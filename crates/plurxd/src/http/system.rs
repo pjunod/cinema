@@ -806,9 +806,14 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
             "readrate": info.readrate,
             "suspend_count": info.suspend_count,
             "progress_idle_ms": info.progress_idle_ms,
+            "producer_attempt": info.producer_attempt,
+            "playlist_ready": info.playlist_ready,
+            "published_segment": info.published_segment,
             "published_end_ms": info.published_end_ms,
+            "next_media_sequence": info.next_media_sequence,
             "fetched_end_ms": info.fetched_end_ms,
             "fetched_segment": info.fetched_segment,
+            "pending_fetched_segment": info.pending_fetched_segment,
             "first_retained_segment": info.first_retained_segment,
             "playlist_shape": info.playlist_shape,
             "last_request": info.last_request,
@@ -3839,6 +3844,11 @@ mod tests {
             production_ahead_seconds: Some(35),
             production_target_seconds: Some(50),
             producer_state: "held",
+            producer_attempt: Some(3),
+            playlist_ready: Some(true),
+            published_segment: Some(5),
+            next_media_sequence: Some(6),
+            pending_fetched_segment: None,
             speed: Some(2.0),
             recent_speed: Some(1.7),
             out_time_ms: Some(10_000),
@@ -3894,7 +3904,11 @@ mod tests {
             serde_json::from_str(row.extra.as_deref().expect("joined status JSON"))
                 .expect("valid joined status JSON");
         assert_eq!(extra["server"]["progress_idle_ms"], 15);
+        assert_eq!(extra["server"]["producer_attempt"], 3);
+        assert_eq!(extra["server"]["playlist_ready"], true);
+        assert_eq!(extra["server"]["published_segment"], 5);
         assert_eq!(extra["server"]["published_end_ms"], 44_000);
+        assert_eq!(extra["server"]["next_media_sequence"], 6);
         assert_eq!(extra["server"]["fetched_segment"], 4);
         assert_eq!(extra["server"]["playlist_shape"], "sliding");
         assert_eq!(extra["server"]["last_request"], "segment");

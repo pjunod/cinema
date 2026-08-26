@@ -4568,6 +4568,7 @@ mod tests {
             -1,
             "a completed byte range proves demand but not a complete segment"
         );
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
 
         let mut full_span = HeaderMap::new();
         full_span.insert(header::RANGE, "bytes=0-".parse().expect("full range"));
@@ -4591,6 +4592,9 @@ mod tests {
             4,
             "a Range response that contains every byte advances the frontier"
         );
+        let actor_delivery = fixture.actor_delivery().await;
+        assert_eq!(actor_delivery.fetched_segment, Some(4));
+        assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
         let delivered_after_full_span = fixture.delivered_bytes();
 
         let mut conditional = HeaderMap::new();
@@ -4613,6 +4617,7 @@ mod tests {
             4,
             "the client has the cached object"
         );
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, Some(4));
         let renewal_before_rejection = fixture.last_renewal_kind().await;
         let frontier_before_rejection = fixture.fetched_segment();
 
@@ -4771,6 +4776,41 @@ mod tests {
             frontier_after_retirement,
             "EOF from an obsolete incarnation cannot move its frontier"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stream_from_an_old_producer_attempt_cannot_advance_its_successor() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "old-attempt-body").await;
+        let body = vec![9_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("old-attempt-body".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("response opened on attempt zero");
+        assert_eq!(fixture.begin_producer_attempt().await, Some(1));
+        let renewal_after_replacement = fixture.last_renewal_kind().await;
+
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("already-open predecessor bytes")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_after_replacement,
+            "predecessor EOF cannot renew the successor attempt"
+        );
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
     }
 
     /// A storage error mid-body is its own classification, separate from an

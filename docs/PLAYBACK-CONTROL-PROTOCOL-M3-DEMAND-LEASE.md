@@ -9,7 +9,9 @@ Project-wide delivery state remains in
 It does not yet claim complete actor ownership of child exit, publication
 waiters, progress deadlines, durable end, or cluster-fence events. Those
 boundaries remain explicit because they are the prerequisite for deleting the
-old recovery watchdogs in M4.
+old recovery watchdogs in M4. M3c1 follows this slice with the passive,
+attempt-fenced publication/fetch ledger documented in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md).
 
 ## Outcome
 

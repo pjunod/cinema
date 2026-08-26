@@ -1,0 +1,140 @@
+# Playback control M3c1 — attempt-fenced delivery ledger
+
+This slice moves rolling publication and completed-fetch facts into the M3
+actor without changing producer recovery behavior. It follows the explicit
+demand lease in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md)
+and is a prerequisite for the remaining producer progress/exit events and the
+M4 watchdog deletion. Project-wide delivery state remains in
+[`PLAYBACK-CONTROL-STATUS.md`](PLAYBACK-CONTROL-STATUS.md).
+
+## Outcome
+
+Each rolling session now has one actor-owned delivery snapshot for one exact
+producer attempt:
+
+- the current attempt number;
+- whether a usable playlist is ready;
+- the highest published segment and its playable end;
+- the next media sequence;
+- the highest completely fetched segment and its playable end; and
+- a fetched segment whose bytes completed before its playlist duration was
+  known.
+
+Publication and fetch completion are observations only in this slice. The
+actor records and exposes them, while the existing segment index and atomics
+remain compatibility projections for pruning, byte accounting, legacy flow
+control, and the old watchdogs. No process action moved and no watchdog was
+removed here.
+
+## Authority and event flow
+
+The actor allocates every rolling producer attempt. Initial copy/transcode
+starts and every allowed pre-publication fallback reset ffmpeg progress to
+that same attempt before spawning the child. An attempt cannot be replaced
+after its usable playlist has entered actor state.
+
+```text
+ producer start/replacement
+          |
+          v
+ BeginProducerAttempt --------------------+
+          |                               |
+          v                               v
+ ffmpeg/progress attempt          actor delivery snapshot
+          |                               ^
+          +-- playlist refresh -----------| ObservePublication
+          |                               |
+ HTTP object open captures attempt        |
+          |                               |
+ successful full response EOF ------------+ CommitMedia
+```
+
+`ObservePublication` is monotonic within an attempt. It may advance the
+published segment, published end, and next sequence, but cannot move them
+backward. A refresh made obsolete by replacement is rejected by attempt.
+
+`CommitMedia` combines media lease renewal and completed-fetch mutation in one
+actor command. A full object, a full-span range, or a valid `304` can advance
+the fetched segment. A partial range renews demand but cannot claim the whole
+segment. Missing, failed, abandoned, short, invalid, retired, superseded, and
+stale-attempt responses do neither.
+
+## Response ownership and replacement ordering
+
+A rolling response owner captures both the session identity and the producer
+attempt before opening the object. The open is discarded and retried if an
+attempt replacement crosses it. Streamed EOF commits revalidate both the
+registry identity and the captured attempt; therefore bytes from a predecessor
+that finish after replacement cannot renew or advance its successor.
+
+Playlist readiness becomes authoritative before a playlist response commits.
+A pre-response fallback may win the compatibility child-transition gate after
+the old playlist was read but before its actor observation. In that ordering
+the observation is rejected and the response's captured attempt cannot renew,
+so the old playlist is not returned as a live response. Once a usable playlist
+observation is actor-owned, in-place attempt replacement is rejected.
+
+## Fetch-before-publication ordering
+
+A segment can complete while its current playlist has not yet exposed the
+segment's `EXTINF`. The actor advances the fetched segment immediately, stores
+it as pending, and leaves the fetched end unchanged. A later publication
+observation may resolve only that exact pending segment. Newer fetches replace
+older pending work because their cumulative end is sufficient; older fetches
+cannot move the frontier backward.
+
+This prevents an independently sampled segment-index lock and fetched atomic
+from producing an impossible status pair. The actor snapshot is the source for
+rolling `published_end_ms`, `fetched_segment`, and `fetched_end_ms` in live
+status and joined playback evidence.
+
+## Compatibility kept deliberately
+
+| Existing mechanism | M3c1 treatment | Why it remains |
+|---|---|---|
+| `SegmentIndex` | Still updated, sized, and pruned | It owns the compatibility playlist catalog, byte totals, and retained files until actor catalog ownership lands. |
+| `playlist_published` | Still gates the first usable response | The existing HTTP startup contract remains unchanged; its value is also projected into the actor. |
+| `high_segment`, `fetched_end_ms` | Still projected after an accepted actor commit | Legacy pacing, pruning, and compatibility tests still consume them. Status no longer samples them when the actor is available. |
+| `child_transition` | Still orders old fallback/retirement paths | M4 removes it only after child start, exit, progress, signal, and retirement are actor actions. |
+| first-segment/software grace and progress watcher | Unchanged | Progress and child exit become actor observations in M3c2; M4 then replaces competing recovery with one producer progress deadline. |
+| playlist/segment wait budgets | Unchanged | These are bounded HTTP waits, not recovery owners. Their wakeup state moves to the actor later. |
+| 15-second repair/flow tick | Unchanged | It still schedules index refresh, pruning, compatibility flow, metrics, and cleanup. |
+
+## Instrumentation
+
+The actor snapshot now supplies rolling delivery frontiers to session status,
+Activity detail, control responses, and joined server/client evidence. Those
+surfaces expose the producer attempt, playlist-ready verdict, published
+segment/end, next sequence, fetched segment/end, and any fetch whose timing is
+still pending. Existing delivery byte/rate/error metrics remain response-path
+measurements. Attempt fencing is covered by structured warnings when an old
+fallback is rejected and by regression tests that hold an old response open
+across replacement.
+
+M3c2 will add coalesced producer-progress observations and exact-attempt child
+exit observations. That slice must not block ffmpeg's stdout/stderr drain on
+the actor mailbox. It still will not move recovery actions; M4 performs that
+cutover only after the actor has all required facts.
+
+## Verification contract
+
+The slice is mergeable only after adversarial review precedes tests and the
+final diff proves:
+
+1. producer attempts are monotonic and actor allocated;
+2. publication, fetch, and response ownership reject stale attempts;
+3. a predecessor body completing after replacement cannot renew or mutate the
+   successor;
+4. publication and fetch frontiers never move backward;
+5. fetch-before-`EXTINF` resolves only against its exact pending segment;
+6. complete objects, full-span ranges, and `304` advance the frontier while
+   partial, dropped, failed, and invalid responses do not;
+7. retirement rejects every late publication and fetch mutation;
+8. rolling status reads actor frontiers while compatibility flow/pruning stay
+   behaviorally unchanged; and
+9. the focused suites, full local gate, and every required hosted job pass.
+
+Rollback removes the actor delivery fields and attempt fence while leaving the
+merged M3b lease/demand actor intact. Because this slice does not remove or
+change recovery actions, rollback does not require restoring a watchdog.

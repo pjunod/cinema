@@ -10037,6 +10037,16 @@ function activitySessionControlText(session){
   if(Number.isSafeInteger(session.client_runway_ms))
     facts.push(`client runway ${Math.round(session.client_runway_ms/1000)}s`);
   if(session.production_policy) facts.push(`production ${session.production_policy}`);
+  if(Number.isSafeInteger(session.producer_attempt))
+    facts.push(`producer attempt ${session.producer_attempt}`);
+  if(session.playlist_ready===true) facts.push("playlist ready");
+  else if(session.playlist_ready===false) facts.push("playlist waiting");
+  if(Number.isSafeInteger(session.published_segment))
+    facts.push(`published segment ${session.published_segment}`);
+  if(Number.isSafeInteger(session.next_media_sequence))
+    facts.push(`next sequence ${session.next_media_sequence}`);
+  if(Number.isSafeInteger(session.pending_fetched_segment))
+    facts.push(`fetched timing pending ${session.pending_fetched_segment}`);
   if(Number.isSafeInteger(session.production_ahead_seconds))
     facts.push(session.production_ahead_seconds<0
       ?`production deficit ${Math.abs(session.production_ahead_seconds)}s`

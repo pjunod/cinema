@@ -396,6 +396,21 @@ impl Progress {
     /// reader from putting them back.
     pub fn begin_attempt(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Relaxed) + 1;
+        self.reset_attempt(generation);
+        generation
+    }
+
+    /// Reset the compatibility telemetry to an attempt allocated by the
+    /// rolling actor. Offline producers still use [`Self::begin_attempt`]; a
+    /// live session must share the actor's attempt fence with publication and
+    /// response commits so a predecessor cannot mutate its successor.
+    fn begin_fenced_attempt(&self, generation: u64) {
+        self.generation.store(generation, Relaxed);
+        self.reset_attempt(generation);
+    }
+
+    fn reset_attempt(&self, generation: u64) {
+        debug_assert!(generation > 0);
         self.out_time_ms.store(-1, Relaxed);
         self.speed_milli.store(-1, Relaxed);
         self.recent_milli.store(-1, Relaxed);
@@ -403,7 +418,6 @@ impl Progress {
         self.sample_out_ms.store(SAMPLE_UNSET, Relaxed);
         self.moved_at_ms
             .store(self.started.elapsed().as_millis() as i64, Relaxed);
-        generation
     }
 
     fn generation(&self) -> u64 {
@@ -1998,8 +2012,10 @@ impl Session {
 
     /// Renew the actor-owned playback lease only if no serving fence
     /// linearized first.
-    async fn touch_if_active(&self, kind: &'static str) -> bool {
-        self.control.renew_media(kind).await
+    async fn touch_attempt_if_active(&self, kind: &'static str, producer_attempt: u64) -> bool {
+        self.control
+            .commit_media(kind, producer_attempt, None, None)
+            .await
     }
 
     /// Submit sequence acceptance and lease renewal as one actor command.
@@ -2238,9 +2254,23 @@ impl Session {
     /// and frontier advance, and it used to redo a whole session's worth of
     /// parsing and ENOENTs each time (review §2.6).
     async fn refresh_segments(&self) {
+        let producer_attempt = self.control.current_producer_attempt();
+        let pending_fetched_segment = self
+            .control
+            .snapshot()
+            .await
+            .and_then(|snapshot| snapshot.delivery.pending_fetched_segment);
         let Ok(raw) = tokio::fs::read(self.dir.join("index.m3u8")).await else {
             return;
         };
+        // Producer replacement owns this gate from its final liveness check
+        // through attempt publication. Revalidate the cheap actor projection
+        // under the same gate before the compatibility index sees bytes from
+        // disk; an old playlist read must not be attributed to its successor.
+        let producer_transition = self.child_transition.lock().await;
+        if self.control.current_producer_attempt() != producer_attempt {
+            return;
+        }
         // Under the lock only to extend; the stats happen with it released.
         let to_stat: Vec<(i64, String)> = {
             let mut index = self.segments.lock().await;
@@ -2286,6 +2316,30 @@ impl Session {
             }
             self.live_bytes.store(index.total_bytes(), Relaxed);
         }
+        let published_segment = index.segs.last().map(|segment| segment.index);
+        let published_end_ms = index.produced_playable_end_ms();
+        let next_media_sequence = index.next_media_sequence();
+        let resolved_fetched_end_ms =
+            pending_fetched_segment.and_then(|segment| index.end_ms_of(segment));
+        drop(index);
+        drop(producer_transition);
+        // Never hold a filesystem/process or segment-index lock while waiting
+        // on the actor mailbox. A replacement that wins after the projection
+        // check increments the attempt first, and the actor rejects this stale
+        // observation.
+        let _ = self
+            .control
+            .observe_publication(crate::playback_control::RollingPublicationObservation {
+                producer_attempt,
+                playlist_ready: self.playlist_published.load(Relaxed),
+                published_segment,
+                published_end_ms,
+                next_media_sequence,
+                resolved_fetched_segment: pending_fetched_segment
+                    .filter(|_| resolved_fetched_end_ms.is_some()),
+                resolved_fetched_end_ms,
+            })
+            .await;
     }
 
     async fn ahead(&self) -> Option<Ahead> {
@@ -2316,15 +2370,24 @@ async fn session_info(
             pause.wait().await;
         }
     }
-    let (ahead, first_retained_segment, published_end_ms) = {
+    let lease = s.control.snapshot().await;
+    let fetched_end_ms = lease.as_ref().map_or_else(
+        || s.fetched_end_ms.load(Relaxed),
+        |lease| lease.delivery.fetched_end_ms,
+    );
+    let (ahead, first_retained_segment, compatibility_published_end_ms) = {
         let index = s.segments.lock().await;
         (
-            ahead_of(&index, s.fetched_end_ms.load(Relaxed).max(0)),
+            ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
             index.produced_playable_end_ms(),
         )
     };
-    let lease = s.control.snapshot().await;
+    let published_end_ms = lease
+        .as_ref()
+        .map_or(compatibility_published_end_ms, |lease| {
+            lease.delivery.published_end_ms
+        });
     let idle_seconds = lease
         .as_ref()
         .map_or(SESSION_IDLE_SECS, |lease| lease.idle_for.as_secs());
@@ -2343,6 +2406,7 @@ async fn session_info(
         None => "unavailable",
     };
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+    let delivery = lease.as_ref().map(|lease| &lease.delivery);
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
         crate::playback_control::PlaybackDemand::Hold => "hold",
@@ -2410,13 +2474,21 @@ async fn session_info(
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
         producer_state,
+        producer_attempt: delivery.map(|delivery| delivery.producer_attempt),
+        playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
+        published_segment: delivery.and_then(|delivery| delivery.published_segment),
+        next_media_sequence: delivery.map(|delivery| delivery.next_media_sequence),
+        pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
         speed: s.progress.speed(),
         recent_speed: s.progress.recent_speed(),
         out_time_ms: s.progress.out_time_ms(),
         progress_idle_ms: s.progress.stalled_for().as_millis().min(i64::MAX as u128) as i64,
         published_end_ms,
-        fetched_end_ms: s.fetched_end_ms.load(Relaxed),
-        fetched_segment: Some(s.high_segment.load(Relaxed)).filter(|index| *index >= 0),
+        fetched_end_ms,
+        fetched_segment: lease.as_ref().map_or_else(
+            || Some(s.high_segment.load(Relaxed)).filter(|index| *index >= 0),
+            |lease| lease.delivery.fetched_segment,
+        ),
         first_retained_segment,
         playlist_shape: if s.cached {
             "vod"
@@ -2472,6 +2544,11 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         production_ahead_seconds: None,
         production_target_seconds: None,
         producer_state: "vod",
+        producer_attempt: None,
+        playlist_ready: None,
+        published_segment: None,
+        next_media_sequence: None,
+        pending_fetched_segment: None,
         speed: None,
         recent_speed: None,
         out_time_ms: None,
@@ -2505,9 +2582,10 @@ pub struct SegmentFile {
 
 impl SegmentFile {
     pub(crate) fn response_owner(&self) -> MediaResponseOwner {
-        MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(
-            &self.delivery.session,
-        )))
+        MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&self.delivery.session),
+            producer_attempt: self.delivery.producer_attempt,
+        })
     }
 }
 
@@ -2520,7 +2598,10 @@ pub(crate) struct MediaResponseOwner(MediaResponseOwnerKind);
 
 #[derive(Clone)]
 enum MediaResponseOwnerKind {
-    Rolling(Arc<Session>),
+    Rolling {
+        session: Arc<Session>,
+        producer_attempt: u64,
+    },
     Vod(crate::vodserve::ResponseOwner),
 }
 
@@ -2570,6 +2651,7 @@ impl DeliveryPurpose {
 pub(crate) struct SegmentDelivery {
     store: Arc<dyn Store>,
     session: Arc<Session>,
+    producer_attempt: u64,
     session_id: String,
     segment: String,
     method: &'static str,
@@ -2589,6 +2671,7 @@ impl SegmentDelivery {
     fn new(
         store: Arc<dyn Store>,
         session: Arc<Session>,
+        producer_attempt: u64,
         session_id: &str,
         segment: &str,
         encoder: String,
@@ -2603,6 +2686,7 @@ impl SegmentDelivery {
         Self {
             store,
             session,
+            producer_attempt,
             session_id: session_id.to_owned(),
             segment: segment.to_owned(),
             method,
@@ -3231,6 +3315,14 @@ pub struct SessionInfo {
     /// Honest current producer verdict. Additive to the legacy status shape;
     /// control uses it instead of inferring health from suspension alone.
     pub producer_state: &'static str,
+    /// Actor-owned rolling attempt and delivery coordinates. `None` denotes
+    /// immutable VOD or an unavailable rolling actor, while attempt zero is a
+    /// valid compatibility cache generation with no child process.
+    pub producer_attempt: Option<u64>,
+    pub playlist_ready: Option<bool>,
+    pub published_segment: Option<i64>,
+    pub next_media_sequence: Option<i64>,
+    pub pending_fetched_segment: Option<i64>,
     /// Cumulative encode rate as a multiple of realtime, as ffmpeg reports it.
     pub speed: Option<f64>,
     /// Rate over the last few seconds. This is the one that answers "is the
@@ -10295,7 +10387,12 @@ impl TranscodeManager {
             "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
         let progress = Arc::new(Progress::new());
-        let generation = progress.begin_attempt();
+        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let generation = control
+            .begin_producer_attempt()
+            .await
+            .ok_or_else(|| "rolling control actor rejected the initial producer".to_owned())?;
+        progress.begin_fenced_attempt(generation);
         let child = spawn_ffmpeg(
             &args,
             encoder.label(),
@@ -10341,7 +10438,7 @@ impl TranscodeManager {
             subtitle_handle,
             cache_manifest: None,
             cache_location: None,
-            control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            control,
             flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
@@ -10643,7 +10740,14 @@ impl TranscodeManager {
         // make it look stalled from its first second, and the
         // generation bump is what stops the dead process's reader
         // from writing those numbers back after the reset.
-        let generation = session.progress.begin_attempt();
+        let Some(generation) = session.control.begin_producer_attempt().await else {
+            tracing::warn!(
+                session = %session_log_id(sid),
+                "rolling actor rejected a stale or post-publication fallback attempt"
+            );
+            return opts.effective_rate_control;
+        };
+        session.progress.begin_fenced_attempt(generation);
         match spawn_ffmpeg(
             &sw_args,
             retry_encoder.label(),
@@ -10826,7 +10930,12 @@ impl TranscodeManager {
             }
         };
         let progress = Arc::new(Progress::new());
-        let generation = progress.begin_attempt();
+        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let generation = control
+            .begin_producer_attempt()
+            .await
+            .ok_or_else(|| "rolling control actor rejected the initial copy producer".to_owned())?;
+        progress.begin_fenced_attempt(generation);
 
         // Take over the cutting when the source is one whose keyframes can be
         // read (docs/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
@@ -10937,7 +11046,7 @@ impl TranscodeManager {
             subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
-            control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            control,
             flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
@@ -11102,7 +11211,15 @@ impl TranscodeManager {
                         // replacement does. It matters only for a fallback
                         // taken tens of seconds in, which means ffmpeg never
                         // produced a moov — a session already in trouble.)
-                        let generation = progress.begin_attempt();
+                        let Some(generation) = session.control.begin_producer_attempt().await
+                        else {
+                            tracing::warn!(
+                                session = %session_log_id(&sid),
+                                "rolling actor rejected a stale or post-publication copy fallback attempt"
+                            );
+                            return;
+                        };
+                        progress.begin_fenced_attempt(generation);
                         match spawn_ffmpeg(
                             &args,
                             "copy",
@@ -11968,7 +12085,11 @@ impl TranscodeManager {
         object_name: Option<&str>,
         complete_object: bool,
     ) -> bool {
-        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
             let current = self.sessions.lock().await.get(session_id).cloned();
             if !current
                 .as_ref()
@@ -11976,23 +12097,32 @@ impl TranscodeManager {
             {
                 return false;
             }
-            if !session.touch_if_active(kind).await {
-                return false;
-            }
-            let current = self.sessions.lock().await.get(session_id).cloned();
-            if !current
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, session))
-            {
-                return false;
-            }
-            if let Some(index) = complete_object
+            let fetched_segment = complete_object
                 .then(|| object_name.and_then(segment_index))
-                .flatten()
+                .flatten();
+            let fetched_end_ms = if let Some(index) = fetched_segment {
+                session.segments.lock().await.end_ms_of(index)
+            } else {
+                None
+            };
+            if !session
+                .control
+                .commit_media(kind, *producer_attempt, fetched_segment, fetched_end_ms)
+                .await
             {
+                return false;
+            }
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            if let Some(index) = fetched_segment {
                 let previous = session.high_segment.fetch_max(index, Relaxed);
                 if index > previous {
-                    if let Some(end) = session.segments.lock().await.end_ms_of(index) {
+                    if let Some(end) = fetched_end_ms {
                         session.fetched_end_ms.fetch_max(end, Relaxed);
                     }
                 }
@@ -12020,11 +12150,16 @@ impl TranscodeManager {
         session_id: &str,
         owner: &MediaResponseOwner,
     ) -> bool {
-        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
             let current = self.sessions.lock().await.get(session_id).cloned();
             return current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
+                && session.control.current_producer_attempt() == *producer_attempt
                 && !session.control.is_retired();
         }
         let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
@@ -12068,7 +12203,10 @@ impl TranscodeManager {
                 supplemental_codecs: session.hls_supplemental_codecs.clone(),
                 frame_rate: None,
             },
-            MediaResponseOwner(MediaResponseOwnerKind::Rolling(session)),
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                producer_attempt: session.control.current_producer_attempt(),
+                session,
+            }),
         ))
     }
 
@@ -12146,6 +12284,7 @@ impl TranscodeManager {
         let Some(session) = self.live_session(session_id).await else {
             return Err(PlaylistError::SessionGone);
         };
+        let producer_attempt = session.control.current_producer_attempt();
         // Hold the request until the playlist exists. On the transcode path
         // that is a beat after ffmpeg starts; on the copy path it is the
         // publish gate filling (COPY_PUBLISH_GATE_SECS), which on a
@@ -12241,7 +12380,10 @@ impl TranscodeManager {
                         return Err(PlaylistError::SessionGone);
                     }
                     if session.cached {
-                        if !session.touch_if_active("playlist").await {
+                        if !session
+                            .touch_attempt_if_active("playlist", producer_attempt)
+                            .await
+                        {
                             return Err(PlaylistError::SessionGone);
                         }
                         return Ok(bytes);
@@ -12295,7 +12437,10 @@ impl TranscodeManager {
                         session.typeless_sliding,
                         session.takeover.as_ref(),
                     );
-                    if !session.touch_if_active("playlist").await {
+                    if !session
+                        .touch_attempt_if_active("playlist", producer_attempt)
+                        .await
+                    {
                         return Err(PlaylistError::SessionGone);
                     }
                     return Ok(served);
@@ -12497,6 +12642,7 @@ impl TranscodeManager {
         let started_waiting = Instant::now();
         let deadline = Instant::now() + SEGMENT_WAIT;
         loop {
+            let producer_attempt = session.control.current_producer_attempt();
             let opened = if let Some(opened) = authenticated_cached_file.take() {
                 Some((opened.file, Some(opened.bytes), Some(opened.lease)))
             } else if session.cached {
@@ -12519,6 +12665,14 @@ impl TranscodeManager {
                         Err(_) => return Ok(None),
                     },
                 };
+                // The handle and its owner fence must describe the same
+                // producer attempt. If replacement crossed the open, discard
+                // the old handle and retry against the successor directory;
+                // sampling only at EOF would let predecessor bytes advance
+                // the successor's frontier.
+                if session.control.current_producer_attempt() != producer_attempt {
+                    continue;
+                }
                 let waited = started_waiting.elapsed();
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
@@ -12560,6 +12714,7 @@ impl TranscodeManager {
                 let delivery = SegmentDelivery::new(
                     Arc::clone(&self.store),
                     Arc::clone(&session),
+                    producer_attempt,
                     session_id,
                     name,
                     encoder,
@@ -13079,7 +13234,7 @@ impl TranscodeManager {
         object_name: Option<&str>,
         complete_object: bool,
     ) {
-        let MediaResponseOwnerKind::Rolling(session) = &owner.0 else {
+        let MediaResponseOwnerKind::Rolling { session, .. } = &owner.0 else {
             return;
         };
         if !complete_object || object_name.and_then(segment_index).is_none() {
@@ -13774,6 +13929,19 @@ impl HlsDeliveryFixture {
         self.session.high_segment.load(Relaxed)
     }
 
+    pub(crate) async fn actor_delivery(&self) -> crate::playback_control::RollingDeliverySnapshot {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
+            .delivery
+    }
+
+    pub(crate) async fn begin_producer_attempt(&self) -> Option<u64> {
+        self.session.control.begin_producer_attempt().await
+    }
+
     pub(crate) async fn hold_child_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.session.child_transition.lock().await
     }
@@ -14131,7 +14299,15 @@ mod tests {
             .hls_session_control(request(3, 1))
             .await
             .is_none());
-        assert!(!fixture.session.touch_if_active("segment").await);
+        assert!(
+            !fixture
+                .session
+                .touch_attempt_if_active(
+                    "segment",
+                    fixture.session.control.current_producer_attempt(),
+                )
+                .await
+        );
         assert!(fixture
             .session
             .control
@@ -16481,9 +16657,11 @@ mod tests {
         // keeps the assertion above from passing vacuously on a session whose
         // clock never moved. This is the shared response commit point; the
         // actual readers would long-poll for output this fixture cannot make.
-        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(
-            mgr.live_session(&info.session_id).await.expect("session"),
-        ));
+        let owner_session = mgr.live_session(&info.session_id).await.expect("session");
+        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            producer_attempt: owner_session.control.current_producer_attempt(),
+            session: owner_session,
+        });
         assert!(
             mgr.commit_resolved_media(&info.session_id, &owner, "test-fetch", None, true)
                 .await
@@ -17496,6 +17674,7 @@ mod tests {
         let mut delivery = SegmentDelivery::new(
             Arc::clone(&store),
             Arc::clone(&session),
+            session.control.current_producer_attempt(),
             "delivery-test",
             "seg00001.m4s",
             "test".to_owned(),
@@ -17669,6 +17848,23 @@ mod tests {
         assert!(text.contains("seg00000.ts"));
         assert!(text.contains("seg00001.ts"));
         assert!(session.playlist_published.load(Relaxed));
+        let actor_delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert!(actor_delivery.playlist_ready);
+        assert_eq!(actor_delivery.published_segment, Some(1));
+        assert_eq!(actor_delivery.published_end_ms, Some(4_000));
+        assert_eq!(actor_delivery.next_media_sequence, 2);
+        let status = mgr.session_status("startup-gate").await.expect("status");
+        assert_eq!(status.producer_attempt, Some(0));
+        assert_eq!(status.playlist_ready, Some(true));
+        assert_eq!(status.published_segment, Some(1));
+        assert_eq!(status.published_end_ms, Some(4_000));
+        assert_eq!(status.next_media_sequence, Some(2));
+        assert_eq!(status.pending_fetched_segment, None);
     }
 
     /// A producer that has already reported an unsuccessful exit cannot make
@@ -18547,7 +18743,10 @@ mod tests {
                 .await
                 .expect("segment admission")
                 .is_some());
-            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(&session)));
+            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                producer_attempt: session.control.current_producer_attempt(),
+                session: Arc::clone(&session),
+            });
             assert!(
                 mgr.commit_resolved_media(
                     &info.session_id,
@@ -18558,7 +18757,31 @@ mod tests {
                 )
                 .await
             );
+            let fetched_index = segment_index(&newest).expect("numbered segment");
+            let fetched_end_ms = session
+                .segments
+                .lock()
+                .await
+                .end_ms_of(fetched_index)
+                .expect("published segment duration");
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert_eq!(actor_delivery.fetched_segment, Some(fetched_index));
+            assert_eq!(actor_delivery.fetched_end_ms, fetched_end_ms);
             mgr.flow_control(&session, &info.session_id).await;
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert!(actor_delivery.playlist_ready);
+            assert!(actor_delivery.published_segment >= Some(fetched_index));
+            assert!(actor_delivery.published_end_ms >= Some(fetched_end_ms));
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
