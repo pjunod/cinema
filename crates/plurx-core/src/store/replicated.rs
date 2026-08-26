@@ -325,6 +325,27 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_cluster_fragment_index",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "complete_cluster_fragment_index",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "prune_cluster_fragment_indexes",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
         module: "sessions.rs",
         method: "claim_media_session_request",
         is_async: true,
@@ -497,6 +518,10 @@ mod tests {
         ("cache.rs", include_str!("sqlite/cache.rs")),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
+        (
+            "fragment_index_cluster.rs",
+            include_str!("sqlite/fragment_index_cluster.rs"),
+        ),
         ("library.rs", include_str!("sqlite/library.rs")),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
@@ -611,7 +636,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 34);
+        assert_eq!(methods.len(), 37);
     }
 
     #[test]

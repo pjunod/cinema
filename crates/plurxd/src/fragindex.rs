@@ -34,6 +34,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::ffmpeg::ffmpeg_bin;
 
+#[cfg(unix)]
+type SourceFd = std::os::fd::RawFd;
+#[cfg(not(unix))]
+type SourceFd = i32;
+
 /// Matches [`crate::copyseg::READ_CHUNK`]'s reasoning: large enough that a
 /// fast copy is not a syscall storm, small enough that the reader parks in one
 /// `read` rather than holding a large buffer.
@@ -261,6 +266,78 @@ pub async fn build(
     budget: Duration,
 ) -> IndexOutcome {
     let args = transcode::copy_index_pipe_args(file, have_dovi_bsf, preserve_dolby_vision);
+    build_with_args(
+        file,
+        args,
+        None,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        runtime_cache,
+        budget,
+    )
+    .await
+}
+
+/// Build from the exact file descriptor whose complete digest was observed.
+/// The parent retains ownership; the child receives a duplicate as fd 3.
+#[cfg(unix)]
+pub async fn build_from_attested_file(
+    file: &MediaFile,
+    source: &std::fs::File,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
+    use std::os::fd::AsRawFd;
+
+    let args = transcode::copy_index_pipe_args_with_input(
+        file,
+        "/dev/fd/3",
+        have_dovi_bsf,
+        preserve_dolby_vision,
+    );
+    build_with_args(
+        file,
+        args,
+        Some(source.as_raw_fd()),
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        runtime_cache,
+        budget,
+    )
+    .await
+}
+
+#[cfg(not(unix))]
+pub async fn build_from_attested_file(
+    file: &MediaFile,
+    _source: &std::fs::File,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
+    build(
+        file,
+        have_dovi_bsf,
+        preserve_dolby_vision,
+        runtime_cache,
+        budget,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_with_args(
+    file: &MediaFile,
+    args: Vec<String>,
+    source_fd: Option<SourceFd>,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
     let identity = identity_for(file, have_dovi_bsf, preserve_dolby_vision);
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
@@ -270,6 +347,27 @@ pub async fn build(
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    if let Some(source_fd) = source_fd {
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = match command
         .args(&args)
         .stdin(Stdio::null())
@@ -314,8 +412,29 @@ pub async fn build(
                 rows: 0,
             },
         };
-    // Dropping the pipe already sends ffmpeg EPIPE; this only reaps the child.
-    let _ = child.start_kill();
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let outcome = match (outcome, status) {
+        (IndexOutcome::Built(_), Ok(Ok(status))) if !status.success() => IndexOutcome::Truncated {
+            reason: format!("index pipe exited with {status}"),
+            rows: 0,
+        },
+        (outcome, Ok(Ok(_))) => outcome,
+        (IndexOutcome::Built(_), Ok(Err(error))) => IndexOutcome::Truncated {
+            reason: format!("waiting for the index pipe: {error}"),
+            rows: 0,
+        },
+        (IndexOutcome::Built(_), Err(_)) => {
+            let _ = child.start_kill();
+            IndexOutcome::Truncated {
+                reason: "index pipe did not exit after closing stdout".to_owned(),
+                rows: 0,
+            }
+        }
+        (outcome, _) => {
+            let _ = child.start_kill();
+            outcome
+        }
+    };
     if let IndexOutcome::Built(ref index) = outcome {
         tracing::info!(
             file_id = file.id,

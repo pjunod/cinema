@@ -12,6 +12,7 @@ mod apikeys;
 mod cache;
 mod coordination;
 mod fragindex;
+mod fragment_index_cluster;
 mod library;
 mod media;
 mod offline;
@@ -819,6 +820,9 @@ const MIGRATIONS: &[&str] = &[
     // Additive, and `parameter_sets_constant` defaults to 0 so an index built
     // before the check existed is rebuilt rather than trusted.
     crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS,
+    // v30: replicated metadata for content-addressed fragment indexes. The
+    // blob itself remains outside this database on clustered deployments.
+    crate::store::fragment_index_cluster::CLUSTER_FRAGMENT_INDEX_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1749,7 +1753,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 29,
+            version, 30,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );

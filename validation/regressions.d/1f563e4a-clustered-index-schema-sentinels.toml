@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1f563e4a"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history audit parses and enforces the cluster-index review mapping, keeping the runtime correction attached to its exact functionality points and runnable checks without claiming that this validation-only commit changed cluster behavior."

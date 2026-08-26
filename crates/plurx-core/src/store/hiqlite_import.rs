@@ -684,6 +684,83 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "cluster_fragment_index_sources",
+        columns: &[
+            "node_id",
+            "file_id",
+            "object_version",
+            "source_size",
+            "source_mtime",
+            "source_sha256",
+            "observed_at_ms",
+        ],
+        order_by: "node_id, file_id",
+        minimum_schema: 30,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cluster_fragment_index_jobs",
+        columns: &[
+            "cache_key",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "source_sha256",
+            "pipeline_sha256",
+            "state",
+            "owner_node_id",
+            "fence",
+            "lease_expires_ms",
+            "attempts",
+            "not_before_ms",
+            "last_error_code",
+            "created_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "cache_key",
+        minimum_schema: 30,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cluster_fragment_index_artifacts",
+        columns: &[
+            "cache_key",
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "source_sha256",
+            "pipeline_sha256",
+            "blob_sha256",
+            "bytes",
+            "built_by_node_id",
+            "built_at_ms",
+        ],
+        order_by: "cache_key",
+        minimum_schema: 30,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "cluster_fragment_index_locations",
+        columns: &[
+            "cache_key",
+            "node_id",
+            "bytes",
+            "verified_at_ms",
+            "last_seen_at_ms",
+        ],
+        order_by: "cache_key, node_id",
+        minimum_schema: 30,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "transcode_cache_recipes",
         columns: &["recipe_hash", "file_id", "recipe_version", "created_at"],
         order_by: "recipe_hash",
@@ -1992,7 +2069,11 @@ mod tests {
         assert!(names.contains(&"media_sessions"));
         assert!(names.contains(&"cache_storage_members"));
         assert!(names.contains(&"cache_consumer_pins"));
-        assert_eq!(names.len(), 25, "review every imported durable table");
+        assert!(names.contains(&"cluster_fragment_index_sources"));
+        assert!(names.contains(&"cluster_fragment_index_jobs"));
+        assert!(names.contains(&"cluster_fragment_index_artifacts"));
+        assert!(names.contains(&"cluster_fragment_index_locations"));
+        assert_eq!(names.len(), 29, "review every imported durable table");
     }
 
     #[test]

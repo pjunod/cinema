@@ -10135,6 +10135,7 @@ function playbackPanel(settings){
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pcpv1" ${settings.playback_control_protocol_v1?'checked':''} style="width:auto;margin-right:9px"> Advertise playback control protocol v1 <span class="muted" style="font-size:12px;margin-left:6px">· passive preview; no automatic actions yet</span></label>
       <div class="row" style="align-items:end">
         <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+        <div><label>Cluster index cache</label><input id="pvcc" type="checkbox" ${settings.vod_index_cluster_cache?'checked':''}><span class="hint">Share content-addressed indexes and divide background builds across voters</span></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
@@ -10907,6 +10908,7 @@ async function savePlayback(){
       vod_live_recovery:document.getElementById("pvlr").checked,
       playback_control_protocol_v1:document.getElementById("pcpv1").checked,
       vod_index_mins:Number(document.getElementById("pvi").value),
+      vod_index_cluster_cache:document.getElementById("pvcc").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value}}));

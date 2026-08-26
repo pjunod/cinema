@@ -1393,9 +1393,26 @@ pub fn copy_index_pipe_args(
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
 ) -> Vec<String> {
+    copy_index_pipe_args_with_input(
+        source,
+        &source.path.to_string_lossy(),
+        have_dovi_bsf,
+        preserve_dolby_vision,
+    )
+}
+
+/// The index pipe with an explicitly named input. Cluster index workers use a
+/// fixed inherited descriptor here, keeping the file they attested attached
+/// to ffmpeg even if the pathname is replaced before the child opens it.
+pub fn copy_index_pipe_args_with_input(
+    source: &MediaFile,
+    input: &str,
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+) -> Vec<String> {
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     args.push("-i".into());
-    args.push(source.path.to_string_lossy().into_owned());
+    args.push(input.to_owned());
     args.push("-map_chapters".into());
     args.push("-1".into());
     args.push("-map".into());
