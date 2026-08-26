@@ -277,6 +277,49 @@ async fn wait_for_fragment_index(daemon: &mut Daemon) {
     }
 }
 
+async fn wait_for_file_id(
+    client: &reqwest::Client,
+    daemon: &mut Daemon,
+    base: &str,
+    token: &str,
+    item_id: i64,
+) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        daemon.assert_running("waiting for the scanned file row");
+        let observation = match client
+            .get(format!("{base}/api/v1/items/{item_id}"))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                match response.json::<Value>().await {
+                    Ok(detail) => {
+                        if let Some(file_id) = detail["files"]
+                            .as_array()
+                            .and_then(|files| files.first())
+                            .and_then(|file| file["id"].as_i64())
+                        {
+                            return file_id;
+                        }
+                        format!("status={status}, detail={detail}")
+                    }
+                    Err(error) => format!("status={status}, invalid JSON: {error}"),
+                }
+            }
+            Err(error) => format!("request failed: {error}"),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "scan published item {item_id} without its file row ({observation})\nnode A log:\n{}",
+            daemon.diagnostics(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn write_av_fixture(path: &Path) {
     let output = Command::new("ffmpeg")
         .args([
@@ -490,16 +533,10 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
-    let detail = client
-        .get(format!("{a_base}/api/v1/items/{item_id}"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .expect("item detail")
-        .json::<Value>()
-        .await
-        .expect("item detail JSON");
-    let file_id = detail["files"][0]["id"].as_i64().expect("file id");
+    // The item row and its file association are committed separately. Linux
+    // runners exposed the short interval where the list endpoint can publish
+    // the item before its detail has a file; wait for the actual prerequisite.
+    let file_id = wait_for_file_id(&client, &mut node_a, &a_base, &token, item_id).await;
     let b_base = format!("http://127.0.0.1:{b_http_port}");
 
     // VOD deliberately refuses to start until this node-local prerequisite is
