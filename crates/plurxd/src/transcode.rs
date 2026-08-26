@@ -2473,12 +2473,24 @@ pub struct SegmentFile {
 }
 
 impl SegmentFile {
-    /// Commit liveness only after the HTTP layer has validated the concrete
-    /// object and request shape it is about to serve. Internal init probes,
-    /// empty files, invalid ranges, and failed reads never call this method.
-    pub(crate) async fn renew_for_response(&self, kind: &'static str) -> bool {
-        self.delivery.session.touch_if_active(kind).await
+    pub(crate) fn response_owner(&self) -> MediaResponseOwner {
+        MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(
+            &self.delivery.session,
+        )))
     }
+}
+
+/// Opaque engine/incarnation identity carried from resource resolution to the
+/// HTTP response commit. Session ids are durable routing keys; they are not
+/// sufficient proof that the bytes still belong to the currently live
+/// rolling actor or resurrected VOD attachment.
+#[derive(Clone)]
+pub(crate) struct MediaResponseOwner(MediaResponseOwnerKind);
+
+#[derive(Clone)]
+enum MediaResponseOwnerKind {
+    Rolling(Arc<Session>),
+    Vod(crate::vodserve::ResponseOwner),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2668,13 +2680,16 @@ impl SegmentDelivery {
         );
     }
 
-    pub(crate) fn finish(&mut self) {
+    /// Finish delivery and report whether every advertised byte was read.
+    /// This completion bit is the only authorization to move the consumed
+    /// frontier for a streamed response.
+    pub(crate) fn finish(&mut self) -> bool {
         if self.terminal {
-            return;
+            return self.delivered_bytes >= self.expected_bytes;
         }
         self.terminal = true;
         if self.delivered_bytes >= self.expected_bytes {
-            return;
+            return true;
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
@@ -2694,6 +2709,7 @@ impl SegmentDelivery {
                 "expected_bytes": self.expected_bytes
             }),
         );
+        false
     }
 
     pub(crate) fn fail(&mut self, error: &std::io::Error) {
@@ -8829,8 +8845,15 @@ impl TranscodeManager {
     pub async fn vod_playlist(
         &self,
         session_id: &str,
-    ) -> Option<Result<Vec<u8>, crate::vodserve::VodError>> {
-        self.vod.playlist(session_id).await
+    ) -> Option<Result<(Vec<u8>, MediaResponseOwner), crate::vodserve::VodError>> {
+        self.vod.playlist(session_id).await.map(|answer| {
+            answer.map(|(bytes, owner)| {
+                (
+                    bytes,
+                    MediaResponseOwner(MediaResponseOwnerKind::Vod(owner)),
+                )
+            })
+        })
     }
 
     /// The VOD dispatch half of [`Self::segment`]: `None` when the id is not
@@ -8839,8 +8862,22 @@ impl TranscodeManager {
         &self,
         session_id: &str,
         name: &str,
-    ) -> Option<Result<Option<crate::vodserve::SegmentReady>, crate::vodserve::VodError>> {
-        self.vod.segment(session_id, name).await
+    ) -> Option<
+        Result<
+            Option<(crate::vodserve::SegmentReady, MediaResponseOwner)>,
+            crate::vodserve::VodError,
+        >,
+    > {
+        self.vod.segment(session_id, name).await.map(|answer| {
+            answer.map(|ready| {
+                ready.map(|(ready, owner)| {
+                    (
+                        ready,
+                        MediaResponseOwner(MediaResponseOwnerKind::Vod(owner)),
+                    )
+                })
+            })
+        })
     }
 
     /// The file a live VOD session serves, for response-time source facts.
@@ -11822,20 +11859,87 @@ impl TranscodeManager {
         (!session.control.is_retired()).then_some(session)
     }
 
-    /// Renew a successfully resolved rolling response.
+    /// Commit a completed response against its resolved incarnation.
     ///
     /// The rolling actor or immutable registry must still own the capability
-    /// when the response authorization linearizes.
-    pub(crate) async fn renew_resolved_media(&self, session_id: &str, kind: &'static str) -> bool {
-        let rolling = self.sessions.lock().await.get(session_id).cloned();
-        if let Some(session) = rolling {
-            return session.touch_if_active(kind).await;
+    /// when response completion linearizes. Partial objects may renew demand,
+    /// but only a complete object moves the consumed frontier.
+    pub(crate) async fn commit_resolved_media(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        kind: &'static str,
+        object_name: Option<&str>,
+        complete_object: bool,
+    ) -> bool {
+        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            if !session.touch_if_active(kind).await {
+                return false;
+            }
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            if let Some(index) = complete_object
+                .then(|| object_name.and_then(segment_index))
+                .flatten()
+            {
+                let previous = session.high_segment.fetch_max(index, Relaxed);
+                if index > previous {
+                    if let Some(end) = session.segments.lock().await.end_ms_of(index) {
+                        session.fetched_end_ms.fetch_max(end, Relaxed);
+                    }
+                    self.flow_control(&session, session_id).await;
+                }
+            }
+            return true;
         }
-        self.vod.renew_resolved_media(session_id).await
+        let vod_index = complete_object
+            .then(|| object_name.and_then(segment_index))
+            .flatten()
+            .and_then(|index| u32::try_from(index).ok());
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        self.vod
+            .commit_resolved_media(session_id, owner, vod_index)
+            .await
+    }
+
+    /// Verify response ownership without renewing the lease or moving the
+    /// consumed frontier. This is the publication fence for streamed bodies;
+    /// their mutating commit happens only after the advertised bytes reach
+    /// EOF, so an abandoned response cannot masquerade as client progress.
+    pub(crate) async fn response_owner_is_live(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+    ) -> bool {
+        if let MediaResponseOwnerKind::Rolling(session) = &owner.0 {
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            return current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+                && !session.control.is_retired();
+        }
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        self.vod.response_owner_is_live(session_id, owner).await
     }
 
     /// Resolve the source and resume base attached to a live HLS capability.
-    pub async fn hls_context(&self, session_id: &str) -> Option<HlsContext> {
+    pub async fn hls_context(&self, session_id: &str) -> Option<(HlsContext, MediaResponseOwner)> {
         if let Some(facts) = self.vod.hls_facts(session_id).await {
             let probe_json = self.store.get_file_probe_json(facts.file.id).await.ok()?;
             let (codecs, supplemental_codecs) = copied_hls_codecs(
@@ -11847,24 +11951,30 @@ impl TranscodeManager {
                 },
                 probe_json.as_deref(),
             );
-            return Some(HlsContext {
-                file_id: facts.file.id,
-                start_seconds: 0.0,
-                media_origin_seconds: 0.0,
-                codecs,
-                supplemental_codecs,
-                frame_rate: None,
-            });
+            return Some((
+                HlsContext {
+                    file_id: facts.file.id,
+                    start_seconds: 0.0,
+                    media_origin_seconds: 0.0,
+                    codecs,
+                    supplemental_codecs,
+                    frame_rate: None,
+                },
+                MediaResponseOwner(MediaResponseOwnerKind::Vod(facts.response_owner)),
+            ));
         }
         let session = self.live_session(session_id).await?;
-        Some(HlsContext {
-            file_id: session.file_id,
-            start_seconds: session.start_seconds,
-            media_origin_seconds: session.media_origin_seconds,
-            codecs: session.hls_codecs.clone(),
-            supplemental_codecs: session.hls_supplemental_codecs.clone(),
-            frame_rate: None,
-        })
+        Some((
+            HlsContext {
+                file_id: session.file_id,
+                start_seconds: session.start_seconds,
+                media_origin_seconds: session.media_origin_seconds,
+                codecs: session.hls_codecs.clone(),
+                supplemental_codecs: session.hls_supplemental_codecs.clone(),
+                frame_rate: None,
+            },
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling(session)),
+        ))
     }
 
     /// Share a producer's terminal startup verdict with every playlist reader.
@@ -12167,9 +12277,6 @@ impl TranscodeManager {
         let session = self.live_session(session_id).await?;
         self.flow_control(&session, session_id).await;
         let (start_ms, end_ms) = session.segments.lock().await.window_ms_of(segment_index)?;
-        if !session.touch_if_active("subtitle-segment").await {
-            return None;
-        }
         Some((start_ms as f64 / 1000.0, end_ms as f64 / 1000.0))
     }
 
@@ -12353,20 +12460,6 @@ impl TranscodeManager {
                         },
                     )
                     .await;
-                }
-                // The client's download frontier just advanced. Resolve it
-                // against the index's real EXTINF bounds — the fetched
-                // segment's own end time, not an index times a nominal
-                // duration — and re-run flow control, since a frontier that
-                // moved may have earned the encoder its slot back.
-                if let Some(i) = idx {
-                    let previous = session.high_segment.fetch_max(i, Relaxed);
-                    if i > previous {
-                        if let Some(end) = session.segments.lock().await.end_ms_of(i) {
-                            session.fetched_end_ms.fetch_max(end, Relaxed);
-                        }
-                        self.flow_control(&session, session_id).await;
-                    }
                 }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
                 let delivery = SegmentDelivery::new(
@@ -13478,6 +13571,19 @@ impl HlsDeliveryFixture {
     /// `delivered_bps` in status and in every playback event.
     pub(crate) fn delivered_bytes(&self) -> i64 {
         self.session.delivery.total_bytes()
+    }
+
+    pub(crate) async fn last_renewal_kind(&self) -> &'static str {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
+            .last_renewal_kind
+    }
+
+    pub(crate) fn fetched_segment(&self) -> i64 {
+        self.session.high_segment.load(Relaxed)
     }
 
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
@@ -16022,8 +16128,11 @@ mod tests {
         // keeps the assertion above from passing vacuously on a session whose
         // clock never moved. This is the shared response commit point; the
         // actual readers would long-poll for output this fixture cannot make.
+        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(
+            mgr.live_session(&info.session_id).await.expect("session"),
+        ));
         assert_eq!(
-            mgr.renew_resolved_media(&info.session_id, "test-fetch")
+            mgr.commit_resolved_media(&info.session_id, &owner, "test-fetch", None, true)
                 .await,
             true
         );
@@ -18062,6 +18171,17 @@ mod tests {
                 .await
                 .expect("segment admission")
                 .is_some());
+            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(Arc::clone(&session)));
+            assert!(
+                mgr.commit_resolved_media(
+                    &info.session_id,
+                    &owner,
+                    "test-segment",
+                    Some(&newest),
+                    true,
+                )
+                .await
+            );
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)

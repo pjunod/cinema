@@ -15,10 +15,11 @@ old recovery watchdogs in M4.
 
 The first newly accepted rolling control sequence now changes the same actor
 lease from the 60-second media-only compatibility mode to a 30-second explicit
-mode. Control heartbeats and successfully resolved capability-authenticated
+mode. Control heartbeats and successfully committed capability-authenticated
 playlist, subtitle, init, and media responses renew that one deadline. Lookup,
-publication wait, integrity validation, and renewal are separate: missing,
-pruned, failed, or timed-out requests cannot manufacture playback activity. A
+publication wait, integrity validation, response ownership, and renewal are
+separate: missing, invalid-range, pruned, failed, timed-out, abandoned, or
+obsolete-incarnation requests cannot manufacture playback activity. A
 command received at or after the deadline expires and fences the actor before
 it can renew. The actor also arms its own exact
 monotonic deadline, so a session receiving no command is fenced at expiry;
@@ -104,6 +105,17 @@ Equal-sequence replays, rejected controls, expired actors, and unavailable
 mailboxes never change demand or signal the producer. A dead mailbox fences
 the session for repair cleanup.
 
+Every resolved HTTP object carries an opaque engine/incarnation token to its
+final response path. Buffered objects commit only after the complete bounded
+read and response construction succeed. Streamed objects perform a
+non-mutating ownership check before headers, then renew only when the promised
+body reaches EOF; a dropped or failed body never commits. A complete media
+object (or a valid `304` proving the client already has it) may advance the
+download frontier. A completed byte range renews demand but does not claim the
+whole segment. Both rolling and VOD commits revalidate the token against the
+currently registered attachment, so a tombstone or same-id reattachment
+between resolution and commit cannot mutate the successor.
+
 ## Instrumentation
 
 Live status and Activity detail now expose:
@@ -158,7 +170,9 @@ diff proves:
    cannot be revived between repair ticks or bypassed by a deadline-edge
    snapshot/signal race;
 2. media renewal immediately before the deadline moves the one deadline;
-3. missing, pruned, failed, and timed-out object requests do not renew it;
+3. missing, invalid-range, pruned, failed, timed-out, dropped, and
+   obsolete-incarnation object requests do not renew it or advance the
+   consumed frontier;
 4. a virtual 30-minute foreground hold with delivered heartbeats stays live;
 5. accepted `hold` and `active` signal a real child immediately;
 6. hold before first publication stops production;

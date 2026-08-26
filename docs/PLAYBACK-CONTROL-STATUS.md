@@ -41,12 +41,14 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch is pushed as draft PR #612. Its first adversarial review at
-`cbc8029c` requested changes: two P1 ordering/liveness corrections, two P2
-status/UI corrections, and one P3 whitespace correction. The corrected head
-linearizes snapshots and physical signals at the exact actor deadline, renews
-only resolved response objects, names VOD correctly, and fixes this ledger;
-second review still precedes every test command. The slice's acceptance
+The active branch is pushed as draft PR #612. Adversarial review of
+`1d229162` requested changes across response ownership/commit ordering, exact
+snapshot timing, standard-overlay truth, and this ledger. The remediation
+linearizes snapshots and physical signals at the exact actor deadline; carries
+an opaque engine/incarnation token through every response; commits streamed
+lease/frontier state only at successful EOF; distinguishes complete objects
+from byte ranges; and names VOD/rolling ownership correctly. A fresh review of
+the committed remediation still precedes every test command. The slice's acceptance
 boundary is intentionally smaller than the whole actor migration; the exact
 behavior
 and timer ledger are in
@@ -76,8 +78,8 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Five first-review findings corrected; corrected head pushed for re-review |
-| Adversarial diff review | **Changes requested** at `cbc8029c`; second review required on the corrected head |
+| Implementation | Formal `1d229162` findings remediated on the branch; exact-head re-review pending |
+| Adversarial diff review | **Changes requested** at `1d229162`; fresh review required on the remediation head |
 | Unit/focused tests | Not run — intentionally waits for second-review approval |
 | Full local gate | Not run |
 | Hosted CI | Draft PR exists; local test gate remains closed until adversarial approval |
@@ -97,7 +99,7 @@ The detailed symbol-by-symbol contract is in the plan's
 | `child_transition`, `watchdog_active`, `replacing_child` | Serializes and masks the old in-place replacement paths | M4 deletes them after every child event/action enters the actor |
 | playlist and live-segment wait budgets | Bound an HTTP request waiting for publication | M3 routes waiters through actor state; bounded HTTP deadlines remain by design |
 | 15-second repair/flow-control tick | Refreshes indexes, prunes retention, records speed, evaluates flow, and claims lease expiry | Scheduling remains; recovery decisions move to actor events/deadlines |
-| fetched-frontier ahead-window inference | Suspends/resumes production based on download behavior | M3b replaces the time policy with explicit demand/playhead/runway; byte/disk safety caps remain |
+| fetched-frontier ahead-window inference | Suspends/resumes production based on download behavior | M3b replaces the time policy only after a session enters explicit mode; legacy pacing and byte/disk safety remain |
 | VOD segment materialization deadline | Bounds demand for an immutable segment that is not ready | Remains permanently as one of the three approved progress deadlines |
 
 ### Client recovery owners still present

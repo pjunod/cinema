@@ -9727,6 +9727,8 @@ function updateStats(){
   // layout to hold in your head and half again the height for the same eleven
   // facts. Its "Playing" card is debug's "Now decoding" section under the name
   // debug already used; one name for one thing, in both sizes.
+  const standardLeasePresentation=PlaybackPolicy.controlLeasePresentation(
+    health&&health.lease_mode?health.lease_mode:'legacy');
   const standardHtml=panelHtml([
     {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
     {t:"Source",rows:[
@@ -9745,7 +9747,8 @@ function updateStats(){
       presentation?cardRow("Presentation",esc(presentation),PLAYER.vod?"good":"warn"):null,
       cardRow("Status",esc(serverState),serverTone),
       controlStatus?cardRow("Control",controlStatus.accepted_sequence
-        ?`Passive · accepted #${controlStatus.accepted_sequence}`:"Passive · connecting",
+        ?`${standardLeasePresentation.ownership} · accepted #${controlStatus.accepted_sequence}`
+        :`${standardLeasePresentation.ownership} · connecting`,
         PLAYER.controlLastError?"warn":"good"):null,
       (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
       serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,

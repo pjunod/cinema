@@ -266,6 +266,15 @@ mod tests {
     }
 
     #[test]
+    fn both_stats_ledgers_render_the_tested_control_lease_presentation() {
+        assert!(PLAYBACK_POLICY_JS.contains("function controlLeasePresentation"));
+        assert!(INDEX_HTML.contains("`${leasePresentation.ownership} · ${leaseState}"));
+        assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · accepted #"));
+        assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · connecting`"));
+        assert!(!INDEX_HTML.contains("`Passive · accepted #"));
+    }
+
+    #[test]
     fn app_shell_loads_the_reader_boundary_before_its_route() {
         let asset = INDEX_HTML.find("/assets/reader.js").expect("reader asset");
         let route = INDEX_HTML

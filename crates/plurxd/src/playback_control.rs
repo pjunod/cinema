@@ -1309,8 +1309,13 @@ impl RollingControlActor {
                 let _transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = self.claim_expiry_at(Instant::now());
-                let _ = reply.send(self.snapshot_at(Instant::now()));
+                let now = Instant::now();
+                let snapshot = match self.claim_expiry_at(now) {
+                    RollingExpiryClaim::Live => self.snapshot_at(now),
+                    RollingExpiryClaim::Claimed(snapshot)
+                    | RollingExpiryClaim::Retired(snapshot) => snapshot,
+                };
+                let _ = reply.send(snapshot);
             }
             RollingControlCommand::ClaimExpiry { reply } => {
                 let transition = Arc::clone(&self.producer_transition);

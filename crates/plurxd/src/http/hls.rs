@@ -1980,12 +1980,31 @@ fn playlist_response(bytes: Vec<u8>) -> Response {
 /// Finalize liveness for a generated rolling resource only after every
 /// authorization and object-resolution step succeeded. The rolling actor or
 /// immutable registry must still own the capability at this commit point.
-async fn renew_generated_live_media(
+async fn commit_resolved_media(
     state: &AppState,
     session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
     kind: &'static str,
+    object_name: Option<&str>,
+    complete_object: bool,
 ) -> Result<(), ApiError> {
-    if state.transcode.renew_resolved_media(session, kind).await {
+    if state
+        .transcode
+        .commit_resolved_media(session, owner, kind, object_name, complete_object)
+        .await
+    {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound("transcode session"))
+    }
+}
+
+async fn response_owner_is_live(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+) -> Result<(), ApiError> {
+    if state.transcode.response_owner_is_live(session, owner).await {
         Ok(())
     } else {
         Err(ApiError::NotFound("transcode session"))
@@ -1995,8 +2014,15 @@ async fn renew_generated_live_media(
 async fn session_file(
     state: &AppState,
     session: &str,
-) -> Result<(crate::transcode::HlsContext, MediaFile), ApiError> {
-    let mut context = state
+) -> Result<
+    (
+        crate::transcode::HlsContext,
+        MediaFile,
+        crate::transcode::MediaResponseOwner,
+    ),
+    ApiError,
+> {
+    let (mut context, owner) = state
         .transcode
         .hls_context(session)
         .await
@@ -2012,7 +2038,7 @@ async fn session_file(
         .await?
         .as_deref()
         .and_then(video_frame_rate);
-    Ok((context, file))
+    Ok((context, file, owner))
 }
 
 /// Maximum frame rate from ffprobe's persisted source description.
@@ -2076,23 +2102,24 @@ async fn playlist_local(
     // The dedicated master path wraps it when native subtitles were requested;
     // the legacy `?native=1` bridge still needs that same wrapper.
     if let Some(answer) = state.transcode.vod_playlist(session).await {
-        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        let (bytes, playlist_owner) = answer.map_err(|err| vod_error(session, err))?;
         if query.native == Some(1) {
-            let (context, file) = session_file(state, session).await?;
+            let (context, file, owner) = session_file(state, session).await?;
             let context = exact_hls_context(state, session, context).await;
-            renew_generated_live_media(state, session, "master-playlist").await?;
+            commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
             return Ok(playlist_response(
                 master_playlist(&file, query.subtitle, &context).into_bytes(),
             ));
         }
+        commit_resolved_media(state, session, &playlist_owner, "playlist", None, true).await?;
         return Ok(playlist_response(bytes));
     }
     if query.native != Some(1) {
         return video_playlist_local(state, session).await;
     }
-    let (context, file) = session_file(state, session).await?;
+    let (context, file, owner) = session_file(state, session).await?;
     let context = exact_hls_context(state, session, context).await;
-    renew_generated_live_media(state, session, "master-playlist").await?;
+    commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
     Ok(playlist_response(
         master_playlist(&file, query.subtitle, &context).into_bytes(),
     ))
@@ -2130,7 +2157,7 @@ async fn master_playlist_response_local(
     session: &str,
     query: PlaylistQuery,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(state, session).await?;
+    let (context, file, owner) = session_file(state, session).await?;
     let context = exact_hls_context(state, session, context).await;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
@@ -2148,7 +2175,7 @@ async fn master_playlist_response_local(
         );
         return video_playlist_local(state, session).await;
     }
-    renew_generated_live_media(state, session, "master-playlist").await?;
+    commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
     Ok(playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
             .into_bytes(),
@@ -2208,7 +2235,8 @@ pub async fn video_playlist(
 
 async fn video_playlist_local(state: &AppState, session: &str) -> Result<Response, ApiError> {
     if let Some(answer) = state.transcode.vod_playlist(session).await {
-        let bytes = answer.map_err(|err| vod_error(session, err))?;
+        let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
+        commit_resolved_media(state, session, &owner, "playlist", None, true).await?;
         return Ok(playlist_response(bytes));
     }
     match state.transcode.playlist(session).await {
@@ -2216,7 +2244,8 @@ async fn video_playlist_local(state: &AppState, session: &str) -> Result<Respons
         Err(PlaylistError::SessionGone) if vod_resurrected(state, session).await => {
             match state.transcode.vod_playlist(session).await {
                 Some(answer) => {
-                    let bytes = answer.map_err(|err| vod_error(session, err))?;
+                    let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
+                    commit_resolved_media(state, session, &owner, "playlist", None, true).await?;
                     Ok(playlist_response(bytes))
                 }
                 None => Err(playlist_error(session, PlaylistError::SessionGone)),
@@ -2252,7 +2281,7 @@ async fn subtitle_playlist_local(
     session: &str,
     index: i64,
 ) -> Result<Response, ApiError> {
-    let (_, file) = session_file(state, session).await?;
+    let (_, file, owner) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2264,16 +2293,16 @@ async fn subtitle_playlist_local(
     }
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
     let video = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
+        Some(answer) => answer.map_err(|err| vod_error(session, err))?.0,
         None => state
             .transcode
             .playlist(session)
             .await
             .map_err(|err| playlist_error(session, err))?,
     };
-    Ok(playlist_response(
-        subtitle_media_playlist(&video).into_bytes(),
-    ))
+    let response = subtitle_media_playlist(&video).into_bytes();
+    commit_resolved_media(state, session, &owner, "subtitle-playlist", None, true).await?;
+    Ok(playlist_response(response))
 }
 
 /// Capability-authenticated VTT data for AVPlayer's autonomous child fetch.
@@ -2307,7 +2336,7 @@ async fn subtitle_vtt_local(
     index: i64,
     segment: &str,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(state, session).await?;
+    let (context, file, owner) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2363,7 +2392,7 @@ async fn subtitle_vtt_local(
                 (b"WEBVTT\n\n".to_vec(), "no-store")
             }
         };
-    Ok((
+    let response = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
@@ -2382,7 +2411,9 @@ async fn subtitle_vtt_local(
             segment_end,
         ),
     )
-        .into_response())
+        .into_response();
+    commit_resolved_media(state, session, &owner, "subtitle-segment", None, true).await?;
+    Ok(response)
 }
 
 fn quoted(value: &str) -> String {
@@ -2449,7 +2480,7 @@ async fn exact_hls_context(
     // tracker that keeps this probe out of player throughput telemetry.
     let mut init = Vec::new();
     match state.transcode.vod_segment(session, &init_object).await {
-        Some(Ok(Some(ready))) => {
+        Some(Ok(Some((ready, _)))) => {
             init.reserve(ready.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
             let mut reader = ready.file.take(INIT_INSPECTION_LIMIT_BYTES);
             if reader.read_to_end(&mut init).await.is_err() {
@@ -3408,6 +3439,7 @@ async fn vod_segment_response(
     seg: &str,
     headers: &RelayHeaders,
     ready: crate::vodserve::SegmentReady,
+    owner: crate::transcode::MediaResponseOwner,
 ) -> Result<Response, ApiError> {
     let mut ready = ready;
     if ready.len == 0 {
@@ -3416,6 +3448,15 @@ async fn vod_segment_response(
     let content_type = segment_content_type(seg);
     let etag = format!("\"{}\"", ready.etag);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        commit_resolved_media(
+            state,
+            session,
+            &owner,
+            "segment-not-modified",
+            Some(seg),
+            true,
+        )
+        .await?;
         return Ok((
             StatusCode::NOT_MODIFIED,
             [
@@ -3490,6 +3531,15 @@ async fn vod_segment_response(
         if let Some(range) = content_range {
             headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
         }
+        commit_resolved_media(
+            state,
+            session,
+            &owner,
+            "init-segment",
+            Some(seg),
+            requested_range.is_none(),
+        )
+        .await?;
         return Ok(response);
     }
     let (status, len, content_range) = match requested_range {
@@ -3508,9 +3558,47 @@ async fn vod_segment_response(
         }
         None => (StatusCode::OK, ready.len, None),
     };
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
-        tokio::io::AsyncReadExt::take(ready.file, len),
-    ));
+    response_owner_is_live(state, session, &owner).await?;
+    let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
+    let completion = (
+        Arc::clone(&state.transcode),
+        session.to_owned(),
+        owner,
+        if crate::transcode::is_init_object(seg) {
+            "init-segment"
+        } else {
+            "media-segment"
+        },
+        seg.to_owned(),
+        requested_range.is_none(),
+    );
+    let stream = futures_util::stream::unfold(
+        (Some(reader), Some(completion)),
+        |(reader, completion)| async move {
+            let mut reader = reader?;
+            match reader.next().await {
+                Some(Ok(bytes)) => Some((Ok(bytes), (Some(reader), completion))),
+                Some(Err(error)) => Some((Err(error), (None, None))),
+                None => {
+                    if let Some((manager, session, owner, kind, object, complete_object)) =
+                        completion
+                    {
+                        let _ = manager
+                            .commit_resolved_media(
+                                &session,
+                                &owner,
+                                kind,
+                                Some(&object),
+                                complete_object,
+                            )
+                            .await;
+                    }
+                    None
+                }
+            }
+        },
+    );
+    let body = axum::body::Body::from_stream(stream);
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let headers_mut = response.headers_mut();
@@ -3549,7 +3637,9 @@ async fn segment_local(
     }
     if let Some(answer) = vod_answer {
         return match answer {
-            Ok(Some(ready)) => vod_segment_response(state, session, seg, headers, ready).await,
+            Ok(Some((ready, owner))) => {
+                vod_segment_response(state, session, seg, headers, ready, owner).await
+            }
             Ok(None) => Err(ApiError::NotFound("segment")),
             Err(err) => Err(vod_error(session, err)),
         };
@@ -3566,6 +3656,7 @@ async fn segment_local(
             ));
         }
     };
+    let response_owner = opened.response_owner();
     // A live media object is published only after bytes exist. Treat an empty
     // file as an incomplete/corrupt publication instead of advertising the
     // saturating `0..=0` calculation below as one byte and hanging the client.
@@ -3575,7 +3666,17 @@ async fn segment_local(
     let content_type = segment_content_type(seg);
     let etag = segment_etag(session, seg, opened.len);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
-        if !opened.renew_for_response("segment-not-modified").await {
+        if commit_resolved_media(
+            state,
+            session,
+            &response_owner,
+            "segment-not-modified",
+            Some(seg),
+            true,
+        )
+        .await
+        .is_err()
+        {
             opened.delivery.finish_without_body();
             return Err(ApiError::NotFound("segment"));
         }
@@ -3609,10 +3710,6 @@ async fn segment_local(
         }
     };
     if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
-        if !opened.renew_for_response("init-segment").await {
-            opened.delivery.finish_without_body();
-            return Err(ApiError::NotFound("segment"));
-        }
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -3628,7 +3725,7 @@ async fn segment_local(
                 return Err(ApiError::Internal(error.to_string()));
             }
         };
-        if let Ok((_, file)) = session_file(state, session).await {
+        if let Ok((_, file, _)) = session_file(state, session).await {
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
                     session = %crate::transcode::session_log_id(session),
@@ -3648,12 +3745,6 @@ async fn segment_local(
             }
             None => (StatusCode::OK, init, None),
         };
-        // The storage inspection reads the complete init so it can normalize
-        // codec metadata, but client-delivery accounting follows only the
-        // bytes placed in this response (especially for a Range request).
-        delivery.expect_at_most(body.len() as u64);
-        delivery.note_read(body.len() as u64, read_elapsed);
-        delivery.finish();
         let mut response = Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, content_type)
@@ -3664,9 +3755,31 @@ async fn segment_local(
         if let Some(content_range) = content_range {
             response = response.header(header::CONTENT_RANGE, content_range);
         }
-        return response
+        let response_bytes = body.len() as u64;
+        let response = response
             .body(Body::from(body))
-            .map_err(|error| ApiError::Internal(error.to_string()));
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        if commit_resolved_media(
+            state,
+            session,
+            &response_owner,
+            "init-segment",
+            Some(seg),
+            requested_range.is_none(),
+        )
+        .await
+        .is_err()
+        {
+            delivery.finish_without_body();
+            return Err(ApiError::NotFound("segment"));
+        }
+        // The storage inspection reads the complete init so it can normalize
+        // codec metadata, but client-delivery accounting follows only the
+        // bytes placed in this response (especially for a Range request).
+        delivery.expect_at_most(response_bytes);
+        delivery.note_read(response_bytes, read_elapsed);
+        delivery.finish();
+        return Ok(response);
     }
     if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
@@ -3685,13 +3798,9 @@ async fn segment_local(
             return Err(ApiError::Internal(error.to_string()));
         }
     }
-    if !opened
-        .renew_for_response(if crate::transcode::is_init_object(seg) {
-            "init-segment"
-        } else {
-            "media-segment"
-        })
+    if response_owner_is_live(state, session, &response_owner)
         .await
+        .is_err()
     {
         opened.delivery.finish_without_body();
         return Err(ApiError::NotFound("segment"));
@@ -3701,13 +3810,25 @@ async fn segment_local(
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
+    let completion = (
+        Arc::clone(&state.transcode),
+        session.to_owned(),
+        response_owner,
+        if crate::transcode::is_init_object(seg) {
+            "init-segment"
+        } else {
+            "media-segment"
+        },
+        seg.to_owned(),
+        requested_range.is_none(),
+    );
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
     // an abandoned body is the `response_dropped` case, and it is the only one
     // nothing else observes.
     let stream = futures_util::stream::unfold(
-        (Some(reader), delivery),
-        |(reader, mut delivery)| async move {
+        (Some(reader), delivery, Some(completion)),
+        |(reader, mut delivery, completion)| async move {
             // `None` means a previous poll already reported a storage error.
             // Re-polling a reader that just failed has no defined meaning, so
             // the error is the last thing this body yields.
@@ -3716,14 +3837,28 @@ async fn segment_local(
             match reader.next().await {
                 Some(Ok(bytes)) => {
                     delivery.note_read(bytes.len() as u64, started.elapsed());
-                    Some((Ok(bytes), (Some(reader), delivery)))
+                    Some((Ok(bytes), (Some(reader), delivery, completion)))
                 }
                 Some(Err(error)) => {
                     delivery.fail(&error);
-                    Some((Err(error), (None, delivery)))
+                    Some((Err(error), (None, delivery, None)))
                 }
                 None => {
-                    delivery.finish();
+                    if delivery.finish() {
+                        if let Some((manager, session, owner, kind, object, complete_object)) =
+                            completion
+                        {
+                            let _ = manager
+                                .commit_resolved_media(
+                                    &session,
+                                    &owner,
+                                    kind,
+                                    Some(&object),
+                                    complete_object,
+                                )
+                                .await;
+                        }
+                    }
                     None
                 }
             }
@@ -4029,6 +4164,12 @@ mod tests {
             1_024
         );
         assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert_eq!(fixture.last_renewal_kind().await, "media-segment");
+        assert_eq!(
+            fixture.fetched_segment(),
+            -1,
+            "a completed byte range proves demand but not a complete segment"
+        );
 
         let mut conditional = HeaderMap::new();
         conditional.insert(
@@ -4045,6 +4186,13 @@ mod tests {
         .await
         .expect("conditional response");
         assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            fixture.fetched_segment(),
+            4,
+            "the client has the cached object"
+        );
+        let renewal_before_rejection = fixture.last_renewal_kind().await;
+        let frontier_before_rejection = fixture.fetched_segment();
 
         let mut unsatisfiable = HeaderMap::new();
         unsatisfiable.insert(
@@ -4060,6 +4208,8 @@ mod tests {
         .expect("range response");
         assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
         assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before_rejection);
+        assert_eq!(fixture.fetched_segment(), frontier_before_rejection);
         assert!(
             fixture.settle().await.is_empty(),
             "valid partial and intentionally bodyless responses are not incomplete deliveries"
@@ -4100,6 +4250,8 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "abandoned").await;
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
         let body = vec![3_u8; 64 * 1024];
         tokio::fs::write(dir.path().join("seg00002.m4s"), &body)
             .await
@@ -4142,6 +4294,61 @@ mod tests {
             first.len() as i64,
             "only the bytes the client actually took are delivery"
         );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_before,
+            "a dropped response cannot renew the playback lease"
+        );
+        assert_eq!(
+            fixture.fetched_segment(),
+            frontier_before,
+            "a dropped response cannot advance the consumed frontier"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_resolved_before_retirement_cannot_commit_after_eof() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "retired-body").await;
+        let body = vec![7_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("retired-body".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("resolved response");
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session("retired-body", "test-retirement")
+                .await
+        );
+        let renewal_after_retirement = fixture.last_renewal_kind().await;
+        let frontier_after_retirement = fixture.fetched_segment();
+
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("already-authorized bytes")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_after_retirement,
+            "EOF from an obsolete incarnation cannot renew it"
+        );
+        assert_eq!(
+            fixture.fetched_segment(),
+            frontier_after_retirement,
+            "EOF from an obsolete incarnation cannot move its frontier"
+        );
     }
 
     /// A storage error mid-body is its own classification, separate from an
@@ -4154,6 +4361,8 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable").await;
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
         // A directory opens like a file and reports a length, then fails its
         // first read with EISDIR — a storage failure the handler meets only
         // after the response headers are already on the wire.
@@ -4203,6 +4412,37 @@ mod tests {
             1,
             "one response produces one terminal classification"
         );
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before);
+        assert_eq!(fixture.fetched_segment(), frontier_before);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_small_init_never_commits_lease_or_frontier() {
+        let dir = crate::test_tempdir().expect("init directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable-init").await;
+        tokio::fs::create_dir(dir.path().join("init.mp4"))
+            .await
+            .expect("unreadable init");
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
+
+        assert!(
+            segment(
+                State(fixture.state.clone()),
+                AxPath(("unreadable-init".to_owned(), "init.mp4".to_owned())),
+                HeaderMap::new(),
+            )
+            .await
+            .is_err(),
+            "the buffered init read must fail before a response is committed"
+        );
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before);
+        assert_eq!(fixture.fetched_segment(), frontier_before);
+        assert!(fixture
+            .delivery_events(1)
+            .await
+            .iter()
+            .any(|event| event.reason.as_deref() == Some("storage_read_error")));
     }
 
     /// `exact_hls_context` opens `init.mp4` for the playlist generator, not
