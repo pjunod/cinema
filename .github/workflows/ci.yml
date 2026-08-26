@@ -512,11 +512,13 @@ jobs:
       - name: Run the Compose and TV focus suite on a disposable emulator
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          # Google's Android TV repository publishes an x86_64 image for API
-          # 36 (and none for API 35). Keep this tuple on a real package.
+          # Google's Android TV repository publishes API 36 for both x86 and
+          # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
+          # threads under nested KVM on the lab runners; the x86 guest keeps
+          # the same TV/API contract without that broken boot path.
           api-level: 36
           target: android-tv
-          arch: x86_64
+          arch: x86
           profile: tv_1080p
           force-avd-creation: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
