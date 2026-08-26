@@ -12,7 +12,7 @@ commits = [
   "fd84590a",
   "bc5da691",
   "e33cf3f3",
-  "838f20cc",
+  "9de2d748",
 ]
 points = ["core.media", "persistence.upgrades", "server.api", "operations.packaging", "validation.framework"]
 checks = ["rust-gate", "database-upgrades", "cluster-auth", "catalog-contract", "history-regressions"]
