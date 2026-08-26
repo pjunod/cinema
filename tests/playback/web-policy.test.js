@@ -1303,6 +1303,46 @@ test("a persistent stall gets one bounded method-aware recovery", () => {
   assert.equal(policy.stallRecoveryAction({ method: "unknown" }), "prompt");
 });
 
+test("a persistent supply stall spends its one restart on the sustainable rung", () => {
+  assert.equal(
+    policy.stallRecoveryTargetHeight({
+      method: "transcode",
+      quality: "auto",
+      kind: "supply",
+      ladder: serverLadder,
+      currentHeight: 720,
+      // hls.js still carries pre-cliff history, while the last completed
+      // transfer measures the shaped link closely enough to choose 360p.
+      estimateKbps: 2_800,
+      recentEstimateKbps: 1_530,
+      recentEstimateAtMs: 10_000,
+      nowMs: 12_000,
+    }),
+    360,
+  );
+  for (const input of [
+    { method: "transcode", quality: "1080", kind: "supply" },
+    { method: "transcode", quality: "auto", kind: "decode" },
+    { method: "remux", quality: "auto", kind: "supply" },
+  ]) {
+    assert.equal(
+      policy.stallRecoveryTargetHeight({
+        ...input,
+        ladder: serverLadder,
+        currentHeight: 720,
+        estimateKbps: 1_530,
+        nowMs: 12_000,
+      }),
+      null,
+    );
+  }
+  assert.match(
+    shippedSource("persistentWait"),
+    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight\)/,
+    "the shipped persistent-stall path must pass the measured target into its bound reopen",
+  );
+});
+
 test("a transcode stall reopen is bound to the exact predecessor", () => {
   const ordinary = { start: 42, height: 720 };
   assert.deepEqual(

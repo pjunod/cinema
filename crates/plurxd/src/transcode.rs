@@ -8566,8 +8566,16 @@ impl TranscodeManager {
         let mut normalized = request.clone();
         normalized.automatic = automatic;
         normalized.kind = if automatic {
+            // One rung is the server-owned upper bound, not a reason to ignore
+            // stronger link evidence from the player that actually stalled.
+            // A lower requested rung can only make the retry safer; a stale or
+            // maliciously higher request can never prevent the bounded step.
+            let client_height = match request.kind {
+                SessionKind::Transcode { height } => height,
+                SessionKind::Copy { .. } => previous_height,
+            };
             SessionKind::Transcode {
-                height: one_rung_below(previous_height),
+                height: one_rung_below(previous_height).min(client_height),
             }
         } else {
             kind
@@ -20015,6 +20023,100 @@ mod tests {
             "the target is stored before either session can be superseded"
         );
         drop(claim);
+    }
+
+    /// The browser that observed the cliff may have a fresher transfer sample
+    /// than the server's predecessor record. It may ask to descend farther,
+    /// but never use that hint to avoid the server-owned one-rung minimum.
+    #[tokio::test]
+    async fn a_bound_auto_reopen_honors_a_safer_client_rung() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        insert_reopen_fixture(
+            &mgr,
+            ReopenFixture {
+                session_id: "measured-cliff-session",
+                dir: previous_dir.path().to_path_buf(),
+                user_name: "paul",
+                playback_id: "measured-cliff-player",
+                file_id: 51,
+                target_height: 720,
+                automatic: true,
+                kind: SessionKind::Transcode { height: 720 },
+            },
+        )
+        .await;
+
+        let lower = SessionRequest {
+            kind: SessionKind::Transcode { height: 360 },
+            ..reopen_request(
+                51,
+                "measured-cliff-player",
+                "measured-cliff-reopen",
+                "measured-cliff-session",
+            )
+        };
+        let Claimed::Mine(claim, normalized) = mgr
+            .claim_request("measured-cliff-reopen", &lower, r#"["username","paul"]"#)
+            .await
+            .expect("lower measured rung is valid")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(normalized.kind, SessionKind::Transcode { height: 360 });
+        assert_eq!(
+            mgr.requests
+                .lock()
+                .expect("requests")
+                .get("measured-cliff-reopen")
+                .and_then(|entry| entry.target_height),
+            Some(360),
+        );
+        drop(claim);
+
+        let higher_dir = crate::test_tempdir().expect("higher previous session");
+        insert_reopen_fixture(
+            &mgr,
+            ReopenFixture {
+                session_id: "stale-high-session",
+                dir: higher_dir.path().to_path_buf(),
+                user_name: "paul",
+                playback_id: "stale-high-player",
+                file_id: 52,
+                target_height: 720,
+                automatic: true,
+                kind: SessionKind::Transcode { height: 720 },
+            },
+        )
+        .await;
+        let higher = reopen_request(
+            52,
+            "stale-high-player",
+            "stale-high-reopen",
+            "stale-high-session",
+        );
+        let Claimed::Mine(higher_claim, higher_normalized) = mgr
+            .claim_request("stale-high-reopen", &higher, r#"["username","paul"]"#)
+            .await
+            .expect("higher hint is bounded")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(
+            higher_normalized.kind,
+            SessionKind::Transcode { height: 480 },
+            "the client cannot avoid the server-owned one-rung descent",
+        );
+        drop(higher_claim);
     }
 
     #[tokio::test]
