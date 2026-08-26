@@ -1,8 +1,8 @@
 # Playback control protocol — explicit demand, one owner, prepared handoffs
 
-**Status:** proposed implementation handoff · written 2026-08-26 against
-`origin/main` at `64d8f4de` · wire names, defaults, and source locations must
-be re-verified at build time
+**Status:** adversarially reviewed implementation handoff · M1 ready · written
+2026-08-26 against `origin/main` at `64d8f4de` · wire names, defaults, and
+source locations must be re-verified at build time
 
 This plan replaces the temporary growing-HLS recovery engine's inferred
 control loop with an explicit client/server protocol. It does not replace the
@@ -15,7 +15,9 @@ Companions: [PLAYBACK.md](PLAYBACK.md),
 [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md),
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md),
 [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md), and
-[CLUSTER-MEDIA-POOL-PLAN.md](CLUSTER-MEDIA-POOL-PLAN.md).
+[CLUSTER-MEDIA-POOL-PLAN.md](CLUSTER-MEDIA-POOL-PLAN.md). The independent
+finding ledger is
+[PLAYBACK-CONTROL-PROTOCOL-REVIEW.md](PLAYBACK-CONTROL-PROTOCOL-REVIEW.md).
 
 ## 0. Decision summary
 
@@ -108,9 +110,10 @@ The implementation must preserve these merged contracts:
 | `playback_id` | Stable player-instance supersession key | Groups delivery generations for one client intent |
 | `request_id` | Idempotent create attempt | Idempotent successor creation |
 | `session_id` | Bearer capability and public HLS URL | One delivery generation and its control URL |
-| `incarnation_id` | Durable replicated media-session identity | Cluster route and activation identity |
-| `owner_epoch` | CAS-fenced cluster ownership generation | Rejects stale node actions |
-| control `sequence` | New, monotonic per client and session | Rejects reordered/replayed state changes |
+| `incarnation_id` | Durable replicated media-session identity | Non-secret delivery `generation` returned to the client |
+| `owner_epoch` | CAS-fenced cluster ownership generation | Control epoch; rejects every stale-owner mutation |
+| `client_instance_id` | New random UUID per player-controller lifetime | Separates a restarted controller's sequence space |
+| control `sequence` | New monotonic counter | Rejects reordered state within `(generation, owner_epoch, client_instance_id)` |
 | `action_id` | New, server-issued UUID | Makes replacement phases idempotent |
 
 `session_id` remains stable during the currently supported same-incarnation
@@ -118,12 +121,19 @@ cluster takeover. A recipe change creates a new `session_id`. Later rolling
 hard-failover work may also create a successor session instead of splicing a
 new producer into a mutable timeline; §10 defines that rule.
 
+`session_id` is never copied into a control body or response field merely as a
+generation token. It is a bearer capability already present in the URL.
+`incarnation_id` is the non-secret delivery generation. A cluster takeover
+keeps that generation and increments `owner_epoch`; a recipe successor gets a
+new incarnation and starts at owner epoch 1.
+
 ## 2. Goals, success criteria, and non-goals
 
 ### 2.1 Goals
 
-1. A healthy playing, paused, seeking, or background-grace player never loses
-   its session because the server guessed intent from fetch silence.
+1. A healthy playing, paused, seeking, or bounded-background-hold player whose
+   renewals arrive never loses its session because the server guessed intent
+   from fetch silence.
 2. Copy and transcode production follow reported buffer demand without
    unbounded disk growth or oscillating `SIGSTOP`/`SIGCONT` decisions.
 3. Exactly one component selects recovery. Multiple observations may arrive,
@@ -142,15 +152,17 @@ new producer into a mutable timeline; §10 defines that rule.
 The final cutover is accepted only when all of these are true:
 
 - no freestanding live-session recovery task can restart or replace media;
-- a 30-minute pause with valid control heartbeats retains the session while
-  producing no new rolling media;
+- a 30-minute pause with control heartbeats physically delivered retains the
+  session while producing no new rolling media;
 - losing control heartbeats but continuing media fetches does not reap a
   healthy session;
 - losing both renewals expires the playback lease once and releases producer
   admission once;
 - scripted network cliffs cause at most one replacement transaction and no
   lower-quality oscillation during its cooldown;
-- a failed prepared successor leaves the current stream playable;
+- a failed true make-before-break successor leaves the current stream running
+  and playable; a one-slot buffered transfer satisfies its separately measured
+  interruption and predecessor-restart contract (§5.3);
 - cluster owner fencing prevents two nodes from accepting mutating actions;
 - fault-injection tests enumerate every remaining deadline in §7;
 - physical web, AVPlayer, and Media3 runs record switch interruption and
@@ -210,7 +222,8 @@ sub-second delivery.
 pub struct ControlBootstrap {
     pub protocol: String,          // exactly "plurx-playback-control-v1"
     pub url: String,               // /api/v1/hls/{session}/control
-    pub generation: String,        // equal to this delivery session_id in v1
+    pub generation: String,        // this delivery's non-secret incarnation_id
+    pub control_epoch: u64,        // current durable owner_epoch
     pub next_exchange_ms: u32,     // initial recommendation, not a deadline
     pub lease_timeout_ms: u32,     // server's current advertised lease
 }
@@ -236,6 +249,8 @@ The concrete v1 body is deliberately small and bounded:
 pub struct ControlRequestV1 {
     pub protocol: String,
     pub generation: String,
+    pub control_epoch: u64,
+    pub client_instance_id: String,
     pub sequence: u64,
     pub demand: PlaybackDemand,
     pub position_ms: i64,
@@ -258,15 +273,24 @@ Normative field rules:
   silently interpreting a future message with old semantics.
 - `generation` must equal the path session's active delivery generation.
   Stale controls against a retiring predecessor do not renew its lease.
-- `sequence` starts at 1 and strictly increases. An equal sequence returns the
-  cached previous response; a lower sequence returns `409 stale_control`.
-  This makes transport replay safe without making state changes twice.
+- `control_epoch` must equal the durable route's current `owner_epoch`. An old
+  epoch returns `409 owner_changed` before mutation or lease renewal, even when
+  `session_id` stayed stable through takeover.
+- `client_instance_id` is a random UUID created by the controller and bound on
+  its first accepted exchange in an epoch. A different instance cannot reset
+  the sequence of an active binding.
+- `sequence` starts at 1 and strictly increases inside
+  `(generation, control_epoch, client_instance_id)`. An equal sequence returns
+  the previous action outcome without applying it again and **does not renew
+  the playback lease**; a lower sequence returns `409 stale_control`. A newly
+  accepted higher sequence is the only control request that renews.
 - `demand` is `active`, `hold`, or `end`. `hold` includes intentional pause
   and supported background grace; it renews the lease but requests no new
   production. `end` is terminal and equivalent to an orderly release.
 - `position_ms` and buffer endpoints use film time, not session-relative time.
-  Negative values and values past the known duration plus a small seek
-  tolerance are rejected.
+  Negative values are rejected. For a known duration, values greater than
+  `duration_ms + max(2_000, target_duration_ms)` are rejected; the allowance
+  covers one player/segment rounding interval and is capped at 30 seconds.
 - `buffered_from_ms` and `buffered_through_ms` describe the contiguous range
   containing or immediately following the playhead. The client computes this
   from platform ranges. Sending an arbitrary range list is unnecessary for
@@ -298,7 +322,9 @@ that a device can decode or display it.
 pub struct ControlResponseV1 {
     pub protocol: String,
     pub generation: String,
+    pub control_epoch: u64,
     pub accepted_sequence: u64,
+    pub server_time_unix_ms: i64,
     pub lease: PlaybackLeaseView,
     pub delivery: DeliveryView,
     pub effective_selection: EffectiveSelection,
@@ -306,8 +332,10 @@ pub struct ControlResponseV1 {
 }
 ```
 
-`PlaybackLeaseView` reports `state`, `renew_after_ms`, and
-`expires_in_ms`. `DeliveryView` reports only facts the controller uses or an
+`PlaybackLeaseView` reports `state`, `renew_after_ms`, and the absolute
+`expires_at_unix_ms`. An absolute expiry stays honest on an idempotent replay;
+the action outcome remains equivalent while the lease is not extended.
+`DeliveryView` reports only facts the controller uses or an
 operator needs: presentation, producer state, produced/materialized through,
 served/fetched through, delivered bitrate and idle interval, recent producer
 speed, contiguous client runway, admission state, hold reason, owner node hash
@@ -326,10 +354,12 @@ terminal(code, message)
 ```
 
 The action object is tagged by `type`; it is never an untyped nullable bag.
-An equal request sequence returns byte-equivalent action semantics. A client
-acknowledges `prepared`, `committed`, `failed`, or `aborted` with the matching
-`action_id`. Unknown and completed action IDs are harmless typed conflicts,
-not triggers for a new replacement.
+An equal request sequence returns equivalent action semantics without a lease
+renewal. A client acknowledges `metadata_ready`, `buffer_ready`, `committed`,
+`failed`, or `aborted` with the matching `action_id`; `buffer_ready` includes
+the successor's film-time `buffered_through_ms`, and `committed` includes
+first-frame time. Unknown and completed action IDs are harmless typed
+conflicts, not triggers for a new replacement.
 
 ### 3.5 Error contract
 
@@ -337,7 +367,8 @@ not triggers for a new replacement.
 |---|---|---|---|
 | 400 | `invalid_control` | Bounded field validation failed | Stop v1 for this session and log the named field |
 | 404 | `session_gone` | No local or durable route exists | Reopen from current film position once |
-| 409 | `stale_control` | Generation, sequence, or action fence lost | Apply the returned/current generation; do not retry stale state |
+| 409 | `owner_changed` | Control epoch lost after owner takeover | Re-snapshot under the returned epoch; never retry the old mutation |
+| 409 | `stale_control` | Generation, client instance, sequence, or action fence lost | Apply returned current state; do not retry stale state |
 | 410 | `session_ended` | Session deliberately ended or superseded | Stop renewing predecessor; follow successor if supplied |
 | 425 | `owner_transition` | Durable route exists but takeover is unresolved | Retry after the bounded response hint |
 | 429 | `control_rate_limited` | Client exceeded the per-session control budget | Back off to the returned interval; media remains independent |
@@ -461,21 +492,30 @@ Every recipe or owner change uses the same phases:
 
 1. **Propose.** The arbiter selects one successor recipe and records the
    evidence, reason, and minimum safe boundary.
-2. **Reserve.** Admission is requested without releasing the current permit
-   unless a single-slot handoff must use buffered runway (§5.3).
-3. **Prime.** The successor is created with an idempotent `request_id` derived
-   from `action_id`, begins at an aligned film-time boundary, and publishes
-   enough media for the target platform's measured startup need.
+2. **Stage.** A prepare-only durable start creates at most one successor for
+   the predecessor/action. It does not call today's supersession reap and does
+   not advance `media_playback_pointers`. The staged row is invisible to
+   ordinary current-session lookup until commit.
+3. **Reserve and prime.** Admission is requested without releasing the current
+   permit unless a single-slot handoff uses §5.3's weaker contract. The
+   successor uses an idempotent `request_id` derived from `action_id`, begins
+   at an aligned film-time boundary, and publishes enough media for the target
+   platform's measured startup need.
 4. **Prepare.** The server returns the complete successor `StartResponse` and
-   boundary. The client preloads it without destroying the current player and
-   acknowledges `prepared` only after the platform says media is ready.
+   boundary. The client preloads it without destroying the current player,
+   acknowledges `metadata_ready`, then acknowledges `buffer_ready` with the
+   successor film time it can actually play without another fetch.
 5. **Commit.** The server returns `commit_replacement`. The client switches at
    or just after the boundary, preserves film position and playback intent,
    and acknowledges `committed` with observed first-frame time.
-6. **Retire.** The predecessor stops producing immediately after commit but
+6. **Commit durability.** A single CAS moves `media_playback_pointers` from
+   the expected predecessor to the staged incarnation and marks the action
+   committed. A lost CAS aborts the staged generation; it never reaps a newer
+   player generation.
+7. **Retire.** The predecessor stops producing immediately after commit but
    retains published media through reader pins plus a bounded retirement
    grace. Late predecessor controls do not renew it.
-7. **Abort.** Any failure before commit tears down only the successor. The
+8. **Abort.** Any failure before commit tears down only the successor. The
    current stream remains authoritative and playable.
 
 The transaction has exactly one terminal outcome. A disconnect does not imply
@@ -500,23 +540,55 @@ The product term “transparent” means no manual action, no position loss, no
 duplicate recovery, and continued old playback until commit. A measured
 display-mode blink is reported honestly rather than hidden under that term.
 
-### 5.3 One encoder slot
+### 5.3 One encoder slot is not make-before-break
 
-Make-before-break is impossible when the only compatible hardware slot is
-occupied by the current stream. In that case the actor may perform a buffered
-permit transfer only when:
+True make-before-break is impossible when the only compatible hardware slot is
+occupied by the current stream. The actor first tries, in order: a bounded
+admission overcommit proven safe for that hardware, an eligible software
+bridge, or staying on the current recipe. Only a severe condition may use a
+buffered break-before-make permit transfer, and only when:
 
 - the client reports contiguous runway exceeding measured successor startup
   p95 plus a safety margin;
 - the current published media remains readable after its producer stops;
 - the successor recipe is known eligible on the target node;
-- the action can abort before commit without deleting predecessor media.
+- the old recipe remains restartable at the same film-time boundary if the
+  successor fails.
 
 The actor stops the old producer, releases its permit, primes the successor
 while the client consumes retained buffer, and commits only after readiness.
-If the runway condition is not met, stay on the current rung. A severe failing
-stream may use an explicitly logged break-before-make rescue as the final
-fallback, but it is a different action reason and never presented as seamless.
+Failure aborts the successor and attempts an idempotent restart of the old
+recipe; the finite retained buffer is not described as a running predecessor.
+If the runway condition is not met, stay on the current rung unless the
+current stream is already terminal. This action is logged and measured as
+`buffered_break_before_make`; its acceptance is bounded interruption and
+successful old-recipe restart, not seamless handoff.
+
+### 5.4 Client preparation feasibility gate
+
+“Ready” has three platform-independent meanings:
+
+- `metadata_ready`: successor manifest/item parsed and decoder eligibility
+  accepted;
+- `buffer_ready`: successor has a reported contiguous film-time range through
+  at least the proposed switch boundary plus its measured safety runway;
+- `first_frame_ready`: observed only after commit, with wall latency and film
+  position.
+
+Asset metadata or an AVPlayer/Media3 ready state alone is not `buffer_ready`.
+Before M6 freezes or enables prepared actions, a physical spike must measure:
+
+| Platform | Dual preparation proof | Required fallback |
+|---|---|---|
+| Web/hls.js | Second detached media pipeline can buffer without destroying current MSE/video or exceeding memory/decoder limits | Server-prime then measured single-player replace |
+| AVPlayer | Successor item/asset can acquire playable buffer while current item renders, including tvOS/iOS resource limits | `AVQueuePlayer`/single-item replace path with honest interruption |
+| Media3 | Second player/preload manager can buffer on target Android TV/phone hardware without decoder starvation | Single-player media-item replace with honest interruption |
+
+The spike records memory, decoder allocation, network duplication, old-stream
+continuity, buffered-through truth, switch position error, and first-frame
+latency for same-codec and codec/grade changes. Unsupported dual preparation
+does not block the protocol; it selects the platform's measured single-player
+fallback and prevents the UI from calling that path seamless.
 
 ## 6. Adaptive delivery and other protocol consumers
 
@@ -598,9 +670,20 @@ owns a playback watchdog.
 
 ### 6.5 Content-analysis index and exact skip markers
 
-The fragment-index pass already reads the complete video stream. It must also
-publish a versioned film-time annotation section instead of making every
-playback request re-derive intro and credits guesses from chapter names.
+“The index” is one operator-visible content-analysis index with three storage
+components, not one Rust struct:
+
+| Component | Scope | Contents |
+|---|---|---|
+| structural fragment index | node-local, pipeline-versioned | Existing packed video-only fragment rows used for VOD planning/landing |
+| timeline annotation set | replicated, source-versioned | Authored/manual/detected intro, recap, credits, and preview boundaries |
+| detector feature sidecar | node-local, detector-versioned | Optional bounded audio/video fingerprints or sampled visual features |
+
+This split is required by the existing store. `FragmentIndex` is serialized
+into a packed node-local sidecar that contains structural rows; adding a Serde
+field would not make it replicated and would invalidate structural indexes on
+every detector change. The item and Activity UI nevertheless present the
+three components as one analysis generation with explicit per-node coverage.
 
 ```rust
 pub struct TimelineAnnotation {
@@ -613,10 +696,13 @@ pub struct TimelineAnnotation {
     pub provenance: AnnotationProvenance,
     pub confidence_millis: u16,     // 0..=1000, not a float
     pub detector_version: String,
+    pub manual_override_revision: Option<u64>,
 }
 
-pub struct FragmentIndex {
-    // existing structural fields
+pub struct TimelineAnnotationSet {
+    pub source_identity: SourceIdentity,
+    pub generation_id: String,
+    pub version: u32,
     pub annotations: Vec<TimelineAnnotation>,
 }
 ```
@@ -624,19 +710,20 @@ pub struct FragmentIndex {
 Ticks are the authority and use the file timeline. Milliseconds are stored so
 clients do not each invent rounding. `start < end <= duration` is enforced,
 overlaps of the same kind are normalized, and a marker is keyed by the
-current source identity plus detector version. The seek target is the marker's
-exact end time. A rolling producer may start at the clean boundary before that
-time, but the player still seeks forward to the exact film time after attach.
+current source identity plus detector/manual revision. The seek target is the
+marker's exact end time. A rolling producer may start at the clean boundary
+before that time, but the player still seeks forward to the exact film time
+after attach.
 
 Detection is evidence-ranked:
 
 1. Authored chapters with recognized intro/recap/credits titles provide exact
    authored boundaries.
-2. Recurring audio/video fingerprints across episodes identify shared opening
-   and ending sequences. A second boundary-refinement pass locates the
-   frame/audio transition rather than using the coarse fingerprint window.
-3. Credits-specific visual/text and audio transition evidence can identify a
-   non-recurring film tail.
+2. Recurring audio/video fingerprints across episodes may identify shared
+   opening and ending sequences. A second boundary-refinement pass must locate
+   the frame/audio transition rather than using the coarse fingerprint window.
+3. Credits-specific visual/text and audio transition evidence may identify a
+   non-recurring film tail after a detector passes its evaluation gate.
 4. Duration-only estimates remain compatibility hints with low confidence;
    they are never labeled exact and are not auto-skipped by default.
 5. An administrator's manual boundary is `manual` provenance, highest
@@ -649,11 +736,23 @@ proof that the semantic classification is correct. Clients auto-skip only
 authored, manual, or detector results above the configured confidence floor.
 Lower-confidence markers may still show a clearly labeled manual button.
 
-Cross-episode matching has two phases so one full-file read does the expensive
-work once. The per-file indexer emits bounded fingerprint features while it
-walks fragments. A series/season correlator compares those small features and
-publishes annotations for affected files. The correlator never re-reads every
-episode merely because a new episode arrived.
+Authored chapter persistence is immediately buildable and requires no new
+media analysis. Experimental detection is a separate bounded feature pass:
+the current fragment indexer maps video only and does not decode audio, frames,
+or OCR text. A feature job may share queue/admission scheduling and source I/O
+budgets, but it must not be described as free output from the existing pipe.
+A series/season correlator compares the small feature sidecars and publishes
+annotations without rereading every episode when a new episode arrives.
+
+Detector rollout is opt-in until a labeled fixture corpus and real-series
+sample meet recorded precision/recall gates, with false-positive rate weighted
+more heavily because a wrong automatic skip is worse than no skip. The exact
+thresholds are set from that evaluation, not invented in this document.
+
+The existing `DecisionResponse.markers` wire stays additive: `kind`,
+`start_ms`, `end_ms`, `label`, and the compatibility `chapter` field remain.
+New provenance, confidence, generation, and detector-version fields are
+optional until web, Apple, and Android have migrated.
 
 The decision/start payload returns the persisted annotations. The control
 actor also consumes them: when the playhead approaches a marker, or automatic
@@ -677,6 +776,78 @@ GET  /api/v1/analysis/jobs/{job}
 POST /api/v1/analysis/jobs/{job}/retry
 DELETE /api/v1/analysis/jobs/{job}
 ```
+
+The replicated work contract uses four records:
+
+```text
+analysis_jobs
+  job_id · file_id · source_identity · component · target_node_id?
+  pipeline_or_detector_version · requested_generation · priority · trigger
+  state · attempt · not_before_ms · cancel_requested · created/updated_ms
+
+analysis_attempts
+  job_id · attempt · claim_node_id · claim_epoch · claim_expires_at_ms
+  phase · started_at_ms · phase_updated_at_ms · terminal_code?
+
+analysis_artifacts
+  file_id · source_identity · component · generation · version
+  payload_or_digest · state(staged|published|rejected) · published_at_ms
+
+analysis_node_coverage
+  file_id · source_identity · pipeline_version · node_id
+  fragment_generation · state · verified_at_ms
+```
+
+Work identities are different on purpose:
+
+- a structural/feature job is unique on
+  `(file_id, source_identity, component, pipeline_version, target_node_id)` so
+  every eligible media node can build its own node-local artifact;
+- semantic correlation is unique on
+  `(file_id, source_identity, detector_version, requested_generation)` and is
+  cluster-owned once;
+- a non-force duplicate joins the active identity and returns its `job_id`;
+  force allocates a new requested generation but still permits only one active
+  forced successor per component/file.
+
+Legal durable state transitions are:
+
+```text
+ queued -> claimed -> running -> staged -> published
+    |         |          |          |
+    |         +-------> retry_wait <-+
+    |                    |
+    +-------> canceled <-+----------> failed
+
+ any nonterminal state -- source identity changed --> stale
+```
+
+Claim is a CAS from `queued|retry_wait` with `not_before <= now`, incrementing
+`attempt` and `claim_epoch`. Renew, phase summary, stage, publish, fail, and
+cancel all require the exact `(job_id, attempt, claim_node_id, claim_epoch)`.
+An expired claim returns to `retry_wait`; its old worker cannot stage or
+publish. Cancellation sets `cancel_requested` durably, then the owner
+cooperatively stops at a safe boundary and fences its partial generation. A
+queued job cancels immediately. A published artifact is never deleted by job
+cancellation.
+
+Retry policy is typed. Transient I/O, preemption, and lease loss use capped
+exponential backoff with jitter and an operator-visible next attempt. Source
+unsupported and deterministic validation failure are terminal until source or
+pipeline/detector version changes, or an admin explicitly retries. The first
+implementation must choose and test numeric attempt/backoff ceilings before
+enablement; they are settings with safe maximums, not wire constants.
+
+Artifact publication is compare-and-swap on current source identity and
+expected predecessor generation. Bytes/payload are fully written, hashed, and
+verified in `staged` state before the replicated pointer changes to
+`published`. A stale or failed successor leaves the previous published
+generation current.
+
+High-frequency byte/media-time progress is node-local in the worker's bounded
+activity registry. The existing peer Activity snapshot supplies it to an
+ingress. Only claim renewal, throttled phase summaries, and terminal/publication
+changes replicate; this keeps per-fragment progress out of Raft.
 
 The item detail page gets **Analyze now** when any current component is absent
 or failed and **Rebuild analysis** when it is current. For an item with
@@ -704,11 +875,9 @@ for a new generation.
 Foreground VOD prerequisite demand and an administrator force request outrank
 recently requested and ordinary background indexing, but all use bounded
 fairness and the existing foreground-production preemption rule. In a cluster,
-the durable queue records desired analysis and per-node fragment-index
-coverage; a lease/fence gives one node ownership of a job attempt. Semantic
-annotations are content facts and replicate after validation. Fragment bytes
-and pipe-specific indexes remain node-local and record which node/pipeline
-version produced them.
+semantic annotations replicate after validation. Fragment bytes and
+pipe-specific indexes remain node-local and publish the explicit coverage row
+for the node/pipeline version that produced them.
 
 Required analysis telemetry:
 
@@ -785,26 +954,79 @@ loop for a playback generation after the actor migration. A repository check
 should enumerate approved deadline constructors and fail on new unowned
 watchdog patterns in playback modules.
 
+### 7.4 Client watchdog-by-watchdog disposition
+
+This is the build-time deletion ledger. Source symbols must be re-verified
+before each client milestone; any newly found automatic recovery owner is
+added here before code changes.
+
+| Apple source symbol | Present mutation | Final disposition |
+|---|---|---|
+| `startStatusPolling` / `statusTask` | Polls server facts used by recovery | Replace with coalesced control exchange; it has no recovery authority |
+| `DeliveryStarvationDetector` | Confirms server/client starvation and enters same-delivery reopen | Retain only as evidence classification inside the controller; submit observation |
+| `PlaybackRecoveryMonitor` / `PlaybackStallDetector` | Nudges Play, then reopens on stagnant clock | Becomes the one `PlaybackProgressDeadline`; no nudge/reopen, only `stalled` observation |
+| `BlackFrameWatchdog` | Treats advancing audio with zero video size as decode failure | Absorb into the same deadline's startup/render predicates; submit decoder-readiness evidence |
+| `SameDeliveryStallRecoveryState` | Allows one same-delivery reopen | Delete after action cutover; server action transaction is the attempt state |
+| `StallReopenBudget` / `RecoveryReopenBudget` | Bounds colliding automatic reopen loops | Delete after action cutover; one action ID and arbiter provide the bound |
+| `PlayerReopenQueue` | Serializes/replays seeks, track changes, and recoveries | Replace automatic half with control sequencing; retain only viewer-intent coalescing until removed |
+| early-end/item failure handlers | Reopen or walk compatibility ladder | Send typed ended/failed observation; arbiter chooses one action |
+
+| Web source symbol | Present mutation | Final disposition |
+|---|---|---|
+| `waitTimer` / `persistentWait` | Times persistent media wait and reopens/falls back | Becomes the one `PlaybackProgressDeadline`; report observation only |
+| `stallTimer` / `armStall` / `stallDiagnose` | Times startup/seek progress and tears down/reopens | Absorb into the same deadline and central action owner |
+| `pollSessionHealth` interval | Reads `/status` for supply/ABR/recovery | Replace with control reporter; never a liveness decision by itself |
+| hls.js fatal-error handlers | Destroy/recreate or compatibility-transcode | Normalize error as proposal; only controller applies returned action |
+| Auto ABR sample/controller | Opens a replacement session | Retain as action proposal using joined control facts; no direct create |
+| automatic fallback claim/budgets | Prevent some recovery collisions | Delete once the server arbiter/action ID is authoritative |
+
+| Android source symbol | Present mutation | Final disposition |
+|---|---|---|
+| `BufferingStallTracker` one-second sample loop | Calls `onStall` after measured buffering | Becomes the one `PlaybackProgressDeadline`; report observation only |
+| `startStatusPolling` / `statusPollingJob` | Polls server supply every two seconds | Replace with coalesced control exchange |
+| `ControllerStallGuard` / `StallReopenBudget` | Fences and budgets automatic reopens | Delete after action cutover |
+| `SessionCreateCoordinator.reopenAfterStall` | Creates the lower/same successor directly | Invoked only by a prepared server action, then replaced by shared action state |
+| Media3 player-error/end callbacks | Reopen or enter compatibility handling | Send typed failed/ended observation; arbiter chooses one action |
+
+PGS cue-boundary jobs, UI-hide timers, seek debounce, progress reporting, and
+subtitle retry scheduling remain ordinary scheduling timers. They do not infer
+playback failure or mutate video delivery and therefore are not watchdogs.
+The repository allowlist names their owner and purpose so a future recovery
+mutation cannot hide under that classification.
+
 ## 8. Playback lease semantics
 
 ### 8.1 Renewal
 
 A local generation's playback lease is renewed by either:
 
-- a valid, new or idempotently replayed control exchange for the active
-  generation; or
+- a valid, newly accepted higher-sequence control exchange for the active
+  generation and control epoch; or
 - a successful playlist, media, subtitle, or init-object request that proves
   the capability is still being consumed.
 
 Diagnostic `GET /status` remains read-only and is deprecated after client
-cutover. Invalid, stale, rate-limited, and predecessor control messages do not
-renew. Cache warmers and cluster probes do not renew.
+cutover. Equal-sequence replays, invalid, stale, old-epoch, rate-limited, and
+predecessor control messages do not renew. Cache warmers and cluster probes do
+not renew.
 
-The server initially advertises a 2-second exchange recommendation and a
-30-second playback lease. These are provisional rollout values, not protocol
-constants. The lease must exceed measured background/timer jitter on all three
-clients, and media renewal prevents a timer-delayed but actively fetching
-player from being killed.
+M1 advertises the lifetime the selected engine actually enforces: currently 60
+seconds for rolling recovery and 300 seconds for VOD. It does not claim the
+new 30-second lease before the actor owns it. M3 may advertise a 2-second
+exchange recommendation and 30-second active lease only after measured timer
+jitter on all three clients validates those provisional values. Media renewal
+prevents a timer-delayed but actively fetching player from being killed.
+
+Foreground pause communicates `hold` and renews normally, so it can remain
+paused indefinitely without producing. OS suspension is different: no
+protocol can prove liveness while the app sends neither control nor media. A
+background callback may request a bounded dormant hold that releases the
+encoder and retains only restartable session metadata. Its duration is a
+measured setting. If the OS prevents even that callback or outlives the hold,
+the server expires safely and the client resumes by VOD resurrection or one
+position-preserving reopen. The success claim is therefore scoped to
+heartbeats that are physically delivered, not to an indefinitely suspended
+process.
 
 ### 8.2 State transitions
 
@@ -879,10 +1101,35 @@ legacy behavior; they never send control to an unadvertised endpoint.
 
 Any ingress accepts control, resolves `media_sessions` by `session_id`, and
 either handles locally or relays the bounded request to the current owner.
-Extend the existing relay resource enum with `Control`; preserve method, body,
-content type, owner epoch, and deadline. The owner validates that its local
-worker still matches `(incarnation_id, owner_node_id, owner_epoch)` before any
-mutation.
+Control is **not** added to the existing read-oriented `RelayResource` enum.
+It gets a separate internal mutating endpoint and envelope:
+
+```text
+ControlRelayRequest
+  session_id · incarnation_id · expected_owner_node_id · expected_owner_epoch
+  validated_control_body
+```
+
+The peer route uses exact write authorization, not the read authorization used
+by playlist/status relay. The ingress builds the envelope only from the
+durable route, never client-supplied owner fields. The owner re-reads or
+otherwise authoritatively fences the route and proves that its local worker
+still matches `(incarnation_id, owner_node_id, owner_epoch)` before any
+mutation or renewal. Body and response have dedicated bounds and deadlines.
+
+Ingress resolution is an explicit state machine before relay:
+
+```text
+active local owner -> handle with exact epoch
+active remote owner -> mutating relay with exact epoch
+takeover settling   -> 425 owner_transition + retry hint
+expired claimable   -> contest/observe takeover, then 425
+terminal/missing    -> 410/404
+```
+
+The public handler no longer applies `relay_if_remote`'s current blanket
+expired-route `GONE` behavior to control. A stale control epoch is rejected
+even if takeover has already installed a healthy owner.
 
 Control samples stay node-local. Owner-lease renewal persists only the current
 coarse produced/fetched frontier already needed for takeover. Persist recipe,
@@ -900,9 +1147,10 @@ epoch/CAS prevents the drained node from acting after handoff.
 
 ### 10.3 Hard owner loss
 
-The surviving ingress already has the client's latest control snapshot and
-the durable recipe/route. It acquires ownership with the existing expired
-lease CAS:
+The surviving ingress has only the absolute snapshot in the request currently
+arriving; earlier samples were relayed to the former owner and are not assumed
+durable. It combines that current snapshot with the durable recipe/route and
+acquires ownership with the existing expired lease CAS:
 
 - **VOD:** resurrect the immutable handle or redirect the client to an
   equivalent successor; requested segment identity is film-addressed.
@@ -929,22 +1177,35 @@ includes hashed session identity, incarnation, and owner epoch.
 
 ### 11.1 Durable changes
 
-Add an optional replacement transaction record to the durable media-session
-model in the milestone that introduces cluster-aware preparation:
+Add replacement staging before M6, not in the later cluster-handoff milestone.
+Today's create path reaps the predecessor and advances the playback pointer,
+so it cannot be reused for preparation. The durable model records:
 
 ```text
-action_id · predecessor_incarnation · successor_incarnation
-reason · phase · switch_at_ms · created_at_ms · expires_at_ms
+media_replacement_actions
+  action_id PRIMARY KEY
+  user_id · playback_id
+  predecessor_incarnation · successor_incarnation
+  expected_pointer_incarnation · reason · phase
+  switch_at_ms · created_at_ms · expires_at_ms · updated_at_ms
+
+UNIQUE active successor per (user_id, playback_id)
 ```
 
-It is written on phase changes, not heartbeats. The current
-`media_playback_pointers` continue to identify the committed incarnation. A
-commit CAS changes the pointer once. An abort leaves it unchanged.
+Prepare-only activation writes the staged successor without reaping or
+changing `media_playback_pointers`. Phase transitions require the exact action
+and predecessor/successor pair. Commit CASes the current pointer from
+`expected_pointer_incarnation` to the staged successor once, marks the action
+committed, then permits predecessor retirement. Abort marks the staged route
+ended and leaves the pointer unchanged. An expired preparation is aborted by
+the same fenced owner/maintenance path. Writes occur on phase changes, not
+heartbeats.
 
 Do not add the last client sequence to replicated storage in v1. It is scoped
-to a node-local HTTP generation; after owner loss, the new owner returns its
-new owner epoch and accepts the next higher sequence supplied by the client.
-The generation/action fences prevent replay from mutating a different stream.
+to `(incarnation_id, owner_epoch, client_instance_id)`. After owner loss, the
+new owner increments `owner_epoch`; every old-epoch request is rejected, and
+the client starts a freshly snapshotted sequence under the new epoch. This
+prevents a captured pre-takeover mutation from becoming fresh state.
 
 ### 11.2 Metrics and events
 
@@ -995,9 +1256,14 @@ implementation PR after this plan is M1.
 
 - Add wire types, strict validation, `ControlBootstrap`, and the capability
   route.
-- Add node-local and cluster-relayed lookup matching `/status` semantics.
+- Add real per-session `ControlState` for VOD and rolling: generation,
+  control epoch, bound client instance, last sequence, and prior action
+  outcome.
+- Add the separate bounded, write-authorized, owner-epoch-fenced cluster
+  control relay; do not reuse the read relay authorization.
 - Add a manager method that returns an observation snapshot and renews the
-  existing activity clock with the explicit `control` reason.
+  existing activity clock with the explicit `control` reason only for a newly
+  accepted sequence.
 - Return `action: none`; do not change production, reaping, or client recovery.
 - Add protocol/route contract tests and documentation examples.
 - Gate advertisement with `playback.control_protocol_v1`, default off.
@@ -1005,7 +1271,9 @@ implementation PR after this plan is M1.
 **Acceptance:** focused protocol/route tests pass; with the setting off a start
 response is byte-compatible except normal JSON field ordering; with it on a
 valid monotonically sequenced exchange returns the matching generation and an
-`active` lease view; stale/malformed controls never touch activity.
+`active` lease view reporting the actual legacy lifetime (rolling 60 seconds,
+VOD 300 seconds); equal, stale, old-epoch, and malformed controls never touch
+activity; takeover rejects the former control epoch before mutation.
 
 ### 13.2 M2 — passive reporters on all clients
 
@@ -1030,9 +1298,10 @@ preceding control snapshot.
 - Keep legacy `Session` selectable for rollback until equivalence passes.
 
 **Acceptance:** actor model/property tests prove one terminal action under all
-event orderings; a 30-minute virtual pause retains the session without
-production; loss of both renewal sources expires once; disk and ahead caps
-hold under adversarial client values.
+event orderings; a 30-minute virtual foreground pause with delivered
+heartbeats retains the session without production; loss of both renewal
+sources expires once; a suspended app follows §8.1's dormant/reopen contract;
+disk and ahead caps hold under adversarial client values.
 
 ### 13.4 M4 — remove server watchdog pile
 
@@ -1057,30 +1326,50 @@ child swap, and exactly one action proposal.
 no platform code outside the controller can create a recovery session; VOD
 completion, pause, seek, and background do not arm the playback deadline.
 
-### 13.6 M6 — prepared recipe handoff and Auto policy
+### 13.6 M5.5 — preparation feasibility and staged generations
+
+- Run §5.4's physical dual-preparation spike on web, Apple, and Android.
+- Freeze platform-specific metadata/buffer/first-frame acknowledgements from
+  measured behavior and select a single-player fallback for each platform.
+- Add `media_replacement_actions`, prepare-only activation, one-staged-
+  successor constraint, committed-pointer CAS, abort, and expiry.
+- Prove prepare neither calls the legacy supersession reap nor advances
+  `media_playback_pointers`.
+
+**Acceptance:** every platform has a recorded dual/single preparation result;
+prepare leaves the predecessor current and running; commit advances the exact
+expected pointer once; abort/expiry removes only the staged successor; owner
+death during every phase leaves one durable outcome.
+
+### 13.7 M6 — prepared recipe handoff and Auto policy
 
 - Implement the replacement transaction and idempotent successor creation.
 - Support resolution/bitrate first, then audio/subtitle burn, codec, and
   dynamic-range recipe axes.
-- Add buffered one-slot permit transfer.
+- Add true make-before-break where capacity permits and §5.3's separately
+  labeled one-slot alternatives/fallback.
 - Preserve manual selection and outgoing bandwidth estimate.
 
-**Acceptance:** scripted bandwidth cliffs and recovery satisfy §2.2; successor
-failure leaves the predecessor running; duplicate acks/requests are harmless;
-physical clients record switch latency without position regression.
+**Acceptance:** scripted bandwidth cliffs and recovery satisfy §2.2; a true
+make-before-break successor failure leaves the predecessor running; a one-slot
+failure restarts the old recipe within its measured interruption bound;
+duplicate acks/requests are harmless; physical clients record switch latency
+without position regression.
 
-### 13.7 M7 — subtitle windows, semantic indexes, and seek coalescing
+### 13.8 M7 — subtitle windows, semantic indexes, and seek coalescing
 
 - Report native/overlay readiness through `DeliveryView`.
 - Drive bounded forward subtitle materialization from client demand.
 - Coalesce seeks and cancel obsolete production by sequence.
 - Join burn changes into an existing successor action.
-- Version `FragmentIndex` annotations and emit bounded fingerprint features in
-  the existing full-file walk.
+- Persist authored/manual timeline annotations separately from the packed
+  node-local `FragmentIndex` while presenting both as one analysis index.
 - Add the lease-fenced analysis queue, force/retry/cancel API, Activity page,
-  and atomic generation publication.
-- Correlate series/season fingerprints, publish exact film-time intro/credits
-  markers with provenance/confidence, and preserve manual overrides.
+  per-node coverage, local progress registry, and atomic generation publication.
+- Add the optional bounded feature sidecar and enable recurring/visual/audio
+  detectors only after their precision/recall gate; publish exact film-time
+  intro/credits markers with provenance/confidence and preserve manual
+  overrides.
 - Use the control snapshot to prewarm marker destinations without seeking the
   client.
 
@@ -1092,10 +1381,9 @@ claimed job; fixture seasons yield frame-refined repeatable markers; ambiguous
 matches are not auto-skipped; clicking/auto-skipping lands at the stored exact
 end time and a seek-back is recorded for detector evaluation.
 
-### 13.8 M8 — cluster handoff
+### 13.9 M8 — cluster handoff
 
 - Relay control with owner fencing.
-- Add durable replacement phase records and committed-pointer CAS.
 - Implement planned drain, VOD resurrection, and rolling successor failover.
 - Retire same-session rolling takeover except for the rollback compatibility
   lane.
@@ -1104,7 +1392,7 @@ end time and a seek-back is recorded for detector evaluation.
 phase, duplicate commit, stale owner, and shared-store loss; one committed
 owner and one client-visible transaction result in every case.
 
-### 13.9 M9 — cutover and deletion
+### 13.10 M9 — cutover and deletion
 
 - Default protocol advertisement on after mixed-fleet evidence.
 - Default the actor recovery engine on and remove the compatibility engine.
@@ -1122,10 +1410,13 @@ green; rollback uses the previous release, not hidden dead code.
 
 - unknown protocol/version, fields, enums, NaN/infinity, negative and
   out-of-duration positions, invalid buffer order, huge body;
-- equal/lower/skipped sequences and response idempotence;
+- equal/lower/skipped sequences, equal-sequence non-renewal, client-instance
+  binding, owner-epoch rollover, and action idempotence;
 - acknowledgement before prepare, wrong action, duplicate ack, ack after abort;
 - pause/seek/background/end transitions and renewal sources;
 - malformed controls cannot keep sessions alive;
+- analysis claim epoch, expiry/retry, cancel at every phase, stale source,
+  force deduplication, per-node coverage, and staged-publication CAS;
 - action priority and combination tables over every proposal pair;
 - actor event-order exploration around child exit, lease expiry, end, replace,
   cluster fence, and HTTP cancellation.
@@ -1141,6 +1432,7 @@ green; rollback uses the previous release, not hidden dead code.
 | child exits after publication | retained bytes stay readable; successor proposal, no in-place swap |
 | successor start fails | abort successor; predecessor remains authoritative |
 | control packets reorder | stale sequence rejected; no lease/action regression |
+| captured control arrives after takeover | old control epoch rejected without renewal or mutation |
 | heartbeats pause but media flows | media renewal keeps lease active |
 | both renewal paths stop | one retirement and permit release |
 | seek during preparation | abort/coalesce obsolete successor; latest target wins |
