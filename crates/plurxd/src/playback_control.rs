@@ -1014,6 +1014,14 @@ const ROLLING_LEGACY_LEASE_TIMEOUT: Duration =
 const ROLLING_EXPLICIT_LEASE_TIMEOUT: Duration =
     Duration::from_millis(ROLLING_EXPLICIT_LEASE_TIMEOUT_MS as u64);
 
+/// Use the runtime's monotonic clock for every actor-owned lease transition.
+/// In production it shares `std::time::Instant`'s epoch; using the runtime
+/// view also keeps the actor and its `sleep_until` timer on one clock when
+/// Tokio time is paused or advanced in deterministic tests.
+fn rolling_now() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RollingLeaseMode {
     Legacy,
@@ -1370,7 +1378,7 @@ impl RollingControlActor {
                 let mut transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let renewed = self.renew_at(Instant::now(), kind, source);
+                let renewed = self.renew_at(rolling_now(), kind, source);
                 if renewed {
                     *transition = self.deadline();
                 }
@@ -1381,7 +1389,7 @@ impl RollingControlActor {
                 let mut transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let outcome = self.control_at(Instant::now(), *request);
+                let outcome = self.control_at(rolling_now(), *request);
                 if outcome
                     .as_ref()
                     .is_ok_and(|outcome| outcome.disposition == ControlDisposition::Accepted)
@@ -1400,7 +1408,7 @@ impl RollingControlActor {
                 let _transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let now = Instant::now();
+                let now = rolling_now();
                 let snapshot = match self.claim_expiry_at(now) {
                     RollingExpiryClaim::Live => self.snapshot_at(now),
                     RollingExpiryClaim::Claimed(snapshot)
@@ -1413,7 +1421,7 @@ impl RollingControlActor {
                 let _transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = reply.send(self.claim_expiry_at(Instant::now()));
+                let _ = reply.send(self.claim_expiry_at(rolling_now()));
             }
             RollingControlCommand::Retire { reply } => {
                 let transition = Arc::clone(&self.producer_transition);
@@ -1478,7 +1486,7 @@ impl RollingControlHandle {
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
-        let now = Instant::now();
+        let now = rolling_now();
         let producer_transition =
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
         let flow_sync = Arc::new(RollingFlowSync::new());
@@ -1597,7 +1605,7 @@ impl RollingControlHandle {
         &self,
         guard: &std::sync::MutexGuard<'_, Instant>,
     ) -> bool {
-        self.producer_transition_is_live_at(guard, Instant::now())
+        self.producer_transition_is_live_at(guard, rolling_now())
     }
 
     fn producer_transition_is_live_at(
