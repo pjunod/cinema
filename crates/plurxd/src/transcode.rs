@@ -3030,7 +3030,7 @@ pub struct SessionInfo {
 #[serde(untagged)]
 pub enum HlsSessionInfo {
     Live(Box<SessionInfo>),
-    Vod(crate::vodserve::VodSessionInfo),
+    Vod(Box<crate::vodserve::VodSessionInfo>),
 }
 
 /// Monotone failover coordinates sampled for the owner's two-second liveness
@@ -11090,7 +11090,7 @@ impl TranscodeManager {
     /// honest live-transcode equivalent.
     pub async fn hls_session_status(&self, session_id: &str) -> Option<HlsSessionInfo> {
         if let Some(status) = self.vod.status(session_id).await {
-            return Some(HlsSessionInfo::Vod(status));
+            return Some(HlsSessionInfo::Vod(Box::new(status)));
         }
         self.session_status(session_id)
             .await

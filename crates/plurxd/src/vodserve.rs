@@ -1172,7 +1172,7 @@ impl VodServe {
             action,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
-            status: crate::transcode::HlsSessionInfo::Vod(status),
+            status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
             platform,
         }))
     }
