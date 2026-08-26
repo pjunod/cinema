@@ -89,8 +89,10 @@ SIGSTOP/SIGCONT with:
 Flow control always re-reads the newest actor snapshot after it acquires that
 gate. A control request may therefore be superseded by a newer request, but a
 stale snapshot cannot signal the child after that newer request, an expiry, or
-a retirement. M4 deletes the gate only when child transitions themselves are
-actor messages.
+a retirement. The actor's exact timer does not await the compatibility gate;
+a short process-local mutex instead orders the timer/control/retirement verdict
+with the final `kill(2)` signal and is never held across an await. M4 deletes
+both temporary gates only when child transitions themselves are actor messages.
 
 Equal-sequence replays, rejected controls, expired actors, and unavailable
 mailboxes never change demand or signal the producer. A dead mailbox fences
@@ -129,7 +131,7 @@ expiry, and retirement counters from M3a remain the liveness view.
 | playback session lease | **Retained by design** | A server must reclaim a generation after both explicit control and media consumption stop. The actor is its only authority. |
 | 15-second repair/flow tick | **Retained as scheduling** | It refreshes publication, prunes retention, records speed, repairs flow state, and tears down an already actor-fenced expiry. Its defensive claim is the same actor command, not an independent clock. |
 | first-segment/software grace and progress watcher | **Still compatibility recovery** | Child progress/exit are not actor events yet. M4 replaces the detached watcher with one actor-owned producer deadline. |
-| `child_transition`, `watchdog_active`, `replacing_child` | **Still compatibility serialization** | M3b uses the gate to order physical signals safely. M4 deletes all three after actor child ownership. |
+| `child_transition`, the short producer-transition fence, `watchdog_active`, `replacing_child` | **Still compatibility serialization** | M3b uses the two gates to order physical signals with old child replacement and the exact actor timer. M4 deletes them after actor child ownership. |
 | playlist and segment wait budgets | **Retained bounded HTTP waits** | A request cannot wait forever. Remaining M3 work converts their observation/wakeup ownership to actor state. |
 | fetched-frontier time suspension | **Removed for explicit mode** | Only legacy media-only sessions use it. Explicit time production is demand/playhead/runway based. |
 | per-session and fleet byte holds | **Retained by design** | These are hard scratch-capacity bounds, not playback-failure watchdogs. |

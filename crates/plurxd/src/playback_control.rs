@@ -1102,6 +1102,7 @@ pub(crate) struct RollingControlOutcome {
 pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
     retired: Arc<AtomicBool>,
+    producer_transition: Arc<std::sync::Mutex<()>>,
 }
 
 struct OwnedLocalControlRequest {
@@ -1148,10 +1149,26 @@ struct RollingControlActor {
     retired: bool,
     expiration_claimed: bool,
     retired_fence: Arc<AtomicBool>,
+    producer_transition: Arc<std::sync::Mutex<()>>,
 }
 
 impl RollingControlActor {
+    #[cfg(test)]
     fn new(now: Instant, initial_kind: &'static str, retired_fence: Arc<AtomicBool>) -> Self {
+        Self::with_producer_transition(
+            now,
+            initial_kind,
+            retired_fence,
+            Arc::new(std::sync::Mutex::new(())),
+        )
+    }
+
+    fn with_producer_transition(
+        now: Instant,
+        initial_kind: &'static str,
+        retired_fence: Arc<AtomicBool>,
+        producer_transition: Arc<std::sync::Mutex<()>>,
+    ) -> Self {
         Self {
             control: ControlState::default(),
             last_renewal: now,
@@ -1161,6 +1178,7 @@ impl RollingControlActor {
             retired: false,
             expiration_claimed: false,
             retired_fence,
+            producer_transition,
         }
     }
 
@@ -1254,18 +1272,34 @@ impl RollingControlActor {
                 source,
                 reply,
             } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = reply.send(self.renew_at(Instant::now(), kind, source));
             }
             RollingControlCommand::Control { request, reply } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = reply.send(self.control_at(Instant::now(), *request));
             }
             RollingControlCommand::Snapshot { reply } => {
                 let _ = reply.send(self.snapshot_at(Instant::now()));
             }
             RollingControlCommand::ClaimExpiry { reply } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = reply.send(self.claim_expiry_at(Instant::now()));
             }
             RollingControlCommand::Retire { reply } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 if !self.retired {
                     self.retired = true;
                     ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
@@ -1275,6 +1309,10 @@ impl RollingControlActor {
             }
             #[cfg(test)]
             RollingControlCommand::SetRenewalForTest { at, kind, reply } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 self.last_renewal = at;
                 self.last_renewal_kind = kind;
                 let _ = reply.send(());
@@ -1303,6 +1341,10 @@ impl RollingControlActor {
                     // The timer itself is the exact actor-owned deadline. Use
                     // the armed monotonic instant as the verdict coordinate so
                     // pausable-clock tests and scheduler delay cannot move it.
+                    let transition = Arc::clone(&self.producer_transition);
+                    let _transition = transition
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     let _ = self.claim_expiry_at(deadline);
                 }
             }
@@ -1314,11 +1356,21 @@ impl RollingControlHandle {
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
+        let producer_transition = Arc::new(std::sync::Mutex::new(()));
         tokio::spawn(
-            RollingControlActor::new(Instant::now(), initial_kind, Arc::clone(&retired))
-                .run(receiver),
+            RollingControlActor::with_producer_transition(
+                Instant::now(),
+                initial_kind,
+                Arc::clone(&retired),
+                Arc::clone(&producer_transition),
+            )
+            .run(receiver),
         );
-        Self { sender, retired }
+        Self {
+            sender,
+            retired,
+            producer_transition,
+        }
     }
 
     async fn renew(&self, kind: &'static str, source: RollingRenewalSource) -> bool {
@@ -1400,6 +1452,12 @@ impl RollingControlHandle {
 
     pub(crate) fn is_retired(&self) -> bool {
         self.retired.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn lock_producer_transition(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A closed mailbox cannot accept another renewal. The repair loop uses

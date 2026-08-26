@@ -60,6 +60,12 @@ the exact behavior and timer ledger are in
 - status and events explain lease mode, demand, production frontier, and the
   exact reason for every hold/resume transition.
 
+M3b temporarily adds one short process-local producer-transition fence so the
+actor's exact timer and a physical SIGSTOP/SIGCONT call have a strict order.
+It is never held across an await and is deleted with `child_transition` when
+M4 moves child ownership into the actor; it is not a watchdog or another
+recovery owner.
+
 Review and test state for M3b:
 
 | Gate | State |

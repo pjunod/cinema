@@ -12597,6 +12597,16 @@ impl TranscodeManager {
         };
         let sent = {
             let child = session.child.lock().await;
+            // The actor's exact timer can fire without entering the async
+            // compatibility gate. Its short synchronous transition fence
+            // makes the expiry/control/retirement verdict and this one
+            // kill(2) call strictly ordered without holding it across an
+            // await. A signal that wins is before the fence; a fence that
+            // wins makes this decision a no-op.
+            let _producer_transition = session.control.lock_producer_transition();
+            if session.control.is_retired() {
+                return;
+            }
             match child.as_ref().and_then(|c| c.id()) {
                 // SAFETY: `kill(2)` with a pid this process owns and a signal
                 // constant. The child is alive as far as we know; a race with
