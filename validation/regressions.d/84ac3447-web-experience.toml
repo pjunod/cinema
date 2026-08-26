@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["84ac3447"]
+points = ["web.experience"]
+checks = ["web-static", "web-layout"]
+reason = "The retained shipped-source unit requires activity copy to expose its bounded truncation hook, while the Chromium layout sweep paints the long unhealthy-node sentence after capture and rejects a wrapped primary nav, horizontal header overflow, a missing activity lane, or a fixture that does not actually truncate."
