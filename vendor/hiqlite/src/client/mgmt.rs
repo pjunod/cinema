@@ -10,6 +10,11 @@ use tokio::sync::watch;
 use tokio::time;
 use tracing::{debug, info};
 
+// Multi-node shutdown deliberately waits 9.5 seconds for readiness propagation
+// and may then wait another five seconds for a leader. Keep enough time after
+// those waits for Raft, WAL, SQL, and client-stream teardown on a loaded host.
+pub(crate) const RAFT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "sqlite")]
 pub(crate) const DB_QUORUM_WATERMARK_MARKER: &str =
     "/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL";
@@ -374,7 +379,7 @@ impl Client {
     pub async fn shutdown(&self) -> Result<(), Error> {
         let primary = if let Some(state) = &self.inner.state {
             match tokio::time::timeout(
-                Duration::from_secs(15),
+                RAFT_SHUTDOWN_TIMEOUT,
                 Self::shutdown_execute(
                     state,
                     #[cfg(feature = "cache")]
@@ -609,7 +614,17 @@ impl Client {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use super::RAFT_SHUTDOWN_TIMEOUT;
     use std::time::Duration;
+
+    #[test]
+    fn shutdown_timeout_leaves_room_after_deliberate_cluster_waits() {
+        let deliberate_waits = Duration::from_millis(9_500) + Duration::from_secs(5);
+        assert!(
+            RAFT_SHUTDOWN_TIMEOUT >= deliberate_waits + Duration::from_secs(10),
+            "shutdown must retain time for Raft and durable-writer drains after cluster waits"
+        );
+    }
 
     #[test]
     fn local_watch_accessor_has_no_remote_fallback() {

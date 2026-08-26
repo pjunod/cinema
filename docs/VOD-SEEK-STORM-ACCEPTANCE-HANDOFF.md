@@ -50,7 +50,8 @@ Done means:
 
 ## Current CI boundary
 
-CI selects the VOD suite with `--exclude-case seek-storm`. This keeps the
-disabled case executable locally while retaining steady playback and
-suspend/resume as browser acceptance gates. The pure seek-storm scoring and
+CI currently selects only the VOD `suspend-resume` case. This keeps the
+disabled seek-storm case executable locally while retaining one browser
+acceptance gate. Steady playback has its own restoration prompt in
+`docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md`. The pure seek-storm scoring and
 manifest contracts continue to run in `tests/playback/network-shaping.test.js`.

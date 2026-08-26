@@ -59,9 +59,9 @@ Done means:
 
 ## Current CI boundary
 
-CI runs `scripts/playback-lab run --suite vod --exclude-case seek-storm`, so
-steady playback and suspend/resume remain release gates. The seek-storm case
-has its own restoration prompt in `docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md`.
-The bandwidth-cliff case is also disabled. Its pure shaping, scoring,
-lifecycle, and artifact contracts continue to run through
-`node tests/playback/network-shaping.test.js` on every commit.
+CI currently runs only `scripts/playback-lab run --suite vod --case
+suspend-resume`. Steady playback and seek-storm have separate restoration
+prompts in `docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md` and
+`docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md`. The bandwidth-cliff case is also
+disabled. Its pure shaping, scoring, lifecycle, and artifact contracts continue
+to run through `node tests/playback/network-shaping.test.js` on every commit.

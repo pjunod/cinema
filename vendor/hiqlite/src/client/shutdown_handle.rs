@@ -2,10 +2,11 @@ use crate::app_state::AppState;
 use crate::client::stream::ClientStreamReq;
 use crate::{Client, Error};
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::sync::watch;
 use tokio::time;
 use tracing::{debug, info};
+
+use super::mgmt::RAFT_SHUTDOWN_TIMEOUT;
 
 pub struct ShutdownHandle {
     state: Arc<AppState>,
@@ -27,7 +28,7 @@ impl ShutdownHandle {
         info!("ShutdownHandle received shutdown signal - shutting down the Raft node now");
 
         if time::timeout(
-            Duration::from_secs(15),
+            RAFT_SHUTDOWN_TIMEOUT,
             Client::shutdown_execute(
                 &self.state,
                 #[cfg(feature = "cache")]

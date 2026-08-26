@@ -756,6 +756,13 @@ class SelfHost:
     def seed(self):
         self.token = api(self.base_url, "/setup", method="POST",
                          body={"username": SEED_USER, "password": SEED_PASSWORD})["token"]
+        # Keep the item-detail fixture in one deliberate state. The default-on
+        # background indexer races the browser sweep: fast hosts render
+        # "Indexed", while slower hosts render "Index pending" from the exact
+        # same database. Focused API and web-policy tests cover both states;
+        # this structural golden needs one reproducible one.
+        api(self.base_url, "/settings", self.token, "PUT",
+            {"vod_index_mins": 0})
         libs = []
         for name, kind, share in LIBRARIES:
             libs.append(api(self.base_url, "/libraries", self.token, "POST", {
