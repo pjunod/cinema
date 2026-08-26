@@ -1638,11 +1638,19 @@ mod tests {
         let directory = crate::test_tempdir().expect("artwork");
         let filename = format!("84-poster-{}.jpg", "b".repeat(64));
         let path = directory.path().join(&filename);
-        let grace = Duration::from_secs(1);
+        let grace = Duration::from_secs(60);
         tokio::fs::write(&path, b"old generation")
             .await
             .expect("old candidate");
-        tokio::time::sleep(grace + Duration::from_millis(100)).await;
+        let old_modified = std::time::SystemTime::now()
+            .checked_sub(Duration::from_secs(120))
+            .expect("old modified time");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open old candidate")
+            .set_times(std::fs::FileTimes::new().set_modified(old_modified))
+            .expect("age old candidate");
         assert!(orphan_candidate_old_enough(&path, grace).await);
 
         plurx_core::metadata::write_artwork_atomically(&path, b"fresh generation")
