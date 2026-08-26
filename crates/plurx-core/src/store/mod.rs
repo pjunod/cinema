@@ -55,8 +55,9 @@ use std::sync::Arc;
 pub use self::hiqlite::HiqliteOperationCounts;
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
-    prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_PROTOCOL_VERSION,
-    AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
+    AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
+    AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};
@@ -376,6 +377,10 @@ pub mod keys {
     /// Node-local, like the transcode-cleanup stamp: an index lives on the
     /// node that built it, so when it last ran is a fact about that node.
     pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
+    /// Last file examined by this node's bounded VOD index walk. Without a
+    /// cursor, one slow or malformed title at the front of a library consumes
+    /// every pass and later files can never become playable.
+    pub const JOB_VOD_INDEX_CURSOR: &str = "jobs.vod_index_cursor";
 }
 
 #[async_trait]

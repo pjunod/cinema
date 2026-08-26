@@ -80,13 +80,12 @@ mapping cannot quietly make ordinary tests disappear.
 The Rust gate has two forms that must never drift apart in coverage, only in
 packaging. Local profiles (`commit`, `full`, `nightly`) run `rust-gate` —
 `make rust-check`, the one-command fmt + clippy + full-workspace suite. The
-`ci` profile runs `rust-gate-ci` — `make ci-rust-gate` — which drops exactly
-the two pieces that already run as their own CI jobs on the same commit:
-clippy is lint.yml's entire job, and the replicated-store member is the
-`cluster_auth` job's entire job. Excluding `plurx-cluster-check` also keeps
-cargo's feature unification from compiling the hiqlite stack into the PR
-gate, which makes the CI suite test `plurx-core` with the features the
-shipped `plurxd` actually resolves. The subset re-runs (`api-wire`,
+`ci` profile and the PR workflow run `rust-gate-ci` — `make ci-rust-gate` —
+which owns formatting, Clippy, unit tests, and SQLite contracts in one job.
+Three parallel jobs own replicated Store/topology, WAL recovery, and real
+daemons. Excluding `plurx-cluster-check` from the fast lane keeps Cargo's
+feature unification from compiling those replicated contracts into it. The
+subset re-runs (`api-wire`,
 `security-boundaries`, `user-journey`) stay out of the `ci` profile for the
 same reason: there they would re-execute binaries the workspace run already
 executed with identical feature resolution.
@@ -155,11 +154,13 @@ rebase-evidence, and telemetry milestones.
 
 The impact graph selects browser and native unit suites. Explicit path owners
 select the narrower environment checks: Android application and build files
-justify an emulator; Rust and toolchain files justify cross-target release
-builds; server, image, Compose, and lifecycle files justify the container
-smoke test. A server contract change can still fan out to every consuming
-client without pretending that server-only code changed Android focus
-behavior.
+justify an emulator; root Cargo manifests and the pinned toolchain justify
+cross-target release builds; image, Compose, runtime configuration, and
+lifecycle files justify the container smoke test. Ordinary `crates/**`
+changes run the fast Rust lane, plus the three cluster lanes when they touch a
+cluster contract. CI routing changes deliberately run those same four Rust
+lanes and the static workflow contracts, not every unrelated platform. The
+merge queue and nightly workflow retain the full fan-out before release.
 
 `PR validation gate` waits for every selected job and accepts an unselected
 job only when GitHub records it as skipped. Configure that aggregate as the

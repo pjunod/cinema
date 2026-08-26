@@ -6,9 +6,33 @@
 
 use std::time::Duration;
 
-use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
+use plurx_core::cluster::coordination::{ClusterJobAuthority, Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::error::StoreError;
 use plurx_core::store::{PublicationFence, PublicationStore, Store};
+
+/// The job authority for a process that has no Raft membership handle.
+///
+/// The maintenance commands attach to a running voter as a remote client, so
+/// they cannot read committed membership and must fall back on this data
+/// directory's durable admission record. That record can only be trusted to
+/// *refuse*: it says what this host was admitted as, which is enough to keep
+/// `plurxd refresh-metadata` on a learner from taking the cluster-wide artwork
+/// lease away from the voters, and is never used to grant anything a live
+/// check would deny.
+pub(crate) struct AdmittedRoleJobAuthority(plurx_core::cluster::membership::ClusterRole);
+
+impl AdmittedRoleJobAuthority {
+    pub(crate) fn new(role: plurx_core::cluster::membership::ClusterRole) -> Self {
+        Self(role)
+    }
+}
+
+#[plurx_core::cluster::coordination::cluster_job_async_trait]
+impl ClusterJobAuthority for AdmittedRoleJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        !self.0.is_learner()
+    }
+}
 
 const JOB_LEASE_TTL: Duration = Duration::from_secs(90);
 const JOB_LEASE_HEARTBEAT: Duration = Duration::from_secs(30);
@@ -207,10 +231,45 @@ impl Drop for ActiveJobLease {
     }
 }
 
+/// Acquire one cluster-wide singleton job, if this node is allowed to run it.
+///
+/// The eligibility question comes first, and it is asked *now* rather than
+/// remembered from startup. A learner holds the same shared cluster credential
+/// as every voter, so nothing inside the lease itself would stop it winning
+/// one — and a learner that won `provider:artwork` would not merely duplicate
+/// work, it would take the lease away from the voters that should own it.
+///
+/// Every *cluster-wide* singleton job passes through here: `provider:artwork`,
+/// `provider:genres`, `scan:library:{id}`, `repair:probe`,
+/// `candidate:pretranscode`, and any future resource of that kind.
+///
+/// One lease deliberately does not, and saying "the only gate" without naming
+/// it made a false claim easy to keep believing.
+/// `shared-cache-gc:{storage_id}` is taken directly on the store by
+/// `shared_cache::gc_once_inner`, because it is not a cluster-wide singleton:
+/// it is a *per-shared-volume* singleton, owned by whichever node has that
+/// volume mounted. The work it does — quarantining and deleting a retired
+/// generation on shared storage — is the same work whoever runs it, is fenced
+/// against a concurrent successor, and has to keep happening on a node with no
+/// vote, because a learner that mounts the volume is exactly as responsible
+/// for it as a voter is. Gating it on membership would leave the volume
+/// uncollected whenever no voter had it mounted.
+///
+/// Anything that is genuinely cluster-wide belongs here. Adding a second
+/// direct `acquire_lease` for one that is fails the enumeration in
+/// `state::tests`.
 pub(crate) async fn acquire_cluster_job(
     coordinator: &StoreCoordinator,
+    authority: &dyn ClusterJobAuthority,
     resource: String,
 ) -> Result<Option<ActiveJobLease>, StoreError> {
+    if !authority.may_run_cluster_jobs().await {
+        tracing::debug!(
+            resource,
+            "declining a cluster job: this node is not a committed voter"
+        );
+        return Ok(None);
+    }
     match coordinator.acquire(&resource, JOB_LEASE_TTL).await? {
         LeaseClaim::Acquired(lease) => ActiveJobLease::start(coordinator.clone(), lease).map(Some),
         LeaseClaim::Held {
@@ -227,5 +286,35 @@ pub(crate) async fn acquire_cluster_job(
             );
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use plurx_core::cluster::membership::ClusterRole;
+
+    use super::*;
+
+    /// The maintenance CLI's fallback authority answers from the durable
+    /// admission record, and it has to answer *no* for a learner.
+    ///
+    /// `plurxd refresh-metadata` attaches to a running voter as a remote
+    /// client and cannot read committed membership, so this record is the only
+    /// thing standing between a learner and the cluster-wide artwork lease.
+    /// Deleting the negation left every test green.
+    #[tokio::test]
+    async fn a_host_admitted_as_a_learner_is_refused_cluster_wide_work() {
+        assert!(
+            !AdmittedRoleJobAuthority::new(ClusterRole::Learner)
+                .may_run_cluster_jobs()
+                .await,
+            "a host admitted as a learner must not take the cluster's singleton leases"
+        );
+        assert!(
+            AdmittedRoleJobAuthority::new(ClusterRole::Voter)
+                .may_run_cluster_jobs()
+                .await,
+            "and a voter's maintenance commands must keep working"
+        );
     }
 }

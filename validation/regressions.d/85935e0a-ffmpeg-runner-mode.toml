@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["85935e0a"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract parses every switched workflow job and requires self-hosted release-readiness and nightly jobs that invoke the pinned ffmpeg action to retain the ffmpeg-6 runner capability label."

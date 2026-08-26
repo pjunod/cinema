@@ -1023,11 +1023,32 @@ async fn sweep_content_orphans(state: &AppState, walker: &mut ArtworkOrphanWalke
     removed
 }
 
-/// Reconcile every filename named by replicated item rows onto this voter.
+/// How much of a reconciliation pass this node may run.
+///
+/// Two different questions were collapsed into one before the learner protocol
+/// existed, because every member was a voter and the answers could not differ.
+/// They differ now: materializing this node's own artwork is node-local work
+/// that every member has to do — a learner serves images like any other node —
+/// while source/provider repair is cluster-wide singleton work that exactly one
+/// voter owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtworkReconciliation {
+    /// Converge this node's own artwork directory: scan the references, pull
+    /// missing files from peers, sweep orphans. Nothing here speaks for the
+    /// cluster.
+    LocalOnly,
+    /// The above, plus the source/provider repair that takes the replicated
+    /// artwork repair fence on the cluster's behalf.
+    Full,
+}
+
+/// Reconcile every filename named by replicated item rows onto this node.
 /// Peer copies are preferred; source/provider repair is a bounded fallback for
-/// the case where the last node holding a file disappeared before convergence.
+/// the case where the last node holding a file disappeared before convergence,
+/// and it only runs under [`ArtworkReconciliation::Full`].
 async fn materialize_once(
     state: &AppState,
+    scope: ArtworkReconciliation,
     repair_after: &mut HashMap<i64, Instant>,
     item_cursor: &mut i64,
     orphan_walker: &mut ArtworkOrphanWalker,
@@ -1147,6 +1168,14 @@ async fn materialize_once(
     }
 
     let repair_items = due_artwork_repairs(unresolved_by_item, repair_after, now);
+    if scope == ArtworkReconciliation::LocalOnly {
+        // Everything below claims the replicated artwork repair fence and
+        // talks to metadata providers on the cluster's behalf. A node with no
+        // vote must not do that — `claim_artwork_source_repair` refuses it
+        // anyway, so running the loop would only produce log noise and burn
+        // the per-item backoff a voter is relying on.
+        return Ok(report);
+    }
 
     for (item_id, filenames) in repair_items.into_iter().take(SOURCE_REPAIRS_PER_PASS) {
         let local_deadline = tokio::time::Instant::now() + SOURCE_REPAIR_LEASE;
@@ -1276,36 +1305,84 @@ async fn materialize_once(
     Ok(report)
 }
 
+/// What committed membership says about this node, as three answers rather
+/// than one collapsed boolean.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ArtworkMembershipView {
+    /// A committed voter whose durable row is neither tombstoned nor fenced by
+    /// an in-flight removal.
+    active_voter: bool,
+    /// A committed voter, whatever the durable row currently says.
+    committed_voter: bool,
+    /// Present in committed membership at all — as a voter or as a learner.
+    committed_member: bool,
+}
+
+/// What one reconciliation tick does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ArtworkTick {
+    Reconcile(ArtworkReconciliation),
+    /// A membership change is fencing this node's durable row. Wait for it to
+    /// commit or roll back rather than acting on either answer.
+    Wait,
+    /// This node is not in committed membership at all, so nothing here has an
+    /// artwork directory worth converging.
+    Stop,
+}
+
+/// Decide a tick from what membership says.
+///
+/// Split out so the distinction this makes is testable without a cluster. The
+/// distinction is the point: "carries no vote" and "is no longer a member" are
+/// different states, and only the second one ends the loop. A learner is
+/// permanently in the first, and a learner promoted to voter has to start doing
+/// provider work on its next tick without a process restart.
+fn artwork_tick(view: ArtworkMembershipView) -> ArtworkTick {
+    if view.active_voter {
+        ArtworkTick::Reconcile(ArtworkReconciliation::Full)
+    } else if view.committed_voter {
+        ArtworkTick::Wait
+    } else if view.committed_member {
+        ArtworkTick::Reconcile(ArtworkReconciliation::LocalOnly)
+    } else {
+        ArtworkTick::Stop
+    }
+}
+
+/// Read the three answers, asking only as many questions as the tick needs.
+async fn observe_artwork_membership(
+    membership: &plurx_core::cluster::membership::MembershipManager,
+) -> Result<ArtworkMembershipView, plurx_core::cluster::membership::MembershipError> {
+    if membership.local_node_is_active_voter().await? {
+        return Ok(ArtworkMembershipView {
+            active_voter: true,
+            committed_voter: true,
+            committed_member: true,
+        });
+    }
+    if membership.local_node_is_committed_voter().await? {
+        return Ok(ArtworkMembershipView {
+            active_voter: false,
+            committed_voter: true,
+            committed_member: true,
+        });
+    }
+    Ok(ArtworkMembershipView {
+        active_voter: false,
+        committed_voter: false,
+        committed_member: membership.local_node_is_committed_member().await?,
+    })
+}
+
 pub(crate) async fn materialize_loop(state: AppState) {
     let mut repair_after = HashMap::new();
     let mut item_cursor = 0;
     let mut orphan_walker = ArtworkOrphanWalker::default();
     tokio::time::sleep(Duration::from_secs(2)).await;
     loop {
-        if state.membership.is_replicated() {
-            match state.membership.local_node_is_active_voter().await {
-                Ok(false) => match state.membership.local_node_is_committed_voter().await {
-                    Ok(false) => {
-                        tracing::info!("stopping artwork reconciliation on removed voter");
-                        break;
-                    }
-                    Ok(true) => {
-                        // Membership changes fence the row before changing the
-                        // Raft set. Wait for either commit or rollback without
-                        // performing provider work in that transition window.
-                        tokio::time::sleep(MATERIALIZE_INTERVAL).await;
-                        continue;
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            code = error.code(),
-                            "cannot verify artwork voter membership"
-                        );
-                        tokio::time::sleep(MATERIALIZE_INTERVAL).await;
-                        continue;
-                    }
-                },
-                Ok(true) => {}
+        let scope = if state.membership.is_replicated() {
+            let tick = match observe_artwork_membership(&state.membership).await {
+                Ok(view) => artwork_tick(view),
                 Err(error) => {
                     tracing::warn!(
                         code = error.code(),
@@ -1314,10 +1391,27 @@ pub(crate) async fn materialize_loop(state: AppState) {
                     tokio::time::sleep(MATERIALIZE_INTERVAL).await;
                     continue;
                 }
+            };
+            match tick {
+                ArtworkTick::Reconcile(scope) => scope,
+                ArtworkTick::Wait => {
+                    tokio::time::sleep(MATERIALIZE_INTERVAL).await;
+                    continue;
+                }
+                ArtworkTick::Stop => {
+                    tracing::info!(
+                        "stopping artwork reconciliation: this node is no longer in committed \
+                         cluster membership"
+                    );
+                    break;
+                }
             }
-        }
+        } else {
+            ArtworkReconciliation::Full
+        };
         match materialize_once(
             &state,
+            scope,
             &mut repair_after,
             &mut item_cursor,
             &mut orphan_walker,
@@ -1884,5 +1978,62 @@ mod tests {
             bytes
         );
         server.abort();
+    }
+}
+
+#[cfg(test)]
+mod reconciliation_scope_tests {
+    use super::*;
+
+    fn view(
+        active_voter: bool,
+        committed_voter: bool,
+        committed_member: bool,
+    ) -> ArtworkMembershipView {
+        ArtworkMembershipView {
+            active_voter,
+            committed_voter,
+            committed_member,
+        }
+    }
+
+    /// A learner reconciles its own artwork forever, and is never mistaken for
+    /// a removed node.
+    ///
+    /// This is the regression: the tick used to read "not a voter" as "removed
+    /// voter" and `break` out of the loop on the learner's first pass, roughly
+    /// two seconds after boot. The learner then never materialized an image
+    /// again — not after a promotion either, because the loop was gone — and
+    /// the log said it had been removed, which was false.
+    #[test]
+    fn a_member_without_a_vote_reconciles_locally_instead_of_stopping() {
+        assert_eq!(
+            artwork_tick(view(false, false, true)),
+            ArtworkTick::Reconcile(ArtworkReconciliation::LocalOnly),
+            "a learner is a member; it converges its own artwork directory"
+        );
+    }
+
+    /// Promotion needs no restart: the same view a moment later is a full pass.
+    #[test]
+    fn a_promoted_learner_starts_provider_work_on_its_next_tick() {
+        assert_eq!(
+            artwork_tick(view(true, true, true)),
+            ArtworkTick::Reconcile(ArtworkReconciliation::Full)
+        );
+    }
+
+    /// Only genuine absence from committed membership ends the loop.
+    #[test]
+    fn stopping_is_reserved_for_a_node_that_is_no_longer_a_member() {
+        assert_eq!(artwork_tick(view(false, false, false)), ArtworkTick::Stop);
+    }
+
+    /// A committed voter whose durable row is fenced by an in-flight removal
+    /// waits, rather than doing provider work in the transition window or
+    /// deciding it has been removed.
+    #[test]
+    fn a_fenced_voter_waits_for_the_membership_change_to_settle() {
+        assert_eq!(artwork_tick(view(false, true, true)), ArtworkTick::Wait);
     }
 }

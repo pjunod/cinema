@@ -506,11 +506,26 @@ impl TraktManager {
     // -- the sync engine -----------------------------------------------------
 
     /// Hourly + on-demand loop over every linked account.
-    pub async fn sync_loop(self: Arc<Self>) {
+    /// The periodic two-way sync.
+    ///
+    /// `authority` gates each pass rather than the spawn: this writes
+    /// replicated watched state on behalf of the whole server, so a node that
+    /// carries no vote must not add an extra copy of it — and a node that is
+    /// promoted later must start syncing without a restart. An unclustered
+    /// server's authority always says yes, so single-node behaviour is
+    /// unchanged.
+    pub async fn sync_loop(
+        self: Arc<Self>,
+        authority: Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>,
+    ) {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(SYNC_EVERY) => {}
                 _ = self.kick.notified() => {}
+            }
+            if !authority.may_run_cluster_jobs().await {
+                tracing::debug!("trakt: skipping a sync pass; this node is not a committed voter");
+                continue;
             }
             let linked = match self.store.list_trakt_auth().await {
                 Ok(l) => l,
@@ -1472,5 +1487,70 @@ mod tests {
         mgr.sync_user(user).await.expect("sync");
         // The change gate short-circuits before any heavy pull.
         assert_eq!(watched_hits.load(Ordering::SeqCst), 0, "pull was skipped");
+    }
+
+    /// A node with no vote runs no sync pass, and a promoted one starts
+    /// without a restart.
+    ///
+    /// This gate *is* the mechanism. The Trakt sync takes no cluster lease
+    /// anywhere, so nothing downstream would stop a learner writing replicated
+    /// watched state on the whole server's behalf concurrently with the
+    /// voters — deleting the four lines left every test green.
+    ///
+    /// The observable is the note the loop records: with no app credentials
+    /// configured a pass fails immediately with "not configured" and leaves
+    /// that behind, so a note appearing is proof a pass ran and a note staying
+    /// absent is proof none did.
+    #[tokio::test]
+    async fn a_node_without_a_vote_runs_no_trakt_sync_pass() {
+        struct MovableAuthority(AtomicBool);
+
+        #[plurx_core::cluster::coordination::cluster_job_async_trait]
+        impl plurx_core::cluster::coordination::ClusterJobAuthority for MovableAuthority {
+            async fn may_run_cluster_jobs(&self) -> bool {
+                self.0.load(Ordering::SeqCst)
+            }
+        }
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let user = store.create_user("u", "h", true).await.expect("user");
+        store
+            .put_trakt_auth(&linked_auth(user.id, now_unix() + 999_999))
+            .await
+            .expect("link an account so a pass has something to do");
+
+        let manager = Arc::new(TraktManager::new(
+            Arc::clone(&store),
+            test_key(),
+            "http://127.0.0.1:1".to_owned(),
+        ));
+        let authority = Arc::new(MovableAuthority(AtomicBool::new(false)));
+        let loop_handle = tokio::spawn(Arc::clone(&manager).sync_loop(Arc::clone(&authority)
+            as Arc<dyn plurx_core::cluster::coordination::ClusterJobAuthority>));
+
+        // `notify_one` stores a permit, so this cannot be lost to the loop not
+        // being parked yet.
+        manager.request_sync();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            manager.note.lock().await.is_none(),
+            "a node with no vote must not have run a Trakt sync pass"
+        );
+
+        authority.0.store(true, Ordering::SeqCst);
+        manager.request_sync();
+        let note = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Some(note) = manager.note.lock().await.clone() {
+                    return note;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("a promoted node syncs without a restart");
+        assert!(note.contains("not configured"), "{note}");
+
+        loop_handle.abort();
     }
 }

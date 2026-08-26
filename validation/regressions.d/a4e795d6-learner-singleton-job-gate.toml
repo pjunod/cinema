@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["a4e795d6"]
+points = ["cluster.auth"]
+checks = ["cluster-auth"]
+reason = "The gate itself is proven twice, but neither proof sits under a governed test path. `crates/plurxd/src/state.rs` holds the three behavioural tests that landed with the commit — `a_node_without_a_vote_acquires_no_cluster_job` names every singleton resource individually against a writable store, `a_promoted_node_starts_acquiring_without_a_restart` moves the authority under a live manager to pin the live-check property, and `the_startup_scan_does_not_run_without_a_vote` covers the scheduler's startup arm — and `crates/plurx-core/src/cluster/migration.rs` proves the authority those tests stub is really live committed membership, against a real one-voter cluster with an admitted learner (`a_learner_joins_only_after_activation_and_never_gains_a_vote`). Both live beside the production code. The end-to-end property this commit exists for — a separate-process learner that runs no singleton job while three voters do — is now built: `23250636` added `run_learner_membership_case` to `crates/plurx-cluster-check/src/lib.rs`, which starts three real voters plus a real learner and drives `acquire_cluster_job` through the production `job_lease` module the check compiles in by `#[path]`, asserting the learner is refused `provider:artwork` and that the resource it was refused is left unheld. `cluster-auth` runs it, so this area's owning check now covers the property rather than standing in for it."

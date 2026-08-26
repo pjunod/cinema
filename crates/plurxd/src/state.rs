@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
 use plurx_core::cluster::coordination::LeaseClaim;
-use plurx_core::cluster::coordination::StoreCoordinator;
+use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
@@ -468,6 +468,7 @@ impl AppState {
             artwork_dir.clone(),
             scan_prune_percent,
             node_id.clone(),
+            Arc::new(membership.clone()),
         ));
         let coming_soon = crate::http::ComingSoonCache::new();
         let watched = crate::watched::WatchedNotifier::new(Arc::clone(&store));
@@ -784,6 +785,10 @@ impl IntegrationMetrics {
 pub struct JobManager {
     store: Arc<dyn Store>,
     coordinator: StoreCoordinator,
+    /// Live "may this node run leader-singleton work?" authority. Held rather
+    /// than sampled once, because committed membership moves under a running
+    /// daemon: a learner may be promoted, and a voter may be removed.
+    job_authority: Arc<dyn ClusterJobAuthority>,
     artwork_dir: PathBuf,
     scan_prune_percent: u8,
     /// Test-only provider override so the targeted-scan seam can be exercised
@@ -890,20 +895,47 @@ struct ArtworkSweepResult {
     claimed_ids: Vec<i64>,
 }
 
-/// Ceiling on one indexing pass. Small because indexing is never urgent and
-/// the next tick is a minute away: a library converts over hours, which is
-/// exactly the shape D4 wants, since a file without an index simply keeps
-/// today's presentation until it has one.
+/// Ceiling on one indexing pass. Small so a backfill shares the node with
+/// foreground playback instead of trying to drain the whole library at once.
 const INDEX_MAX_PER_PASS: usize = 4;
 /// Files one pass will even look at. An already-indexed library attempts
 /// nothing, so without this the pass would query every file every minute for
 /// the life of the server.
 const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
-/// Wall clock one pass will spend, whatever it got through.
+/// Stop *starting* new files after this much wall time. A file already in
+/// flight owns its independently bounded budget below.
 const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
-/// Per file, so one pathological NAS read gives the slot back rather than
-/// holding it until the process restarts.
-const INDEX_FILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+/// Short files retain the original ceiling. Long remuxes need a duration-sized
+/// allowance: indexing is a complete video-bitstream pass, and a measured
+/// 14x Dolby Vision copy on nynuc needs about nine minutes for a two-hour film.
+const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
+const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
+const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
+const INDEX_FILE_HEADROOM_SECS: u64 = 30;
+
+fn index_file_budget(duration_ms: Option<i64>) -> Duration {
+    let film_secs = duration_ms
+        .filter(|milliseconds| *milliseconds > 0)
+        .map_or(0, |milliseconds| (milliseconds as u64).div_ceil(1_000));
+    let estimated = film_secs
+        .div_ceil(INDEX_EXPECTED_MIN_SPEED)
+        .saturating_add(INDEX_FILE_HEADROOM_SECS);
+    Duration::from_secs(
+        estimated.clamp(INDEX_FILE_BUDGET_FLOOR_SECS, INDEX_FILE_BUDGET_CEILING_SECS),
+    )
+}
+
+/// Stable, wrapping order for one bounded pass. The cursor is the last file a
+/// prior pass examined, successful or not; starting after it prevents a few
+/// permanently slow/unsupported rows from starving every later title.
+fn ordered_index_paths(mut paths: Vec<(i64, PathBuf)>, cursor: Option<i64>) -> Vec<(i64, PathBuf)> {
+    paths.sort_unstable_by_key(|(file_id, _)| *file_id);
+    let split = cursor.map_or(0, |cursor| {
+        paths.partition_point(|(file_id, _)| *file_id <= cursor)
+    });
+    paths.rotate_left(split);
+    paths
+}
 
 /// Clears [`JobManager::indexing`] however the pass ends, including the ways a
 /// `?` or a panic would leave it set for the life of the process.
@@ -1239,6 +1271,7 @@ impl JobManager {
             artwork_dir,
             plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
             "test-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         )
     }
 
@@ -1247,12 +1280,14 @@ impl JobManager {
         artwork_dir: PathBuf,
         scan_prune_percent: u8,
         node_id: String,
+        job_authority: Arc<dyn ClusterJobAuthority>,
     ) -> Self {
         let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id)
             .expect("configured node id is a valid lease owner");
         JobManager {
             store,
             coordinator,
+            job_authority,
             artwork_dir,
             scan_prune_percent,
             #[cfg(test)]
@@ -1277,7 +1312,12 @@ impl JobManager {
     }
 
     async fn acquire_job(&self, resource: String) -> Result<Option<ActiveJobLease>, StoreError> {
-        acquire_cluster_job(&self.coordinator, resource).await
+        acquire_cluster_job(&self.coordinator, self.job_authority.as_ref(), resource).await
+    }
+
+    /// Whether this node may run cluster-wide scheduled work right now.
+    pub(crate) async fn may_run_cluster_jobs(&self) -> bool {
+        self.job_authority.may_run_cluster_jobs().await
     }
 
     /// What the last genre-backfill pass did, if one has run since boot.
@@ -2389,7 +2429,16 @@ impl JobManager {
     /// here is urgent; the cost is one small query per tick. Scheduled and
     /// manual runs go through the same `trigger_*` methods, so a scheduled scan
     /// can't stack on top of a running one — `trigger` refuses, and the next
-    /// tick tries again. The cluster integration feature exposes a process-
+    /// tick tries again.
+    ///
+    /// The scheduler is cluster-wide work: every job it dispatches is one the
+    /// cluster expects exactly one node to run. The eligibility check therefore
+    /// sits on the tick, not on the spawn — a node that is a learner now may be
+    /// a voter in ten minutes, and this loop has to start scheduling then
+    /// without a restart. The individual leases are gated too, but skipping the
+    /// tick keeps a learner from doing the reads and the log noise as well.
+    ///
+    /// The cluster integration feature exposes a process-
     /// local cadence override so real-daemon tests can wait on scheduler-owned
     /// prerequisites without adding a full minute to every fixture.
     pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
@@ -2405,10 +2454,26 @@ impl JobManager {
         let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
-            if let Err(e) = self.run_due_jobs(&transcode).await {
-                tracing::warn!(error = %e, "scheduler tick failed");
-            }
+            self.schedule_tick(&transcode).await;
         }
+    }
+
+    /// One scheduler tick, gate included.
+    ///
+    /// Split out from the loop above so the gate is reachable without waiting
+    /// a minute for the interval. Returns whether the tick dispatched: the
+    /// answer is what a test can hold on to, and it is the whole difference
+    /// between a learner that quietly does nothing and one that schedules the
+    /// cluster's jobs a second time.
+    async fn schedule_tick(self: &Arc<Self>, transcode: &Arc<TranscodeManager>) -> bool {
+        if !self.may_run_cluster_jobs().await {
+            tracing::debug!("skipping a scheduler tick: this node is not a committed voter");
+            return false;
+        }
+        if let Err(e) = self.run_due_jobs(transcode).await {
+            tracing::warn!(error = %e, "scheduler tick failed");
+        }
+        true
     }
 
     /// Scan every library once at boot, if the operator asked for it.
@@ -2428,6 +2493,12 @@ impl JobManager {
             _ => return,
         }
         tokio::time::sleep(SETTLE).await;
+        // After the settle, not before: the answer that matters is the one at
+        // the moment work would start.
+        if !self.may_run_cluster_jobs().await {
+            tracing::debug!("startup scan skipped: this node is not a committed voter");
+            return;
+        }
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
             Err(e) => {
@@ -3128,73 +3199,77 @@ impl JobManager {
             }
         };
 
-        let mut built = 0usize;
-        let mut attempted = 0usize;
-        let mut examined = 0usize;
+        let mut paths = Vec::new();
         for library in libraries {
-            let paths = match self.store.library_file_paths(library.id).await {
-                Ok(paths) => paths,
+            match self.store.library_file_paths(library.id).await {
+                Ok(library_paths) => paths.extend(library_paths),
                 Err(error) => {
                     tracing::warn!(library = library.id, error = %error, "listing files to index");
-                    continue;
                 }
+            }
+        }
+        let cursor_key = self.local_job_key(keys::JOB_VOD_INDEX_CURSOR);
+        let cursor = self.job_stamp(&cursor_key).await;
+        let paths = ordered_index_paths(paths, cursor);
+
+        let mut built = 0usize;
+        let mut built_file_ids = Vec::new();
+        let mut attempted = 0usize;
+        let mut last_examined = None;
+        for (examined, (file_id, _path)) in paths.into_iter().enumerate() {
+            // Both bounds stop different runaways: attempts bound whole-file
+            // reads, while examined bounds a fully indexed library's queries.
+            if attempted >= INDEX_MAX_PER_PASS
+                || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            if !transcode.pretranscode_worker_idle() {
+                return;
+            }
+            last_examined = Some(file_id);
+            let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                continue;
             };
-            for (file_id, _path) in paths {
-                // Both bounds, because they stop different runaways: a
-                // library that is already fully indexed attempts nothing and
-                // would otherwise walk every file every minute.
-                if attempted >= INDEX_MAX_PER_PASS
-                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
-                    || std::time::Instant::now() >= deadline
-                {
-                    break;
-                }
-                examined += 1;
-                if !transcode.pretranscode_worker_idle() {
-                    return;
-                }
-                let Ok(Some(file)) = self.store.get_file(file_id).await else {
-                    continue;
-                };
-                if !crate::copyseg::supports(file.video_codec.as_deref()) {
+            if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                continue;
+            }
+            let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+            match self.store.fragment_index(file_id, &identity).await {
+                // Already current for this file and this pipeline.
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(file_id, error = %error, "reading a fragment index");
                     continue;
                 }
-                let identity = crate::fragindex::identity_for(&file, have_dovi, false);
-                match self.store.fragment_index(file_id, &identity).await {
-                    // Already current for this file and this pipeline.
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(file_id, error = %error, "reading a fragment index");
-                        continue;
+            }
+            attempted += 1;
+            match crate::fragindex::build(
+                &file,
+                have_dovi,
+                false,
+                &runtime_cache,
+                index_file_budget(file.duration_ms),
+            )
+            .await
+            {
+                crate::fragindex::IndexOutcome::Built(index) => {
+                    if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                        tracing::warn!(file_id, error = %error, "storing a fragment index");
+                    } else {
+                        built += 1;
+                        built_file_ids.push(file_id);
                     }
                 }
-                attempted += 1;
-                match crate::fragindex::build(
-                    &file,
-                    have_dovi,
-                    false,
-                    &runtime_cache,
-                    INDEX_FILE_BUDGET,
-                )
-                .await
-                {
-                    crate::fragindex::IndexOutcome::Built(index) => {
-                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
-                            tracing::warn!(file_id, error = %error, "storing a fragment index");
-                        } else {
-                            built += 1;
-                        }
-                    }
-                    // A short read is not an index — persisting one would put
-                    // every later boundary in the wrong part of the film — so
-                    // the next pass simply tries again.
-                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
-                        tracing::debug!(file_id, rows, "fragment index incomplete: {reason}");
-                    }
-                    crate::fragindex::IndexOutcome::Unsupported(reason) => {
-                        tracing::debug!(file_id, "file cannot be indexed: {reason}");
-                    }
+                // These now make an HLS title unavailable, so keep the reason
+                // in the ordinary operator log and move the cursor forward.
+                crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                    tracing::warn!(file_id, rows, "fragment index incomplete: {reason}");
+                }
+                crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                    tracing::warn!(file_id, "file cannot be indexed: {reason}");
                 }
             }
         }
@@ -3204,11 +3279,23 @@ impl JobManager {
         // for a full cadence. A pass that examined media is complete even when
         // everything was already current or unsupported; an empty or
         // preempted pass remains due for the next minute tick.
-        if examined > 0 {
+        if let Some(file_id) = last_examined {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &file_id.to_string())
+                .await
+            {
+                tracing::warn!(error = %error, key = cursor_key, "recording VOD index cursor failed");
+            }
             self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
         }
         if attempted > 0 {
-            tracing::info!(attempted, built, "fragment indexing pass finished");
+            tracing::info!(
+                attempted,
+                built,
+                built_files = ?built_file_ids,
+                "fragment indexing pass finished"
+            );
         }
     }
 
@@ -3965,6 +4052,7 @@ mod tests {
                 artwork.path().to_path_buf(),
                 plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
                 node.to_owned(),
+                Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
             );
             manager.tmdb_base = Some((base.clone(), base.clone()));
             Arc::new(manager)
@@ -4403,6 +4491,269 @@ mod tests {
         assert!((now() - stamped).abs() <= 1);
     }
 
+    /// A job authority whose answer can be moved while the manager holding it
+    /// keeps running, which is the whole point: committed membership moves
+    /// under a live daemon and the gate has to follow it without a restart.
+    struct MovableJobAuthority(std::sync::atomic::AtomicBool);
+
+    impl MovableJobAuthority {
+        fn learner() -> Arc<Self> {
+            Arc::new(Self(std::sync::atomic::AtomicBool::new(false)))
+        }
+
+        fn promote(&self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[plurx_core::cluster::coordination::cluster_job_async_trait]
+    impl ClusterJobAuthority for MovableJobAuthority {
+        async fn may_run_cluster_jobs(&self) -> bool {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Every cluster-wide singleton resource, named individually.
+    ///
+    /// Spelled out rather than derived, so adding a sixth job without deciding
+    /// whether a node with no vote may run it fails here.
+    const CLUSTER_SINGLETON_RESOURCES: &[&str] = &[
+        "provider:artwork",
+        "provider:genres",
+        "scan:library:1",
+        "repair:probe",
+        "candidate:pretranscode",
+    ];
+
+    /// Leases that are singletons but not *cluster* singletons, named so this
+    /// enumeration is honest about what it does and does not cover.
+    ///
+    /// `shared-cache-gc:{storage_id}` is taken directly on the store by
+    /// `shared_cache::gc_once_inner` rather than through `acquire_cluster_job`,
+    /// and that is deliberate: it is a per-shared-volume singleton owned by
+    /// whichever node has the volume mounted. Its work is the same work
+    /// whoever runs it, it is fenced against a concurrent successor, and it
+    /// has to keep happening on a node with no vote — a learner that mounts
+    /// the volume is exactly as responsible for it as a voter is.
+    ///
+    /// Listing it here rather than leaving the gap unstated is the point: an
+    /// enumeration that silently omits a resource cannot fail.
+    const SHARED_STORAGE_SINGLETON_RESOURCES: &[&str] = &["shared-cache-gc:{storage_id}"];
+
+    /// A node with no vote acquires none of the cluster's singleton leases —
+    /// and the store it is talking to is perfectly writable, so the refusal is
+    /// the gate rather than an incidental failure.
+    #[tokio::test]
+    async fn a_node_without_a_vote_acquires_no_cluster_job() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let authority = MovableJobAuthority::learner();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner-node".to_owned(),
+            authority.clone(),
+        ));
+
+        assert!(!jobs.may_run_cluster_jobs().await);
+        for resource in CLUSTER_SINGLETON_RESOURCES {
+            let claimed = jobs
+                .acquire_job((*resource).to_owned())
+                .await
+                .expect("lease acquisition must not error");
+            assert!(
+                claimed.is_none(),
+                "a node with no vote acquired the {resource} lease"
+            );
+        }
+
+        // Nothing took the leases, so the store still hands every one of them
+        // to a node that is allowed to ask.
+        let voter = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "voter-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
+        ));
+        for resource in CLUSTER_SINGLETON_RESOURCES {
+            let claimed = voter
+                .acquire_job((*resource).to_owned())
+                .await
+                .expect("lease acquisition")
+                .unwrap_or_else(|| panic!("an eligible node must acquire {resource}"));
+            let _ = claimed.release().await;
+        }
+    }
+
+    /// The lease that bypasses the membership gate is named, not denied.
+    ///
+    /// `acquire_cluster_job` claimed to be "the only gate the whole
+    /// singleton-job surface passes through". It was not: the shared-cache GC
+    /// takes `shared-cache-gc:{storage_id}` directly on the store. Nothing is
+    /// corrupted by that — the GC is fenced and is a per-shared-volume
+    /// singleton any mounting node may own, including a learner — but while
+    /// the claim stood, the enumeration beside it could not fail, because a
+    /// resource nobody had listed could not be missing.
+    #[test]
+    fn the_lease_that_bypasses_the_membership_gate_is_named_rather_than_denied() {
+        // Built at runtime so this test's own source does not count as a call
+        // site of what it is looking for.
+        let needle = format!(".{}(", "acquire_lease");
+
+        let gate = include_str!("job_lease.rs");
+        assert!(
+            !gate.contains("the only gate the whole singleton-job surface passes through"),
+            "the false claim must not come back"
+        );
+        for resource in SHARED_STORAGE_SINGLETON_RESOURCES {
+            assert!(
+                gate.contains(resource),
+                "the gate's contract must name the exception {resource}"
+            );
+        }
+
+        // And the exception is exactly one call site, still outside the gate.
+        let shared_cache = include_str!("shared_cache.rs");
+        assert_eq!(
+            shared_cache.matches(needle.as_str()).count(),
+            SHARED_STORAGE_SINGLETON_RESOURCES.len(),
+            "a second direct lease means the enumeration above is stale again"
+        );
+        assert!(shared_cache.contains("shared-cache-gc:"));
+        assert!(
+            !shared_cache.contains("acquire_cluster_job"),
+            "routing it through the gate is a fine choice, but then it is no longer an exception \
+             and both enumerations have to say so"
+        );
+    }
+
+    /// The scheduler tick itself is gated, not only the leases it dispatches.
+    ///
+    /// Defence in depth, and it was untested: deleting the gate left every
+    /// plurxd test green, because the individual leases refuse a learner
+    /// anyway. The tick still matters — it is what keeps a node with no vote
+    /// from doing the scheduler's reads and writing its log lines every minute
+    /// — and the answer has to move the moment committed membership does,
+    /// without a restart.
+    #[tokio::test]
+    async fn a_node_without_a_vote_dispatches_no_scheduler_tick() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let work = tempfile::tempdir().expect("transcode work");
+        let authority = MovableJobAuthority::learner();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner-node".to_owned(),
+            authority.clone(),
+        ));
+        let transcode = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            work.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+
+        assert!(
+            !jobs.schedule_tick(&transcode).await,
+            "a node with no vote must not dispatch a scheduler tick"
+        );
+
+        authority.promote();
+        assert!(
+            jobs.schedule_tick(&transcode).await,
+            "and the same manager, never restarted, dispatches once it has a vote"
+        );
+    }
+
+    /// The live property. The same manager, never restarted, starts acquiring
+    /// leases the moment its committed role changes — which is what makes this
+    /// a membership check rather than a boot-time flag.
+    #[tokio::test]
+    async fn a_promoted_node_starts_acquiring_without_a_restart() {
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let authority = MovableJobAuthority::learner();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            Arc::clone(&store),
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "promoted-node".to_owned(),
+            authority.clone(),
+        ));
+
+        assert!(jobs
+            .acquire_job("provider:artwork".to_owned())
+            .await
+            .expect("lease acquisition")
+            .is_none());
+
+        authority.promote();
+
+        assert!(jobs.may_run_cluster_jobs().await);
+        let lease = jobs
+            .acquire_job("provider:artwork".to_owned())
+            .await
+            .expect("lease acquisition")
+            .expect("a promoted node acquires the lease it was refused a moment ago");
+        let _ = lease.release().await;
+    }
+
+    /// The scheduler's startup arm asks the same question, and asks it after
+    /// its settle delay rather than before, so the answer is the one that
+    /// holds at the moment work would actually begin.
+    #[tokio::test(start_paused = true)]
+    async fn the_startup_scan_does_not_run_without_a_vote() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let media = tempfile::tempdir().expect("media");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let library = store
+            .create_library(&NewLibrary {
+                name: "Movies".into(),
+                kind: LibraryKind::Movies,
+                paths: vec![media.path().to_path_buf()],
+                anime: false,
+            })
+            .await
+            .expect("library");
+        store
+            .put_setting(keys::JOB_SCAN_ON_STARTUP, "1")
+            .await
+            .expect("enable startup scan");
+        let authority = MovableJobAuthority::learner();
+        let store_handle: Arc<dyn Store> = store.clone();
+        let jobs = Arc::new(JobManager::new_with_scan_prune_percent(
+            store_handle,
+            artwork.path().to_path_buf(),
+            plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
+            "learner-node".to_owned(),
+            authority.clone(),
+        ));
+
+        let settle = |jobs: Arc<JobManager>| async move {
+            let startup = tokio::spawn(async move { jobs.scan_on_startup().await });
+            tokio::task::yield_now().await;
+            tokio::time::advance(std::time::Duration::from_secs(30)).await;
+            startup.await.expect("startup task");
+        };
+
+        settle(Arc::clone(&jobs)).await;
+        assert!(
+            jobs.all_statuses().await.is_empty(),
+            "a node with no vote must not start the boot scan"
+        );
+
+        authority.promote();
+        settle(Arc::clone(&jobs)).await;
+        assert!(
+            jobs.all_statuses().await.contains_key(&library.id),
+            "and must start it once it carries one"
+        );
+    }
+
     #[tokio::test]
     async fn an_empty_vod_pass_does_not_delay_the_first_useful_index() {
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -4425,6 +4776,30 @@ mod tests {
             "a boot tick before library creation must stay due for the first scan"
         );
         assert!(!jobs.indexing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_vod_index_cursor_wraps_past_failed_low_ids() {
+        let paths = [1, 9, 17, 120, 5910]
+            .into_iter()
+            .map(|file_id| (file_id, PathBuf::from(format!("/{file_id}.mkv"))))
+            .collect();
+        let ordered: Vec<i64> = ordered_index_paths(paths, Some(17))
+            .into_iter()
+            .map(|(file_id, _)| file_id)
+            .collect();
+        assert_eq!(ordered, [120, 5910, 1, 9, 17]);
+    }
+
+    #[test]
+    fn long_remuxes_receive_a_complete_pass_budget() {
+        assert_eq!(
+            index_file_budget(None),
+            Duration::from_secs(INDEX_FILE_BUDGET_FLOOR_SECS)
+        );
+        let steel = index_file_budget(Some(7_095_005));
+        assert!(steel >= Duration::from_secs(15 * 60));
+        assert!(steel <= Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
     }
 
     #[tokio::test]
@@ -5390,6 +5765,7 @@ mod tests {
             artwork.path().to_path_buf(),
             plurx_core::config::DEFAULT_SCAN_PRUNE_PERCENT,
             "other-cleanup-node".to_owned(),
+            Arc::new(plurx_core::cluster::coordination::UnclusteredJobAuthority),
         );
         let other_key = other.local_job_key(keys::JOB_LAST_TRANSCODE_CLEANUP);
         assert_ne!(cleanup_key, other_key);

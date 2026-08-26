@@ -257,11 +257,24 @@ class OperationsContractCase(unittest.TestCase):
             workflow.index("name: Check validation catalog and contract unit tests"),
         )
         self.assertIn("name: PR validation gate", workflow)
-        self.assertIn("PLURX_SKIP_UI_BASELINE: 1", workflow)
-        self.assertIn("PLURX_SKIP_ANDROID_JVM: 1", workflow)
+        fast_rust = workflow.split("  check:", 1)[1].split(
+            "\n  cluster_auth:", 1
+        )[0]
+        self.assertIn("name: fast Rust gate", fast_rust)
+        self.assertIn("run: make ci-rust-gate", fast_rust)
+        self.assertNotIn("scripts/validate run", fast_rust)
+        self.assertNotIn("actions/setup-node", fast_rust)
+        self.assertNotIn("./.github/actions/playwright", fast_rust)
+        self.assertNotIn("./.github/actions/ffmpeg", fast_rust)
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.android_device == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", workflow)
+        web_layout = workflow.split("\n  web_layout:", 1)[1].split(
+            "\n  android_jvm:", 1
+        )[0]
+        android_device = workflow.split("\n  android_device:", 1)[1].split(
+            "\n  coverage:", 1
+        )[0]
+        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
+        self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
@@ -285,6 +298,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("      - cluster_auth", pr_gate)
         self.assertIn("      - cluster_wal", pr_gate)
         self.assertIn("      - cluster_daemon", pr_gate)
+        self.assertIn("      - web_layout", pr_gate)
+        self.assertIn("      - vod_web", pr_gate)
+        self.assertIn("      - android_device", pr_gate)
         self.assertNotIn("      - hiqlite_spike", pr_gate)
         self.assertIn("needs: scope", workflow)
         self.assertNotIn("github.event_name == 'pull_request' && github.ref == 'refs/heads/main'", workflow)
@@ -323,8 +339,10 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("needs: [scope, preflight]", docker)
 
         lint = read(".github/workflows/lint.yml")
-        self.assertIn("Select the documentation-only fast path", lint)
-        self.assertIn("steps.scope.outputs.docs_only != 'true'", lint)
+        self.assertNotIn("\n  pull_request:\n", lint)
+        self.assertNotIn("\n  merge_group:\n", lint)
+        self.assertIn("workflow_dispatch:", lint)
+        self.assertIn("run: make fmt-check lint", lint)
 
         self.assertIn(
             "cargo build --release -p plurxd --target ${{ matrix.target }}",
@@ -362,10 +380,12 @@ class OperationsContractCase(unittest.TestCase):
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
 
-        # Both required workflows must fire on merge_group, or enabling the
-        # queue deadlocks every merge on a check that never reports.
+        # The single required aggregate workflow must fire on merge_group.
+        # The badge-only lint workflow runs after merge; Clippy already belongs
+        # to the aggregate workflow's fast Rust lane.
         self.assertIn("\n  merge_group:\n", workflow)
-        self.assertIn("\n  merge_group:\n", lint)
+        self.assertNotIn("\n  merge_group:\n", lint)
+        self.assertNotIn("\n  pull_request:\n", lint)
         self.assertIn(
             "if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')",
             workflow,
@@ -376,11 +396,12 @@ class OperationsContractCase(unittest.TestCase):
             workflow,
         )
 
-        # The CI Rust gate splits, not shrinks: clippy stays in lint.yml, and
-        # each expensive replicated surface keeps a dedicated job in ci.yml.
+        # Exactly four Rust test lanes own the PR: the fast gate plus three
+        # independently selected replicated/daemon jobs.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
-        self.assertIn("ci-rust-gate: fmt-check", gate)
+        self.assertIn("ci-rust-gate: fmt-check lint", gate)
+        self.assertIn("run: make ci-rust-gate", workflow)
         self.assertIn("make fmt-check lint", lint)
         self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)
         self.assertIn("run: make cluster-wal-check", workflow)
@@ -446,6 +467,12 @@ class OperationsContractCase(unittest.TestCase):
             "\n  web_layout:", 1
         )[0]
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
+        self.assertIn(
+            "Resolve pinned Rust executables for the long contract run", cluster
+        )
+        self.assertIn("rustup which --toolchain 1.97.1 cargo", cluster)
+        self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
+        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
         self.assertIn("run: make cluster-store-check cluster-harness-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertIn("run: make cluster-wal-check", wal)
@@ -572,15 +599,14 @@ class OperationsContractCase(unittest.TestCase):
                 if path == ".github/workflows/ci.yml" and name == "apple":
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
-                    "check",
                     "cluster_daemon",
-                    "vod_web",
                     "coverage",
                 }:
                     expected = high_cpu_ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name == "web_layout":
                     expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name in {
+                    "check",
                     "cluster_auth",
                     "cluster_wal",
                     "docker",
@@ -591,6 +617,11 @@ class OperationsContractCase(unittest.TestCase):
                     "android_device",
                 }:
                     expected = android
+                elif (
+                    "uses: ./.github/actions/ffmpeg" in block
+                    and "container: ubuntu:26.04" not in block
+                ):
+                    expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
         for path in (

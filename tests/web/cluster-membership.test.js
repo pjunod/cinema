@@ -123,6 +123,7 @@ function node(id, raftId, role, extra = {}) {
     advertised_host: `${id}.lan`,
     raft_id: raftId,
     role,
+    is_voter: role === "voter",
     is_leader: false,
     reachable: true,
     last_seen_at: Date.now(),
@@ -281,7 +282,7 @@ test("a replicated one-node install says one node is a complete configuration", 
   assert.match(view.body, /complete, supported configuration/i);
 });
 
-test("a learner is named as not voting yet", () => {
+test("a learner is named as a permanent non-voting role", () => {
   const ui = sandbox();
   const view = ui.clusterStateView(
     status("single_node", [
@@ -289,8 +290,70 @@ test("a learner is named as not voting yet", () => {
       node("node-b", 2, "learner"),
     ]),
   );
-  assert.match(view.body, /catching up as a learner/i);
-  assert.match(view.body, /do(es)? not vote yet/i);
+  assert.match(view.body, /is a learner/i);
+  assert.match(view.body, /holds no vote/i);
+  assert.match(view.body, /not counted toward quorum/i);
+  // It is not a join state: nothing in this panel may promise a promotion
+  // the server does not implement.
+  assert.doesNotMatch(view.body, /catching up/i);
+  assert.doesNotMatch(view.body, /becomes? a voter/i);
+});
+
+// The banner sentence has two branches and only the singular one was read, so
+// reverting the plural branch on its own to the withdrawn promise kept this
+// file green. That is the half an operator with two learners actually sees.
+test("two learners are named the same way the one-learner sentence is", () => {
+  const ui = sandbox();
+  const view = ui.clusterStateView(
+    status("single_node", [
+      node("node-a", 1, "voter"),
+      node("node-b", 2, "learner"),
+      node("node-c", 3, "learner"),
+    ]),
+  );
+  assert.match(view.body, /2 nodes are learners/i);
+  assert.match(view.body, /hold no vote/i);
+  assert.match(view.body, /not counted toward quorum/i);
+  assert.doesNotMatch(view.body, /catching up/i);
+  assert.doesNotMatch(view.body, /become voters/i);
+});
+
+// The roster pill repeats the promise in a `title` attribute, and that is the
+// one an operator hovers rather than reads in a banner. Nothing asserted it,
+// so it could be reverted to "Admitted and catching up" by itself.
+test("the learner role pill says what the banner says", () => {
+  const ui = sandbox();
+  const row = ui.clusterNodeRow(node("node-b", 2, "learner"), "node-a");
+  assert.match(row, /permanent non-voting role/i);
+  assert.match(row, /does not vote/i);
+  assert.match(row, /not counted toward quorum/i);
+  assert.doesNotMatch(row, /catching up/i);
+  assert.doesNotMatch(row, /becomes? a voter/i);
+
+  // And none of that leaks onto a voter's pill.
+  const voter = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
+  assert.match(voter, />voter</);
+  assert.doesNotMatch(voter, /non-voting/i);
+});
+
+test("a voter catching up is not rendered as a permanent learner", () => {
+  const ui = sandbox();
+  const joining = node("node-d", 4, "voter", { is_voter: false });
+  const view = ui.clusterStateView(
+    status("high_availability", [
+      node("node-a", 1, "voter"),
+      node("node-b", 2, "voter"),
+      node("node-c", 3, "voter"),
+      joining,
+    ]),
+  );
+  assert.match(view.body, /voter is joining and catching up/i);
+  assert.match(view.body, /no committed vote yet/i);
+  assert.doesNotMatch(view.body, /node is a learner/i);
+
+  const row = ui.clusterNodeRow(joining, "node-a");
+  assert.match(row, /joining voter/i);
+  assert.doesNotMatch(row, /permanent non-voting role/i);
 });
 
 // ---- every refusal is a sentence with a next step -------------------------

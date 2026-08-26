@@ -49,8 +49,10 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "hiqlite-store")]
 use super::membership::{
-    decode_join_token, join_token_digest, ActivitySigningKey, ClusterPeer, FinalizeJoinRequest,
-    JoinPayload, JoinSecrets, LocalMembership, MembershipManager, RedeemJoinRequest,
+    decode_join_token, join_token_digest, local_membership_version,
+    local_membership_version_matches_role, ActivitySigningKey, ClusterPeer, ClusterRole,
+    FinalizeJoinRequest, JoinSecrets, JoinToken, LocalMembership, MembershipManager,
+    RedeemJoinRequest,
 };
 
 pub const SQLITE_FILENAME: &str = "plurx.db";
@@ -141,6 +143,15 @@ pub struct ActivationMarker {
     pub replicated_schema_version: i64,
     pub imported_rows: u64,
     pub table_hashes: Vec<SqliteImportTableDigest>,
+    /// The role this particular data directory was admitted with.
+    ///
+    /// Old one-voter markers omit this field and are therefore the only
+    /// markers for which a missing `membership.json` can still be upgraded as
+    /// a voter. Every joined node writes it before the activation marker
+    /// becomes authoritative, so losing the membership record can never turn
+    /// a learner into a campaigning process.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admitted_role: Option<ClusterRole>,
 }
 
 /// Crash-recovery record for the one-voter loopback-to-advertised transition.
@@ -400,23 +411,41 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     // same payload; only the replicated token record can distinguish them.
     // Rechecking the embedded timestamp here would strand an identity-bound
     // voter that failed after redemption and restarted after the token TTL.
-    if payload.schema_version != AUTH_SCHEMA_VERSION
-        || payload.protocol_version != crate::store::AUTH_PROTOCOL_VERSION
+    // The token names the protocols the cluster is using; this binary
+    // implements a range. Refuse early when the two do not overlap at all —
+    // but this is only the cheap local check. `preflight_voter` below is
+    // authoritative, because the cluster's *active* range can have been
+    // narrowed after this token was minted and only the live `cluster_meta`
+    // row says so.
+    //
+    // Every refusal in this block runs before a single secret reaches the
+    // disk. That ordering is the contract: a joiner that cannot participate
+    // must leave nothing behind that a later boot could mistake for a staged
+    // join, and must never hold this cluster's credentials.
+    let (token_min, token_max) = payload.declared_protocol_range();
+    if payload.schema_version() != AUTH_SCHEMA_VERSION
+        || token_min < crate::store::AUTH_PROTOCOL_MIN
+        || token_max > crate::store::AUTH_PROTOCOL_MAX
     {
-        return Err(StoreError::Migration(
-            "join_incompatible: joining binary does not match the cluster schema/protocol"
-                .to_owned(),
-        ));
+        return Err(StoreError::Migration(format!(
+            "join_incompatible: this join token declares schema {} and protocol {token_min}..\
+             ={token_max}, but this binary implements schema {AUTH_SCHEMA_VERSION} and protocol \
+             {}..={}; install a matching build on this node",
+            payload.schema_version(),
+            crate::store::AUTH_PROTOCOL_MIN,
+            crate::store::AUTH_PROTOCOL_MAX,
+        )));
     }
+    let role = payload.role();
     let remote = Client::remote(
         payload
-            .bootstrap
+            .bootstrap()
             .iter()
             .map(|peer| peer.api_address.clone())
             .collect(),
         true,
         true,
-        payload.secrets.api.clone(),
+        payload.secrets().api.clone(),
         false,
         None,
     )
@@ -424,16 +453,30 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     .map_err(|error| {
         StoreError::Database(format!("connecting to cluster for join preflight: {error}"))
     })?;
-    HiqliteAuthStore::preflight_voter(&remote, crate::store::ClusterCompatibility::CURRENT).await?;
+    HiqliteAuthStore::preflight_role(
+        &remote,
+        crate::store::ClusterCompatibility::CURRENT,
+        role.is_learner(),
+    )
+    .await?;
 
     let existing_membership = read_local_membership(&config.storage.data_dir)?;
     let identity = match &existing_membership {
         Some(membership) => {
-            if membership.cluster_id != payload.cluster_id || membership.raft_id != payload.raft_id
+            if membership.cluster_id != payload.cluster_id()
+                || membership.raft_id != payload.raft_id()
             {
                 return Err(StoreError::Identity(
                     "join token does not match the interrupted local membership".to_owned(),
                 ));
+            }
+            if membership.role != role {
+                return Err(StoreError::Identity(format!(
+                    "join token admits this node as a {} but the interrupted local join is a {}; \
+                     a role is not something a retry may change",
+                    role.as_str(),
+                    membership.role.as_str()
+                )));
             }
             super::ClusterIdentity {
                 cluster_id: membership.cluster_id.clone(),
@@ -443,26 +486,27 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         }
         None => super::initialize_join_identity(
             &config.storage.data_dir,
-            &payload.cluster_id,
-            payload.raft_id,
+            payload.cluster_id(),
+            payload.raft_id(),
         )?,
     };
-    let local = configured_local_peer(config, payload.raft_id)?;
+    let local = configured_local_peer(config, payload.raft_id())?;
     let token_digest = join_token_digest(&token);
     let membership = LocalMembership {
-        version: 1,
-        cluster_id: payload.cluster_id.clone(),
+        version: local_membership_version(role),
+        cluster_id: payload.cluster_id().to_owned(),
         node_id: identity.node_id.clone(),
-        raft_id: payload.raft_id,
+        raft_id: payload.raft_id(),
         local: local.clone(),
-        bootstrap: payload.bootstrap.clone(),
+        bootstrap: payload.bootstrap().to_vec(),
         join_token_digest: Some(token_digest.clone()),
+        role,
     };
     redeem_remote_join(
         &payload,
         RedeemJoinRequest {
             token_digest,
-            raft_id: payload.raft_id,
+            raft_id: payload.raft_id(),
             node_id: identity.node_id.clone(),
             hostname: super::membership::system_short_hostname().unwrap_or_default(),
             raft_address: local.raft_address.clone(),
@@ -470,21 +514,23 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             http_base: configured_artwork_url(config)?,
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
         },
     )
     .await?;
 
     persist_join_secret(
         &config.storage.data_dir.join(RAFT_SECRET_FILENAME),
-        &payload.secrets.raft,
+        &payload.secrets().raft,
     )?;
     persist_join_secret(
         &config.storage.data_dir.join(API_SECRET_FILENAME),
-        &payload.secrets.api,
+        &payload.secrets().api,
     )?;
     persist_join_secret(
         &config.cluster.credential_key_path(&config.storage.data_dir),
-        &payload.secrets.credential_key,
+        &payload.secrets().credential_key,
     )?;
     let secrets = read_existing_secrets(&config.storage.data_dir)?;
     // A verified activation marker, not the directory name, is the commit bit.
@@ -506,12 +552,17 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     )
     .await?;
     let store = HiqliteAuthStore::open(client.clone(), &active.join("telemetry.db")).await?;
-    verify_store_identity(&store, &payload.cluster_id).await?;
-    write_activation_marker(&active, &payload.activation_marker)?;
-    write_local_membership(&config.storage.data_dir, &membership)?;
-    sync_directory(&active)?;
-    sync_directory(&config.storage.data_dir)?;
-    ensure_activated_source_record(&config.storage.data_dir, &payload.activation_marker)?;
+    verify_store_identity(&store, payload.cluster_id()).await?;
+    let mut activation_marker = payload.activation_marker().clone();
+    activation_marker.admitted_role = Some(role);
+    publish_join_activation(
+        &config.storage.data_dir,
+        &active,
+        &activation_marker,
+        &membership,
+        JoinActivationFailpoint::None,
+    )?;
+    ensure_activated_source_record(&config.storage.data_dir, &activation_marker)?;
 
     // Keep the caught-up voter alive. Fully-TLS Hiqlite listeners have no
     // graceful-shutdown handle, and no stop/rebind boundary is needed because
@@ -542,7 +593,8 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
             )?,
         },
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        payload.activation_marker,
+        activation_marker,
+        role,
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -559,6 +611,44 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     };
     finalize_pending_join_best_effort(config, &selected).await;
     Ok(selected)
+}
+
+/// Publish a joined node's local role before making its active store
+/// authoritative.
+///
+/// The ordering is the safety property. A retry after the failpoint sees the
+/// role record and no activation marker, re-enters the idempotent join path,
+/// and can never default a learner to voter. The private failpoint is used by
+/// the crash-restart regression below; it is not configurable in production.
+#[cfg(feature = "hiqlite-store")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinActivationFailpoint {
+    None,
+    #[cfg(test)]
+    AfterMembership,
+}
+
+#[cfg(feature = "hiqlite-store")]
+fn publish_join_activation(
+    data_dir: &Path,
+    active: &Path,
+    marker: &ActivationMarker,
+    membership: &LocalMembership,
+    failpoint: JoinActivationFailpoint,
+) -> Result<(), StoreError> {
+    write_local_membership(data_dir, membership)?;
+    sync_directory(data_dir)?;
+    #[cfg(test)]
+    if failpoint == JoinActivationFailpoint::AfterMembership {
+        return Err(StoreError::Migration(
+            "join activation failpoint after durable membership".to_owned(),
+        ));
+    }
+    #[cfg(not(test))]
+    let _ = failpoint;
+    write_activation_marker(active, marker)?;
+    sync_directory(active)?;
+    sync_directory(data_dir)
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -602,7 +692,10 @@ async fn finalize_pending_join(
     }
     let payload = decode_join_token(&token)
         .map_err(|error| StoreError::Migration(format!("{}: {}", error.code(), error)))?;
-    if payload.cluster_id != membership.cluster_id || payload.raft_id != membership.raft_id {
+    if payload.cluster_id() != membership.cluster_id
+        || payload.raft_id() != membership.raft_id
+        || payload.role() != membership.role
+    {
         return Err(StoreError::Identity(
             "staged join token does not match local membership identity".to_owned(),
         ));
@@ -662,28 +755,36 @@ fn persist_join_secret(path: &Path, secret: &str) -> Result<(), StoreError> {
 
 #[cfg(feature = "hiqlite-store")]
 async fn redeem_remote_join(
-    payload: &JoinPayload,
+    payload: &JoinToken,
     request: RedeemJoinRequest,
 ) -> Result<(), StoreError> {
-    post_join_request(payload, "/api/v1/cluster/join/redeem", &request).await
+    let path = match payload.role() {
+        ClusterRole::Voter => "/api/v1/cluster/join/redeem",
+        ClusterRole::Learner => "/api/v1/cluster/learner/join/redeem",
+    };
+    post_join_request(payload, path, &request).await
 }
 
 #[cfg(feature = "hiqlite-store")]
 async fn finalize_remote_join(
-    payload: &JoinPayload,
+    payload: &JoinToken,
     request: FinalizeJoinRequest,
 ) -> Result<(), StoreError> {
-    post_join_request(payload, "/api/v1/cluster/join/finalize", &request).await
+    let path = match payload.role() {
+        ClusterRole::Voter => "/api/v1/cluster/join/finalize",
+        ClusterRole::Learner => "/api/v1/cluster/learner/join/finalize",
+    };
+    post_join_request(payload, path, &request).await
 }
 
 #[cfg(feature = "hiqlite-store")]
 async fn post_join_request<T: Serialize>(
-    payload: &JoinPayload,
+    payload: &JoinToken,
     path: &str,
     request: &T,
 ) -> Result<(), StoreError> {
     let response = reqwest::Client::new()
-        .post(format!("{}{path}", payload.bootstrap_http))
+        .post(format!("{}{path}", payload.bootstrap_http()))
         .json(request)
         .send()
         .await
@@ -874,6 +975,7 @@ impl ActivationMarker {
             replicated_schema_version: AUTH_SCHEMA_VERSION,
             imported_rows: report.imported_rows,
             table_hashes: report.tables,
+            admitted_role: None,
         }
     }
 
@@ -957,6 +1059,17 @@ fn readdress_single_voter_if_needed(config: &Config) -> Result<(), StoreError> {
         return Ok(());
     }
     let existing_membership = read_local_membership(&config.storage.data_dir)?;
+    // This rebuilds one-voter Raft metadata around a preserved state machine.
+    // A learner is never a sole voter — it was admitted into an existing
+    // cluster and its recovery is catching up from the leader, exactly as for
+    // any node with peers. The peer count below reaches the same conclusion,
+    // but only after opening the closed state machine; say it here instead.
+    if existing_membership
+        .as_ref()
+        .is_some_and(|membership| membership.role.is_learner())
+    {
+        return Ok(());
+    }
     // Settle on whether the committed address already matches configuration,
     // not on whether it looks like loopback. A loopback-literal advertise_host
     // is a legitimate configuration - two daemons on one host, and the whole
@@ -1054,13 +1167,14 @@ fn readdress_single_voter_if_needed(config: &Config) -> Result<(), StoreError> {
     write_activation_marker(&incoming, &marker)?;
     verify_state_machine_snapshot_identity(&state_target, &marker.cluster_id)?;
     let membership = LocalMembership {
-        version: 1,
+        version: local_membership_version(ClusterRole::Voter),
         cluster_id: identity.cluster_id.clone(),
         node_id: identity.node_id.clone(),
         raft_id: identity.raft_id,
         local: desired.clone(),
         bootstrap: vec![desired],
         join_token_digest: existing_membership.and_then(|membership| membership.join_token_digest),
+        role: ClusterRole::Voter,
     };
     sync_directory(&incoming)?;
 
@@ -1253,6 +1367,7 @@ async fn open_active_store_with_key(
     require_real_directory(&active)?;
     let mut marker = read_activation_marker(&active)?;
     let mut local_membership = read_local_membership(&config.storage.data_dir)?;
+    let role = active_store_role(&marker, local_membership.as_ref(), &config.storage.data_dir)?;
     let mut identity = super::initialize_identity(&config.storage.data_dir, &marker.cluster_id)?;
     if let Some(membership) = &local_membership {
         if membership.cluster_id != marker.cluster_id || membership.node_id != identity.node_id {
@@ -1274,12 +1389,8 @@ async fn open_active_store_with_key(
         force_loopback,
     )
     .await?;
-    let store =
-        match HiqliteAuthStore::open_or_migrate(client.clone(), &active.join("telemetry.db")).await
-        {
-            Ok(store) => store,
-            Err(error) => return Err(error),
-        };
+    let telemetry = active.join("telemetry.db");
+    let store = open_store_for_role(role, client.clone(), &telemetry).await?;
     if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
         marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
         write_activation_marker(&active, &marker)?;
@@ -1333,8 +1444,14 @@ async fn open_active_store_with_key(
             let metrics = client.metrics_db().await.map_err(|error| {
                 StoreError::Database(format!("reading initial cluster membership: {error}"))
             })?;
+            // A node reaching this branch has no membership record at all, so
+            // it is an initial voter: a learner only ever exists because a
+            // join wrote one. Version 1 keeps this file readable by the
+            // previous release, which is what makes installing this binary
+            // reversible for every node that has not been admitted as a
+            // learner.
             let membership = LocalMembership {
-                version: 1,
+                version: local_membership_version(ClusterRole::Voter),
                 cluster_id: identity.cluster_id.clone(),
                 node_id: identity.node_id.clone(),
                 raft_id: identity.raft_id,
@@ -1345,6 +1462,7 @@ async fn open_active_store_with_key(
                     .map(|(_, node)| ClusterPeer::from(node))
                     .collect(),
                 join_token_digest: None,
+                role: ClusterRole::Voter,
             };
             write_local_membership(&config.storage.data_dir, &membership)?;
             membership
@@ -1366,6 +1484,7 @@ async fn open_active_store_with_key(
         },
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
+        role,
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -1604,6 +1723,76 @@ fn load_or_create_secrets(data_dir: &Path) -> Result<ClusterSecrets, StoreError>
     })
 }
 
+/// The role a boot resumes from this data directory's durable record.
+///
+/// It decides two things and no others: whether Hiqlite is told not to promote
+/// this node, and what committed state startup waits for. Everything a running
+/// daemon decides about leadership or singleton work is re-derived from live
+/// committed membership instead, because a learner can be promoted while the
+/// process runs. A directory with no record at all is an initial voter.
+#[cfg(feature = "hiqlite-store")]
+fn boot_cluster_role(local_membership: Option<&LocalMembership>) -> ClusterRole {
+    local_membership
+        .map(|membership| membership.role)
+        .unwrap_or_default()
+}
+
+/// Resolve an active store's boot role without granting authority from a
+/// missing joined-node record.
+#[cfg(feature = "hiqlite-store")]
+fn active_store_role(
+    marker: &ActivationMarker,
+    local_membership: Option<&LocalMembership>,
+    data_dir: &Path,
+) -> Result<ClusterRole, StoreError> {
+    match local_membership {
+        Some(membership)
+            if marker
+                .admitted_role
+                .is_some_and(|admitted_role| admitted_role != membership.role) =>
+        {
+            Err(StoreError::Identity(
+                "membership.json role does not match activation.json admitted role".to_owned(),
+            ))
+        }
+        Some(membership) => Ok(membership.role),
+        None if marker.admitted_role.is_some() => Err(StoreError::Identity(format!(
+            "activation.json records this joined node's admitted role but {} is missing; restore \
+             the durable membership record before startup rather than guessing that this node may vote",
+            data_dir.join(LOCAL_MEMBERSHIP_FILENAME).display()
+        ))),
+        // Markers written before role-aware joins describe only the original
+        // one-voter activation. Preserve that upgrade path.
+        None => Ok(ClusterRole::Voter),
+    }
+}
+
+/// Open the replicated store the way this node's role is allowed to.
+///
+/// Replicated schema migration is voter work. A learner opens the store and
+/// refuses a version it does not implement, but never advances one: a
+/// migration is a cluster-wide state change, and a node that carries no vote
+/// has no business proposing one. It also cannot help — a learner is by
+/// construction the node most likely to be behind, so the version it would
+/// migrate *to* is the one it happens to ship rather than the one the cluster
+/// agreed on.
+///
+/// A named function rather than a `match` inline in the boot path, because
+/// this is the whole of "a learner never proposes a schema migration" and the
+/// boot path around it needs a real cluster, a real join, and a real data
+/// directory to reach.
+#[cfg(feature = "hiqlite-store")]
+async fn open_store_for_role(
+    role: ClusterRole,
+    client: Client,
+    telemetry: &Path,
+) -> Result<HiqliteAuthStore, StoreError> {
+    match role {
+        ClusterRole::Voter => HiqliteAuthStore::open_or_migrate(client, telemetry).await,
+        ClusterRole::Learner => HiqliteAuthStore::open(client, telemetry).await,
+    }
+}
+
 #[cfg(feature = "hiqlite-store")]
 async fn start_voter(
     config: &Config,
@@ -1627,9 +1816,10 @@ async fn start_voter(
     validate_cluster_listener("raft", raft_bind, active_transport)?;
     validate_cluster_listener("cluster API", api_bind, active_transport)?;
 
+    let role = boot_cluster_role(local_membership);
     let local = match local_membership {
         Some(membership) => {
-            if membership.version != 1
+            if !local_membership_version_matches_role(membership.version, membership.role)
                 || membership.cluster_id != identity.cluster_id
                 || membership.node_id != identity.node_id
                 || membership.raft_id != identity.raft_id
@@ -1683,6 +1873,13 @@ async fn start_voter(
         secret_api: secrets.api.clone(),
         tls_raft: active_transport.then_some(ServerTlsConfig::TlsAutoCertificates),
         tls_api: active_transport.then_some(ServerTlsConfig::TlsAutoCertificates),
+        // Defence in depth, not the guard. Hiqlite reads this exactly once, to
+        // decide whether this node asks the leader to promote it during
+        // startup reconciliation, and never consults it again — in particular
+        // `become_member` is a route on every node that never reads its
+        // target's hint. It stops a learner from promoting *itself*; it is not
+        // what stops one from acting like a voter.
+        learner_only: role.is_learner(),
         ..production_hiqlite_defaults(config)
     };
     let client = hiqlite::start_node(node_config)
@@ -1697,29 +1894,45 @@ async fn start_voter(
             "Hiqlite voter did not become healthy within {HIQLITE_START_TIMEOUT:?}"
         )));
     }
-    let promotion_deadline = tokio::time::Instant::now() + HIQLITE_START_TIMEOUT;
+    // Committed membership is the gate on startup, and it is the *only* thing
+    // stopping a node the cluster has not admitted from running — so what each
+    // role waits for has to be exactly what admission means for it. A voter
+    // waits for its vote. A learner waits to be a committed member, and must
+    // never wait for a promotion it was admitted specifically not to receive.
+    let admission_deadline = tokio::time::Instant::now() + HIQLITE_START_TIMEOUT;
     loop {
         let metrics = client
             .metrics_db()
             .await
             .map_err(|error| StoreError::Database(format!("reading voter membership: {error}")))?;
-        if metrics
+        let is_voter = metrics
             .membership_config
             .voter_ids()
-            .any(|raft_id| raft_id == identity.raft_id)
-        {
+            .any(|raft_id| raft_id == identity.raft_id);
+        let is_member = metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == identity.raft_id);
+        let admitted = match role {
+            ClusterRole::Voter => is_voter,
+            ClusterRole::Learner => is_member,
+        };
+        if admitted {
             break;
         }
-        if tokio::time::Instant::now() >= promotion_deadline {
-            let is_learner = metrics
-                .membership_config
-                .nodes()
-                .any(|(raft_id, _)| *raft_id == identity.raft_id);
+        if tokio::time::Instant::now() >= admission_deadline {
             let _ = shutdown_voter(&client, active_transport).await;
-            let reason = if is_learner {
-                "is still a learner and was not promoted before the start timeout"
-            } else {
-                "is absent from committed membership; it may have been removed"
+            let reason = match (role, is_member) {
+                (ClusterRole::Voter, true) => {
+                    "is still a learner and was not promoted before the start timeout"
+                }
+                (ClusterRole::Learner, _) => {
+                    "was not admitted to committed membership as a learner before the start \
+                     timeout"
+                }
+                (ClusterRole::Voter, false) => {
+                    "is absent from committed membership; it may have been removed"
+                }
             };
             return Err(StoreError::Identity(format!(
                 "node {} {reason} in cluster {}",
@@ -1727,6 +1940,14 @@ async fn start_voter(
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    if role.is_learner() {
+        tracing::info!(
+            node_id = %identity.node_id,
+            raft_id = identity.raft_id,
+            "started as a committed cluster learner: replicated, non-voting, and ineligible \
+             for leader-singleton work"
+        );
     }
     Ok((client, local))
 }
@@ -2317,7 +2538,14 @@ fn read_local_membership(data_dir: &Path) -> Result<Option<LocalMembership>, Sto
             path.display()
         ))
     })?;
-    if membership.version != 1
+    // Version 1 is a voter, version 2 names its role. Reading a version 1
+    // record is the upgrade path: `role` defaults to voter, which is what
+    // every record written before this binary existed described. Anything
+    // else — an unknown version, or a version that disagrees with the role
+    // beside it — is refused rather than guessed at, because guessing wrong
+    // starts a campaigning process on a node the cluster admitted as a
+    // learner.
+    if !local_membership_version_matches_role(membership.version, membership.role)
         || membership.cluster_id.trim().is_empty()
         || membership.node_id.trim().is_empty()
         || membership.raft_id == 0
@@ -2328,6 +2556,40 @@ fn read_local_membership(data_dir: &Path) -> Result<Option<LocalMembership>, Sto
         )));
     }
     Ok(Some(membership))
+}
+
+/// The role this data directory was admitted with.
+///
+/// For a process that has no Raft membership handle of its own — the
+/// maintenance CLI attaches to a running voter as a remote client — this is
+/// the only durable statement of what the node is. It is a boot record, not
+/// live committed membership, so it may only be used to *refuse*: it can say
+/// "this host was admitted as a learner", never "this host is a voter now".
+///
+/// A missing record has to be read carefully, because the answer this hands
+/// back grants cluster-wide job authority. No record at all on a directory
+/// that was never clustered is the honest single-node case and answers voter.
+/// A missing record *beside an activation marker* is not: the directory is
+/// clustered and the one file that says what it was admitted as is gone, so
+/// answering "voter" would let a learner whose record was deleted grant itself
+/// the cluster's artwork lease. That is refused instead.
+#[cfg(feature = "hiqlite-store")]
+pub fn local_cluster_role(data_dir: &Path) -> Result<ClusterRole, StoreError> {
+    if let Some(membership) = read_local_membership(data_dir)? {
+        return Ok(membership.role);
+    }
+    let marker = data_dir
+        .join(HIQLITE_ACTIVE_DIRNAME)
+        .join(ACTIVATION_MARKER_FILENAME);
+    if path_exists(&marker)? {
+        return Err(StoreError::Identity(format!(
+            "{} records an activated cluster node but {} is missing, so this host's admitted \
+             role cannot be established; restore it before running cluster-wide work here",
+            marker.display(),
+            data_dir.join(LOCAL_MEMBERSHIP_FILENAME).display()
+        )));
+    }
+    Ok(ClusterRole::default())
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -2367,7 +2629,7 @@ fn read_readdress_record(data_dir: &Path) -> Result<Option<ReaddressRecord>, Sto
         ))
     })?;
     if record.version != 1
-        || record.membership.version != 1
+        || !local_membership_version_matches_role(record.membership.version, record.membership.role)
         || record.membership.cluster_id.trim().is_empty()
         || record.membership.node_id.trim().is_empty()
         || record.membership.raft_id == 0
@@ -3000,6 +3262,7 @@ mod tests {
                 row_count: 0,
                 sha256: "0".repeat(64),
             }],
+            admitted_role: None,
         };
         marker(AUTH_SCHEMA_MIGRATION_SOURCE)
             .validate()
@@ -3031,6 +3294,7 @@ mod tests {
                     row_count: 0,
                     sha256: "0".repeat(64),
                 }],
+                admitted_role: None,
             };
             let error = zero
                 .validate()
@@ -3201,6 +3465,7 @@ mod tests {
                 },
                 bootstrap: Vec::new(),
                 join_token_digest: None,
+                role: ClusterRole::Voter,
             },
         )
         .expect("write local membership");
@@ -3244,6 +3509,7 @@ mod tests {
             },
             bootstrap: Vec::new(),
             join_token_digest: None,
+            role: ClusterRole::Voter,
         };
         let mut drifted = enabled;
         drifted.cluster.api_bind.set_port(32502);
@@ -3273,6 +3539,7 @@ mod tests {
                     row_count: 0,
                     sha256: "0".repeat(64),
                 }],
+                admitted_role: Some(membership.role),
             },
         )
         .expect("activation marker");
@@ -3317,6 +3584,7 @@ mod tests {
                     api_address: format!("127.0.0.1:{api_port}"),
                 }],
                 join_token_digest: None,
+                role: ClusterRole::Voter,
             };
             let activated = activated_dir_for_readdress(&membership);
             let mut config = membership_test_config(activated.path());
@@ -3371,6 +3639,7 @@ mod tests {
                 api_address: "127.0.0.1:32402".to_owned(),
             }],
             join_token_digest: None,
+            role: ClusterRole::Voter,
         };
         let activated = activated_dir_for_readdress(&membership);
         let database = activated
@@ -3466,6 +3735,7 @@ mod tests {
             },
             bootstrap: Vec::new(),
             join_token_digest: None,
+            role: ClusterRole::Voter,
         };
 
         let between = tempfile::tempdir().expect("between-renames recovery dir");
@@ -3552,11 +3822,33 @@ mod tests {
     }
 
     #[cfg(feature = "hiqlite-store")]
+    async fn redeem_learner_join_for_test(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<RedeemJoinRequest>,
+    ) -> Response {
+        match manager.redeem_learner(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(error) => membership_http_error(error),
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
     async fn finalize_join_for_test(
         State(manager): State<MembershipManager>,
         Json(request): Json<FinalizeJoinRequest>,
     ) -> Response {
         match manager.finalize(&request).await {
+            Ok(()) => StatusCode::NO_CONTENT.into_response(),
+            Err(error) => membership_http_error(error),
+        }
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    async fn finalize_learner_join_for_test(
+        State(manager): State<MembershipManager>,
+        Json(request): Json<FinalizeJoinRequest>,
+    ) -> Response {
+        match manager.finalize_learner(&request).await {
             Ok(()) => StatusCode::NO_CONTENT.into_response(),
             Err(error) => membership_http_error(error),
         }
@@ -3662,8 +3954,16 @@ mod tests {
         let app = Router::new()
             .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
             .route(
+                "/api/v1/cluster/learner/join/redeem",
+                post(redeem_learner_join_for_test),
+            )
+            .route(
                 "/api/v1/cluster/join/finalize",
                 post(finalize_join_for_test),
+            )
+            .route(
+                "/api/v1/cluster/learner/join/finalize",
+                post(finalize_learner_join_for_test),
             )
             .with_state(coordinator.clone());
         let http_task = tokio::spawn(async move {
@@ -3750,6 +4050,8 @@ mod tests {
                     .expect("derive the staged node artwork origin"),
                 schema_version: AUTH_SCHEMA_VERSION,
                 protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+                protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+                protocol_max: crate::store::AUTH_PROTOCOL_MAX,
             })
             .await
             .expect("reserve the token to the staged node before its failed start");
@@ -4006,6 +4308,1113 @@ mod tests {
                 .contains("does not match its content-addressed name"),
             "unexpected error: {error}"
         );
+    }
+
+    /// The upgrade contract, on a real replicated voter.
+    ///
+    /// Everything here happens with no operator action beyond installing this
+    /// binary: the cluster must stay on the pre-P6 protocol, must keep
+    /// admitting the previous release, and must move only when activation is
+    /// asked for. The refusal that comes after activation is the point of the
+    /// whole guard, so it is asserted on the message an operator would read.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_deployed_binary_widens_no_range_until_activation_is_asked_for() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("protocol activation data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster on this binary");
+        let membership = selected.membership_manager();
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        // The binary that shipped before P6: it implements exactly protocol 4.
+        let previous_release = crate::store::ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_max: crate::store::AUTH_PROTOCOL_VERSION,
+        };
+
+        // 1. Installing this binary changed nothing.
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the active range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a bootstrapped cluster must not activate protocol 5 by itself"
+        );
+        HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect("the previous release must still be able to join this cluster");
+        HiqliteAuthStore::preflight_voter(&client, crate::store::ClusterCompatibility::CURRENT)
+            .await
+            .expect("and so must this one");
+
+        // A learner's preflight against the same unactivated cluster is
+        // refused, and the refusal is not dressed as a database problem. It
+        // reached operators as `schema migration failed: learner_protocol_
+        // inactive: …`, which sent them to look at the schema when the answer
+        // was "run the activation command".
+        let learner_refusal = HiqliteAuthStore::preflight_role(
+            &client,
+            crate::store::ClusterCompatibility::CURRENT,
+            true,
+        )
+        .await
+        .expect_err("an unactivated cluster must refuse a learner's preflight")
+        .to_string();
+        assert!(
+            learner_refusal.contains("learner_protocol_inactive"),
+            "{learner_refusal}"
+        );
+        assert!(
+            !learner_refusal.contains("migration"),
+            "a protocol refusal must not arrive as a migration failure: {learner_refusal}"
+        );
+
+        // The node's own heartbeat is the proof; nothing else writes it.
+        let status = membership
+            .protocol_status()
+            .await
+            .expect("read the protocol status");
+        assert!(
+            status.learner_protocol_pending.is_empty(),
+            "the running binary proved the learner protocol by heartbeating: {status:?}"
+        );
+        assert!(!status.learner_protocol_active);
+
+        // An unactivated cluster still admits a joiner that predates the range
+        // fields entirely. This is the other half of "zero operator action":
+        // the coordinator was upgraded, and a not-yet-upgraded node can still
+        // join it. Any refusal here is addressing, never the protocol gate.
+        let unactivated_token = membership
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("issue a join token before activation");
+        let pre_range_joiner = RedeemJoinRequest {
+            token_digest: join_token_digest(&unactivated_token.token),
+            raft_id: unactivated_token.raft_id,
+            node_id: "pre-range-joiner".to_owned(),
+            hostname: "pre-range-joiner".to_owned(),
+            raft_address: "127.0.0.1:3".to_owned(),
+            api_address: "127.0.0.1:4".to_owned(),
+            http_base: String::new(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            protocol_min: 0,
+            protocol_max: 0,
+        };
+        assert_ne!(
+            membership
+                .redeem(&pre_range_joiner)
+                .await
+                .err()
+                .map(|error| error.code().to_owned())
+                .unwrap_or_default(),
+            "join_incompatible",
+            "an unactivated cluster must not refuse a joiner that predates the range"
+        );
+
+        // And that admitted joiner now holds activation, which is exactly the
+        // point: it redeemed on a binary that predates protocol 5, it is
+        // mid-join, and narrowing the range past it would leave a node that
+        // counts for quorum and can never open its store again.
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::JoinInFlight(nodes)) => {
+                assert_eq!(nodes, vec!["pre-range-joiner".to_owned()]);
+            }
+            other => panic!("a join in flight must hold activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a refused activation must not move the range"
+        );
+        // The operator's exit: this joiner has no process behind it and is
+        // never going to finish, so remove it.
+        client
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = $1 WHERE node_id = $2",
+                hiqlite::params!(1_i64, "pre-range-joiner"),
+            )
+            .await
+            .expect("tombstone the abandoned joiner");
+
+        // 2. Activation is explicit, and only then does the range move.
+        let activated = membership
+            .activate_learner_protocol()
+            .await
+            .expect("activate the learner protocol");
+        assert!(
+            activated.changed,
+            "the first activation commits: {activated:?}"
+        );
+        assert!(activated.protocol.learner_protocol_active);
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the activated range"),
+            (
+                crate::store::AUTH_PROTOCOL_MAX,
+                crate::store::AUTH_PROTOCOL_MAX
+            )
+        );
+
+        // 3. Idempotent: a retried request after a timeout is not an error and
+        //    is not a second write.
+        let again = membership
+            .activate_learner_protocol()
+            .await
+            .expect("activating an already-activated cluster succeeds");
+        assert!(!again.changed, "activation must not write twice: {again:?}");
+
+        // 4. The previous release can no longer boot here, and is told why.
+        let refusal = HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect_err("an activated cluster must refuse the previous release")
+            .to_string();
+        assert!(refusal.contains("protocol 5"), "{refusal}");
+        assert!(refusal.contains("too old"), "{refusal}");
+        HiqliteAuthStore::preflight_voter(&client, crate::store::ClusterCompatibility::CURRENT)
+            .await
+            .expect("this binary keeps working across activation");
+
+        // The admission gate agrees with the boot guard rather than comparing
+        // against a constant of its own.
+        let issued = membership
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("issue a join token for the activated cluster");
+        let old_joiner = RedeemJoinRequest {
+            token_digest: join_token_digest(&issued.token),
+            raft_id: issued.raft_id,
+            node_id: "old-binary-joiner".to_owned(),
+            hostname: "old-binary-joiner".to_owned(),
+            raft_address: "127.0.0.1:1".to_owned(),
+            api_address: "127.0.0.1:2".to_owned(),
+            http_base: String::new(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: crate::store::AUTH_PROTOCOL_VERSION,
+            // A joiner that predates the range sends no range fields.
+            protocol_min: 0,
+            protocol_max: 0,
+        };
+        assert_eq!(
+            membership
+                .redeem(&old_joiner)
+                .await
+                .expect_err("an activated cluster must refuse a protocol-4-only joiner")
+                .code(),
+            "join_incompatible"
+        );
+        let new_joiner = RedeemJoinRequest {
+            protocol_min: crate::store::AUTH_PROTOCOL_MIN,
+            protocol_max: crate::store::AUTH_PROTOCOL_MAX,
+            ..old_joiner
+        };
+        // This one clears the protocol gate; it fails later, on addressing,
+        // which is exactly what proves the protocol check let it through.
+        assert_ne!(
+            membership
+                .redeem(&new_joiner)
+                .await
+                .err()
+                .map(|error| error.code().to_owned())
+                .unwrap_or_default(),
+            "join_incompatible",
+            "a range-declaring joiner must clear the activated protocol gate"
+        );
+
+        // 5. The reversible rollback, and its idempotence.
+        let rolled_back = membership
+            .deactivate_learner_protocol()
+            .await
+            .expect("deactivate with no learner present");
+        assert!(rolled_back.changed);
+        assert!(!rolled_back.protocol.learner_protocol_active);
+        let noop = membership
+            .deactivate_learner_protocol()
+            .await
+            .expect("deactivating an unactivated cluster succeeds");
+        assert!(!noop.changed, "deactivation must not write twice: {noop:?}");
+        HiqliteAuthStore::preflight_voter(&client, previous_release)
+            .await
+            .expect("rollback restores the previous release's ability to boot");
+
+        selected.shutdown().await.expect("stop the voter");
+    }
+
+    /// The replicated schema marker, read through the leader.
+    #[cfg(feature = "hiqlite-store")]
+    async fn replicated_schema_version(client: &Client) -> i64 {
+        client
+            .query_consistent_map::<SchemaVersionRow, _>(
+                "SELECT schema_version FROM cluster_meta WHERE singleton = 1",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read the replicated schema marker")
+            .first()
+            .expect("cluster_meta has exactly one row")
+            .schema_version
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    struct SchemaVersionRow {
+        schema_version: i64,
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    impl From<&mut hiqlite::Row<'_>> for SchemaVersionRow {
+        fn from(row: &mut hiqlite::Row<'_>) -> Self {
+            Self {
+                schema_version: row.get("schema_version"),
+            }
+        }
+    }
+
+    /// One replicated membership row's durable admission role.
+    #[cfg(feature = "hiqlite-store")]
+    #[derive(Debug)]
+    struct NodeRoleRow {
+        node_id: String,
+        role: Option<String>,
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    impl From<&mut hiqlite::Row<'_>> for NodeRoleRow {
+        fn from(row: &mut hiqlite::Row<'_>) -> Self {
+            Self {
+                node_id: row.get("node_id"),
+                role: row.get("role"),
+            }
+        }
+    }
+
+    /// A token framing this build does not implement must leave the data
+    /// directory exactly as it found it.
+    ///
+    /// The assertion is on the filesystem rather than on the return value on
+    /// purpose: the refusal is only worth anything if this node is not holding
+    /// the cluster's raft, API, and credential secrets afterwards, and has not
+    /// staged an identity a later boot could resume. `plxjoin:v3` stands in for
+    /// any future protocol — including, from an older build's side, `plxjoin:v2`
+    /// itself.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test]
+    async fn an_unsupported_join_token_is_refused_before_any_secret_is_written() {
+        let joining = tempfile::tempdir().expect("joining data dir");
+        let token_path = joining.path().join("join.token");
+        // Well-formed framing, unknown version: 32-byte key, 24-byte nonce and
+        // a body, so nothing but the version can be what refuses it.
+        let token = format!("plxjoin:v3:{}:{}", "ab".repeat(32), "cd".repeat(64));
+        std::fs::write(&token_path, format!("{token}\n")).expect("write token file");
+        let mut config = membership_test_config(joining.path());
+        config.cluster.join_token_file = token_path.clone();
+
+        let error = select_daemon_store(&config)
+            .await
+            .err()
+            .expect("an unsupported token framing must refuse the join")
+            .to_string();
+        assert!(error.contains("join_token_invalid"), "{error}");
+
+        for leftover in [
+            joining.path().join(RAFT_SECRET_FILENAME),
+            joining.path().join(API_SECRET_FILENAME),
+            config.cluster.credential_key_path(joining.path()),
+            joining.path().join(crate::cluster::NODE_ID_FILENAME),
+            joining.path().join(LOCAL_MEMBERSHIP_FILENAME),
+            joining.path().join(HIQLITE_ACTIVE_DIRNAME),
+        ] {
+            assert!(
+                !leftover.exists(),
+                "a refused join left {} behind",
+                leftover.display()
+            );
+        }
+        assert!(
+            token_path.exists(),
+            "the operator's token stays put for inspection"
+        );
+    }
+
+    /// The previous release's `membership.json` version check, transcribed.
+    ///
+    /// A build that predates the learner role has no idea it must not campaign,
+    /// so it has to refuse a learner's record rather than read it as a voter's.
+    /// That is the desired behaviour, which means it is worth a test rather
+    /// than a comment.
+    #[cfg(feature = "hiqlite-store")]
+    fn the_previous_release_accepts(record: &LocalMembership) -> bool {
+        record.version == 1
+            && !record.cluster_id.trim().is_empty()
+            && !record.node_id.trim().is_empty()
+            && record.raft_id != 0
+    }
+
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn a_learner_membership_record_fails_closed_on_an_older_binary() {
+        let peer = ClusterPeer {
+            raft_id: 2,
+            raft_address: "localhost:32401".to_owned(),
+            api_address: "localhost:32402".to_owned(),
+        };
+        let voter = LocalMembership {
+            version: local_membership_version(ClusterRole::Voter),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            raft_id: 2,
+            local: peer.clone(),
+            bootstrap: vec![peer.clone()],
+            join_token_digest: None,
+            role: ClusterRole::Voter,
+        };
+        let learner = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            role: ClusterRole::Learner,
+            ..voter.clone()
+        };
+
+        // Installing this binary does not rewrite a voter's record, so rolling
+        // that node back to the previous release still works.
+        assert!(the_previous_release_accepts(&voter));
+        assert!(!the_previous_release_accepts(&learner));
+
+        // And this build round-trips both, including the v1 record's implied
+        // role — which is the v1-to-v2 read path.
+        let dir = tempfile::tempdir().expect("membership dir");
+        write_local_membership(dir.path(), &voter).expect("write a voter record");
+        assert_eq!(
+            read_local_membership(dir.path()).expect("read it back"),
+            Some(voter.clone())
+        );
+        let raw = std::fs::read_to_string(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
+            .expect("read the raw record");
+        assert!(raw.contains("\"version\": 1"), "{raw}");
+
+        write_local_membership(dir.path(), &learner).expect("write a learner record");
+        assert_eq!(
+            read_local_membership(dir.path()).expect("read it back"),
+            Some(learner)
+        );
+
+        // A record whose version and role disagree is an edited file, not a
+        // version this build has to interpret.
+        write_local_membership(
+            dir.path(),
+            &LocalMembership {
+                version: 1,
+                role: ClusterRole::Learner,
+                ..voter
+            },
+        )
+        .expect("write an inconsistent record");
+        assert!(
+            read_local_membership(dir.path()).is_err(),
+            "a v1 record must not be allowed to claim the learner role"
+        );
+    }
+
+    /// The admitted-role record grants cluster-wide job authority to a process
+    /// that cannot read committed membership, so a *missing* record must not
+    /// be read as "voter" on a clustered directory.
+    ///
+    /// Two different absences: a directory that was never clustered has no
+    /// record because there is nothing to record, and that is the ordinary
+    /// single-node server which owns every job. A directory with an activation
+    /// marker and no record is a cluster node whose one durable statement of
+    /// what it was admitted as has been lost — and if that node was a learner,
+    /// answering "voter" hands it `provider:artwork`.
+    ///
+    /// Gated like everything it calls. Without this, `cargo test -p plurx-core
+    /// --lib` does not compile — the same default-feature blind spot that hid
+    /// `local_cluster_role`'s own missing gate, one layer up.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn a_clustered_directory_with_no_admitted_role_record_refuses_instead_of_defaulting() {
+        let dir = tempfile::tempdir().expect("data dir");
+
+        // Never clustered: no marker, no record, and the single-node answer.
+        assert_eq!(
+            local_cluster_role(dir.path()).expect("an unclustered directory answers"),
+            ClusterRole::Voter
+        );
+
+        // Clustered, record present: the record answers.
+        let peer = ClusterPeer {
+            raft_id: 2,
+            raft_address: "localhost:32401".to_owned(),
+            api_address: "localhost:32402".to_owned(),
+        };
+        let learner = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "22222222-2222-4222-8222-222222222222".to_owned(),
+            raft_id: 2,
+            local: peer.clone(),
+            bootstrap: vec![peer],
+            join_token_digest: None,
+            role: ClusterRole::Learner,
+        };
+        write_local_membership(dir.path(), &learner).expect("write a learner record");
+        let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("create the active directory");
+        std::fs::write(active.join(ACTIVATION_MARKER_FILENAME), b"{}")
+            .expect("write an activation marker");
+        assert_eq!(
+            local_cluster_role(dir.path()).expect("a clustered directory answers from its record"),
+            ClusterRole::Learner
+        );
+
+        // Clustered, record gone: refuse rather than grant.
+        std::fs::remove_file(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
+            .expect("delete the learner's record");
+        let refused = local_cluster_role(dir.path())
+            .expect_err("a clustered directory with no admitted-role record must refuse")
+            .to_string();
+        assert!(
+            refused.contains(LOCAL_MEMBERSHIP_FILENAME),
+            "the refusal must name the missing file: {refused}"
+        );
+    }
+
+    /// A joined role is durable before `activation.json` becomes the commit
+    /// bit, and a retry after a crash at that boundary resumes the same role.
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn join_activation_crash_after_membership_never_restarts_a_learner_as_a_voter() {
+        let dir = tempfile::tempdir().expect("joined data dir");
+        let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("active target");
+        let peer = ClusterPeer {
+            raft_id: 4,
+            raft_address: "localhost:33401".to_owned(),
+            api_address: "localhost:33402".to_owned(),
+        };
+        let membership = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "44444444-4444-4444-8444-444444444444".to_owned(),
+            raft_id: 4,
+            local: peer.clone(),
+            bootstrap: vec![peer],
+            join_token_digest: Some("a".repeat(64)),
+            role: ClusterRole::Learner,
+        };
+        let marker = ActivationMarker {
+            marker_version: ACTIVATION_MARKER_VERSION,
+            cluster_id: membership.cluster_id.clone(),
+            source_backup_sha256: "0".repeat(64),
+            source_schema_version: AUTH_SCHEMA_VERSION,
+            replicated_schema_version: AUTH_SCHEMA_VERSION,
+            imported_rows: 0,
+            table_hashes: vec![SqliteImportTableDigest {
+                table: "settings".to_owned(),
+                row_count: 0,
+                sha256: "0".repeat(64),
+            }],
+            admitted_role: Some(ClusterRole::Learner),
+        };
+
+        let interrupted = publish_join_activation(
+            dir.path(),
+            &active,
+            &marker,
+            &membership,
+            JoinActivationFailpoint::AfterMembership,
+        )
+        .expect_err("failpoint interrupts before activation marker");
+        assert!(interrupted.to_string().contains("failpoint"));
+        assert_eq!(
+            read_local_membership(dir.path())
+                .expect("read durable membership")
+                .expect("membership was published")
+                .role,
+            ClusterRole::Learner
+        );
+        assert!(!active.join(ACTIVATION_MARKER_FILENAME).exists());
+
+        publish_join_activation(
+            dir.path(),
+            &active,
+            &marker,
+            &membership,
+            JoinActivationFailpoint::None,
+        )
+        .expect("retry publishes the marker");
+        let resumed_marker = read_activation_marker(&active).expect("read activation marker");
+        assert_eq!(
+            active_store_role(&resumed_marker, Some(&membership), dir.path())
+                .expect("resume the admitted role"),
+            ClusterRole::Learner
+        );
+
+        std::fs::remove_file(dir.path().join(LOCAL_MEMBERSHIP_FILENAME))
+            .expect("simulate later membership loss");
+        assert!(
+            active_store_role(&resumed_marker, None, dir.path()).is_err(),
+            "an activated learner with a missing role record must fail closed"
+        );
+    }
+
+    /// The whole learner admission path against a real replicated cluster.
+    ///
+    /// A learner is only useful if it is provably harmless, so this asserts the
+    /// harm it must not do rather than only that it started: it carries no
+    /// vote, its own membership handle refuses it leader-singleton work, its
+    /// durable role survives a restart, and while it exists the cluster refuses
+    /// to deactivate the protocol that admitted it.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_learner_joins_only_after_activation_and_never_gains_a_vote() {
+        install_default_crypto_provider();
+
+        let source_dir = tempfile::tempdir().expect("source data dir");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("join coordinator listener");
+        let coordinator_addr = listener.local_addr().expect("coordinator address");
+        let mut source_config = membership_test_config(source_dir.path());
+        source_config.server.bind = coordinator_addr;
+        source_config.cluster.join_url = format!("http://{coordinator_addr}");
+        drop(SqliteStore::open(&source_dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let source = select_daemon_store(&source_config)
+            .await
+            .expect("activate the source voter");
+        let coordinator = source.membership_manager();
+        let source_client = source.local_client.clone().expect("source client");
+        let app = Router::new()
+            .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
+            .route(
+                "/api/v1/cluster/learner/join/redeem",
+                post(redeem_learner_join_for_test),
+            )
+            .route(
+                "/api/v1/cluster/join/finalize",
+                post(finalize_join_for_test),
+            )
+            .route(
+                "/api/v1/cluster/learner/join/finalize",
+                post(finalize_learner_join_for_test),
+            )
+            .with_state(coordinator.clone());
+        let http_task = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("serve join coordinator");
+        });
+
+        // 1. Before activation there is no learner protocol to admit anyone
+        //    with, and the refusal happens at issuance — an operator finds out
+        //    before they have copied a token to another machine.
+        assert_eq!(
+            coordinator
+                .issue_learner_token(Duration::from_secs(120))
+                .await
+                .expect_err("an unactivated cluster cannot mint a learner token")
+                .code(),
+            "learner_protocol_inactive"
+        );
+        // A voter token is still perfectly ordinary, and still v1.
+        let voter_token = coordinator
+            .issue_token(Duration::from_secs(120))
+            .await
+            .expect("issue a voter token on an unactivated cluster");
+        assert!(voter_token.token.starts_with("plxjoin:v1:"));
+
+        // 2. Activation is the explicit step that changes this.
+        assert!(
+            coordinator
+                .activate_learner_protocol()
+                .await
+                .expect("activate the learner protocol")
+                .changed
+        );
+        let learner_token = coordinator
+            .issue_learner_token(Duration::from_secs(120))
+            .await
+            .expect("issue a learner token on an activated cluster");
+        assert!(learner_token.token.starts_with("plxjoin:v2:"));
+
+        // A pre-P6 coordinator knows only the voter route and its old SQL
+        // transition. Replicated state must reject that transition even if
+        // the old HTTP decoder would otherwise ignore a caller's learner
+        // field and proceed with the stored digest.
+        let learner_digest = join_token_digest(&learner_token.token);
+        let old_coordinator = source_client
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                 WHERE token_hash = $2 AND state = 'issued'",
+                hiqlite::params!("old-coordinator", learner_digest.as_str()),
+            )
+            .await
+            .expect_err("the voter-path transition must reject a learner token");
+        assert!(
+            old_coordinator
+                .to_string()
+                .contains("learner token requires v2 admission"),
+            "unexpected old-coordinator refusal: {old_coordinator}"
+        );
+
+        // 3. The join itself, through the operator's real entry point.
+        let learner_dir = tempfile::tempdir().expect("learner data dir");
+        let token_path = learner_dir.path().join("join.token");
+        std::fs::write(&token_path, format!("{}\n", learner_token.token))
+            .expect("learner token file");
+        let mut learner_config = membership_test_config(learner_dir.path());
+        learner_config.cluster.join_token_file = token_path.clone();
+        let learner = select_daemon_store(&learner_config)
+            .await
+            .expect("admit the learner");
+        assert_eq!(learner.identity.raft_id, learner_token.raft_id);
+        assert!(
+            !token_path.exists(),
+            "a finalized learner join consumes its token"
+        );
+
+        // 4. It is a committed member and it carries no vote. This is the
+        //    property Raft itself enforces: a non-voter cannot campaign.
+        let metrics = source_client
+            .metrics_db()
+            .await
+            .expect("read committed membership");
+        assert!(
+            metrics
+                .membership_config
+                .nodes()
+                .any(|(raft_id, _)| *raft_id == learner_token.raft_id),
+            "the learner must be a committed member"
+        );
+        assert!(
+            !metrics
+                .membership_config
+                .voter_ids()
+                .any(|raft_id| raft_id == learner_token.raft_id),
+            "the learner must not have acquired a vote"
+        );
+        assert!(
+            metrics.membership_config.voter_ids().count() == 1,
+            "admitting a learner must not change quorum size"
+        );
+
+        // 5. Its own membership handle refuses it every leader-singleton job,
+        //    from live committed membership rather than a boot flag.
+        let learner_membership = learner.membership_manager();
+        assert!(!learner_membership
+            .local_node_is_committed_voter()
+            .await
+            .expect("read the learner's committed role"));
+        assert!(!learner_membership.may_run_cluster_jobs().await);
+        assert!(
+            coordinator.may_run_cluster_jobs().await,
+            "the voter is unaffected"
+        );
+
+        // 6. The durable role is in replicated membership, where deactivation
+        //    can see it.
+        let roles = source_client
+            .query_map::<NodeRoleRow, _>(
+                "SELECT node_id, role FROM cluster_nodes ORDER BY raft_id",
+                hiqlite::params!(),
+            )
+            .await
+            .expect("read the durable roles");
+        let learner_rows = roles
+            .iter()
+            .filter(|row| row.role.as_deref() == Some("learner"))
+            .map(|row| row.node_id.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            learner_rows,
+            vec![learner.identity.node_id.clone()],
+            "exactly the joined node is durably a learner: {roles:?}"
+        );
+        match coordinator.deactivate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::LearnerProtocolInUse {
+                admitted,
+                non_voting,
+            }) => {
+                assert!(
+                    admitted.contains(&learner.identity.node_id),
+                    "the refusal must name the learner it protects: {admitted:?}"
+                );
+                assert_eq!(
+                    non_voting,
+                    vec![learner.identity.raft_id.to_string()],
+                    "and must label the Raft-membership roster as its own claim"
+                );
+            }
+            other => panic!("deactivation must be refused while a learner exists: {other:?}"),
+        }
+        assert_eq!(
+            coordinator
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_LEARNER_PROTOCOL,
+                crate::store::AUTH_LEARNER_PROTOCOL
+            ),
+            "a refused deactivation must not move the range"
+        );
+
+        // 6b. And the removal endpoint an operator reaches for next says the
+        //     same thing. It used to answer "not found" for this node — a 404
+        //     for a row the roster is printing, which reads as "you typed the
+        //     wrong id" rather than "this release cannot remove it". The
+        //     refusal has to name the node and be its own code.
+        let refused_removal = coordinator
+            .remove_voter(&learner.identity.node_id)
+            .await
+            .expect_err("this release has no removal path for a member with no vote");
+        assert_eq!(
+            refused_removal.code(),
+            "cluster_non_voter_removal_unsupported",
+            "a learner the roster lists must not be reported as missing: {refused_removal}"
+        );
+        assert!(
+            refused_removal
+                .to_string()
+                .contains(&learner.identity.node_id),
+            "the refusal must name the node the operator asked about: {refused_removal}"
+        );
+        assert_eq!(
+            coordinator
+                .remove_voter("a-node-id-that-was-never-in-this-cluster")
+                .await
+                .expect_err("an unknown node is still not found")
+                .code(),
+            "cluster_node_not_found",
+            "and the genuine 404 must keep answering 404"
+        );
+
+        // 7. A learner never advances replicated schema. Rewind the marker
+        //    one step and make the learner's own boot call — `open`, not
+        //    `open_or_migrate` — against its own client: it must refuse and
+        //    leave the marker exactly where it found it. What a voter's boot
+        //    call does with the same marker is covered by the schema
+        //    migration tests in `store::hiqlite`; what matters here is that
+        //    the learner is not the node that does it.
+        let learner_client = learner.local_client.clone().expect("learner client");
+        let previous_schema = crate::store::AUTH_SCHEMA_VERSION - 1;
+        source_client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(previous_schema),
+            )
+            .await
+            .expect("rewind the replicated schema marker");
+        let refused = HiqliteAuthStore::open(
+            learner_client.clone(),
+            &learner_dir.path().join("learner-migration-probe.db"),
+        )
+        .await
+        .err()
+        .expect("a learner must refuse a schema it does not implement")
+        .to_string();
+        assert!(refused.contains("schema"), "{refused}");
+        assert_eq!(
+            replicated_schema_version(&source_client).await,
+            previous_schema,
+            "a learner must not advance replicated schema"
+        );
+        source_client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+            )
+            .await
+            .expect("restore the replicated schema marker");
+
+        // 7. The role is durable across a restart: membership.json carries it,
+        //    and the restarted process must not wait for a promotion it was
+        //    admitted specifically not to receive.
+        let persisted = read_local_membership(learner_dir.path())
+            .expect("read the learner record")
+            .expect("a joined node persists one");
+        assert_eq!(persisted.role, ClusterRole::Learner);
+        assert_eq!(persisted.version, 2);
+        learner.shutdown().await.expect("drain the learner");
+        drop(learner);
+
+        // The record a restart reads, read back through the same function both
+        // boot paths use to resume a role.
+        let resumed = read_local_membership(learner_dir.path())
+            .expect("read the record a restart would resume from")
+            .expect("still present after shutdown");
+        assert_eq!(boot_cluster_role(Some(&resumed)), ClusterRole::Learner);
+
+        // And the restart itself gets as far as binding its listeners, which
+        // is downstream of reading and accepting that version 2 record — the
+        // previous release refuses it before this point. It stops there only
+        // because Hiqlite 0.14 keeps its TLS listener task alive until the
+        // test runtime exits, so this process cannot free its own ports; a
+        // real daemon restart has them back.
+        let restart = select_daemon_store(&learner_config)
+            .await
+            .err()
+            .expect("an in-process restart cannot rebind Hiqlite's leaked listener")
+            .to_string();
+        assert!(
+            restart.contains("is not available"),
+            "the restart must fail on the port and not on the learner record: {restart}"
+        );
+
+        http_task.abort();
+        source.shutdown().await.expect("drain the source voter");
+    }
+
+    /// A learner never proposes a replicated schema migration.
+    ///
+    /// The boot path picks how to open the store from the role this node was
+    /// admitted with, and swapping the learner arm to `open_or_migrate`
+    /// survived everywhere — including the separate-process harness, which
+    /// never sets up a learner joining a cluster whose replicated schema is
+    /// behind. Nothing looked at the one thing that distinguishes the arms.
+    ///
+    /// So construct exactly that: rewind the cluster's replicated schema
+    /// marker, then open the store both ways against the same live cluster.
+    /// The learner has to refuse and leave the marker where it found it; the
+    /// voter has to advance it. Either arm collapsing onto the other fails
+    /// one of the two halves.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_learner_refuses_a_behind_schema_that_a_voter_migrates() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("schema role data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster");
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        let current = replicated_schema_version(&client).await;
+        assert_eq!(current, crate::store::AUTH_SCHEMA_VERSION);
+        let behind = current - 1;
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(behind),
+            )
+            .await
+            .expect("rewind the replicated schema marker");
+
+        // The learner arm: refuse, and change nothing. The refusal is asserted
+        // in full, because that is what distinguishes the arms — swapping this
+        // to `open_or_migrate` also fails here, but on a migration step rather
+        // than on the compatibility check, and an operator reading "duplicate
+        // column name" learns nothing about what their learner is waiting for.
+        let refused = open_store_for_role(
+            ClusterRole::Learner,
+            client.clone(),
+            &dir.path().join("learner-probe.db"),
+        )
+        .await
+        .err()
+        .expect("a learner must refuse a replicated schema it does not implement")
+        .to_string();
+        assert!(
+            refused.contains(&format!(
+                "cluster schema {behind} is incompatible with voter schema {}",
+                crate::store::AUTH_SCHEMA_VERSION
+            )),
+            "the learner must refuse on the compatibility check, not inside a migration: \
+             {refused}"
+        );
+        assert_eq!(
+            replicated_schema_version(&client).await,
+            behind,
+            "a learner must not advance replicated schema"
+        );
+
+        // And the refusal was about the schema, not about learners: put the
+        // marker back and the same arm opens the same cluster.
+        client
+            .execute(
+                "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
+                hiqlite::params!(crate::store::AUTH_SCHEMA_VERSION),
+            )
+            .await
+            .expect("restore the replicated schema marker");
+        drop(
+            open_store_for_role(
+                ClusterRole::Learner,
+                client.clone(),
+                &dir.path().join("learner-probe.db"),
+            )
+            .await
+            .expect("a learner opens a schema it does implement"),
+        );
+
+        // The voter arm is the one that may migrate, and it opens the same
+        // cluster through `open_or_migrate`.
+        drop(
+            open_store_for_role(
+                ClusterRole::Voter,
+                client.clone(),
+                &dir.path().join("voter-probe.db"),
+            )
+            .await
+            .expect("a voter opens the cluster it is responsible for migrating"),
+        );
+        assert_eq!(
+            replicated_schema_version(&client).await,
+            crate::store::AUTH_SCHEMA_VERSION
+        );
+
+        selected.shutdown().await.expect("stop the voter");
+    }
+
+    /// Activation is decided on the binary each voter is running *now*.
+    ///
+    /// Both refusals below are constructed against a live replicated cluster:
+    /// one voter whose capability row was never written, and one whose row
+    /// survives from a build that was rolled back. The second is the case the
+    /// heartbeat coupling exists for — the row is present and looks like a
+    /// proof until it is compared with that node's current heartbeat.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn activation_refuses_a_voter_whose_running_binary_is_unproven() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("unproven voter data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        let selected = select_daemon_store(&config)
+            .await
+            .expect("activate a one-voter cluster");
+        let membership = selected.membership_manager();
+        let client = selected
+            .local_client
+            .as_ref()
+            .expect("voter client")
+            .clone();
+
+        // A second node that has heartbeated but never proved the capability,
+        // standing in for a voter still running the previous release. Its
+        // heartbeats are *current* on purpose: activation also refuses for a
+        // node that has gone silent, and this test is about the capability
+        // rule, not that one.
+        let beat = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_millis() as i64;
+        client
+            .execute(
+                "INSERT INTO cluster_nodes \
+                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
+                 VALUES ($1, $2, $3, $4, $5, NULL)",
+                hiqlite::params!("unproven-voter", 77_i64, "127.0.0.1:1", "127.0.0.1:2", beat),
+            )
+            .await
+            .expect("seed a voter running an older binary");
+        client
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3)",
+                hiqlite::params!("unproven-voter", "membership_removal_attempt_refs_v1", beat),
+            )
+            .await
+            .expect("that binary does write the capability it knows about");
+
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::LearnerProtocolUpgradeRequired(
+                nodes,
+            )) => {
+                assert_eq!(nodes, vec!["unproven-voter".to_owned()]);
+            }
+            other => panic!("an unproven voter must block activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            ),
+            "a refused activation must not move the range"
+        );
+
+        // Now the deliberate stale case: the node proves the capability, then
+        // heartbeats again on a binary that does not know about it. The row is
+        // still there; only its timestamp says it is no longer current.
+        client
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 VALUES ($1, $2, $3)",
+                hiqlite::params!("unproven-voter", "learner_protocol_v5", beat),
+            )
+            .await
+            .expect("the node proves the learner protocol once");
+        assert!(
+            membership
+                .protocol_status()
+                .await
+                .expect("status after the proof")
+                .learner_protocol_pending
+                .is_empty(),
+            "the cluster is briefly ready"
+        );
+        client
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = $1 WHERE node_id = $2",
+                hiqlite::params!(beat + 1, "unproven-voter"),
+            )
+            .await
+            .expect("the rolled-back binary heartbeats");
+
+        match membership.activate_learner_protocol().await {
+            Err(super::super::membership::MembershipError::LearnerProtocolUpgradeRequired(
+                nodes,
+            )) => {
+                assert_eq!(
+                    nodes,
+                    vec!["unproven-voter".to_owned()],
+                    "a capability older than its node's heartbeat is not a current proof"
+                );
+            }
+            other => panic!("a stale capability must block activation: {other:?}"),
+        }
+        assert_eq!(
+            membership
+                .active_protocol_range()
+                .await
+                .expect("read the range"),
+            (
+                crate::store::AUTH_PROTOCOL_MIN,
+                crate::store::AUTH_PROTOCOL_MIN
+            )
+        );
+
+        selected.shutdown().await.expect("stop the voter");
     }
 }
 

@@ -415,13 +415,9 @@ async fn run_remote_topology(request: RemoteTopologyRequest<'_>) -> Result<Topol
     let mut nodes = Vec::with_capacity(selected.len());
     for (voter, cleanup) in selected.iter().zip(&cleanups) {
         let launch = NodeLaunch {
-            node_id: voter.node_id,
-            root: PathBuf::from("/data"),
-            nodes: specs.clone(),
             listen_addr: "0.0.0.0".to_owned(),
             read_pool_size: config.read_pool_size,
-            emulate_old_watermark_handler: false,
-            emulate_p3a_watermark_handler: false,
+            ..NodeLaunch::voter(voter.node_id, PathBuf::from("/data"), specs.clone())
         };
         match spawn_remote_node(
             voter,

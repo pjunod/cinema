@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["aeb58f40"]
+reason = "This commit only records the retained TLS-publication and offline-idempotency CI evidence in separate regressions.d fragments."
+ignore = true

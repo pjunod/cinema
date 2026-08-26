@@ -248,6 +248,11 @@ Raft progress facts, never users, titles, media paths, tokens, or library data.
 | `Replicated DEGRADED` with two voters | Both voters are required for every quorum, so one failure stops writes and membership changes. This is a reconfiguration waypoint, never HA. | Add a third voter from **Settings → Cluster**, which reports the same state as a reconfiguration in progress. Do not stop either voter until three are present and in sync. |
 | `Replicated DEGRADED` | This node has unapplied entries, a leader cannot be confirmed, or a reporting peer is behind or missing. Watch state is durable once quorum-acknowledged, but it may not be visible from every node yet. | Keep the available nodes online and check the last observed in-sync time. If the gap does not fall, inspect the logs before restarting anything. |
 
+Every count in this table is a count of **voters**. A learner replicates like
+any other member and appears in the roster, but it is not a voter, so it moves
+none of these states: a one-voter install with a learner is still
+`Replicated one node`, and a three-voter cluster with a learner is still three.
+
 **How to read the numbers:** `applied term T, index I` is this node's latest
 applied durable entry. `N changes behind` is the largest gap in the current
 metrics, or a conservative worst-case upper bound when a peer stops reporting.
@@ -281,6 +286,7 @@ read when you open the tab, not on every Settings visit.
 | `One node` | Replicated, one voter. A supported configuration, not a half-built cluster. |
 | `Reconfiguration in progress — not redundant` | Two voters. Both machines are required for every write and every membership change, so this survives no failure — read the same warning in the table above. Add a third node. |
 | `Redundant — N voters` | Three or more voters. The panel names the majority required and how many nodes may be down. |
+| `… is a learner` appended to any of the above | One or more admitted non-voting members. The sentence is appended, never substituted: a learner changes none of the quorum arithmetic in front of it. |
 
 The node table leads with each machine's short OS hostname, labels the current
 leader beside it, then shows the advertised host and stable node id underneath.
@@ -290,9 +296,11 @@ the hostname from the OS. A container should set `PLURX_NODE_HOSTNAME` to the
 Docker host's `hostname -s`, because its own OS hostname is normally a generated
 container id. `GET /api/v1/cluster/nodes` also exposes the Raft id,
 voter/learner role, heartbeat freshness, and last-seen. A fresh heartbeat is a
-recent committed application heartbeat, not a direct socket probe; read the
-nested replication status for leader and apply-lag health. Media paths and
-token material are not in that payload and are not shown.
+recent committed application heartbeat, not a direct socket probe. The role is
+the durable one the node was admitted under, not a phase of joining; a learner
+keeps it for as long as it is a member. Read the nested replication status for
+leader and apply-lag health. Media paths and token material are not in that
+payload and are not shown.
 
 The **Cluster log** under the roster holds membership, Hiqlite, and Raft events
 in its own 2,000-line process-local ring. Those events do not consume the
@@ -407,6 +415,10 @@ and its measured write cost is acceptable. Removing a fourth voter is always
 an operator decision through the safe membership API, never an automated
 "performance" action.
 
+Every number above counts voters. Admitting a learner adds a replica, not a
+vote: it changes no majority, adds no failure tolerance, and is not a substitute
+for the third voter this section asks for.
+
 `make cluster-check` now creates
 `target/validation/cluster-topology-semantic.json`. It starts fresh independent
 three- and four-process clusters, sends the same 64 quorum-acknowledged setting
@@ -414,8 +426,12 @@ writes to each elected leader, and records raw controller-to-node acknowledged
 write round trips in microseconds, type-7 p50/p95/p99 values, quorum size,
 physical Raft-entry count, the stable leader term, and every voter's applied
 index. Every voter locally reads back the deterministic 64-row/4,096-byte
-payload and must match the expected corpus digest. The round trip includes
-harness IPC and scheduling; it is not an internal Raft commit timer. This is
+payload and must match the expected corpus digest. Every voter in that
+artifact is a voter: the topology comparison admits no learner, so its
+quorum-size and applied-index fields say nothing about one. `make cluster-check`
+separately runs a three-voter-plus-learner scenario, described under *Admitting
+a learner* below. The round trip includes harness IPC and scheduling; it is not
+an internal Raft commit timer. This is
 deterministic semantic CI evidence: resource fields are explicitly null and
 the artifact cannot support a hardware or absolute-latency claim. A
 counterbalanced semantic run can be requested with
@@ -425,6 +441,278 @@ resource counters. The portable Draft 2020-12 schema enforces shape, topology,
 and evidence-scope resource fields; `validate_topology_artifact` remains the
 canonical check for cross-field hashes, recomputed percentiles, timestamps,
 applied lag, and leader/term semantics that JSON Schema cannot express.
+
+### The cluster protocol range and learner-protocol activation
+
+Every voter carries two protocol numbers: the range its binary implements, and
+the range the cluster is actively using. The cluster's range lives in
+`cluster_meta.protocol_min`/`protocol_max`. A node may boot, join, or rejoin
+only when its own range covers the cluster's whole active range — not when the
+two merely overlap, because the active range names protocols the cluster's
+features already depend on.
+
+Binaries from this release implement protocol **4 through 5**. Protocol 5 is
+the non-voting learner admission protocol. A cluster bootstrapped or upgraded
+onto this release stays on `4..=4`:
+
+- installing this binary requires no operator action and changes nothing;
+- a voter still running the previous release keeps booting and keeps joining;
+- `protocol_max` is never widened implicitly — nothing but the explicit
+  activation below moves the cluster's range.
+
+`GET /api/v1/cluster/nodes` reports the range under `protocol`
+(`active_min`, `active_max`, `binary_min`, `binary_max`,
+`learner_protocol_active`, and `learner_protocol_pending`), and each roster
+entry carries `learner_protocol_ready`. A node is ready only when the binary it
+is running *right now* has proven the learner protocol; the proof is written in
+the same replicated transaction as the node's heartbeat, so a node that was
+upgraded and then rolled back stops being ready on its next heartbeat rather
+than keeping a stale claim.
+
+Activate only after every voter reports ready:
+
+```
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://plurx.example.net/api/v1/cluster/protocol/learner/activate
+```
+
+The response is `{"changed": …, "protocol": …}`. `changed: false` with
+`learner_protocol_active: true` means the cluster was already activated — the
+operation is idempotent, so retrying after a timeout is safe. Refusals are
+distinct on purpose:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `learner_protocol_upgrade_required` | 409 | Named nodes are running a binary that has not proven protocol 5. Upgrade each, wait one heartbeat interval, retry. |
+| `learner_protocol_node_absent` | 409 | Named members have not heartbeated for over two minutes, so nothing current is known about the binary they would come back running. Start them, or remove them. |
+| `join_in_flight` | 409 | Named nodes have redeemed a join token and have not heartbeated yet. Wait for the join to finish, then retry. |
+| `cluster_protocol_range_changed` | 409 | The range moved while this call was committing. Re-read `GET /cluster/nodes` and retry. |
+| `learner_protocol_in_use` | 409 | Deactivation would strand the named members: those admitted as learners, and those that committed Raft membership currently lists as holding no vote. |
+| `cluster_leader_unavailable` | 503 | There is no elected leader to commit the change. Retry after the election. |
+
+Activation asks three separate questions, because "can this cluster speak
+protocol 5" has three ways to be false and `learner_protocol_pending` answers
+only the first. Each is checked twice — once as a read that names nodes, and
+again inside the committing statement, so a leader that won the reads and then
+lost a race cannot commit anyway.
+
+**`learner_protocol_pending` is a staleness rule, not a liveness one.** The
+capability row carries the heartbeat's own timestamp, and a node is "pending"
+when its capability row's timestamp no longer equals its `last_seen_at`. That
+is what catches a rollback: an older binary's heartbeat advances `last_seen_at`
+without refreshing the proof, so the node reappears in
+`learner_protocol_pending` within one interval, and upgrading it again clears it
+within one interval too.
+
+**A node that proved protocol 5 and then stopped stays "ready" forever, and is
+refused by the absence rule instead.** Both timestamps freeze together when a
+node dies, so the equality still holds and the node never appears in
+`learner_protocol_pending` — the pending roster alone would activate straight
+past a machine that is switched off, and a binary rolled back while that machine
+is down never writes the desynchronising heartbeat the rule above leans on.
+Activation therefore also refuses, with `learner_protocol_node_absent`, for any
+member that is not tombstoned and has not heartbeated in over two minutes
+(twelve heartbeat intervals). A node that died running the *previous* release is
+named by this rule too, and by this rule first: it is the one whose next step —
+start it or remove it — actually ends.
+
+The two exits are the two in that sentence. Bring the node back on a binary from
+this release and it clears itself within one heartbeat interval, or remove it
+with `DELETE /api/v1/cluster/nodes/{node_id}` first. A node that has already
+been removed is tombstoned and is not consulted by any of the three rules.
+
+**A node that is mid-join blocks activation too, and clears itself.** Between
+redeeming its join token and its first heartbeat a node is already a committed
+member with no capability row at all, which `learner_protocol_pending` is
+deliberately blind to — it has not heartbeated, so it is not "behind". Activating
+past it would leave a voter that counts toward quorum and can never open its
+store again; on a three-to-four growth that takes fault tolerance to zero. So the
+commit refuses with `join_in_flight` and names it. A join that finishes clears
+this within seconds. A join that was abandoned stops advancing its timestamp and
+is named by `learner_protocol_node_absent` instead once it goes stale, so an
+interrupted redemption cannot hold activation forever.
+
+**After activation, a binary that only implements protocol 4 can no longer
+boot, join, or rejoin this cluster.** Its refusal names the required protocol
+and says the binary is too old. Upgrade every voter *before* activating.
+
+### Rolling the learner protocol back
+
+`POST /api/v1/cluster/protocol/learner/deactivate` narrows the range back to
+`4..=4`. It is idempotent, and it is refused while any committed member holds no
+vote.
+
+The rollback is available in exactly one state: activated, with no learner
+admitted. In that state it is a clean reversal — nothing depends on protocol 5,
+and the previous release boots, joins, and rejoins again on the next heartbeat.
+
+```
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://plurx.example.net/api/v1/cluster/protocol/learner/deactivate
+```
+
+**Once a learner is admitted, rollback is unavailable, and this release has no
+way to make it available again.** Deactivation is refused with
+`learner_protocol_in_use` naming the member it would strand, and learner removal
+is not implemented — `DELETE /api/v1/cluster/nodes/{node_id}` refuses a node
+that carries no vote with `cluster_non_voter_removal_unsupported`, naming it,
+rather than answering `cluster_node_not_found` for a node the roster plainly
+lists. Plan for this before admitting the first learner, not after: the forward
+fix (upgrade the lagging node) is the only route out from that point, and there
+is no rehearsal that gets it back.
+
+`learner_protocol_in_use` carries two labelled rosters, and they answer
+different questions. *Admitted as learners* comes from the durable role column
+and names nodes this cluster admitted under protocol 5, including one that is
+currently switched off. *Listed as non-voting* comes from committed Raft
+membership. An ordinary voter that is mid-join appears in the second for a
+moment — the join adds it as a Raft learner before promoting it — and settles on
+its own; it is not a learner and must not be removed. Wait for the join to
+finish and retry.
+
+An admission interrupted after redemption — a port conflict, a crash, a `^C`
+— leaves a `role='learner'` row and **continues to block rollback regardless of
+age**. Age is not proof that the authorized process cannot resume. This release
+has no learner-removal transaction that can cancel and tombstone that admission
+atomically, so the safe recovery is forward: restart the joiner or upgrade/fix
+it. Plan as though copying a learner token into place and reaching redemption
+makes protocol 5 permanent for this release.
+
+The refusal is decided twice — once as a read that names what is in the way, and
+again inside the committing statement — so a learner admitted between the two
+still stops the rollback rather than being stranded by it.
+
+### Admitting a learner
+
+A learner receives replication and nothing else. It never becomes leader, never
+counts toward quorum, and runs none of the cluster's leader-singleton work — no
+scheduler, no schema migration, no provider or scan pass. Quorum size is
+unchanged by admitting one: three voters plus a learner still needs two voters
+to commit. Eligibility for that work is re-derived from committed Raft
+membership on every decision, not from the role the process booted with.
+
+#### What a learner is not, yet
+
+This release admits a learner and makes it harmless. It does not yet make it
+useful, and the three things an operator would reasonably expect next do not
+exist:
+
+| Not yet | What that means today |
+|---|---|
+| Eligible traffic | Nothing routes reads, playback, or transcode work to a learner. It replicates and answers its own local API; it takes no share of the cluster's load. Admitting one changes what the cluster costs, not what it can serve. |
+| Promotion | There is no operation that turns a learner into a voter. The role is durable, and no code path moves it. |
+| Removal | There is no operation that removes a learner. The voter removal endpoint does not resolve one, and its presence permanently blocks the protocol rollback above. |
+
+Admit a learner in this release only to stage a machine you intend to keep, on a
+cluster you will not need to roll back. Adding a learner for capacity is PR-2's
+subject and is not delivered here.
+
+Admission is a separate protocol, not a flag on the voter join, and it is
+available only after the activation above:
+
+1. Activate the learner protocol (previous section). Before that,
+   `POST /api/v1/cluster/learner-join-tokens` is refused with
+   `learner_protocol_inactive` — at issuance, so nobody copies a token to
+   another machine first.
+2. Mint the token on a voter:
+
+```
+curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"expires_in_seconds": 600}' \
+  https://plurx.example.net/api/v1/cluster/learner-join-tokens
+```
+
+   Voter admission stays on `/api/v1/cluster/join-tokens` and mints exactly the
+   token it always did. A learner token is prefixed `plxjoin:v2:`; a voter token
+   stays `plxjoin:v1:`.
+3. Put the token in the new node's `cluster.join_token_file` and start `plurxd`
+   on a **fresh data directory**, exactly as for a voter join.
+
+The role is bound to the coordinator's issued-token record, not to anything the
+joining node sends, so a joining process cannot ask to be admitted as something
+other than what the token was minted for. It is also recorded in replicated
+membership and in the node's own `membership.json`, which is written as
+**version 2** for a learner. That file is deliberately unreadable by releases
+that predate the learner role: such a build has no idea it must not campaign,
+so refusing to start is the correct outcome. A voter's `membership.json` stays
+version 1 and stays readable by the previous release, so rolling a voter back
+remains possible.
+
+Once a learner exists, `.../protocol/learner/deactivate` is refused with
+`learner_protocol_in_use` and names it. Removing a learner is not yet
+implemented; do not admit one to a cluster you may need to roll back. See
+*Rolling the learner protocol back* above.
+
+#### A learner is inside the trust boundary
+
+**Admitting a learner is admitting a full member of this cluster's trust
+boundary.** The role is a capacity decision, not a security boundary, and this
+release does not make it one.
+
+A join token ships `secret_api` whole, before the joining node starts, and that
+one credential is simultaneously:
+
+- the Raft **membership-mutation** credential, which authorizes
+  `POST /cluster/become_member` and `/cluster/membership` on the leader;
+- the full replicated **read/write client** credential; and
+- the artwork **HMAC** key.
+
+A learner therefore holds everything it needs to call `become_member` against
+the leader and promote itself to a voter, and nothing on the plurx side is
+consulted when it does: those routes live in vendored Hiqlite and honour only
+`validate_secret`. Every plurx-side refusal in this document — the role bound to
+the token record, the `learner_only` startup hint, the job gate — is
+defence-in-depth against mistakes, not authorization against a hostile or
+compromised node.
+
+In particular, **the cluster job gate is not authorization.** It stops a learner
+from duplicating a provider pass or taking a scan lease away from the voters
+that should own it. It does not, and cannot, stop a node that holds the shared
+credential from doing cluster-wide work by other means.
+
+Give a learner the same trust you give a voter: admit only machines you
+administer, and treat a leaked join token as a full cluster compromise, exactly
+as for a voter join. Splitting membership mutation onto its own credential is a
+separate milestone, designed in
+[MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
+
+Refusals specific to admission:
+
+| Code | HTTP | Meaning |
+|---|---|---|
+| `learner_protocol_inactive` | 409 | The cluster has not activated protocol 5. Activate it first. |
+| `join_incompatible` | 400 | The joining binary does not implement the cluster's whole active protocol range. |
+| `join_token_invalid` | 400 | Including a token framing this build does not implement — an older build reads `plxjoin:v2` this way, and refuses before it writes any cluster secret to disk. |
+
+On the joining node's own console the first of those reads `the cluster refused
+this join: learner_protocol_inactive: …`. It is deliberately not prefixed
+`schema migration failed`: nothing is being migrated and nothing is broken.
+
+#### Upgrade voters before learners
+
+A learner never proposes a replicated schema migration — that is the point of
+the role, and it is enforced at the boot path rather than merely intended. The
+consequence is an ordering rule for every future upgrade:
+
+**Upgrade the voters first, then the learners.** A voter migrates the
+replicated schema forward when it opens the store. A learner only checks it, so
+a learner running a *newer* binary than the cluster's replicated schema refuses
+to start, with
+
+```
+cluster schema 11 is incompatible with voter schema 12
+```
+
+("voter schema" there is the schema this binary implements — the name says which
+role is responsible for installing it, not which role is refusing.) There is no
+override and no self-repair: the learner will refuse for as long as the cluster
+sits behind it. Upgrade a voter and the learner starts on its next attempt.
+
+The reverse order is safe: a learner still on the old binary is refused by the
+same check the moment the voters move ahead of *it*, and the same fix applies —
+move the learner forward. Either way the fix is forward, so keep the voters at
+or ahead of every learner.
 
 ### Measuring page-route latency
 
@@ -884,8 +1172,10 @@ curl -fsS -X POST "$PLURX/api/v1/cluster/join-tokens" \
 `plurx.db`; joining never overwrites an installation. Copy the protected token
 file there, configure this node's own reachable addresses, and start `plurxd`.
 It checks schema/protocol compatibility before admission, creates a distinct
-`node.id`, catches up as a learner, becomes a voter, verifies the unchanged
-replicated `instance.id`, and deletes the token file only after finalization.
+`node.id`, catches up as a non-voting Raft member, is promoted to a voter,
+verifies the unchanged replicated `instance.id`, and deletes the token file only
+after finalization. That intermediate step is Raft's, and is over in seconds; it
+is not the durable **learner role** below, which nothing promotes.
 An interrupted join reuses its staged identity instead of minting another one.
 `membership.json` records that token's digest. A leftover token from another
 node therefore produces a warning and is ignored rather than taking an already

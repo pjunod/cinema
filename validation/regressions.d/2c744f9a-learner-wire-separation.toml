@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2c744f9a"]
+points = ["cluster.auth", "cluster.membership", "persistence.upgrades"]
+checks = ["cluster-auth", "database-upgrades", "security-boundaries"]
+reason = "The migration contract's real replicated learner join now first runs the exact issued-to-redeeming SQL used by a pre-P6 coordinator and requires the replicated trigger to reject it, then admits the same credential through the dedicated learner redeem/finalize routes and proves it remains non-voting. The security-boundaries route test pins admin-only learner issuance, role-free redemption, and rejection of a role field on the voter endpoint. Cluster-auth retains the three-voter-plus-learner process proof around the same admission record and live committed-role gate."

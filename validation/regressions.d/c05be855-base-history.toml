@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c05be855"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This validation-only base repair attaches the missing current-check evidence to the already merged Darwin secure-path correction. The history-regressions check parses and enforces that retained mapping."

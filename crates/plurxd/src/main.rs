@@ -579,14 +579,42 @@ async fn refresh_metadata(config: &mut Config, library_id: Option<i64>) -> anyho
     let identity = plurx_core::cluster::initialize_identity(&config.storage.data_dir, &cluster_id)?;
     let artwork_dir = dirs.artwork;
     std::fs::create_dir_all(&artwork_dir)?;
-    refresh_metadata_with_store(store, &artwork_dir, library_id, &identity.node_id).await
+    // A maintenance command runs the same cluster-wide singleton pass a
+    // scheduled job would, so it is subject to the same rule. This process has
+    // no Raft handle of its own, so the durable admission record in
+    // membership.json is what it has; it can only refuse, never grant.
+    let authority = crate::job_lease::AdmittedRoleJobAuthority::new(
+        plurx_core::cluster::migration::local_cluster_role(&config.storage.data_dir)?,
+    );
+    refresh_metadata_with_store(
+        store,
+        &artwork_dir,
+        library_id,
+        &identity.node_id,
+        &authority,
+    )
+    .await
 }
+
+/// What an operator sees when `plurxd refresh-metadata` cannot take the
+/// cluster-wide artwork lease.
+///
+/// A named constant rather than an inline literal because the sentence is the
+/// deliverable — it is the only thing the operator gets — and it shipped once
+/// with two runs of fourteen spaces in it, from continuation lines that had
+/// lost their trailing `\`. Nothing could assert on it while it was inline, so
+/// nothing did; [`the_cluster_refusals_read_as_sentences`] asserts on it here.
+const ARTWORK_PASS_UNAVAILABLE: &str =
+    "the artwork provider pass is not available on this node: it is either active on \
+     another cluster node, or this node was admitted as a learner and never runs \
+     cluster-wide provider work";
 
 async fn refresh_metadata_with_store(
     store: Arc<dyn Store>,
     artwork_dir: &std::path::Path,
     library_id: Option<i64>,
     node_id: &str,
+    authority: &dyn plurx_core::cluster::coordination::ClusterJobAuthority,
 ) -> anyhow::Result<()> {
     let libraries = store.list_libraries().await?;
 
@@ -599,9 +627,10 @@ async fn refresh_metadata_with_store(
 
     let tmdb_key = store.get_setting(keys::TMDB_API_KEY).await?;
     let coordinator = StoreCoordinator::new(Arc::clone(&store), node_id.to_owned())?;
-    let Some(lease) = acquire_cluster_job(&coordinator, "provider:artwork".to_owned()).await?
+    let Some(lease) =
+        acquire_cluster_job(&coordinator, authority, "provider:artwork".to_owned()).await?
     else {
-        anyhow::bail!("artwork provider pass is active on another cluster node");
+        anyhow::bail!(ARTWORK_PASS_UNAVAILABLE);
     };
     let lost = lease.loss_token();
     let publisher = lease.publisher(store.as_ref());
@@ -1421,6 +1450,39 @@ impl Drop for BackgroundLoopGuard {
     }
 }
 
+/// Start the daemon's background loops.
+///
+/// Three of these are cluster-wide work and take a live eligibility check on
+/// every pass, so a node carrying no vote runs none of them and a promoted one
+/// starts without a restart: the scheduler (which dispatches every leased
+/// singleton job), the Trakt two-way sync, and the watched outbox. All three
+/// mutate replicated state on behalf of the whole server.
+///
+/// Everything else here is node-local by construction and must keep running on
+/// a learner. The store-metrics and replication loops describe *this* process —
+/// a learner's lag is precisely what an operator needs to see. The membership
+/// heartbeat is how a node stays in the roster and keeps its protocol
+/// capability proof current; a learner that stopped heartbeating would read as
+/// unreachable. The offline source probe answers questions about this node's
+/// own files and has to run everywhere for any node's removal to be provable.
+/// The serving-fence, media-pool, shared-cache, transcode, artwork-
+/// materialization and storage-probe loops act on bytes and hardware this
+/// process owns.
+///
+/// Two of them are not node-local, and saying they were was wrong.
+/// `maintain_media_sessions` ends *any* node's expired sessions and prunes
+/// `job_leases`; `expire_offline_packages` expires the whole cluster's. Both
+/// are idempotent sweeps over rows that have already passed a deadline, both
+/// reach the same answer whoever runs them, and every voter already runs them
+/// concurrently today — so a learner running them too changes nothing. They
+/// stay ungated because a cluster where only voters swept would leave expired
+/// sessions and packages alive whenever the sweeping voter was down, and
+/// because gating them would buy nothing: a sweep is not a singleton.
+///
+/// The offline-package loop is the exception inside the exception, and it is
+/// gated: its expiry sweep is one of the two above, but claiming the next
+/// queued package is not a sweep at all — it pops from a cluster-wide queue
+/// and binds the work to this node. See `offline::prepare_loop`.
 fn spawn_background_loops(
     state: &AppState,
     background_shutdown: tokio_util::sync::CancellationToken,
@@ -1460,7 +1522,12 @@ fn spawn_background_loops(
     // Reap idle transcode sessions in the background.
     tokio::spawn(std::sync::Arc::clone(&state.transcode).reap_loop());
     tokio::spawn(std::sync::Arc::clone(&state.transcode).vod_maintain_loop());
-    tokio::spawn(std::sync::Arc::clone(&state.offline).run());
+    // The expiry sweep in here is a cluster-wide idempotent sweep and stays
+    // ungated; claiming the next queued package is not, and takes the same
+    // live membership check the other cluster-wide loops do.
+    tokio::spawn(
+        std::sync::Arc::clone(&state.offline).run(std::sync::Arc::new(state.membership.clone())),
+    );
 
     // What the libraries' storage reads at. Deliberately after the listener
     // would come up rather than inline with the encoder and tone-map probes:
@@ -1478,12 +1545,17 @@ fn spawn_background_loops(
     );
 
     // Trakt: hourly (and on-demand) two-way sync + the scrobble-pause sweep.
-    tokio::spawn(std::sync::Arc::clone(&state.trakt).sync_loop());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.trakt)
+            .sync_loop(std::sync::Arc::new(state.membership.clone())),
+    );
     tokio::spawn(std::sync::Arc::clone(&state.trakt).sweep_loop());
     // The watched outbox. Its own loop because a retry scheduled two minutes
     // out has no request to wake it, and a monarr that is down must not stall
     // anything a viewer is waiting on.
-    tokio::spawn(std::sync::Arc::clone(&state.watched).run());
+    tokio::spawn(
+        std::sync::Arc::clone(&state.watched).run(std::sync::Arc::new(state.membership.clone())),
+    );
 }
 
 /// Which port the GDM responder should answer on, or `None` when it must not
@@ -2253,6 +2325,28 @@ mod startup_tests {
 
     use plurx_core::domain::Library;
     use plurx_core::store::Store;
+
+    /// The operator-facing cluster refusal is a sentence, not a paragraph with
+    /// the indentation baked in.
+    ///
+    /// It shipped reading `... active on              another cluster node`:
+    /// two continuation lines inside the literal had lost their trailing `\`,
+    /// so fourteen columns of Rust source indentation became fourteen spaces
+    /// in the message. Nothing asserted on it, so `cargo fmt` kept it aligned
+    /// and every test stayed green. A run of two spaces is the whole tell.
+    #[test]
+    fn the_cluster_refusals_read_as_sentences() {
+        assert!(
+            !ARTWORK_PASS_UNAVAILABLE.contains("  "),
+            "source indentation leaked into an operator message: \
+             {ARTWORK_PASS_UNAVAILABLE:?}"
+        );
+        // And it is still the whole sentence, so the assertion above cannot be
+        // satisfied by shortening the message instead of fixing it.
+        assert!(ARTWORK_PASS_UNAVAILABLE.starts_with("the artwork provider pass is not available"));
+        assert!(ARTWORK_PASS_UNAVAILABLE.ends_with("never runs cluster-wide provider work"));
+        assert!(ARTWORK_PASS_UNAVAILABLE.contains("admitted as a learner"));
+    }
 
     fn config_in(dir: &std::path::Path) -> Config {
         let mut config = Config::default();
@@ -3709,9 +3803,15 @@ mod startup_tests {
         add_library(&store, "Books", LibraryKind::Books, false).await;
         add_library(&store, "Home", LibraryKind::Home, false).await;
         let artwork = tmp.path().join("artwork");
-        refresh_metadata_with_store(store, &artwork, None, "test-refresh")
-            .await
-            .expect("a provider-less refresh must succeed");
+        refresh_metadata_with_store(
+            store,
+            &artwork,
+            None,
+            "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        )
+        .await
+        .expect("a provider-less refresh must succeed");
     }
 
     /// Naming a library that does not exist is a mistake worth reporting: the
@@ -3725,9 +3825,15 @@ mod startup_tests {
 
         let error = format!(
             "{:#}",
-            refresh_metadata_with_store(store, &artwork, Some(4242), "test-refresh")
-                .await
-                .expect_err("no such library")
+            refresh_metadata_with_store(
+                store,
+                &artwork,
+                Some(4242),
+                "test-refresh",
+                &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+            )
+            .await
+            .expect_err("no such library")
         );
         assert!(error.contains("no library with id 4242"), "{error}");
     }
@@ -3743,9 +3849,15 @@ mod startup_tests {
 
         let error = format!(
             "{:#}",
-            refresh_metadata_with_store(store, &artwork, None, "test-refresh")
-                .await
-                .expect_err("no TMDB key")
+            refresh_metadata_with_store(
+                store,
+                &artwork,
+                None,
+                "test-refresh",
+                &plurx_core::cluster::coordination::UnclusteredJobAuthority
+            )
+            .await
+            .expect_err("no TMDB key")
         );
         assert!(error.contains("TMDB API key is not configured"), "{error}");
     }
@@ -3771,12 +3883,19 @@ mod startup_tests {
             &artwork,
             Some(movies.id),
             "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
         )
         .await
         .expect("empty TMDB refresh");
-        refresh_metadata_with_store(store, &artwork, Some(anime.id), "test-refresh")
-            .await
-            .expect("empty AniList refresh");
+        refresh_metadata_with_store(
+            store,
+            &artwork,
+            Some(anime.id),
+            "test-refresh",
+            &plurx_core::cluster::coordination::UnclusteredJobAuthority,
+        )
+        .await
+        .expect("empty AniList refresh");
     }
 
     /// Everything a request needs, assembled the way `run` assembles it.

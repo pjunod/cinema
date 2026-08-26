@@ -303,6 +303,29 @@ test("every server verdict reaches exactly one initial web transport", () => {
   }
 });
 
+test("a missing node-local VOD index falls back only where progressive remux works", () => {
+  assert.equal(
+    policy.indexPendingFallback({
+      code: "vod_index_pending",
+      method: "remux",
+      nativeHls: false,
+    }),
+    "progressive_remux",
+  );
+  for (const input of [
+    { code: "vod_index_pending", method: "remux", nativeHls: true },
+    { code: "vod_index_pending", method: "transcode", nativeHls: false },
+    { code: "producer_failed", method: "remux", nativeHls: false },
+  ]) {
+    assert.equal(policy.indexPendingFallback(input), "fail", JSON.stringify(input));
+  }
+  assert.match(
+    shippedSource("startCopyHls"),
+    /indexPendingFallback[\s\S]*?stream\.mp4[\s\S]*?copyHls=false/,
+    "the shipped session-open path must attach the progressive response",
+  );
+});
+
 test("native HLS is Safari-only unless MSE is unavailable", () => {
   assert.equal(
     policy.nativeHlsAvailable({
@@ -680,7 +703,7 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   });
 });
 
-test("an emergency downgrade ignores cooldown, dwell, and restart cost", () => {
+test("an active supply stall spends its one restart on the floor", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
@@ -689,8 +712,40 @@ test("an emergency downgrade ignores cooldown, dwell, and restart cost", () => {
     nowMs: 20_000,
     lastSwitchAtMs: 19_999,
   });
-  assert.equal(decision.height, 480);
+  assert.equal(decision.height, 360);
   assert.equal(decision.reason, "supply stalls");
+  assert.equal(decision.emergency, true);
+});
+
+test("an empty-buffer supply stall spends its one restart on the floor", () => {
+  const decision = policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    // The completed-fragment and stable EWMAs may both still describe the
+    // pre-cliff link when the player runs out of buffered media.
+    estimateKbps: 5_000,
+    recentEstimateKbps: 5_000,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 0.1,
+    activeSupplyStall: true,
+    nowMs: 10_000,
+  });
+  assert.equal(decision.height, 360);
+  assert.equal(decision.reason, "supply stalls");
+  assert.equal(decision.emergency, true);
+});
+
+test("near-empty runway spends its one restart on the floor", () => {
+  const decision = policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    // The stall callback can arrive after the controller already observed the
+    // empty runway, so this signal must be sufficient on its own.
+    estimateKbps: 5_000,
+    runwaySeconds: 0.1,
+  });
+  assert.equal(decision.height, 360);
+  assert.equal(decision.reason, "buffer ran dry");
   assert.equal(decision.emergency, true);
 });
 
@@ -761,7 +816,7 @@ test("three supply stalls act while decode stalls never choose a rung", () => {
     estimateKbps: 7000,
     supplyStalls: 3,
   });
-  assert.equal(supply.height, 480);
+  assert.equal(supply.height, 360);
   assert.equal(supply.emergency, true);
 
   const decode = policy.decideRung({
@@ -2804,7 +2859,7 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     estimateKbps: 1_000,
     runwaySeconds: 0.5,
   });
-  assert.equal(pressured.height, 480, "emergencies still fall");
+  assert.equal(pressured.height, 480, "starvation reaches the available ladder floor");
   assert.equal(pressured.emergency, true);
 });
 

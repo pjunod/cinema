@@ -257,6 +257,44 @@ bump may break compatibility and a **patch** bump never does.
   first-byte deadline running against it and outranks everything else, so the
   producer never walks backwards to refill a hole nobody has asked for. Neither
   module is wired to a request path yet.
+- **A cluster can now admit a non-voting learner.** Once the learner protocol
+  is activated, `POST /api/v1/cluster/join-tokens` accepts `{"role":
+  "learner"}` and mints a token in a distinct v2 protocol — its own prefix,
+  associated data, payload version, and `membership.json` version — so a build
+  that predates the role refuses the whole flow rather than reinterpreting it as
+  a voter join, and refuses it before writing any cluster secret to disk. Voter
+  joining is untouched and remains the default. The role is bound to the
+  coordinator's issued-token record and derived from it on redemption, never
+  taken from the joining node's request. A learner receives replication, is a
+  committed Raft member with no vote, leaves quorum size unchanged, and runs
+  none of the cluster's leader-singleton work: no scheduler, no replicated
+  schema migration, no leased provider/scan/repair/pre-transcode job, no Trakt
+  sync, and no watched-outbox delivery. That eligibility is re-derived from live
+  committed membership on every decision rather than from a startup flag, so a
+  node promoted later starts doing the work without a restart. Deactivating the
+  learner protocol is refused, by the committing statement itself, while any
+  learner is still admitted. See
+  [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
+- **The cluster now declares a supported protocol range, and the learner
+  protocol is activated as an explicit admin step.** Binaries from this release
+  implement protocol 4 through 5, while the cluster records the range its
+  features actually use in `cluster_meta`. A node may participate only when its
+  range covers the cluster's whole active range. Installing this release needs
+  no operator action: a running cluster stays on protocol 4, a voter on the
+  previous release keeps booting and joining, and `protocol_max` is never
+  widened implicitly. `GET /api/v1/cluster/nodes` now reports the active range
+  and each voter's readiness, and the admin-only
+  `POST /api/v1/cluster/protocol/learner/activate` narrows the cluster onto
+  protocol 5 — but only once every active node has proven the protocol with the
+  binary it is running now, which it does by writing a capability row inside the
+  same replicated transaction as its heartbeat. A node that was upgraded and
+  rolled back therefore stops counting as ready. Activation and its rollback
+  (`.../deactivate`, refused while any committed member holds no vote) are both
+  idempotent. After activation, a protocol-4-only binary is refused at boot with
+  a message naming the protocol it lacks. See
+  [docs/OPERATIONS.md](docs/OPERATIONS.md).
+
 - **Durable state, persistent cache, and live-transcode scratch can now sit on
   three different devices.** `storage.cache_dir` (`PLURX_CACHE_DIR`) names a
   node-local root whose persistent children are `artwork/`, `transcode/`,

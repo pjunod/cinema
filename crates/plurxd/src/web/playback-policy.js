@@ -332,7 +332,17 @@
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
-      const target = available[Math.min(currentIndex - 1, safeIndex)];
+      // Starvation can surface as a supply wait, empty runway, or the rolling
+      // stall burst on different controller ticks. Any one of those signals
+      // spends the one allowed automatic restart on the ladder floor: the
+      // transfer that proves the lower link may not complete before this
+      // decision, leaving both EWMA inputs biased by the pre-cliff rate. A
+      // one-rung restart can then starve again after the restart claim is
+      // already spent. A bandwidth estimate alone keeps the safe-rung logic.
+      const starvation = activeSupplyStall || nearEmpty || supplyBurst;
+      const target = starvation
+        ? available[0]
+        : available[Math.min(currentIndex - 1, safeIndex)];
       const reason = supplyBurst || activeSupplyStall
         ? "supply stalls"
         : nearEmpty
@@ -518,6 +528,22 @@
       return "progressive_remux";
     }
     return "direct";
+  }
+
+  // A node-local VOD index is an optimization prerequisite, not evidence that
+  // this browser cannot play the source. MSE browsers already proved the same
+  // remux viable before choosing copy-HLS, so a cold/missing index may fall
+  // back to the progressive pipe. Native HLS cannot: Safari does not accept
+  // the fragmented progressive response, which is why it selected HLS in the
+  // first place.
+  function indexPendingFallback({
+    code = null,
+    method = null,
+    nativeHls = false,
+  } = {}) {
+    return code === "vod_index_pending" && method === "remux" && !nativeHls
+      ? "progressive_remux"
+      : "fail";
   }
 
   function fallbackAction({
@@ -965,6 +991,7 @@
     hlsTransport,
     copyAudioNeedsTranscode,
     initialRoute,
+    indexPendingFallback,
     fallbackAction,
     stallRecoveryAction,
     stallRecoveryTargetHeight,

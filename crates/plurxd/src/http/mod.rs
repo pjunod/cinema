@@ -99,9 +99,14 @@ pub fn router(state: AppState) -> Router {
         .route("/system", get(system::system_info))
         .route("/system/logs", get(system::logs))
         .route("/system/playback-events", get(system::playback_events))
-        // Membership control is admin-only. The two join routes below are the
-        // exception: their single-use token is its own narrow credential.
+        // Membership control is admin-only. The role-specific join routes
+        // below are the exception: their single-use token digest is its own
+        // narrow credential, and the caller never supplies the role.
         .route("/cluster/join-tokens", post(cluster::issue_join_token))
+        .route(
+            "/cluster/learner-join-tokens",
+            post(cluster::issue_learner_join_token),
+        )
         .route("/cluster/nodes", get(cluster::nodes))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
@@ -110,9 +115,28 @@ pub fn router(state: AppState) -> Router {
             post(internal_media::diagnostic_offers),
         )
         .route("/cluster/leave", post(cluster::leave))
+        // Protocol activation is a separate deliberate step from installing
+        // the binary that supports it. The active range and each node's
+        // readiness are reported by GET /cluster/nodes above.
+        .route(
+            "/cluster/protocol/learner/activate",
+            post(cluster::activate_learner_protocol),
+        )
+        .route(
+            "/cluster/protocol/learner/deactivate",
+            post(cluster::deactivate_learner_protocol),
+        )
         .route("/cluster/nodes/{node_id}", delete(cluster::remove_node))
         .route("/cluster/join/redeem", post(cluster::redeem_join))
         .route("/cluster/join/finalize", post(cluster::finalize_join))
+        .route(
+            "/cluster/learner/join/redeem",
+            post(cluster::redeem_learner_join),
+        )
+        .route(
+            "/cluster/learner/join/finalize",
+            post(cluster::finalize_learner_join),
+        )
         // Node-to-node artwork materialization. The handler verifies a
         // filename-bound cluster HMAC and current live membership; it does
         // not accept an account bearer and never proxies another hop.
@@ -3011,6 +3035,24 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         assert_eq!(body["code"], "membership_unavailable");
 
+        // Narrowing the cluster's protocol range locks out every binary that
+        // does not implement the new one, so both directions are admin-only and
+        // both fail closed where there is no replicated membership to change.
+        for route in [
+            "/api/v1/cluster/protocol/learner/activate",
+            "/api/v1/cluster/protocol/learner/deactivate",
+        ] {
+            let (status, _) = call(&app, post(route, None, json!({}))).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{route} must be admin-only"
+            );
+            let (status, body) = call(&app, post(route, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}: {body}");
+            assert_eq!(body["code"], "membership_unavailable", "{route}");
+        }
+
         let (status, _) = call(
             &app,
             put(
@@ -3156,6 +3198,42 @@ mod tests {
                     "token": "a complete join token must never cross this route",
                     "node_id": "joining-node"
                 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Learner issuance has a wire-distinct endpoint. The joining node's
+        // request still carries no role: redemption derives it from the
+        // coordinator's own issued-token record.
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/cluster/learner-join-tokens",
+                None,
+                json!({ "expires_in_seconds": 600 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/learner-join-tokens",
+                Some(&admin),
+                json!({ "expires_in_seconds": 600 }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            post(
+                "/api/v1/cluster/join-tokens",
+                Some(&admin),
+                json!({ "expires_in_seconds": 600, "role": "observer" }),
             ),
         )
         .await;
@@ -4658,19 +4736,22 @@ mod tests {
         let package_id = first["id"].as_str().expect("package id").to_owned();
 
         // Rate control is server policy, not part of the client's idempotent
-        // request. Model a completed administrator change directly: the
-        // settings endpoint's real ffmpeg probe has its own focused tests and
-        // may correctly defer under a loaded test host. A lost create response
-        // retried under this new validated policy must still recover the
-        // original package and its first-write snapshot.
+        // request. A lost create response retried after an administrator flips
+        // that policy must recover the original package and its first-write
+        // snapshot, never conflict or silently retarget it.
+        // Do not drive the public settings probe after queueing encoder work:
+        // that endpoint deliberately returns 409 unless the node is idle, so
+        // doing so races the package worker this test just woke. This scenario
+        // needs only a different durable and effective policy before the
+        // idempotent retry; publish that state through the test boundary.
         state
             .store
             .put_settings(&[
-                (plurx_core::store::keys::TRANSCODE_QUALITY, "22"),
                 (plurx_core::store::keys::TRANSCODE_RATE_MODE, "quality"),
+                (plurx_core::store::keys::TRANSCODE_QUALITY, "22"),
             ])
             .await
-            .expect("publish changed rate-control request");
+            .expect("change the durable rate-control policy");
         let selected = state.transcode.test_publish_supported_quality(22).await;
         assert_eq!(
             state.transcode.effective_rate_control(selected),

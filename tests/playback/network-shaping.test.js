@@ -1751,6 +1751,18 @@ test("API parsing preserves opaque 64-bit ids for later routes", () => {
   assert.equal(parsed.nested.item_id, "-9007199254740993");
 });
 
+test("VOD readiness waits for the exact file built by an indexing pass", () => {
+  const pass = {
+    message: "fragment indexing pass finished attempted=2 built=2 built_files=[1, 42]",
+  };
+  assert.equal(lab.fragmentIndexPassBuiltFile(pass, 42), true);
+  assert.equal(lab.fragmentIndexPassBuiltFile(pass, 4), false);
+  assert.equal(lab.fragmentIndexPassBuiltFile(pass, 420), false);
+  assert.equal(lab.fragmentIndexPassBuiltFile({
+    message: "fragment indexing pass finished attempted=1 built=1",
+  }, 42), false);
+});
+
 test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites["stall-recovery"];

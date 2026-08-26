@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["705da73e"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract checks each switched nightly job by name, retaining ffmpeg-6 only for deep-validation and mutation while leaving the parser fuzz campaign and ffmpeg-8 container on their intended general capability boundary."
