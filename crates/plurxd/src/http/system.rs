@@ -463,6 +463,22 @@ pub struct ClientPlaybackSnapshot {
     pub server: Option<ClientServerSnapshot>,
 }
 
+/// Last control snapshot the server accepted before a legacy client recovery.
+/// M2 keeps the legacy recovery authoritative, but preserving this join makes
+/// shadow comparisons possible without inferring client state after the fact.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlSnapshot {
+    pub generation: Option<String>,
+    pub control_epoch: Option<u64>,
+    pub sequence: Option<u64>,
+    pub demand: Option<String>,
+    pub render_state: Option<String>,
+    pub position_ms: Option<i64>,
+    pub buffered_through_ms: Option<i64>,
+    pub observed_download_bps: Option<u64>,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
@@ -530,6 +546,8 @@ pub struct ClientLog {
     pub session_id: Option<String>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
+    /// Accepted protocol state immediately preceding this legacy event.
+    pub control: Option<ClientControlSnapshot>,
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -937,6 +955,21 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         if !client.is_empty() {
             extra.insert("client".to_owned(), client.into());
         }
+    }
+    if let Some(control) = ev.control.as_ref() {
+        extra.insert(
+            "control".to_owned(),
+            serde_json::json!({
+                "generation": clipped(&control.generation, 64),
+                "control_epoch": control.control_epoch,
+                "sequence": control.sequence,
+                "demand": clipped(&control.demand, 16),
+                "render_state": clipped(&control.render_state, 16),
+                "position_ms": control.position_ms,
+                "buffered_through_ms": control.buffered_through_ms,
+                "observed_download_bps": control.observed_download_bps,
+            }),
+        );
     }
     let runway = ev
         .runway
@@ -3476,6 +3509,7 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            control: None,
         }
     }
 
@@ -3787,6 +3821,30 @@ mod tests {
         let line = client_log_line(&event, 0);
         assert!(line.contains("runway=0.4s"), "{line}");
         assert!(line.contains("bw=12345kbps"), "{line}");
+    }
+
+    #[test]
+    fn legacy_recovery_keeps_the_preceding_control_snapshot() {
+        let mut event = beacon("stall_recovery", 8_000);
+        event.control = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: Some(23),
+            demand: Some("active".into()),
+            render_state: Some("stalled".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+        });
+
+        let persisted = client_playback_event(&event, 7);
+        let extra: serde_json::Value =
+            serde_json::from_str(persisted.extra.as_deref().expect("control snapshot JSON"))
+                .expect("valid control snapshot JSON");
+        assert_eq!(extra["control"]["sequence"], 23);
+        assert_eq!(extra["control"]["render_state"], "stalled");
+        assert_eq!(extra["control"]["buffered_through_ms"], 90_400);
+        assert_eq!(extra["control"]["observed_download_bps"], 1_500_000);
     }
 
     #[test]

@@ -2807,6 +2807,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <div class="toast" id="toast"></div>
 
 <script src="/assets/playback-policy.js"></script>
+<script src="/assets/playback-control.js"></script>
 <script src="/assets/reader.js"></script>
 <script src="/assets/hls.min.js"></script>
 <script>
@@ -2951,6 +2952,8 @@ function clientLog(ev){
       file_id:p.fileId||null,
       vcodec:s.video_codec||null,
     }, ev||{});
+    const control=p.controlReporter&&p.controlReporter.legacyContext();
+    if(control && body.control==null) body.control=control;
     fetch(API+"/client-log",{method:"POST",keepalive:true,
       headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
       body:JSON.stringify(body)}).catch(()=>{});
@@ -5712,6 +5715,17 @@ const PLAYBACK_ID=(function(){
   try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
   return "pb-"+Math.random().toString(36).slice(2)+Date.now().toString(36);
 })();
+// The control endpoint deliberately requires a UUID so an untrusted client
+// cannot create an unbounded identity vocabulary. Keep this separate from the
+// older playback_id fallback, whose server contract predates that rule.
+const CONTROL_CLIENT_ID=(function(){
+  try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  let seed=Date.now();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
+    const r=(seed+Math.random()*16)%16|0; seed=Math.floor(seed/16);
+    return (c==='x'?r:(r&3)|8).toString(16);
+  });
+})();
 function newRequestId(){
   try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
   return "rq-"+Math.random().toString(36).slice(2)+Date.now().toString(36);
@@ -5774,6 +5788,144 @@ function selectedAudioIndex(player){
   const track=p&&p.audio&&p.audio[p.curAudio];
   return track?track.index:0;
 }
+function playbackControlCapabilities(){
+  const codecs=["h264"];
+  const advertised=String(PLAY_CAPS&&PLAY_CAPS.vcodec||"").split(",");
+  if(advertised.includes("hevc")) codecs.push("hevc");
+  if(advertised.includes("av1")) codecs.push("av1");
+  const ranges=["sdr"];
+  if(PLAY_CAPS&&PLAY_CAPS.hdr10t) ranges.push("hdr10");
+  if(PLAY_CAPS&&PLAY_CAPS.dv) ranges.push("dolby_vision");
+  const displayPx=Math.max((typeof screen!=="undefined"&&screen.height)||0, window.innerHeight||0)
+    * Math.max(1, window.devicePixelRatio||1);
+  const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
+  const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
+  return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
+    codecs,dynamic_ranges:ranges,dual_player_preparation:false};
+}
+function playbackControlSelection(p){
+  const requested=playQuality();
+  const sourceHeight=Math.round(Number(p&&p.source&&p.source.height)||0);
+  const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested)
+    :["original","nomse"].includes(requested)&&sourceHeight>=144?sourceHeight:null;
+  const quality=manualHeight!=null
+    ? {mode:"manual",height:Math.max(144,Math.min(2160,manualHeight))} : {mode:"auto"};
+  const selected=(p&&p.curSub>=0)?p.curSub:null;
+  const subtitle=selected==null ? {mode:"off",track:null}
+    : {mode:p.burnedSub!=null?"burn":"native",track:selected};
+  const audioTrack=Math.max(0,Math.min(1024,Math.round(selectedAudioIndex(p))));
+  const audioOffset=Math.max(-15000,Math.min(15000,Math.round(p&&p.aoffset||0)));
+  return {quality,audio_track:audioTrack,subtitle,
+    audio_offset_ms:audioOffset,codec:"auto",dynamic_range:"auto"};
+}
+function playbackControlBufferedRange(v,p,positionMs){
+  try{
+    const local=(v.currentTime||0), origin=p.offset||0;
+    for(let i=0;i<v.buffered.length;i++){
+      if(v.buffered.start(i)<=local+0.25 && v.buffered.end(i)>=local){
+        const from=Math.max(0,Math.round((origin+v.buffered.start(i))*1000));
+        const through=Math.max(positionMs,Math.round((origin+v.buffered.end(i))*1000));
+        return {from,through};
+      }
+    }
+  }catch(e){}
+  return {from:null,through:positionMs};
+}
+function playbackControlSnapshot(v,p){
+  if(!v||!p) return null;
+  const seeking=!!v.seeking || p._seekPreview!=null;
+  const hinted=!p.started&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
+  const preview=seeking&&p._seekPreview!=null
+    ? Math.max(0,p._seekPreview-((p.bookOffset||0)/1000)) : null;
+  let positionMs=Math.max(0,Math.round((hinted!=null?hinted:
+    preview!=null?preview:(p.offset||0)+(v.currentTime||0))*1000));
+  const duration=Math.max(0,Number(p.durMs||p.knownDur||0));
+  if(duration>0) positionMs=Math.min(positionMs,duration);
+  const range=hinted!=null?{from:null,through:positionMs}
+    :playbackControlBufferedRange(v,p,positionMs);
+  const demand=(v.ended?"end":v.paused?"hold":"active");
+  let render="rendering";
+  if(v.error) render="failed";
+  else if(v.ended) render="ended";
+  else if(seeking) render="seeking";
+  else if(!p.started) render="starting";
+  else if(p.waitAt && performance.now()-p.waitAt>=PERSISTENT_STALL_MS) render="stalled";
+  else if(p.waitAt || (!v.paused&&v.readyState<3)) render="waiting";
+  const rate=Number(v.playbackRate||0);
+  const playbackRate=demand==="active"
+    ? Math.max(0.25,Math.min(4,rate||1)) : Math.max(0,Math.min(4,rate));
+  let dropped=null;
+  try{
+    const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
+    if(q&&Number.isFinite(q.droppedVideoFrames)) dropped=Math.max(0,Math.round(q.droppedVideoFrames));
+  }catch(e){}
+  const observation={decoder_state:v.error?"failed":render==="stalled"?"starved":p.started?"ready":"unknown"};
+  if(dropped!=null) observation.dropped_frames=dropped;
+  if(v.error){ observation.error_code="media"; observation.error_detail=`media_code_${v.error.code||0}`; }
+  const bps=p.hls&&Number(p.hls.bandwidthEstimate);
+  return {demand,position_ms:positionMs,buffered_from_ms:range.from,
+    buffered_through_ms:range.through,playback_rate:playbackRate,render_state:render,
+    seek_target_ms:render==="seeking"?positionMs:null,
+    observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
+    selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
+    observation,acknowledgement:null};
+}
+async function sendPlaybackControl(url,body,signal){
+  const response=await fetch(url,{method:"POST",signal,
+    headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
+    body:JSON.stringify(body)});
+  if(!response.ok){
+    let code=null;
+    try{ const failure=await response.json(); code=failure&&failure.code; }catch(e){}
+    const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
+    error.status=response.status; error.code=code; throw error;
+  }
+  return response.json();
+}
+function stopPlaybackControl(p){
+  if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
+}
+function notifyPlaybackControl(){
+  const p=PLAYER;
+  if(p&&p.controlReporter) p.controlReporter.notify();
+}
+function startPlaybackControl(v,p,bootstrap){
+  stopPlaybackControl(p);
+  if(!bootstrap || !window.PlurxPlaybackControl) return null;
+  try{
+    const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
+      clientInstanceId:CONTROL_CLIENT_ID,
+      snapshot:()=>PLAYER===p?playbackControlSnapshot(v,p):null,
+      send:sendPlaybackControl,
+      onExchange:({request,response,error})=>{
+        if(PLAYER!==p) return;
+        p.controlLastRequest=request;
+        if(response){
+          const recovered=p.controlLastError;
+          p.controlLastResponse=response;
+          p.controlLastExchangeAt=Date.now();
+          p.controlLastError=null;
+          if(recovered) clientLog({level:"info",event:"playback_control",detail:"recovered",
+            message:"playback-control exchange recovered; legacy recovery remained authoritative"});
+        }
+        if(error){
+          const now=Date.now(), message=String(error.message||error);
+          p.controlLastError={at:now,message};
+          if(!p.controlLastFailureLogAt||now-p.controlLastFailureLogAt>=60000){
+            p.controlLastFailureLogAt=now;
+            clientLog({level:"warn",event:"playback_control",
+              detail:String(error.code||error.name||"exchange_failed"),message});
+          }
+        }
+      }});
+    p.controlReporter=reporter;
+    reporter.start();
+    return reporter;
+  }catch(error){
+    p.controlLastError={at:Date.now(),message:String(error&&error.message||error)};
+    return null;
+  }
+}
 async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
@@ -5795,6 +5947,7 @@ async function openSession(fileId, opts){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  stopPlaybackControl(t);
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
@@ -5818,7 +5971,9 @@ function attachSession(v, t, info, wantSec){
   if(t===PLAYER) renderPlayerInfo();
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
+  t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
+  startPlaybackControl(v,t,info.control||null);
   return into + (t.offset||0);
 }
 // Tell the server we are finished with a stream. Without this the encoder
@@ -7310,6 +7465,7 @@ function resetMediaSource(v){
 // with it and the callbacks run forever.
 function stopPlayerTimers(){
   if(!PLAYER) return;
+  stopPlaybackControl(PLAYER);
   clearInterval(PLAYER.timer); PLAYER.timer=null;
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
@@ -7939,7 +8095,7 @@ function wirePlayer(){
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
   ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>p.addEventListener(ev,playerActivity));
-  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); if(first) reportTtff(); });
+  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled
@@ -7957,14 +8113,20 @@ function wirePlayer(){
     if(action!=='buffer') return;
     setLoading(true,"Buffering…","");
     beginWait(v);
+    notifyPlaybackControl();
   });
   // Pausing during a wait means the viewer stopped it, not the stream.
-  v.addEventListener("pause",()=>{ p.classList.remove("idle"); endWait(false); });
-  v.addEventListener("seeking",()=>{ endWait(false); });
+  v.addEventListener("pause",()=>{ p.classList.remove("idle"); endWait(false); notifyPlaybackControl(); });
+  v.addEventListener("play",notifyPlaybackControl);
+  v.addEventListener("seeking",()=>{ endWait(false); notifyPlaybackControl(); });
+  v.addEventListener("seeked",notifyPlaybackControl);
+  v.addEventListener("ratechange",notifyPlaybackControl);
+  v.addEventListener("ended",notifyPlaybackControl);
   // A media error never reaches the console on its own — surface it, always.
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
   v.addEventListener("error",()=>{
+    notifyPlaybackControl();
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
@@ -8006,6 +8168,7 @@ function wirePlayer(){
     setLoading(true,"Playback failed: "+(names[code]||("error "+code))+".",(msg?msg+" — ":"")+"see Settings → Logs for the server side");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
+  document.addEventListener("visibilitychange",notifyPlaybackControl);
   v.addEventListener("timeupdate",checkMarkers);
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
@@ -8580,6 +8743,7 @@ async function setSub(index){
   const v=document.getElementById("video"); if(!v) return;
   pbSyncSubIcon();
   clearSubs(v);
+  notifyPlaybackControl();
   if(index<0){ me._subOff=null; return; }
   const off=me.offset||0;
   me._subOff=off;                       // set before awaiting: stops pbTick re-firing
@@ -9043,6 +9207,33 @@ function updateStats(){
     srv.push({l:"Stalls",c:statsToneClass(stallTone),
       v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
   }
+  // The control protocol is deliberately passive in M2, but it must not be
+  // invisible. This is the join point an operator needs during shadow mode:
+  // whether the client is exchanging, the last sequence the owner accepted,
+  // whether an event arrived while the previous exchange was in flight, and
+  // the advertised cadence/lease rather than another inferred idle clock.
+  const controlReporter=PLAYER.controlReporter;
+  const controlStatus=controlReporter&&controlReporter.status();
+  if(controlStatus){
+    const phase=controlStatus.stopped?"stopped"
+      :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
+      :controlStatus.retrying?"retry scheduled"
+      :controlStatus.pending?"new state queued":"scheduled";
+    const accepted=controlStatus.accepted_sequence
+      ?`accepted #${controlStatus.accepted_sequence}`:"awaiting first acceptance";
+    const acceptedAge=PLAYER.controlLastExchangeAt
+      ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
+    srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError?"warn":"good"),
+      v:`passive · ${accepted}${acceptedAge} · ${phase}`});
+    srv.push({l:"Control timing",c:"stat-muted",
+      v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
+        `${Math.round(controlStatus.lease_timeout_ms/1000)} s legacy lease`});
+  }
+  if(PLAYER.controlLastError){
+    const age=Math.max(0,Math.round((Date.now()-PLAYER.controlLastError.at)/1000));
+    srv.push({l:"Control failure",c:"stat-warn",note:true,
+      v:`${esc(PLAYER.controlLastError.message)} · ${age} s ago · playback recovery remains legacy-owned`});
+  }
   const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
   const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
   // The value as a reader sees it, with the markup taken back out — the two
@@ -9084,7 +9275,8 @@ function updateStats(){
   //
   // There is no `.dense` two-up variant any more. It required ten-plus rows in
   // one section and the web panel's sections have a structural ceiling of five
-  // (Playback 4, Source 4, Now decoding 5, Network 4, Server 4) — the branch
+  // (Playback 4, Source 4, Now decoding 5, Network 4, with Server allowed a
+  // small control ledger while the preview is enabled) — the branch
   // and its `@media(min-width:721px)` stylesheet block could never run. The
   // Android panel's equivalent IS reachable and is untouched; it groups rows
   // differently.
@@ -9348,6 +9540,9 @@ function updateStats(){
     {t:"Server",rows:[
       presentation?cardRow("Presentation",esc(presentation),PLAYER.vod?"good":"warn"):null,
       cardRow("Status",esc(serverState),serverTone),
+      controlStatus?cardRow("Control",controlStatus.accepted_sequence
+        ?`Passive · accepted #${controlStatus.accepted_sequence}`:"Passive · connecting",
+        PLAYER.controlLastError?"warn":"good"):null,
       (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
       serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
       health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):null,
