@@ -32,6 +32,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Restore patched crates to registry provenance for advisory matching
         run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
       # v2.0.0, pinned so the security gate cannot move without review.
@@ -55,6 +56,7 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
       # v2.0.0, pinned so the security gate cannot move without review.
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:

@@ -685,6 +685,15 @@ class OperationsContractCase(unittest.TestCase):
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
                 self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
 
+        for name, block in workflow_job_blocks(
+            ".github/workflows/rust-audit.yml"
+        ).items():
+            self.assertIn(
+                "uses: dtolnay/rust-toolchain@1.97.1",
+                block,
+                f"rust-audit:{name} does not provision the pinned Cargo toolchain",
+            )
+
     def test_ci_runner_mode_has_one_validated_operator_switch(self):
         ci = read(".github/workflows/ci.yml")
         audit = read(".github/workflows/rust-audit.yml")
