@@ -883,6 +883,19 @@ struct FlowEvaluation {
     production_target_seconds: Option<i64>,
 }
 
+#[derive(Clone, Copy)]
+struct FlowInputs<'a> {
+    physical_ahead: Option<Ahead>,
+    published_end_ms: Option<i64>,
+    media_origin_ms: i64,
+    lease_mode: crate::playback_control::RollingLeaseMode,
+    demand: Option<&'a crate::playback_control::PlaybackDemandSnapshot>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    limits: AheadLimits,
+    currently_suspended: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct SuspendedAt {
     since: Instant,
@@ -943,17 +956,18 @@ fn explicit_production_target_seconds(
         .clamp(1, configured_max_secs)
 }
 
-fn evaluate_flow(
-    physical_ahead: Option<Ahead>,
-    published_end_ms: Option<i64>,
-    media_origin_ms: i64,
-    lease_mode: crate::playback_control::RollingLeaseMode,
-    demand: Option<&crate::playback_control::PlaybackDemandSnapshot>,
-    global_live_bytes: i64,
-    global_ahead_bytes: i64,
-    limits: AheadLimits,
-    currently_suspended: bool,
-) -> FlowEvaluation {
+fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
+    let FlowInputs {
+        physical_ahead,
+        published_end_ms,
+        media_origin_ms,
+        lease_mode,
+        demand,
+        global_live_bytes,
+        global_ahead_bytes,
+        limits,
+        currently_suspended,
+    } = inputs;
     if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
         return FlowEvaluation {
             hold: physical_ahead.and_then(|ahead| {
@@ -2345,17 +2359,17 @@ async fn session_info(
     });
     let suspended = s.suspended.load(Relaxed);
     let flow = lease.as_ref().map(|lease| {
-        evaluate_flow(
-            ahead,
+        evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
             published_end_ms,
-            (s.media_origin_seconds * 1_000.0).round() as i64,
-            lease.mode,
-            lease.demand.as_ref(),
+            media_origin_ms: (s.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
             global_live_bytes,
             global_ahead_bytes,
             limits,
-            suspended,
-        )
+            currently_suspended: suspended,
+        })
     });
     let active_hold = if suspended {
         (*s.suspended_at.lock().await).map(|held| held.hold)
@@ -12742,17 +12756,17 @@ impl TranscodeManager {
             )
         };
         let suspended = session.suspended.load(Relaxed);
-        let evaluation = evaluate_flow(
-            ahead,
+        let evaluation = evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
             published_end_ms,
-            (session.media_origin_seconds * 1_000.0).round() as i64,
-            lease.mode,
-            lease.demand.as_ref(),
+            media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
             global_live_bytes,
             global_ahead_bytes,
             limits,
-            suspended,
-        );
+            currently_suspended: suspended,
+        });
         let hold = evaluation.hold;
         let want_suspend = hold.is_some();
         if want_suspend == suspended {
@@ -16470,10 +16484,9 @@ mod tests {
         let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling(
             mgr.live_session(&info.session_id).await.expect("session"),
         ));
-        assert_eq!(
+        assert!(
             mgr.commit_resolved_media(&info.session_id, &owner, "test-fetch", None, true)
-                .await,
-            true
+                .await
         );
         assert_eq!(
             mgr.session_status(&info.session_id)
@@ -17095,17 +17108,17 @@ mod tests {
             bytes: 1_000,
         };
 
-        let active = evaluate_flow(
-            Some(physical),
-            Some(80_000),
-            100_000,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            1_000,
-            1_000,
+        let active = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
             limits,
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(active.policy, "explicit_demand");
         assert_eq!(active.production_ahead_seconds, Some(60));
         assert_eq!(active.production_target_seconds, Some(50));
@@ -17118,17 +17131,17 @@ mod tests {
         );
 
         demand.playback_rate = 2.0;
-        let faster = evaluate_flow(
-            Some(physical),
-            Some(80_000),
-            100_000,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            1_000,
-            1_000,
+        let faster = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
             limits,
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(
             faster.production_target_seconds,
             Some(80),
@@ -17144,44 +17157,44 @@ mod tests {
         );
 
         demand.buffered_through_ms = 140_000;
-        let capacity = evaluate_flow(
-            Some(Ahead {
+        let capacity = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
                 seconds: 0,
                 bytes: 2_001,
             }),
-            Some(120_000),
-            100_000,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            1_000,
-            1_000,
+            published_end_ms: Some(120_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
             limits,
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(
             capacity.hold.map(|hold| hold.reason),
             Some(AheadHoldReason::Bytes),
             "explicit observations cannot bypass the physical scratch bound"
         );
 
-        let unbounded_time = evaluate_flow(
-            Some(Ahead {
+        let unbounded_time = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
                 seconds: 10_000,
                 bytes: 0,
             }),
-            Some(10_000_000),
-            0,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            0,
-            0,
-            AheadLimits {
+            published_end_ms: Some(10_000_000),
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits: AheadLimits {
                 max_secs: 0,
                 max_bytes: 2_000,
                 global_max_bytes: 8_000,
             },
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(unbounded_time.production_target_seconds, None);
         assert_eq!(
             unbounded_time.hold, None,
@@ -17200,17 +17213,17 @@ mod tests {
             crate::playback_control::ClientPlatform::Apple,
         );
         demand.demand = crate::playback_control::PlaybackDemand::Hold;
-        let holding = evaluate_flow(
-            None,
-            None,
-            0,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            0,
-            0,
+        let holding = evaluate_flow(FlowInputs {
+            physical_ahead: None,
+            published_end_ms: None,
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
             limits,
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(
             holding.hold.map(|hold| hold.reason),
             Some(AheadHoldReason::Demand)
@@ -17222,20 +17235,20 @@ mod tests {
         demand.seek_target_ms = Some(100_000);
         demand.buffered_through_ms = 130_000;
         demand.playback_rate = 1.0;
-        let seeking = evaluate_flow(
-            Some(Ahead {
+        let seeking = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
                 seconds: 10,
                 bytes: 0,
             }),
-            Some(65_000),
-            100_000,
-            crate::playback_control::RollingLeaseMode::Explicit,
-            Some(&demand),
-            0,
-            0,
+            published_end_ms: Some(65_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
             limits,
-            false,
-        );
+            currently_suspended: false,
+        });
         assert_eq!(seeking.production_ahead_seconds, Some(65));
         assert_eq!(seeking.production_target_seconds, Some(60));
         assert_eq!(

@@ -18,7 +18,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
@@ -4238,7 +4238,7 @@ mod tests {
         // queue flow work, but must not hold END_STREAM behind this gate.
         let transition = fixture.hold_child_transition().await;
         let delivered = tokio::time::timeout(
-            Duration::from_millis(250),
+            std::time::Duration::from_millis(250),
             axum::body::to_bytes(response.into_body(), body.len() + 1),
         )
         .await
@@ -4344,7 +4344,7 @@ mod tests {
             .vod_last_touch_for_test(range_id)
             .await
             .expect("range touch before");
-        tokio::time::sleep(Duration::from_millis(2)).await;
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
         let range_headers = RelayHeaders {
             range: Some("bytes=1024-2047".to_owned()),
             ..RelayHeaders::default()

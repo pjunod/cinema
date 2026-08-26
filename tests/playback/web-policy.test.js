@@ -1938,6 +1938,8 @@ function detailHarness({ decisions = {} } = {}) {
     "fmtSize",
     "fmtDur",
     "fmtMbps",
+    "ME",
+    "exactWireId",
     [
       shippedSource("esc"),
       shippedSource("fmtChannels"),
@@ -1952,6 +1954,7 @@ function detailHarness({ decisions = {} } = {}) {
       shippedSource("trackChip"),
       shippedSource("trackFactRow"),
       shippedSource("preferredLanguageNote"),
+      shippedSource("analysisFileControl"),
       shippedSource("specBlock"),
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -1985,6 +1988,8 @@ function detailHarness({ decisions = {} } = {}) {
     () => "3.4 GB",
     () => "1h 52m",
     () => "8.1 Mb/s",
+    { is_admin: false },
+    (file) => String(file.id),
   );
   return { ...shipped, requested };
 }
