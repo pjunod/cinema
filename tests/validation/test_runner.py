@@ -138,19 +138,22 @@ class CatalogCase(unittest.TestCase):
         self.assertFalse(android["release_build"])
         self.assertFalse(android["container"])
 
-        # The pull-request lane defers the server→client fan-out to the merge
-        # queue: a server diff keeps the Rust, release, and container lanes and
-        # runs no client simulator, JVM, or layout sweep on the PR itself.
+        # The pull-request lane defers cross-builds and container rebuilds to
+        # the merge queue: ordinary server code runs the fast Rust lane only.
         server = scope_for_paths(catalog, ("crates/plurxd/src/http/stream.rs",))
         self.assertTrue(server["rust"])
-        self.assertTrue(server["release_build"])
-        self.assertTrue(server["container"])
+        self.assertFalse(server["release_build"])
+        self.assertFalse(server["container"])
         self.assertFalse(server["apple"])
         self.assertFalse(server["android_jvm"])
         self.assertFalse(server["web_layout"])
         self.assertFalse(server["android_device"])
         self.assertFalse(server["hiqlite_spike"])
         self.assertFalse(server["cluster_auth"])
+
+        packaging = scope_for_paths(catalog, ("Cargo.toml", "Dockerfile"))
+        self.assertTrue(packaging["release_build"])
+        self.assertTrue(packaging["container"])
 
         web = scope_for_paths(catalog, ("crates/plurxd/src/web/app.js",))
         self.assertTrue(web["rust"])
@@ -306,19 +309,26 @@ class CatalogCase(unittest.TestCase):
 
         for scheduler_path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/lint.yml",
             "validation/ci_scope.py",
             "validation/points.toml",
             "validation/runner.py",
         ):
             with self.subTest(scheduler_path=scheduler_path):
                 scheduler_scope = scope_for_paths(catalog, (scheduler_path,))
-                selected = (
-                    value
-                    for key, value in scheduler_scope.items()
-                    if key != "docs_only"
+                self.assertEqual(
+                    {key for key, value in scheduler_scope.items() if value},
+                    {"rust", "cluster_auth"},
                 )
-                self.assertTrue(all(selected))
                 self.assertFalse(scheduler_scope["docs_only"])
+
+        ffmpeg = scope_for_paths(
+            catalog, (".github/actions/ffmpeg/action.yml",)
+        )
+        self.assertEqual(
+            {key for key, value in ffmpeg.items() if value},
+            {"rust", "web_layout", "cluster_auth"},
+        )
 
     def test_ci_scope_fails_open_for_mixed_documentation_and_code(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
@@ -329,8 +339,9 @@ class CatalogCase(unittest.TestCase):
         )
 
         self.assertFalse(scope["docs_only"])
-        self.assertTrue(scope["release_build"])
-        self.assertTrue(scope["container"])
+        self.assertTrue(scope["rust"])
+        self.assertFalse(scope["release_build"])
+        self.assertFalse(scope["container"])
 
     def test_profile_keeps_mandatory_baseline_when_slow_check_is_ineligible(self):
         catalog = self.load()
