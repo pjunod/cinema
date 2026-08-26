@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use hiqlite::macros::params;
 use hiqlite::Row;
 
-use super::fragment_index_cluster::{ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA};
-use super::hiqlite::{database_error, timeout_store, validate_sql, HiqliteAuthStore};
+use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::{
     cluster_fragment_index_key, AnalysisFileLabel, AnalysisRequest, ClusterFragmentIndexArtifact,
     ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
@@ -22,13 +21,171 @@ const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
 const MAX_ANALYSIS_REQUESTS: i64 = 4_096;
 const MAX_LIST_ROWS: i64 = 500;
 
+// These arrays are the immutable replicated-store migrations for schema v12
+// and v13. Keep them as individual statements: Hiqlite's `batch` API applies
+// statements independently, while `txn` rolls the complete version step back
+// if any statement or the version-marker update fails.
+//
+// `CLUSTER_FRAGMENT_INDEX_SCHEMA` and `ANALYSIS_REQUESTS_SCHEMA` remain the
+// matching SQLite migration strings. The parity test below prevents either
+// representation from drifting without review.
+const FRAGMENT_INDEX_SCHEMA_STATEMENTS: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS cluster_fragment_index_sources (
+        node_id          TEXT NOT NULL,
+        file_id          INTEGER NOT NULL,
+        object_version   TEXT NOT NULL,
+        source_size      INTEGER NOT NULL,
+        source_mtime     INTEGER NOT NULL,
+        source_sha256    TEXT NOT NULL,
+        observed_at_ms   INTEGER NOT NULL,
+        PRIMARY KEY (node_id, file_id)
+    ) STRICT"#,
+    r#"CREATE TABLE IF NOT EXISTS cluster_fragment_index_jobs (
+        cache_key         TEXT PRIMARY KEY,
+        file_id           INTEGER NOT NULL,
+        source_size       INTEGER NOT NULL,
+        source_mtime      INTEGER NOT NULL,
+        source_sha256     TEXT NOT NULL,
+        pipeline_sha256   TEXT NOT NULL,
+        state             TEXT NOT NULL CHECK (
+            state IN ('queued', 'running', 'ready', 'failed', 'cancelled')),
+        owner_node_id     TEXT,
+        fence             INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms  INTEGER,
+        attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms     INTEGER NOT NULL,
+        last_error_code   TEXT,
+        created_at_ms     INTEGER NOT NULL,
+        updated_at_ms     INTEGER NOT NULL
+    ) STRICT"#,
+    r#"CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_due
+        ON cluster_fragment_index_jobs(state, not_before_ms, created_at_ms, cache_key)"#,
+    r#"CREATE TABLE IF NOT EXISTS cluster_fragment_index_artifacts (
+        cache_key         TEXT PRIMARY KEY,
+        file_id           INTEGER NOT NULL,
+        source_size       INTEGER NOT NULL,
+        source_mtime      INTEGER NOT NULL,
+        source_sha256     TEXT NOT NULL,
+        pipeline_sha256   TEXT NOT NULL,
+        blob_sha256       TEXT NOT NULL,
+        bytes             INTEGER NOT NULL CHECK (bytes > 0),
+        built_by_node_id  TEXT NOT NULL,
+        built_at_ms       INTEGER NOT NULL
+    ) STRICT"#,
+    r#"CREATE INDEX IF NOT EXISTS cluster_fragment_index_artifacts_file
+        ON cluster_fragment_index_artifacts(file_id, source_size, source_mtime, pipeline_sha256)"#,
+    r#"CREATE TABLE IF NOT EXISTS cluster_fragment_index_locations (
+        cache_key         TEXT NOT NULL,
+        node_id           TEXT NOT NULL,
+        bytes             INTEGER NOT NULL CHECK (bytes > 0),
+        verified_at_ms    INTEGER NOT NULL,
+        last_seen_at_ms   INTEGER NOT NULL,
+        PRIMARY KEY (cache_key, node_id)
+    ) STRICT"#,
+    r#"CREATE INDEX IF NOT EXISTS cluster_fragment_index_locations_node
+        ON cluster_fragment_index_locations(node_id, last_seen_at_ms, cache_key)"#,
+    r#"CREATE TRIGGER IF NOT EXISTS cluster_fragment_indexes_cancel_source BEFORE DELETE ON files
+    BEGIN
+        DELETE FROM cluster_fragment_index_sources WHERE file_id = OLD.id;
+        UPDATE cluster_fragment_index_jobs
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_deleted'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running');
+    END"#,
+];
+
+const ANALYSIS_REQUEST_SCHEMA_STATEMENTS: &[&str] = &[
+    r#"CREATE TABLE IF NOT EXISTS analysis_requests (
+        request_id         TEXT PRIMARY KEY,
+        file_id            INTEGER NOT NULL,
+        source_size        INTEGER NOT NULL,
+        source_mtime       INTEGER NOT NULL,
+        component          TEXT NOT NULL CHECK (component IN ('fragment_index')),
+        force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+        target_node_id     TEXT NOT NULL,
+        state              TEXT NOT NULL CHECK (
+            state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+        owner_node_id      TEXT,
+        fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms   INTEGER,
+        attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms      INTEGER NOT NULL,
+        result_cache_key   TEXT,
+        last_error_code    TEXT,
+        created_at_ms      INTEGER NOT NULL,
+        updated_at_ms      INTEGER NOT NULL
+    ) STRICT"#,
+    r#"CREATE INDEX IF NOT EXISTS analysis_requests_due
+        ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id)"#,
+    r#"CREATE INDEX IF NOT EXISTS analysis_requests_status
+        ON analysis_requests(state, updated_at_ms DESC, request_id)"#,
+    r#"CREATE UNIQUE INDEX IF NOT EXISTS analysis_requests_one_active_source
+        ON analysis_requests(file_id, source_size, source_mtime, component, target_node_id)
+        WHERE state IN ('queued', 'running', 'submitted')"#,
+    r#"CREATE TRIGGER IF NOT EXISTS analysis_requests_cancel_source BEFORE DELETE ON files
+    BEGIN
+        UPDATE analysis_requests
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_deleted'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+    END"#,
+    r#"CREATE TRIGGER IF NOT EXISTS analysis_requests_supersede_source
+    AFTER UPDATE OF size, mtime ON files
+    WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+    BEGIN
+        UPDATE analysis_requests
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_superseded'
+         WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+           AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+    END"#,
+    r#"CREATE TRIGGER IF NOT EXISTS analysis_requests_bound_terminal_history
+    AFTER UPDATE OF state ON analysis_requests
+    WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+    BEGIN
+        DELETE FROM analysis_requests
+         WHERE request_id IN (
+           SELECT request_id FROM analysis_requests
+            WHERE state IN ('ready', 'failed', 'cancelled')
+              AND request_id <> NEW.request_id
+            ORDER BY updated_at_ms, request_id
+            LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                        WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+    END"#,
+];
+
+fn migration_statements(
+    statements: &'static [&'static str],
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    statements
+        .iter()
+        .map(|sql| {
+            validate_sql(sql)?;
+            Ok(((*sql).to_owned(), params!()))
+        })
+        .collect()
+}
+
+pub(super) fn fragment_index_schema_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(FRAGMENT_INDEX_SCHEMA_STATEMENTS)
+}
+
+pub(super) fn analysis_request_schema_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_REQUEST_SCHEMA_STATEMENTS)
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
-    for schema in [CLUSTER_FRAGMENT_INDEX_SCHEMA, ANALYSIS_REQUESTS_SCHEMA] {
-        validate_sql(schema)?;
-        for result in timeout_store(client.batch(schema)).await? {
-            result.map_err(database_error)?;
-        }
-    }
+    let mut statements = fragment_index_schema_migration_statements()?;
+    statements.extend(analysis_request_schema_migration_statements()?);
+    client
+        .txn(statements)
+        .await
+        .map_err(database_error)?
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(database_error)?;
     Ok(())
 }
 
@@ -1328,5 +1485,80 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .zip(results.chunks_exact(3))
             .filter_map(|(key, result)| (result[0] == 1).then_some(key))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::Connection;
+
+    use super::{ANALYSIS_REQUEST_SCHEMA_STATEMENTS, FRAGMENT_INDEX_SCHEMA_STATEMENTS};
+    use crate::store::fragment_index_cluster::{
+        ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
+    };
+
+    fn fixture() -> Connection {
+        let connection = Connection::open_in_memory().expect("in-memory schema fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE files (
+                    id INTEGER PRIMARY KEY,
+                    size INTEGER NOT NULL,
+                    mtime INTEGER NOT NULL
+                 ) STRICT;",
+            )
+            .expect("files prerequisite");
+        connection
+    }
+
+    fn schema_objects(connection: &Connection) -> Vec<(String, String, String, String)> {
+        let mut statement = connection
+            .prepare(
+                "SELECT type, name, tbl_name, COALESCE(sql, '')
+                   FROM sqlite_master
+                  WHERE name LIKE 'cluster_fragment_index_%'
+                     OR name LIKE 'analysis_requests%'
+                  ORDER BY type, name",
+            )
+            .expect("schema object query");
+        statement
+            .query_map([], |row| {
+                let sql: String = row.get(3)?;
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    sql.split_whitespace().collect::<Vec<_>>().join(" "),
+                ))
+            })
+            .expect("schema object rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("schema object values")
+    }
+
+    #[test]
+    fn replicated_migration_statements_match_sqlite_schema_versions() {
+        assert_eq!(FRAGMENT_INDEX_SCHEMA_STATEMENTS.len(), 8);
+        assert_eq!(ANALYSIS_REQUEST_SCHEMA_STATEMENTS.len(), 7);
+
+        let sqlite = fixture();
+        sqlite
+            .execute_batch(CLUSTER_FRAGMENT_INDEX_SCHEMA)
+            .expect("SQLite v30 fragment-index schema");
+        sqlite
+            .execute_batch(ANALYSIS_REQUESTS_SCHEMA)
+            .expect("SQLite v31 analysis-request schema");
+
+        let replicated = fixture();
+        for sql in FRAGMENT_INDEX_SCHEMA_STATEMENTS
+            .iter()
+            .chain(ANALYSIS_REQUEST_SCHEMA_STATEMENTS)
+        {
+            replicated
+                .execute_batch(sql)
+                .expect("replicated migration statement");
+        }
+
+        assert_eq!(schema_objects(&replicated), schema_objects(&sqlite));
     }
 }

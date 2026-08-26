@@ -44,8 +44,12 @@ use crate::error::StoreError;
 // is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
-// schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 13;
+// schemas still fail closed. Version-step targets are named independently of
+// `AUTH_SCHEMA_VERSION` so a later bump cannot silently make an older handler
+// skip intermediate migrations.
+const FRAGMENT_INDEX_SCHEMA_VERSION: i64 = 12;
+const ANALYSIS_REQUEST_SCHEMA_VERSION: i64 = 13;
+pub const AUTH_SCHEMA_VERSION: i64 = ANALYSIS_REQUEST_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -55,7 +59,7 @@ const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
 const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
 const FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = 11;
-const ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE: i64 = 12;
+const ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE: i64 = FRAGMENT_INDEX_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1452,35 +1456,41 @@ impl HiqliteAuthStore {
                         .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE) => {
-                    // Every statement is additive and IF NOT EXISTS, making a
-                    // concurrent coordinator harmless. Publish the marker only
-                    // after the complete schema batch is quorum-applied.
-                    super::hiqlite_fragment_index_cluster::install_schema(self.client().inner())
-                        .await?;
                     let now = self.now()?;
-                    self.execute(
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        fragment_index_schema_migration_statements()?;
+                    statements.push((
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
-                         WHERE singleton = 1 AND schema_version = $3",
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
                         params!(
-                            AUTH_SCHEMA_VERSION,
+                            FRAGMENT_INDEX_SCHEMA_VERSION,
                             now,
                             FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
                         ),
-                    )
-                    .await?;
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE) => {
-                    super::hiqlite_fragment_index_cluster::install_schema(self.client().inner())
-                        .await?;
                     let now = self.now()?;
-                    self.execute(
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_request_schema_migration_statements()?;
+                    statements.push((
                         "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
-                         WHERE singleton = 1 AND schema_version = $3",
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
                         params!(
-                            AUTH_SCHEMA_VERSION,
+                            ANALYSIS_REQUEST_SCHEMA_VERSION,
                             now,
                             ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
                         ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
                     )
                     .await?;
                 }
@@ -4112,6 +4122,21 @@ mod tests {
 
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
+        assert_eq!(
+            FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            FRAGMENT_INDEX_SCHEMA_VERSION,
+            "v11 must advance exactly one step to the fragment-index schema"
+        );
+        assert_eq!(
+            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE,
+            FRAGMENT_INDEX_SCHEMA_VERSION,
+            "the analysis migration must start from the exact v12 shape"
+        );
+        assert_eq!(
+            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_REQUEST_SCHEMA_VERSION,
+            "v12 must advance exactly one step to the analysis-request schema"
+        );
         assert_eq!(
             AUTH_SCHEMA_MIGRATION_SOURCE + 8,
             AUTH_SCHEMA_VERSION,
