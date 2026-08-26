@@ -16,8 +16,8 @@ use crate::error::StoreError;
 const MAX_ATTEMPTS: i64 = 5;
 const MAX_ACTIVE_JOBS: i64 = 4_096;
 const MAX_ERROR_CODE_BYTES: usize = 64;
-const MAX_LOCAL_EXCLUSIONS: usize = 128;
-const CLAIM_SCAN_LIMIT: i64 = 256;
+const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
+const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     validate_sql(CLUSTER_FRAGMENT_INDEX_SCHEMA)?;
@@ -341,26 +341,45 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
 
     async fn requeue_cluster_fragment_index(
         &self,
-        cache_key: &str,
-        now_ms: i64,
+        replacement: &NewClusterFragmentIndexJob,
     ) -> Result<bool, StoreError> {
-        if !valid_hex_digest(cache_key) {
+        if !valid_job(replacement) {
             return Err(StoreError::Task(
-                "invalid cluster fragment-index repair key".to_owned(),
+                "invalid cluster fragment-index repair job".to_owned(),
             ));
         }
         Ok(self
             .execute(
                 "UPDATE cluster_fragment_index_jobs
-                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        not_before_ms = $1, updated_at_ms = $1,
+                    SET file_id = $2, source_size = $3, source_mtime = $4,
+                        source_sha256 = $5, pipeline_sha256 = $6,
+                        state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        attempts = CASE WHEN file_id <> $2 THEN 0 ELSE attempts END,
+                        not_before_ms = $7, updated_at_ms = $8,
                         last_error_code = 'holders_unavailable'
-                  WHERE cache_key = $2
+                  WHERE cache_key = $1
                     AND (state = 'ready' OR (state = 'failed'
-                      AND attempts < $3 AND not_before_ms <= $1))
+                      AND attempts < $9 AND not_before_ms <= $8))
+                    AND (state <> 'ready' OR
+                      (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                        WHERE state IN ('queued', 'running')) < $10)
+                    AND EXISTS (SELECT 1 FROM files
+                      WHERE id = $2 AND size = $3 AND mtime = $4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                 WHERE cache_key = $2)",
-                params!(now_ms, cache_key, MAX_ATTEMPTS),
+                      WHERE cache_key = $1 AND source_size = $3
+                        AND source_sha256 = $5 AND pipeline_sha256 = $6)",
+                params!(
+                    &replacement.cache_key,
+                    replacement.file_id,
+                    replacement.source_size,
+                    replacement.source_mtime,
+                    &replacement.source_sha256,
+                    &replacement.pipeline_sha256,
+                    replacement.not_before_ms,
+                    replacement.created_at_ms,
+                    MAX_ATTEMPTS,
+                    MAX_ACTIVE_JOBS
+                ),
             )
             .await?
             == 1)
@@ -648,16 +667,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         let mut statements = Vec::with_capacity(candidates.len() * 3);
         for cache_key in &candidates {
             statements.push((
-                "DELETE FROM cluster_fragment_index_locations
-                  WHERE cache_key = $1
-                    AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                      WHERE cache_key = $1
-                        AND state IN ('ready', 'failed', 'cancelled')
-                        AND updated_at_ms < $2)"
-                    .to_owned(),
-                params!(cache_key, older_than_ms),
-            ));
-            statements.push((
                 "DELETE FROM cluster_fragment_index_artifacts
                   WHERE cache_key = $1
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
@@ -670,12 +679,22 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 params!(cache_key, older_than_ms),
             ));
             statements.push((
+                "DELETE FROM cluster_fragment_index_locations
+                  WHERE cache_key = $1 AND last_seen_at_ms < $2
+                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                     WHERE cache_key = $1)"
+                    .to_owned(),
+                params!(cache_key, older_than_ms),
+            ));
+            statements.push((
                 "DELETE FROM cluster_fragment_index_jobs
                   WHERE cache_key = $1
                     AND state IN ('ready', 'failed', 'cancelled')
                     AND updated_at_ms < $2
                     AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                     WHERE cache_key = $1)"
+                                     WHERE cache_key = $1)
+                    AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
+                      WHERE cache_key = $1 AND last_seen_at_ms >= $2)"
                     .to_owned(),
                 params!(cache_key, older_than_ms),
             ));
@@ -690,7 +709,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         Ok(candidates
             .into_iter()
             .zip(results.chunks_exact(3))
-            .filter_map(|(key, result)| (result[1] == 1).then_some(key))
+            .filter_map(|(key, result)| (result[0] == 1).then_some(key))
             .collect())
     }
 }

@@ -491,6 +491,17 @@ impl VodServe {
         let cache_key =
             plurx_core::store::cluster_fragment_index_key(&observation.source_sha256, &pipeline)
                 .ok_or_else(|| "source attestation contained an invalid digest".to_owned())?;
+        let now = crate::fragment_index_cluster::unix_ms();
+        let repair = plurx_core::store::NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id: file.id,
+            source_size: file.size,
+            source_mtime: file.mtime,
+            source_sha256: observation.source_sha256.clone(),
+            pipeline_sha256: pipeline.clone(),
+            not_before_ms: now,
+            created_at_ms: now,
+        };
         let artifact = self
             .shared
             .store
@@ -503,20 +514,10 @@ impl VodServe {
                     && artifact.pipeline_sha256 == pipeline
             });
         let Some(artifact) = artifact else {
-            let now = crate::fragment_index_cluster::unix_ms();
             let _ = self
                 .shared
                 .store
-                .enqueue_cluster_fragment_index(&plurx_core::store::NewClusterFragmentIndexJob {
-                    cache_key,
-                    file_id: file.id,
-                    source_size: file.size,
-                    source_mtime: file.mtime,
-                    source_sha256: observation.source_sha256,
-                    pipeline_sha256: pipeline,
-                    not_before_ms: now,
-                    created_at_ms: now,
-                })
+                .enqueue_cluster_fragment_index(&repair)
                 .await;
             return Err("the exact v2 artifact is queued".to_owned());
         };
@@ -532,10 +533,7 @@ impl VodServe {
             let _ = self
                 .shared
                 .store
-                .requeue_cluster_fragment_index(
-                    &artifact.cache_key,
-                    crate::fragment_index_cluster::unix_ms(),
-                )
+                .requeue_cluster_fragment_index(&repair)
                 .await;
             return Err("no verified holder could supply the v2 artifact".to_owned());
         };

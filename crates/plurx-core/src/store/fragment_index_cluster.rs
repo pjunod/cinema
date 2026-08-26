@@ -83,7 +83,7 @@ END;
 
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 const BLOB_MAGIC: &[u8; 8] = b"PLRXIDX2";
-const BLOB_FORMAT_VERSION: u16 = 1;
+const BLOB_FORMAT_VERSION: u16 = 2;
 const ROW_BYTES: usize = 24;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -179,8 +179,7 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     /// identity while a fenced worker deterministically reconstructs it.
     async fn requeue_cluster_fragment_index(
         &self,
-        cache_key: &str,
-        now_ms: i64,
+        replacement: &NewClusterFragmentIndexJob,
     ) -> Result<bool, StoreError>;
 
     async fn claim_cluster_fragment_index(
@@ -308,7 +307,6 @@ struct BlobHeader {
     init_sha256: String,
     promotion: PromotionInputs,
     parameter_sets_constant: bool,
-    source: SourceIdentity,
     source_sha256: String,
     pipeline_sha256: String,
     rows: usize,
@@ -335,7 +333,6 @@ pub fn encode_cluster_fragment_index_blob(
         init_sha256: index.init_sha256.clone(),
         promotion: index.promotion.clone(),
         parameter_sets_constant: index.parameter_sets_constant,
-        source: index.source.clone(),
         source_sha256: source_sha256.to_ascii_lowercase(),
         pipeline_sha256: pipeline_sha256.to_ascii_lowercase(),
         rows: index.rows.len(),
@@ -443,7 +440,15 @@ pub fn decode_cluster_fragment_index_blob(
             class,
         });
     }
-    let mut index = FragmentIndex::new(header.timescale, rows, header.init_sha256, header.source);
+    // The cluster artifact is named by source *content* and pipeline content.
+    // Legacy SourceIdentity contains scanner mtime and a non-cryptographic argv
+    // fingerprint, so serializing it would make duplicate files produce
+    // different bytes for the same cache key. Consumers that bridge this v2
+    // artifact into the file-keyed v1 store replace this neutral identity with
+    // that file's current local identity.
+    let canonical_source = SourceIdentity::new(0, 0, header.pipeline_sha256.clone());
+    let mut index =
+        FragmentIndex::new(header.timescale, rows, header.init_sha256, canonical_source);
     index.promotion = header.promotion;
     index.parameter_sets_constant = header.parameter_sets_constant;
     Ok(index)
@@ -507,10 +512,45 @@ mod tests {
         let source = digest('a');
         let pipeline = digest('b');
         let blob = encode_cluster_fragment_index_blob(&index, &source, &pipeline).expect("encode");
+        let decoded =
+            decode_cluster_fragment_index_blob(&blob, &source, &pipeline).expect("decode");
+        assert_eq!(decoded.rows, index.rows);
+        assert_eq!(decoded.init_sha256, index.init_sha256);
+        assert_eq!(decoded.promotion, index.promotion);
         assert_eq!(
-            decode_cluster_fragment_index_blob(&blob, &source, &pipeline).expect("decode"),
-            index
+            decoded.parameter_sets_constant,
+            index.parameter_sets_constant
         );
+        assert_eq!(decoded.source, SourceIdentity::new(0, 0, pipeline.clone()));
         assert!(decode_cluster_fragment_index_blob(&blob, &digest('d'), &pipeline).is_err());
+    }
+
+    #[test]
+    fn blob_bytes_ignore_file_specific_legacy_identity() {
+        let row = IndexRow {
+            dts: 12,
+            duration: 3_003,
+            bytes: 45,
+            video_bytes: 31,
+            class: CutClass::CleanIdr,
+        };
+        let first = FragmentIndex::new(
+            90_000,
+            vec![row.clone()],
+            digest('c'),
+            SourceIdentity::new(123, 456, "argv-a"),
+        );
+        let second = FragmentIndex::new(
+            90_000,
+            vec![row],
+            digest('c'),
+            SourceIdentity::new(123, 999, "argv-b"),
+        );
+        let source = digest('a');
+        let pipeline = digest('b');
+        assert_eq!(
+            encode_cluster_fragment_index_blob(&first, &source, &pipeline).expect("first"),
+            encode_cluster_fragment_index_blob(&second, &source, &pipeline).expect("second")
+        );
     }
 }

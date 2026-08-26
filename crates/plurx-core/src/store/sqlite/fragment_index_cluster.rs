@@ -12,8 +12,8 @@ use crate::store::{
 const MAX_ATTEMPTS: i64 = 5;
 const MAX_ACTIVE_JOBS: i64 = 4_096;
 const MAX_ERROR_CODE_BYTES: usize = 64;
-const MAX_LOCAL_EXCLUSIONS: usize = 128;
-const CLAIM_SCAN_LIMIT: i64 = 256;
+const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
+const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
 
 const JOB_COLS: &str = "cache_key, file_id, source_size, source_mtime, source_sha256,
     pipeline_sha256, state, COALESCE(owner_node_id, ''), fence,
@@ -301,27 +301,46 @@ impl ClusterFragmentIndexStore for SqliteStore {
 
     async fn requeue_cluster_fragment_index(
         &self,
-        cache_key: &str,
-        now_ms: i64,
+        replacement: &NewClusterFragmentIndexJob,
     ) -> Result<bool, StoreError> {
-        if !valid_hex_digest(cache_key) {
+        if !valid_job(replacement) {
             return Err(StoreError::Task(
-                "invalid cluster fragment-index repair key".to_owned(),
+                "invalid cluster fragment-index repair job".to_owned(),
             ));
         }
-        let cache_key = cache_key.to_owned();
+        let replacement = replacement.clone();
         self.with_conn(move |conn| {
             Ok(conn.execute(
                 "UPDATE cluster_fragment_index_jobs
-                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        not_before_ms = ?1, updated_at_ms = ?1,
+                    SET file_id = ?2, source_size = ?3, source_mtime = ?4,
+                        source_sha256 = ?5, pipeline_sha256 = ?6,
+                        state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        attempts = CASE WHEN file_id <> ?2 THEN 0 ELSE attempts END,
+                        not_before_ms = ?7, updated_at_ms = ?8,
                         last_error_code = 'holders_unavailable'
-                  WHERE cache_key = ?2
+                  WHERE cache_key = ?1
                     AND (state = 'ready' OR (state = 'failed'
-                      AND attempts < ?3 AND not_before_ms <= ?1))
+                      AND attempts < ?9 AND not_before_ms <= ?8))
+                    AND (state <> 'ready' OR
+                      (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                        WHERE state IN ('queued', 'running')) < ?10)
+                    AND EXISTS (SELECT 1 FROM files
+                      WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                 WHERE cache_key = ?2)",
-                params![now_ms, cache_key, MAX_ATTEMPTS],
+                      WHERE cache_key = ?1 AND source_size = ?3
+                        AND source_sha256 = ?5 AND pipeline_sha256 = ?6)",
+                params![
+                    replacement.cache_key,
+                    replacement.file_id,
+                    replacement.source_size,
+                    replacement.source_mtime,
+                    replacement.source_sha256,
+                    replacement.pipeline_sha256,
+                    replacement.not_before_ms,
+                    replacement.created_at_ms,
+                    MAX_ATTEMPTS,
+                    MAX_ACTIVE_JOBS,
+                ],
             )? == 1)
         })
         .await
@@ -631,15 +650,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
             };
             let mut pruned_artifacts = Vec::new();
             for cache_key in candidates {
-                transaction.execute(
-                    "DELETE FROM cluster_fragment_index_locations
-                      WHERE cache_key = ?1
-                        AND EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                          WHERE cache_key = ?1
-                            AND state IN ('ready', 'failed', 'cancelled')
-                            AND updated_at_ms < ?2)",
-                    params![cache_key, older_than_ms],
-                )?;
                 let artifact = transaction.execute(
                     "DELETE FROM cluster_fragment_index_artifacts
                       WHERE cache_key = ?1
@@ -652,12 +662,21 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     params![cache_key, older_than_ms],
                 )?;
                 transaction.execute(
+                    "DELETE FROM cluster_fragment_index_locations
+                      WHERE cache_key = ?1 AND last_seen_at_ms < ?2
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                         WHERE cache_key = ?1)",
+                    params![cache_key, older_than_ms],
+                )?;
+                transaction.execute(
                     "DELETE FROM cluster_fragment_index_jobs
                       WHERE cache_key = ?1
                         AND state IN ('ready', 'failed', 'cancelled')
                         AND updated_at_ms < ?2
                         AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                         WHERE cache_key = ?1)",
+                                         WHERE cache_key = ?1)
+                        AND NOT EXISTS (SELECT 1 FROM cluster_fragment_index_locations
+                          WHERE cache_key = ?1 AND last_seen_at_ms >= ?2)",
                     params![cache_key, older_than_ms],
                 )?;
                 if artifact == 1 {
@@ -747,6 +766,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn published_artifact_repairs_through_a_surviving_duplicate() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let original = job(1, 10, 10);
+        let key = original.cache_key.clone();
+        let seeded = original.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', 1, 1, 0, 10, 10)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_artifacts
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 10)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                        "e".repeat(64),
+                    ],
+                )?;
+                conn.execute("DELETE FROM files WHERE id = 1", [])?;
+                Ok(())
+            })
+            .await
+            .expect("publish then delete original");
+
+        let replacement = job(2, 20, 20);
+        assert!(store
+            .requeue_cluster_fragment_index(&replacement)
+            .await
+            .expect("requeue replacement"));
+        let claimed = store
+            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .await
+            .expect("claim")
+            .expect("replacement claim");
+        assert_eq!(claimed.file_id, 2);
+
+        let rebuilt = ClusterFragmentIndexArtifact {
+            cache_key: key.clone(),
+            file_id: 2,
+            source_size: 100,
+            source_mtime: 20,
+            source_sha256: replacement.source_sha256,
+            pipeline_sha256: replacement.pipeline_sha256,
+            blob_sha256: "e".repeat(64),
+            bytes: 10,
+            built_by_node_id: "node-b".to_owned(),
+            built_at_ms: 21,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: key.clone(),
+            node_id: "node-b".to_owned(),
+            bytes: 10,
+            verified_at_ms: 21,
+            last_seen_at_ms: 21,
+        };
+        assert!(store
+            .complete_cluster_fragment_index(&claimed, &rebuilt, &location, 21)
+            .await
+            .expect("complete repair"));
+        assert_eq!(
+            store
+                .cluster_fragment_index_artifact(&key)
+                .await
+                .expect("artifact")
+                .expect("published artifact")
+                .blob_sha256,
+            "e".repeat(64)
+        );
+        assert_eq!(
+            store
+                .cluster_fragment_index_locations(&key)
+                .await
+                .expect("locations")
+                .into_iter()
+                .map(|location| location.node_id)
+                .collect::<Vec<_>>(),
+            vec!["node-b".to_owned()]
+        );
+    }
+
+    #[tokio::test]
     async fn node_local_exclusions_skip_an_unreadable_head_job() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
@@ -776,6 +896,37 @@ mod tests {
             .expect("claim")
             .expect("later runnable job");
         assert_eq!(claimed.cache_key, second.cache_key);
+    }
+
+    #[tokio::test]
+    async fn exclusions_skip_more_than_128_unreadable_head_jobs() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let mut exclusions = Vec::new();
+        let mut runnable = String::new();
+        for sequence in 1_i64..=130 {
+            let mut candidate = job(1, 10, sequence);
+            candidate.source_sha256 = format!("{sequence:064x}");
+            candidate.cache_key =
+                cluster_fragment_index_key(&candidate.source_sha256, &candidate.pipeline_sha256)
+                    .expect("candidate key");
+            assert!(store
+                .enqueue_cluster_fragment_index(&candidate)
+                .await
+                .expect("enqueue candidate"));
+            if sequence < 130 {
+                exclusions.push(candidate.cache_key);
+            } else {
+                runnable = candidate.cache_key;
+            }
+        }
+
+        let claimed = store
+            .claim_cluster_fragment_index("node-b", &exclusions, 130, 1_130)
+            .await
+            .expect("claim")
+            .expect("later runnable job");
+        assert_eq!(claimed.cache_key, runnable);
     }
 
     #[tokio::test]

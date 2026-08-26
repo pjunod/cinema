@@ -88,68 +88,157 @@ pub(crate) async fn remove_local_blob(root: &Path, cache_key: &str) -> bool {
     }
 }
 
-/// Reconcile a bounded slice of node-local bytes with the authoritative
-/// catalog. Any catalog read failure aborts the sweep and preserves data.
+/// Reconcile one cursor-bounded cache-prefix page with the authoritative
+/// catalog. The returned cursor advances through all 256 digest prefixes and
+/// within a busy prefix, so valid entries at the head cannot permanently hide
+/// later orphans. Any catalog read failure aborts the sweep and preserves the
+/// current candidate.
 pub(crate) async fn sweep_local_orphans(
     store: &dyn Store,
     root: &Path,
+    cursor: Option<&str>,
     limit: usize,
-) -> Result<usize, String> {
-    let mut removed = 0_usize;
-    let mut examined = 0_usize;
-    let mut directories = match tokio::fs::read_dir(root).await {
-        Ok(directories) => directories,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-        Err(error) => return Err(format!("list {}: {error}", root.display())),
+) -> Result<(usize, String), String> {
+    const STAGING_GRACE: Duration = Duration::from_secs(60 * 60);
+
+    let (prefix, after) = cursor
+        .and_then(|cursor| cursor.split_once('/'))
+        .and_then(|(prefix, after)| {
+            u8::from_str_radix(prefix, 16)
+                .ok()
+                .map(|prefix| (prefix, after))
+        })
+        .unwrap_or((0, ""));
+    let directory = root.join(format!("{prefix:02x}"));
+    let mut files = match tokio::fs::read_dir(&directory).await {
+        Ok(files) => files,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((0, format!("{:02x}/", prefix.wrapping_add(1))));
+        }
+        Err(error) => return Err(format!("list {}: {error}", directory.display())),
     };
-    while let Some(directory) = directories
+    let mut candidates = Vec::new();
+    while let Some(file) = files
         .next_entry()
         .await
-        .map_err(|error| format!("walk {}: {error}", root.display()))?
+        .map_err(|error| format!("walk {}: {error}", directory.display()))?
     {
-        if !directory
+        if !file
             .file_type()
             .await
             .map_err(|error| error.to_string())?
-            .is_dir()
+            .is_file()
         {
             continue;
         }
-        let mut files = tokio::fs::read_dir(directory.path())
-            .await
-            .map_err(|error| error.to_string())?;
-        while let Some(file) = files
-            .next_entry()
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            if examined >= limit {
-                return Ok(removed);
-            }
-            let name = file.file_name();
-            let Some(name) = name.to_str() else { continue };
-            let Some(cache_key) = name.strip_suffix(".idx") else {
-                continue;
-            };
-            if !valid_digest(cache_key) {
-                continue;
-            }
-            examined += 1;
-            match store
+        let Some(name) = file.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let is_index = name.strip_suffix(".idx").is_some_and(valid_digest);
+        if name.as_str() > after && (is_index || name.ends_with(".tmp")) {
+            candidates.push((name, file.path()));
+        }
+    }
+    candidates.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    let page_len = limit.max(1).min(candidates.len());
+    let exhausted = page_len == candidates.len();
+    let mut removed = 0_usize;
+    let mut last = after.to_owned();
+    for (name, path) in candidates.into_iter().take(page_len) {
+        last = name.clone();
+        if let Some(cache_key) = name.strip_suffix(".idx") {
+            if store
                 .cluster_fragment_index_artifact(cache_key)
                 .await
                 .map_err(|error| error.to_string())?
-            {
-                Some(_) => {}
-                None => {
-                    if remove_local_blob(root, cache_key).await {
-                        removed += 1;
+                .is_none()
+                && match tokio::fs::remove_file(&path).await {
+                    Ok(()) => true,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+                    Err(error) => {
+                        return Err(format!("remove {}: {error}", path.display()));
                     }
+                }
+            {
+                removed += 1;
+            }
+        } else if name.ends_with(".tmp") {
+            let stale = tokio::fs::metadata(&path)
+                .await
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|modified| modified.elapsed().ok())
+                .is_some_and(|age| age >= STAGING_GRACE);
+            if stale {
+                match tokio::fs::remove_file(&path).await {
+                    Ok(()) => removed += 1,
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(error) => return Err(format!("remove {}: {error}", path.display())),
                 }
             }
         }
     }
-    Ok(removed)
+    let next = if exhausted {
+        format!("{:02x}/", prefix.wrapping_add(1))
+    } else {
+        format!("{prefix:02x}/{last}")
+    };
+    Ok((removed, next))
+}
+
+/// Open and cryptographically verify the exact descriptor that will be
+/// streamed to a peer. Cache publication uses rename, so seeking this handle
+/// back to zero keeps the response bound to the inode that was attested even
+/// if another generation is installed at the pathname concurrently.
+pub(crate) async fn open_verified_local_blob(
+    root: &Path,
+    artifact: &ClusterFragmentIndexArtifact,
+) -> Result<Option<tokio::fs::File>, String> {
+    let Some(path) = cache_path(root, &artifact.cache_key) else {
+        return Err("invalid fragment-index cache key".to_owned());
+    };
+    let mut file = match tokio::fs::File::open(&path).await {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("open {}: {error}", path.display())),
+    };
+    let expected = u64::try_from(artifact.bytes)
+        .ok()
+        .filter(|bytes| *bytes <= MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES as u64)
+        .ok_or_else(|| "fragment-index catalog has an invalid blob size".to_owned())?;
+    let metadata = file
+        .metadata()
+        .await
+        .map_err(|error| format!("fstat {}: {error}", path.display()))?;
+    if metadata.len() != expected {
+        return Err(format!(
+            "fragment-index blob size is {}, expected {expected}",
+            metadata.len()
+        ));
+    }
+    let mut digest = Sha256::new();
+    let mut seen = 0_u64;
+    let mut buffer = vec![0_u8; HASH_CHUNK];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("verify {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        seen = seen.saturating_add(read as u64);
+        digest.update(&buffer[..read]);
+    }
+    if seen != expected
+        || !hex::encode(digest.finalize()).eq_ignore_ascii_case(&artifact.blob_sha256)
+    {
+        return Err("fragment-index blob checksum or size mismatch".to_owned());
+    }
+    file.seek(SeekFrom::Start(0))
+        .await
+        .map_err(|error| format!("rewind {}: {error}", path.display()))?;
+    Ok(Some(file))
 }
 
 pub(crate) async fn read_local_blob(
@@ -520,5 +609,33 @@ mod tests {
             Some(root.join("aa").join(format!("{key}.idx")))
         );
         assert!(cache_path(root, "../escape").is_none());
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_cursor_advances_past_a_full_head_page() {
+        let store = plurx_core::store::SqliteStore::open_in_memory().expect("store");
+        let cache = tempfile::tempdir().expect("cache");
+        let root = cache.path();
+        let prefix = root.join("00");
+        tokio::fs::create_dir_all(&prefix)
+            .await
+            .expect("prefix directory");
+        for sequence in 0_u64..257 {
+            let key = format!("00{sequence:062x}");
+            tokio::fs::write(prefix.join(format!("{key}.idx")), b"orphan")
+                .await
+                .expect("orphan");
+        }
+
+        let (first_removed, cursor) = sweep_local_orphans(&store, root, None, 256)
+            .await
+            .expect("first page");
+        assert_eq!(first_removed, 256);
+        assert!(cursor.starts_with("00/"));
+        let (second_removed, cursor) = sweep_local_orphans(&store, root, Some(&cursor), 256)
+            .await
+            .expect("second page");
+        assert_eq!(second_removed, 1);
+        assert_eq!(cursor, "01/");
     }
 }

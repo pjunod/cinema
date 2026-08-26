@@ -855,6 +855,9 @@ pub struct JobManager {
     /// Per-node maintenance cadence for node-local cache bytes. Candidate
     /// generation is cluster-singleton and cannot maintain every worker disk.
     last_pretranscode_cache_sweep_ms: AtomicI64,
+    /// Stable local cursor for the content-addressed index cache. Without a
+    /// cursor each bounded pass would revisit the same legitimate head page.
+    fragment_index_sweep_cursor: Mutex<Option<String>>,
     /// A genre-backfill pass is running. Same reasoning as `producing`: the
     /// question is "may another one start", not "wait for this one" — two
     /// passes would read the same cursor, fetch the same titles and double
@@ -1371,6 +1374,7 @@ impl JobManager {
             pretranscode_refusals: Mutex::new(HashMap::new()),
             fragment_index_refusals: Mutex::new(HashMap::new()),
             last_pretranscode_cache_sweep_ms: AtomicI64::new(0),
+            fragment_index_sweep_cursor: Mutex::new(None),
             backfilling_genres: std::sync::atomic::AtomicBool::new(false),
             retrying_artwork: std::sync::atomic::AtomicBool::new(false),
             book_cover_workers: metadata::book::CoverMaterializationWorkers::default(),
@@ -3461,14 +3465,24 @@ impl JobManager {
             }
             Err(error) => tracing::warn!(%error, "pruning fragment-index catalog generations"),
         }
-        if let Err(error) = crate::fragment_index_cluster::sweep_local_orphans(
+        let sweep_cursor = self.fragment_index_sweep_cursor.lock().await.clone();
+        match crate::fragment_index_cluster::sweep_local_orphans(
             self.store.as_ref(),
             &cache_root,
+            sweep_cursor.as_deref(),
             256,
         )
         .await
         {
-            tracing::warn!(%error, "reconciling local fragment-index blobs");
+            Ok((removed, next)) => {
+                *self.fragment_index_sweep_cursor.lock().await = Some(next);
+                if removed > 0 {
+                    tracing::info!(removed, "removed orphaned fragment-index cache files");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "reconciling local fragment-index blobs");
+            }
         }
         let libraries = match self.store.list_libraries().await {
             Ok(libraries) => libraries,
@@ -3569,6 +3583,20 @@ impl JobManager {
             else {
                 continue;
             };
+            let now = clock_ms();
+            let job = NewClusterFragmentIndexJob {
+                cache_key: cache_key.clone(),
+                file_id,
+                source_size: file.size,
+                source_mtime: file.mtime,
+                source_sha256: attested.observation.source_sha256.clone(),
+                pipeline_sha256: pipeline_sha256.clone(),
+                not_before_ms: now,
+                created_at_ms: now,
+            };
+            // A successful local attestation proves that an earlier mount or
+            // path refusal for this exact content/pipeline is no longer true.
+            self.fragment_index_refusals.lock().await.remove(&cache_key);
             match self.store.cluster_fragment_index_artifact(&cache_key).await {
                 Ok(Some(artifact)) => match crate::fragment_index_cluster::hydrate(
                     self.store.as_ref(),
@@ -3579,30 +3607,27 @@ impl JobManager {
                 )
                 .await
                 {
-                    Ok(Some(index)) => {
+                    Ok(Some(mut index)) => {
+                        // The content-addressed v2 blob deliberately carries a
+                        // neutral source identity. The v1 bridge is file keyed,
+                        // so bind only this local copy to the consuming file.
+                        index.source = crate::fragindex::identity_for(&file, have_dovi, false);
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, %error, "installing hydrated fragment index");
                         } else {
                             hydrated += 1;
                         }
                     }
-                    Ok(None) => {
-                        let now = clock_ms();
-                        match self
-                            .store
-                            .requeue_cluster_fragment_index(&cache_key, now)
-                            .await
-                        {
-                            Ok(true) => enqueued += 1,
-                            Ok(false) => {}
-                            Err(error) => tracing::warn!(
-                                file_id,
-                                cache_key,
-                                %error,
-                                "queueing fragment-index holder repair"
-                            ),
-                        }
-                    }
+                    Ok(None) => match self.store.requeue_cluster_fragment_index(&job).await {
+                        Ok(true) => enqueued += 1,
+                        Ok(false) => {}
+                        Err(error) => tracing::warn!(
+                            file_id,
+                            cache_key,
+                            %error,
+                            "queueing fragment-index holder repair"
+                        ),
+                    },
                     Err(error) => tracing::warn!(
                         file_id,
                         cache_key,
@@ -3610,29 +3635,16 @@ impl JobManager {
                         "hydrating a cluster fragment index"
                     ),
                 },
-                Ok(None) => {
-                    let now = clock_ms();
-                    let job = NewClusterFragmentIndexJob {
-                        cache_key: cache_key.clone(),
+                Ok(None) => match self.store.enqueue_cluster_fragment_index(&job).await {
+                    Ok(true) => enqueued += 1,
+                    Ok(false) => {}
+                    Err(error) => tracing::warn!(
                         file_id,
-                        source_size: file.size,
-                        source_mtime: file.mtime,
-                        source_sha256: attested.observation.source_sha256.clone(),
-                        pipeline_sha256,
-                        not_before_ms: now,
-                        created_at_ms: now,
-                    };
-                    match self.store.enqueue_cluster_fragment_index(&job).await {
-                        Ok(true) => enqueued += 1,
-                        Ok(false) => {}
-                        Err(error) => tracing::warn!(
-                            file_id,
-                            cache_key,
-                            %error,
-                            "queueing a cluster fragment index"
-                        ),
-                    }
-                }
+                        cache_key,
+                        %error,
+                        "queueing a cluster fragment index"
+                    ),
+                },
                 Err(error) => tracing::warn!(file_id, %error, "reading cluster index catalog"),
             }
         }
@@ -3716,7 +3728,7 @@ impl JobManager {
     ) -> usize {
         const MAX_JOBS_PER_SLOT: usize = 4;
         const CLAIM_TTL_MS: i64 = 60_000;
-        const MAX_REFUSALS: usize = 128;
+        const MAX_REFUSALS: usize = 4_096;
 
         let node_id = self.coordinator.node_id().to_owned();
         let engine_sha256 = crate::ffmpeg::fragment_index_engine_digest().await;
@@ -3805,7 +3817,7 @@ impl JobManager {
     }
 
     async fn remember_fragment_index_refusal(&self, cache_key: &str, retry_at_ms: i64) {
-        const MAX_REFUSALS: usize = 128;
+        const MAX_REFUSALS: usize = 4_096;
         let mut refusals = self.fragment_index_refusals.lock().await;
         refusals.retain(|_, retry_at| *retry_at > clock_ms());
         if refusals.len() >= MAX_REFUSALS {
@@ -3832,7 +3844,10 @@ impl JobManager {
         const RENEW_EVERY: Duration = Duration::from_secs(20);
         const CLAIM_TTL_MS: i64 = 60_000;
         const RETRY_MS: i64 = 5 * 60_000;
-        const LOCAL_REFUSAL_MS: i64 = 60_000;
+        // Long enough for a node to walk the entire enforced 4,096-job active
+        // queue at eight refusals per minute. Discovery removes an exclusion
+        // immediately when the exact source becomes readable again.
+        const LOCAL_REFUSAL_MS: i64 = 24 * 60 * 60_000;
         const ATTEST_TIMEOUT: Duration = Duration::from_secs(10 * 60);
         const PREEMPT_RETRY_MS: i64 = 5_000;
 
