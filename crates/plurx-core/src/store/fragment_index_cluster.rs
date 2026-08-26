@@ -130,6 +130,18 @@ BEGIN
      WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
        AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
 END;
+CREATE TRIGGER IF NOT EXISTS analysis_requests_bound_terminal_history
+AFTER UPDATE OF state ON analysis_requests
+WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+BEGIN
+    DELETE FROM analysis_requests
+     WHERE request_id IN (
+       SELECT request_id FROM analysis_requests
+        WHERE state IN ('ready', 'failed', 'cancelled')
+        ORDER BY updated_at_ms, request_id
+        LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                    WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+END;
 "#;
 
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;

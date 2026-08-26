@@ -59,8 +59,34 @@ removes at most 256 rows and is throttled to hourly cadence per node.
 
 ## Validation order
 
-The corrected commit receives a second adversarial review before any unit test
+Each correction commit receives another adversarial review before any unit test
 is run. After approval, focused store/HTTP tests and the repository validation
 gate run; test-driven corrections are reviewed again if they materially change
 queue semantics. The PR is made ready only when that sequence is recorded and
 green.
+
+## Second review
+
+The second review of `64ce08df` kept the PR at **request changes**. It confirmed
+that the fenced handoff, full-hash cancellation, claim-loss no-op,
+source-generation uniqueness, and predecessor migrations were materially
+correct, then found four narrower gaps:
+
+- a ready content key could not be joined after its scanner file identity
+  changed, and an old canceled row retained an expired queue age;
+- Hiqlite admission committed and read in separate calls but read only active
+  rows, allowing a very fast completion to make a successful POST look failed;
+- hourly cleanup was not a hard growth bound; and
+- replicated contracts did not exercise forced reopen, ready replacement,
+  canceled rebind, or the v11-to-current migration path.
+
+The follow-up uses the content/pipeline key—not obsolete scanner fields—to join
+active or ready work. A matching retained artifact converts a missing or
+terminal ordinary worker row directly to ready, while force still reopens a
+queued rebuild. Every terminal rebind receives a fresh queue age. Hiqlite now
+checks the inserted request id in any state when its insert succeeds; duplicate
+joins still require an active exact generation. Terminal transitions enforce
+the 8,192-row global ceiling synchronously. SQLite and real-Raft contracts cover
+ready replacement, canceled rebind, forced reopen with artifact retention,
+charged retry exhaustion, the foreground stop signal, and both v11 and v12
+migration paths.

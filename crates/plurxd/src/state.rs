@@ -6069,6 +6069,45 @@ mod tests {
         assert!(!jobs.indexing.load(Ordering::Relaxed));
     }
 
+    #[tokio::test]
+    async fn analysis_hash_stop_signal_observes_foreground_playback() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable analysis");
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store,
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let lost = tokio_util::sync::CancellationToken::new();
+        let waiter = {
+            let jobs = Arc::clone(&jobs);
+            let transcode = Arc::clone(&transcode);
+            let lost = lost.clone();
+            tokio::spawn(async move {
+                jobs.wait_for_cluster_fragment_index_stop(&transcode, &lost)
+                    .await;
+                lost.is_cancelled()
+            })
+        };
+        tokio::task::yield_now().await;
+        let _waiting_viewer = transcode.test_mark_live_waiting();
+        let claim_was_lost = tokio::time::timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("foreground demand cancels the hash selector")
+            .expect("wait task");
+        assert!(
+            !claim_was_lost,
+            "foreground cancellation is a no-charge retry, not claim loss"
+        );
+    }
+
     #[test]
     fn the_vod_index_cursor_wraps_past_failed_low_ids() {
         let paths = [1, 9, 17, 120, 5910]

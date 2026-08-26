@@ -308,10 +308,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                       OR
                       (?9 = 0 AND (
                         EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                 WHERE cache_key = ?1 AND file_id = ?6
-                                   AND source_size = ?7 AND source_mtime = ?8
-                                   AND source_sha256 = ?11 AND pipeline_sha256 = ?12
+                                 WHERE cache_key = ?1
                                    AND state IN ('queued', 'running', 'ready'))
+                        OR (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                    WHERE cache_key = ?1 AND source_sha256 = ?11
+                                      AND pipeline_sha256 = ?12)
+                          AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                                            WHERE cache_key = ?1)
+                            OR EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
+                                        WHERE cache_key = ?1
+                                          AND state IN ('failed', 'cancelled'))))
                         OR (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
                                         WHERE cache_key = ?1)
                           AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
@@ -349,28 +355,44 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     (cache_key, file_id, source_size, source_mtime, source_sha256,
                      pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
                      attempts, not_before_ms, created_at_ms, updated_at_ms, last_error_code)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, 0, NULL, 0,
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6,
+                        CASE WHEN ?9 = 0 AND EXISTS (
+                          SELECT 1 FROM cluster_fragment_index_artifacts
+                           WHERE cache_key = ?1 AND source_sha256 = ?5
+                             AND pipeline_sha256 = ?6)
+                        THEN 'ready' ELSE 'queued' END,
+                        NULL, 0, NULL, 0,
                         ?7, ?8, ?8, NULL
                  ON CONFLICT(cache_key) DO UPDATE SET
                     file_id = excluded.file_id, source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
                     source_sha256 = excluded.source_sha256,
                     pipeline_sha256 = excluded.pipeline_sha256,
-                    state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                    attempts = CASE WHEN ?9 = 1 THEN 0
+                    state = CASE WHEN ?9 = 0 AND EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_artifacts
+                       WHERE cache_key = ?1 AND source_sha256 = ?5
+                         AND pipeline_sha256 = ?6)
+                      THEN 'ready' ELSE 'queued' END,
+                    owner_node_id = NULL, lease_expires_ms = NULL,
+                    attempts = CASE WHEN ?9 = 1 OR EXISTS (
+                      SELECT 1 FROM cluster_fragment_index_artifacts
+                       WHERE cache_key = ?1 AND source_sha256 = ?5
+                         AND pipeline_sha256 = ?6) THEN 0
                       WHEN cluster_fragment_index_jobs.state = 'cancelled'
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                       ELSE cluster_fragment_index_jobs.attempts END,
                     not_before_ms = excluded.not_before_ms,
-                    created_at_ms = CASE WHEN ?9 = 1
-                      OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                      THEN excluded.created_at_ms
-                      ELSE cluster_fragment_index_jobs.created_at_ms END,
+                    created_at_ms = excluded.created_at_ms,
                     updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
                   WHERE (?9 = 1 AND cluster_fragment_index_jobs.state
                                       IN ('ready', 'failed', 'cancelled'))
-                     OR (?9 = 0 AND (cluster_fragment_index_jobs.state = 'cancelled'
+                     OR (?9 = 0 AND (
+                       (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
+                                 WHERE cache_key = ?1 AND source_sha256 = ?5
+                                   AND pipeline_sha256 = ?6)
+                         AND cluster_fragment_index_jobs.state IN ('failed', 'cancelled'))
+                       OR cluster_fragment_index_jobs.state = 'cancelled'
                        OR (cluster_fragment_index_jobs.state = 'failed'
                          AND (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                            OR (cluster_fragment_index_jobs.attempts < ?10
@@ -390,17 +412,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
             )?;
             let handed_off = transaction.query_row(
                 "SELECT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                  WHERE cache_key = ?1 AND file_id = ?2 AND source_size = ?3
-                    AND source_mtime = ?4 AND source_sha256 = ?5 AND pipeline_sha256 = ?6
-                    AND state IN ('queued', 'running', 'ready'))",
-                params![
-                    job.cache_key,
-                    job.file_id,
-                    job.source_size,
-                    job.source_mtime,
-                    job.source_sha256,
-                    job.pipeline_sha256
-                ],
+                  WHERE cache_key = ?1 AND state IN ('queued', 'running', 'ready'))",
+                params![job.cache_key],
                 |row| row.get::<_, i64>(0),
             )? == 1;
             if !handed_off {
@@ -1625,6 +1638,204 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ready_content_is_reused_after_the_scanner_generation_changes() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let ready = job(1, 10, 10);
+        let seeded = ready.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', 1, 1, 0, 10, 10)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_artifacts
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 10)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                        "c".repeat(64),
+                    ],
+                )?;
+                conn.execute("UPDATE files SET mtime = 30 WHERE id = 1", [])?;
+                Ok(())
+            })
+            .await
+            .expect("seed ready artifact and replace scanner generation");
+
+        let mut replacement = request("replacement", false, 30);
+        replacement.source_mtime = 30;
+        store
+            .enqueue_analysis_request(&replacement)
+            .await
+            .expect("enqueue replacement generation");
+        let claimed = store
+            .claim_analysis_request("node-a", 30, 1_030)
+            .await
+            .expect("claim replacement")
+            .expect("replacement claim");
+        let mut replacement_job = ready.clone();
+        replacement_job.source_mtime = 30;
+        replacement_job.created_at_ms = 31;
+        replacement_job.not_before_ms = 31;
+        assert!(store
+            .submit_fragment_index_analysis(&claimed, &replacement_job, 31)
+            .await
+            .expect("join ready content identity"));
+        assert_eq!(
+            store
+                .settle_analysis_requests(32)
+                .await
+                .expect("settle replacement"),
+            1
+        );
+        let requests = store.analysis_requests(10).await.expect("list requests");
+        assert_eq!(requests[0].state, "ready");
+        assert!(store
+            .cluster_fragment_index_artifact(&ready.cache_key)
+            .await
+            .expect("read artifact")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn cancelled_content_rebind_resets_queue_age_and_retains_artifact() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let old = job(1, 10, 1);
+        let seeded = old.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       created_at_ms, updated_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'cancelled', 1, 3, 0, 1, 1)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_artifacts
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 1)",
+                    params![
+                        seeded.cache_key,
+                        seeded.file_id,
+                        seeded.source_size,
+                        seeded.source_mtime,
+                        seeded.source_sha256,
+                        seeded.pipeline_sha256,
+                        "c".repeat(64),
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed cancelled generation");
+        let mut replacement = request("rebind", false, 30_000_001);
+        replacement.file_id = 2;
+        replacement.source_mtime = 20;
+        store
+            .enqueue_analysis_request(&replacement)
+            .await
+            .expect("enqueue surviving file");
+        let claimed = store
+            .claim_analysis_request("node-a", 30_000_001, 30_001_001)
+            .await
+            .expect("claim surviving file")
+            .expect("surviving claim");
+        let mut rebound = old.clone();
+        rebound.file_id = 2;
+        rebound.source_mtime = 20;
+        rebound.created_at_ms = 30_000_002;
+        rebound.not_before_ms = 30_000_002;
+        assert!(store
+            .submit_fragment_index_analysis(&claimed, &rebound, 30_000_002)
+            .await
+            .expect("rebind cancelled content"));
+        let job = store
+            .cluster_fragment_index_job(&rebound.cache_key)
+            .await
+            .expect("read rebound job")
+            .expect("rebound job");
+        assert_eq!(job.state, "ready");
+        assert_eq!(job.file_id, 2);
+        assert_eq!(job.created_at_ms, 30_000_002);
+        assert!(store
+            .cluster_fragment_index_artifact(&rebound.cache_key)
+            .await
+            .expect("read retained artifact")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn charged_retries_exhaust_to_a_terminal_attempt_limit() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .enqueue_analysis_request(&request("attempts", false, 10))
+            .await
+            .expect("enqueue request");
+        let mut now = 10;
+        for expected_attempt in 1..=MAX_ATTEMPTS {
+            let claimed = store
+                .claim_analysis_request("node-a", now, now + 1_000)
+                .await
+                .expect("claim retry")
+                .expect("retry claim");
+            assert_eq!(claimed.attempts, expected_attempt);
+            assert!(store
+                .retry_analysis_request(
+                    &claimed.request_id,
+                    "node-a",
+                    claimed.fence,
+                    "source_attestation_failed",
+                    now + 1,
+                    now + 2,
+                    true,
+                )
+                .await
+                .expect("queue charged retry"));
+            now += 2;
+        }
+        assert!(store
+            .claim_analysis_request("node-a", now, now + 1_000)
+            .await
+            .expect("settle attempt limit")
+            .is_none());
+        let requests = store.analysis_requests(10).await.expect("list requests");
+        assert_eq!(requests[0].state, "failed");
+        assert_eq!(requests[0].attempts, MAX_ATTEMPTS);
+        assert_eq!(requests[0].last_error_code, "attempt_limit");
+    }
+
+    #[tokio::test]
     async fn terminal_analysis_history_is_age_and_generation_bounded() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
@@ -1663,6 +1874,58 @@ mod tests {
                 .expect("prune by age"),
             20
         );
+    }
+
+    #[tokio::test]
+    async fn terminal_analysis_history_has_a_hard_global_cap() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        store
+            .with_conn(|conn| {
+                let transaction = conn.unchecked_transaction()?;
+                for generation in 0_i64..=8_192 {
+                    transaction.execute(
+                        "INSERT INTO analysis_requests
+                          (request_id, file_id, source_size, source_mtime, component,
+                           force_rebuild, target_node_id, state, fence, attempts,
+                           not_before_ms, created_at_ms, updated_at_ms)
+                         VALUES (?1, 1, 100, ?2, 'fragment_index', 0, 'node-a',
+                                 'failed', 0, 1, 0, ?2, ?2)",
+                        params![format!("terminal-{generation:05}"), generation],
+                    )?;
+                }
+                transaction.execute(
+                    "INSERT INTO analysis_requests
+                      (request_id, file_id, source_size, source_mtime, component,
+                       force_rebuild, target_node_id, state, fence, attempts,
+                       not_before_ms, created_at_ms, updated_at_ms)
+                     VALUES ('cap-trigger', 2, 100, 20, 'fragment_index', 0,
+                             'node-a', 'queued', 0, 0, 9000, 9000, 9000)",
+                    [],
+                )?;
+                transaction.execute(
+                    "UPDATE analysis_requests SET state = 'failed'
+                      WHERE request_id = 'cap-trigger'",
+                    [],
+                )?;
+                transaction.commit()?;
+                Ok(())
+            })
+            .await
+            .expect("exercise terminal cap trigger");
+        let count = store
+            .with_read(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM analysis_requests
+                      WHERE state IN ('ready', 'failed', 'cancelled')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("count terminal history");
+        assert_eq!(count, 8_192);
     }
 
     #[tokio::test]

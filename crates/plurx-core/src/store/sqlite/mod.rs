@@ -2809,6 +2809,7 @@ mod tests {
             "analysis_requests_one_active_source",
             "analysis_requests_cancel_source",
             "analysis_requests_supersede_source",
+            "analysis_requests_bound_terminal_history",
         ] {
             assert_eq!(
                 conn.query_row(

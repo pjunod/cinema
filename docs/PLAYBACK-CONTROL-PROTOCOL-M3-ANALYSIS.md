@@ -62,7 +62,11 @@ time visible.
 Concurrent ordinary requests for one source generation/component/node join the
 active row. If a scanner update changes size or modification time, a trigger
 cancels the stale active generation and the replacement generation can be
-admitted immediately under the same file id.
+admitted immediately under the same file id. Once hashing proves that a
+replacement file has the same content/pipeline key, it may join the existing
+ready artifact even when scanner file id, size/mtime generation, or path
+changed. A canceled terminal worker row is rebound with a fresh queue age; the
+published artifact remains available throughout.
 A force request does not silently replace an ordinary request already in
 flight; it returns conflict and can be made once the first generation
 finishes. Likewise, force does not delete the published artifact. It reopens a
@@ -109,6 +113,9 @@ file/title labels from bounded request/job inputs in one joined query rather
 than an Activity-page N+1. Terminal request history is retained for 30 days and
 capped at the 20 newest generations per file/component/target. Pruning is
 bounded to 256 rows and locally throttled to no more than once per hour.
+An update trigger independently enforces a hard global ceiling of 8,192
+terminal requests, so the hourly pass is age/per-file cleanup rather than the
+only growth bound.
 
 ## What this slice does not claim
 

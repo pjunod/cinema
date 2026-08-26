@@ -5962,7 +5962,7 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v12_store_migrates_exactly_to_v13_on_daemon_open() {
+async fn replicated_v11_and_v12_stores_migrate_exactly_to_v13_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -5994,6 +5994,10 @@ async fn replicated_v12_store_migrates_exactly_to_v13_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP TRIGGER analysis_requests_bound_terminal_history",
+                hiqlite::params!(),
+            ),
             (
                 "DROP TRIGGER analysis_requests_supersede_source",
                 hiqlite::params!(),
@@ -6060,14 +6064,118 @@ async fn replicated_v12_store_migrates_exactly_to_v13_on_daemon_open() {
         (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
              AND name IN ('analysis_requests_cancel_source', \
-                          'analysis_requests_supersede_source')",
-            2,
+                          'analysis_requests_supersede_source', \
+                          'analysis_requests_bound_terminal_history')",
+            3,
         ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
             .expect("inspect migrated v13 analysis schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+    drop(migrated);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER analysis_requests_bound_terminal_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_supersede_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX analysis_requests_status", hiqlite::params!()),
+            ("DROP INDEX analysis_requests_due", hiqlite::params!()),
+            ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP TRIGGER cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_locations_node",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_artifacts_file",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_locations",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_artifacts",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (
+                "DROP TABLE cluster_fragment_index_sources",
+                hiqlite::params!(),
+            ),
+            (
+                "UPDATE cluster_meta SET schema_version = 11 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v11 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v11 fixture");
+
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v11 through v13 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v12.proof")
+            .await
+            .expect("read v11 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('cluster_fragment_index_sources', \
+                          'cluster_fragment_index_jobs', \
+                          'cluster_fragment_index_artifacts', \
+                          'cluster_fragment_index_locations', 'analysis_requests')",
+            5,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('cluster_fragment_indexes_cancel_source', \
+                          'analysis_requests_cancel_source', \
+                          'analysis_requests_supersede_source', \
+                          'analysis_requests_bound_terminal_history')",
+            4,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v11-through-v13 schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -6182,6 +6290,173 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
             .state,
         "queued"
     );
+
+    client
+        .txn([
+            (
+                "UPDATE cluster_fragment_index_jobs
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        updated_at_ms = 22 WHERE cache_key = $1",
+                hiqlite::params!(&job.cache_key),
+            ),
+            (
+                "INSERT INTO cluster_fragment_index_artifacts
+                  (cache_key, file_id, source_size, source_mtime, source_sha256,
+                   pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                 VALUES ($1, 1, 100, 10, $2, $3, $4, 10, 'node-a', 22)",
+                hiqlite::params!(
+                    &job.cache_key,
+                    &job.source_sha256,
+                    &job.pipeline_sha256,
+                    "c".repeat(64)
+                ),
+            ),
+            (
+                "UPDATE files SET mtime = 20 WHERE id = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("publish artifact and replace scanner generation")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit ready replacement fixture");
+    store
+        .settle_analysis_requests(23)
+        .await
+        .expect("settle original request");
+
+    store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: "replacement-request".to_owned(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 20,
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 30,
+            created_at_ms: 30,
+        })
+        .await
+        .expect("enqueue replacement request");
+    let replacement_claim = store
+        .claim_analysis_request("node-a", 30, 1_030)
+        .await
+        .expect("claim replacement")
+        .expect("replacement owner");
+    let mut replacement_job = job.clone();
+    replacement_job.source_mtime = 20;
+    replacement_job.not_before_ms = 31;
+    replacement_job.created_at_ms = 31;
+    assert!(store
+        .submit_fragment_index_analysis(&replacement_claim, &replacement_job, 31)
+        .await
+        .expect("join ready artifact after scanner replacement"));
+    assert_eq!(
+        store
+            .settle_analysis_requests(32)
+            .await
+            .expect("settle replacement request"),
+        1
+    );
+
+    store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: "force-request".to_owned(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 20,
+            component: "fragment_index".to_owned(),
+            force_rebuild: true,
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 40,
+            created_at_ms: 40,
+        })
+        .await
+        .expect("enqueue forced rebuild");
+    let force_claim = store
+        .claim_analysis_request("node-a", 40, 1_040)
+        .await
+        .expect("claim forced rebuild")
+        .expect("forced owner");
+    let mut forced_job = replacement_job.clone();
+    forced_job.not_before_ms = 41;
+    forced_job.created_at_ms = 41;
+    assert!(store
+        .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
+        .await
+        .expect("force reopen ready job"));
+    assert_eq!(
+        store
+            .cluster_fragment_index_job(&job.cache_key)
+            .await
+            .expect("read forced worker")
+            .expect("forced worker")
+            .state,
+        "queued"
+    );
+    assert!(store
+        .cluster_fragment_index_artifact(&job.cache_key)
+        .await
+        .expect("read artifact during rebuild")
+        .is_some());
+
+    client
+        .txn([
+            ("DELETE FROM files WHERE id = 1", hiqlite::params!()),
+            (
+                "INSERT INTO files (id, item_id, path, size, mtime) \
+                 VALUES (2, 1, '/replacement.mkv', 100, 30)",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("replace file identity while forced job is queued")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit file replacement");
+    store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: "rebind-request".to_owned(),
+            file_id: 2,
+            source_size: 100,
+            source_mtime: 30,
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 50,
+            created_at_ms: 50,
+        })
+        .await
+        .expect("enqueue surviving file");
+    let rebind_claim = store
+        .claim_analysis_request("node-a", 50, 1_050)
+        .await
+        .expect("claim surviving file")
+        .expect("surviving owner");
+    let mut rebound_job = job.clone();
+    rebound_job.file_id = 2;
+    rebound_job.source_mtime = 30;
+    rebound_job.not_before_ms = 51;
+    rebound_job.created_at_ms = 51;
+    assert!(store
+        .submit_fragment_index_analysis(&rebind_claim, &rebound_job, 51)
+        .await
+        .expect("rebind cancelled content"));
+    let rebound = store
+        .cluster_fragment_index_job(&job.cache_key)
+        .await
+        .expect("read rebound worker")
+        .expect("rebound worker");
+    assert_eq!(rebound.state, "ready");
+    assert_eq!(rebound.file_id, 2);
+    assert_eq!(rebound.created_at_ms, 51);
+    assert!(store
+        .cluster_fragment_index_artifact(&job.cache_key)
+        .await
+        .expect("read retained artifact after rebind")
+        .is_some());
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]
