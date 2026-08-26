@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["eccf3e0c"]
+points = ["validation.framework"]
+checks = ["operations-contract"]
+reason = "The operations contract requires the replicated-storage job to select the joint high-cpu and ffmpeg-6 runner capability, invoke the repository's pinned ffmpeg 6 setup action, and retain the separate docker runner boundary. This prevents the cluster activity fixture from depending on which high-CPU host happens to accept the job."

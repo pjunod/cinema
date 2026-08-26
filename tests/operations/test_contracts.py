@@ -249,8 +249,14 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("./.github/actions/playwright", fast_rust)
         self.assertNotIn("./.github/actions/ffmpeg", fast_rust)
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.android_device == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", workflow)
+        web_layout = workflow.split("\n  web_layout:", 1)[1].split(
+            "\n  android_jvm:", 1
+        )[0]
+        android_device = workflow.split("\n  android_device:", 1)[1].split(
+            "\n  coverage:", 1
+        )[0]
+        self.assertIn("if: ${{ false }}", web_layout)
+        self.assertIn("if: ${{ false }}", android_device)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
@@ -408,7 +414,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
 
         # The emulator restores a cached AVD snapshot and never saves over it.
-        self.assertIn("key: avd-35-google_apis-pixel_7_pro", workflow)
+        self.assertIn("key: avd-35-google_apis-tv_1080p", workflow)
+        self.assertEqual(workflow.count("profile: tv_1080p"), 2)
         self.assertIn("-no-snapshot-save", workflow)
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
@@ -425,6 +432,12 @@ class OperationsContractCase(unittest.TestCase):
             "\n  web_layout:", 1
         )[0]
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
+        self.assertIn(
+            "Resolve pinned Rust executables for the long contract run", cluster
+        )
+        self.assertIn("rustup which --toolchain 1.97.1 cargo", cluster)
+        self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
+        self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
         self.assertIn("run: make cluster-store-check cluster-harness-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertIn("run: make cluster-wal-check", wal)
@@ -552,7 +565,6 @@ class OperationsContractCase(unittest.TestCase):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
                     "cluster_daemon",
-                    "vod_web",
                     "coverage",
                 }:
                     expected = high_cpu_ffmpeg6
@@ -570,6 +582,11 @@ class OperationsContractCase(unittest.TestCase):
                     "android_device",
                 }:
                     expected = android
+                elif (
+                    "uses: ./.github/actions/ffmpeg" in block
+                    and "container: ubuntu:26.04" not in block
+                ):
+                    expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
         for path in (

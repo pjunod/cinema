@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["6f39a461"]
+reason = "This commit only records validation metadata for the empty-buffer playback evidence."
+ignore = true

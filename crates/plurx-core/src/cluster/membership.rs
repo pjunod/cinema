@@ -10,6 +10,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::ffi::CStr;
 use std::future::Future;
 use std::net::IpAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,9 +23,12 @@ use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::cluster::coordination::removed_job_owner_key;
+use crate::cluster::coordination::{removed_job_owner_key, ClusterJobAuthority};
 use crate::domain::{OfflinePackage, OfflineRemovalPlanEntry, OfflineRemovalReport};
-use crate::store::{ArtworkRepairFence, Store, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION};
+use crate::store::{
+    ArtworkRepairFence, Store, AUTH_LEARNER_PROTOCOL, AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN,
+    AUTH_SCHEMA_VERSION,
+};
 
 use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
@@ -33,8 +37,25 @@ use super::ClusterIdentity;
 const JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
 const JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
 const JOIN_TOKEN_VERSION: u32 = 1;
+/// Learner admission is a *different* protocol, not a flag on the voter one.
+/// The prefix, the AEAD associated data, and the version constant are all
+/// distinct, so a build that only knows v1 refuses a v2 token at the prefix,
+/// again at decryption, and again at the version, instead of reinterpreting
+/// the payload as a voter join.
+const JOIN_TOKEN_V2_PREFIX: &str = "plxjoin:v2";
+const JOIN_TOKEN_V2_AAD: &[u8] = b"plurx-cluster-join-v2";
+const JOIN_TOKEN_V2_VERSION: u32 = 2;
 const MEMBERSHIP_SCHEMA_VERSION: i64 = 1;
 const NODE_REACHABLE_WINDOW_MS: i64 = 30_000;
+/// How long a member may say nothing before a protocol change treats it as
+/// absent rather than as proven.
+///
+/// Twelve heartbeats, deliberately much wider than the thirty-second
+/// reachability window: reachability is a health signal an operator reads,
+/// while this decides whether to commit a one-way narrowing that can lock a
+/// node out of its own store. A brief hiccup must not block activation; two
+/// minutes of silence is not a hiccup.
+const PROTOCOL_CHANGE_ABSENCE_WINDOW_MS: i64 = 120_000;
 const ARTWORK_AUTH_WINDOW_MS: i64 = 60_000;
 /// The vendored Raft configuration sends heartbeats every 500 ms and cannot
 /// elect a successor before 1,500 ms. Requiring an acknowledgement inside two
@@ -68,6 +89,130 @@ const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
 /// if this best-effort final tombstone write does not finish in time.
 const FINAL_TOMBSTONE_WAIT: Duration = Duration::from_secs(1);
 const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
+/// Proof that the binary running on this node implements protocol 5, the
+/// non-voting learner admission protocol. Written coupled to the heartbeat for
+/// the same reason as [`REMOVAL_ATTEMPT_CAPABILITY`]: activation must be
+/// decided on what each voter is running *now*, not on what it once ran.
+const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
+
+/// Whether this process must heartbeat the way a binary that predates the
+/// learner protocol does: it advances `cluster_nodes.last_seen_at` like any
+/// other member, and it never writes [`LEARNER_PROTOCOL_CAPABILITY`].
+///
+/// Activation is refused while any active node's currently running binary has
+/// not proven that capability, and the only honest way to test that is to run a
+/// second process that genuinely does not write it. The separate-process
+/// harness starts one with this variable set. `cluster-validation` is a feature
+/// the daemon never enables, so a production build compiles the constant
+/// version below instead and has no variable to read.
+#[cfg(feature = "cluster-validation")]
+fn emulate_pre_learner_protocol_heartbeat() -> bool {
+    std::env::var("PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT").as_deref() == Ok("1")
+}
+
+/// Production builds do not compile the emulation at all.
+#[cfg(not(feature = "cluster-validation"))]
+const fn emulate_pre_learner_protocol_heartbeat() -> bool {
+    false
+}
+
+/// What a cluster member was *admitted* as.
+///
+/// This is the durable admission record, not the effective role. Whether a
+/// process may act as a voter right now is decided by live committed Raft
+/// membership ([`MembershipManager::local_node_is_committed_voter`]); this
+/// enum only says which protocol admitted it and therefore what its own
+/// startup is allowed to do. Anything that reads it to decide about leadership
+/// or singleton work is a bug — a learner can be promoted while it runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClusterRole {
+    /// Carries a vote, may become leader, may run leader-singleton work.
+    #[default]
+    Voter,
+    /// Receives replication and nothing else.
+    Learner,
+}
+
+impl ClusterRole {
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Voter => "voter",
+            Self::Learner => "learner",
+        }
+    }
+
+    #[must_use]
+    pub fn is_learner(self) -> bool {
+        matches!(self, Self::Learner)
+    }
+
+    /// Read a role back out of replicated SQL.
+    ///
+    /// The column is additive and nullable, so every row written before this
+    /// binary existed carries `NULL` — and every such row belongs to a node
+    /// admitted by the voter-only protocol. An unrecognized value is treated
+    /// the same way a missing one is only for `NULL`; anything else is a state
+    /// this binary does not understand and must not guess about.
+    fn from_stored(value: Option<&str>) -> Result<Self, MembershipError> {
+        match value {
+            None | Some("voter") => Ok(Self::Voter),
+            Some("learner") => Ok(Self::Learner),
+            Some(other) => Err(MembershipError::Internal(format!(
+                "cluster member role {other:?} is not one this binary understands"
+            ))),
+        }
+    }
+}
+
+/// Additive column steps applied by [`MembershipManager::initialize`].
+///
+/// `cluster_nodes` and `cluster_join_tokens` are created by the
+/// `CREATE TABLE IF NOT EXISTS` list below, which does nothing to a table that
+/// already exists — so a new column needs its own explicit step. Each is one
+/// replicated statement and each is additive and nullable, so an older binary
+/// in the same cluster keeps writing and reading its six-column rows unchanged
+/// and a partially applied list simply resumes on the next boot.
+const MEMBERSHIP_ADDITIVE_COLUMNS: &[AdditiveColumn] = &[
+    AdditiveColumn {
+        table: "cluster_nodes",
+        column: "role",
+        statement: "ALTER TABLE cluster_nodes ADD COLUMN role TEXT",
+    },
+    AdditiveColumn {
+        table: "cluster_join_tokens",
+        column: "role",
+        statement: "ALTER TABLE cluster_join_tokens ADD COLUMN role TEXT",
+    },
+];
+
+/// Refuse a learner credential on the legacy voter redemption path.
+///
+/// A coordinator from before P6 ignores unknown JSON fields and knows only
+/// `/cluster/join/redeem`. The dedicated v2 handler installs a transaction-
+/// local intent before changing the token state; an old coordinator cannot,
+/// so replicated SQLite rejects its otherwise-valid `issued -> redeeming`
+/// update before it can publish the learner as a voter.
+const REQUIRE_LEARNER_JOIN_INTENT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_learner_join_v1_guard \
+     BEFORE UPDATE OF state ON cluster_join_tokens \
+     WHEN NEW.state = 'redeeming' AND OLD.state = 'issued' \
+       AND OLD.role = 'learner' \
+       AND NOT EXISTS (SELECT 1 FROM cluster_learner_join_intents intent \
+         WHERE intent.token_hash = OLD.token_hash) \
+     BEGIN SELECT RAISE(ABORT, 'learner token requires v2 admission'); END";
+
+/// One additive column, named as well as spelled.
+///
+/// The table and column are carried beside the statement because both the
+/// coordinator and a read-only learner have to be able to *ask* whether the
+/// column is there, and neither can learn that from the `ALTER` text.
+struct AdditiveColumn {
+    table: &'static str,
+    column: &'static str,
+    statement: &'static str,
+}
 
 const MEMBERSHIP_SCHEMA: &[&str] = &[
     "CREATE TABLE IF NOT EXISTS cluster_membership_meta (\
@@ -81,6 +226,11 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          node_id TEXT, \
          created_at INTEGER NOT NULL, \
          redeemed_at INTEGER) STRICT",
+    // The row exists only during the v2 coordinator's replicated redemption
+    // transaction. The trigger installed after the additive role columns uses
+    // it to distinguish that path from an older coordinator's v1 update.
+    "CREATE TABLE IF NOT EXISTS cluster_learner_join_intents (\
+         token_hash TEXT PRIMARY KEY) STRICT",
     "CREATE TABLE IF NOT EXISTS cluster_nodes (\
          node_id TEXT PRIMARY KEY, \
          raft_id INTEGER NOT NULL UNIQUE CHECK (raft_id > 0), \
@@ -205,6 +355,9 @@ const MAX_INTERNAL_READ_REPLAYS_PER_PEER: usize = 6_144;
 const INTERNAL_READ_AUTH_WINDOW_MS: i64 = 5_000;
 const INTERNAL_READ_AUTHORITY_TTL: Duration = Duration::from_secs(1);
 const MAX_PEER_NODE_ID_BYTES: usize = 256;
+const MAX_JOIN_SOCKET_ADDRESS_BYTES: usize = 512;
+const MAX_JOIN_HTTP_ORIGIN_BYTES: usize = 2_048;
+const MAX_JOIN_HOSTNAME_BYTES: usize = 253;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
@@ -231,12 +384,96 @@ pub enum MembershipError {
     NodeIdentityInUse,
     #[error("finish upgrading every active cluster node before changing membership")]
     MembershipUpgradeRequired,
+    /// Activation was refused because at least one active node is not running
+    /// a binary that has proven the learner protocol. Naming them is the point:
+    /// "finish upgrading" is not actionable at 3am without the roster.
+    #[error(
+        "these cluster nodes are not running a binary that supports the learner protocol: {}; \
+         upgrade each of them, let one heartbeat interval pass, then activate again",
+        .0.join(", ")
+    )]
+    LearnerProtocolUpgradeRequired(Vec<String>),
+    /// A learner was asked for on a cluster that has not activated the
+    /// protocol that admits one. Deploying this binary does not activate it;
+    /// only the explicit admin operation does.
+    #[error(
+        "this cluster has not activated the learner protocol, so it cannot admit a non-voting \
+         node; activate it from an admin session once every node reports ready, then retry"
+    )]
+    LearnerProtocolInactive,
+    /// Deactivation was refused because removing protocol 5 would strand a
+    /// node that only exists under it.
+    ///
+    /// The two rosters are carried separately because they are two different
+    /// claims. `admitted` is the durable role column and names nodes this
+    /// cluster admitted as learners. `non_voting` is committed Raft membership
+    /// and names members that hold no vote — which, mid-join, includes an
+    /// ordinary voter the vendored client has added but not yet promoted.
+    /// Collapsing them told an operator that a healthy voter was a learner.
+    #[error(
+        "deactivating the learner protocol would strand cluster members{}{}; remove them first, \
+         then deactivate",
+        crate::cluster::membership::roster_clause(" admitted as learners: ", .admitted),
+        crate::cluster::membership::roster_clause(
+            " that committed membership currently lists as non-voting (a voter that is still \
+             mid-join appears here and settles on its own): ",
+            .non_voting
+        )
+    )]
+    LearnerProtocolInUse {
+        admitted: Vec<String>,
+        non_voting: Vec<String>,
+    },
+    /// Activation was refused because a node is between redeeming its join
+    /// token and proving anything about the binary it runs. Such a node is
+    /// deliberately invisible to the capability roster — it has not
+    /// heartbeated yet — so without this it would be activated straight past
+    /// and could never open its store again while still counting for quorum.
+    #[error(
+        "these cluster nodes are mid-join and have not yet proven what binary they run: {}; \
+         wait for the join to finish, or remove the node if it is not coming back, then activate",
+        .0.join(", ")
+    )]
+    JoinInFlight(Vec<String>),
+    /// Activation was refused because a node that is still a member has said
+    /// nothing for long enough that no claim about its running binary can be
+    /// current. A wall-clock window is a weak proof of presence and a good
+    /// proof of absence, which is all this needs.
+    #[error(
+        "these cluster members have not heartbeated in over {minutes} minutes, so activation \
+         cannot tell what binary they would come back running and could lock them out: {}; \
+         start them or remove them, then activate",
+        .nodes.join(", ")
+    )]
+    LearnerProtocolNodeAbsent { nodes: Vec<String>, minutes: i64 },
+    /// A guarded protocol change lost its compare-and-swap and the re-read
+    /// roster came back empty, so nothing can be named. Saying "upgrade these
+    /// nodes: []" is worse than saying what actually happened.
+    #[error(
+        "the cluster's protocol range changed while this operation was committing; re-read the \
+         cluster status and retry"
+    )]
+    ProtocolRangeChanged,
+    /// The write is committed by the leader and the client routes it there, so
+    /// this is the state an operator can actually act on: right now there is no
+    /// leader to route to.
+    #[error("the cluster has no elected leader to commit this operation; retry after an election")]
+    LeaderUnavailable,
     #[error(
         "node removal remains pending after the membership change was rejected: {0}; finish upgrading every cluster node and retry this removal"
     )]
     RemovalPending(String),
     #[error("node was not found in current cluster membership")]
     NodeNotFound,
+    /// The target is a committed member that carries no vote — a learner, or a
+    /// voter Raft has added but not yet promoted. The roster lists it, so
+    /// "not found" would be a lie; this release simply has no removal path for
+    /// it yet.
+    #[error(
+        "cluster member {0} carries no vote, and this release can only remove voters; it has to \
+         be shut down and its data directory discarded"
+    )]
+    NonVoterRemovalUnsupported(String),
     #[error("the current Raft leader cannot be removed; retry after leadership moves")]
     LeaderRemoval,
     #[error("the local voter must use the graceful leave operation")]
@@ -264,6 +501,21 @@ pub enum MembershipError {
     Internal(String),
 }
 
+/// Render one labelled roster into a refusal, or nothing when it is empty.
+///
+/// Two rosters that answer different questions have to stay labelled in the
+/// message an operator reads, and an empty one must not leave a dangling
+/// label behind.
+#[doc(hidden)]
+#[must_use]
+pub fn roster_clause(label: &str, nodes: &[String]) -> String {
+    if nodes.is_empty() {
+        String::new()
+    } else {
+        format!("{label}{}", nodes.join(", "))
+    }
+}
+
 impl MembershipError {
     #[must_use]
     pub fn code(&self) -> &'static str {
@@ -278,8 +530,16 @@ impl MembershipError {
             Self::HttpEndpointInUse => "cluster_http_endpoint_in_use",
             Self::NodeIdentityInUse => "cluster_node_identity_in_use",
             Self::MembershipUpgradeRequired => "membership_upgrade_required",
+            Self::LearnerProtocolUpgradeRequired(_) => "learner_protocol_upgrade_required",
+            Self::LearnerProtocolInactive => "learner_protocol_inactive",
+            Self::LearnerProtocolInUse { .. } => "learner_protocol_in_use",
+            Self::JoinInFlight(_) => "join_in_flight",
+            Self::LearnerProtocolNodeAbsent { .. } => "learner_protocol_node_absent",
+            Self::ProtocolRangeChanged => "cluster_protocol_range_changed",
+            Self::LeaderUnavailable => "cluster_leader_unavailable",
             Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
+            Self::NonVoterRemovalUnsupported(_) => "cluster_non_voter_removal_unsupported",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
             Self::SelfRemovalRequiresLeave => "self_removal_requires_leave",
             Self::LeaveNodeMismatch => "leave_node_mismatch",
@@ -298,6 +558,13 @@ impl From<hiqlite::Error> for MembershipError {
             hiqlite::Error::LeaderChange(message) => Self::LeaderChanged(message.into_owned()),
             error => Self::Internal(error.to_string()),
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl ClusterJobAuthority for MembershipManager {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        MembershipManager::may_run_cluster_jobs(self).await
     }
 }
 
@@ -341,6 +608,37 @@ pub struct LocalMembership {
     /// file from turning an otherwise healthy restart into a failed join.
     #[serde(default)]
     pub join_token_digest: Option<String>,
+    /// What this node was admitted as, so a restart resumes the same role
+    /// rather than re-deriving it from a token that has since been consumed.
+    ///
+    /// Absent in a version 1 record, which is why a voter keeps writing
+    /// version 1: an operator who rolls a *voter* back to the previous release
+    /// must find a file that release can still read. A learner writes version
+    /// 2 and the previous release refuses it, which is the correct outcome —
+    /// that build has no idea it must not campaign.
+    #[serde(default)]
+    pub role: ClusterRole,
+}
+
+/// The `membership.json` version a node of this role writes.
+///
+/// Two versions coexist deliberately. See [`LocalMembership::role`].
+#[must_use]
+pub fn local_membership_version(role: ClusterRole) -> u32 {
+    match role {
+        ClusterRole::Voter => 1,
+        ClusterRole::Learner => 2,
+    }
+}
+
+/// Whether a decoded `membership.json` record is internally consistent.
+///
+/// A version 1 record cannot describe a learner: that combination is only
+/// reachable by editing the file, and reading it as a voter would start a
+/// campaigning process on a node the cluster admitted as a learner.
+#[must_use]
+pub fn local_membership_version_matches_role(version: u32, role: ClusterRole) -> bool {
+    version == local_membership_version(role)
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -363,7 +661,83 @@ pub struct RedeemJoinRequest {
     #[serde(default)]
     pub http_base: String,
     pub schema_version: i64,
+    /// The oldest protocol the joining binary implements, and the field a
+    /// coordinator that predates the range compares for exact equality.
     pub protocol_version: i64,
+    /// The joining binary's supported protocol range. A joiner that predates
+    /// P6 omits both, and [`RedeemJoinRequest::declared_protocol_range`] then
+    /// reads its single scalar as the one-element range it actually is.
+    #[serde(default)]
+    pub protocol_min: i64,
+    #[serde(default)]
+    pub protocol_max: i64,
+}
+
+impl RedeemJoinRequest {
+    /// The inclusive protocol range this joiner claims to implement.
+    #[must_use]
+    pub fn declared_protocol_range(&self) -> (i64, i64) {
+        if self.protocol_min > 0 && self.protocol_max >= self.protocol_min {
+            (self.protocol_min, self.protocol_max)
+        } else {
+            (self.protocol_version, self.protocol_version)
+        }
+    }
+}
+
+/// Reject untrusted redemption fields before they can cause any replicated
+/// read. The public route is intentionally unauthenticated because possession
+/// of the token is its credential; malformed JSON must not become a cheap way
+/// to force leader/quorum traffic.
+fn validate_redeem_join_request(
+    request: &RedeemJoinRequest,
+) -> Result<Option<String>, MembershipError> {
+    let invalid_identity = !is_join_token_digest(&request.token_digest)
+        || request.raft_id == 0
+        || request.node_id.is_empty()
+        || request.node_id.len() > MAX_PEER_NODE_ID_BYTES
+        || request.node_id.chars().any(char::is_control)
+        || request.hostname.len() > MAX_JOIN_HOSTNAME_BYTES
+        || request.hostname.chars().any(char::is_control)
+        || !is_bounded_join_socket_address(&request.raft_address)
+        || !is_bounded_join_socket_address(&request.api_address);
+    if invalid_identity {
+        return Err(MembershipError::InvalidToken);
+    }
+    let (protocol_min, protocol_max) = request.declared_protocol_range();
+    if protocol_min <= 0 || protocol_max < protocol_min {
+        return Err(MembershipError::Incompatible);
+    }
+    if request.http_base.is_empty() {
+        return Ok(None);
+    }
+    if request.http_base.len() > MAX_JOIN_HTTP_ORIGIN_BYTES
+        || request.http_base.chars().any(char::is_control)
+    {
+        return Err(MembershipError::InvalidHttpEndpoint);
+    }
+    normalize_internal_http_base(&request.http_base)
+        .map(Some)
+        .ok_or(MembershipError::InvalidHttpEndpoint)
+}
+
+fn is_bounded_join_socket_address(value: &str) -> bool {
+    if value.is_empty()
+        || value.len() > MAX_JOIN_SOCKET_ADDRESS_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return false;
+    }
+    let Ok(url) = reqwest::Url::parse(&format!("http://{value}")) else {
+        return false;
+    };
+    url.host_str().is_some()
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && url.path() == "/"
 }
 
 impl std::fmt::Debug for RedeemJoinRequest {
@@ -378,6 +752,7 @@ impl std::fmt::Debug for RedeemJoinRequest {
             .field("api_address", &self.api_address)
             .field("schema_version", &self.schema_version)
             .field("protocol_version", &self.protocol_version)
+            .field("protocol_range", &self.declared_protocol_range())
             .finish()
     }
 }
@@ -434,7 +809,14 @@ pub struct ClusterNodeRecord {
     /// still private; loopback is rendered as `localhost`, not a raw IP.
     pub advertised_host: String,
     pub raft_id: u64,
+    /// Durable admission role. A voter keeps this role while Raft temporarily
+    /// carries it as a non-voting learner during catch-up.
     pub role: NodeRole,
+    /// Whether committed Raft membership currently grants this node a vote.
+    /// Kept separate from `role` so a joining voter is not mislabeled as a
+    /// permanent learner.
+    #[serde(default)]
+    pub is_voter: bool,
     pub is_leader: bool,
     pub reachable: bool,
     pub last_seen_at: i64,
@@ -442,6 +824,41 @@ pub struct ClusterNodeRecord {
     /// Raft membership after a rejected or indeterminate request, so expose
     /// the fence instead of rendering the node as fully operational.
     pub removal_pending: bool,
+    /// The binary this node is running *now* has proven the learner protocol,
+    /// by writing its capability row inside the same Raft transaction as its
+    /// current heartbeat. False here is exactly what blocks activation.
+    #[serde(default)]
+    pub learner_protocol_ready: bool,
+}
+
+/// What protocol range the cluster is on, what this binary can do, and — when
+/// the two disagree — which nodes are the reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterProtocolStatus {
+    /// The range the cluster's replicated features actually require. A node
+    /// may participate only if it implements all of it.
+    pub active_min: i64,
+    pub active_max: i64,
+    /// The range this binary implements.
+    pub binary_min: i64,
+    pub binary_max: i64,
+    /// The active range is the learner protocol.
+    pub learner_protocol_active: bool,
+    /// Active, non-staged nodes whose currently running binary has not proven
+    /// the learner protocol. Activation is refused while this is non-empty.
+    pub learner_protocol_pending: Vec<String>,
+}
+
+/// The outcome of an activation or deactivation request.
+///
+/// `changed` is what separates "this call moved the cluster" from "the cluster
+/// was already there"; both are successes, because these operations are
+/// idempotent and an operator retrying after a timeout must not be told the
+/// cluster is broken.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtocolChange {
+    pub changed: bool,
+    pub protocol: ClusterProtocolStatus,
 }
 
 /// Internal addressing paired with the privacy-safe health projection.
@@ -549,6 +966,8 @@ pub struct MembershipStatus {
     pub nodes: Vec<ClusterNodeRecord>,
     /// The one canonical lag answer introduced by #233.
     pub replication: ReplicationStatus,
+    /// The cluster's active protocol range and this binary's support for it.
+    pub protocol: ClusterProtocolStatus,
 }
 
 /// Fixed-cardinality, process-local projection for Prometheus scrapes.
@@ -719,29 +1138,307 @@ const REQUIRE_REMOVAL_INTENT_SQL: &str =
        WHERE intent.node_id = NEW.node_id) \
      BEGIN SELECT RAISE(ABORT, 'cluster membership removal requires current coordinator'); END";
 
-const CAPABILITY_READY_PREDICATE: &str = "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
-       WHERE active.removed_at IS NULL \
+/// One active node that has *not* proven `capability` with its currently
+/// running binary.
+///
+/// The proof is the equality below: a capability row is written inside the same
+/// Raft transaction as the ordinary heartbeat, so `last_seen_at` matching the
+/// node's `cluster_nodes.last_seen_at` is what distinguishes the binary running
+/// right now from one that was installed, observed, and then rolled back. This
+/// is the cluster's only capability *staleness* rule; the separate liveness
+/// and join-in-flight rules below answer different questions and deliberately
+/// do not touch this one.
+///
+/// The staging exclusion here keeps the pending *roster* honest: a node that
+/// is mid-join has not heartbeated yet and is not "behind". It is not, on its
+/// own, permission to activate — see [`no_join_in_flight_predicate`].
+fn capability_unready_node_predicate(capability: &str) -> String {
+    format!(
+        "active.removed_at IS NULL \
          AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
            WHERE staged.node_id = active.node_id) \
          AND NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
            WHERE capability.node_id = active.node_id \
-             AND capability.capability = 'membership_removal_attempt_refs_v1' \
-             AND capability.last_seen_at = active.last_seen_at))";
+             AND capability.capability = '{capability}' \
+             AND capability.last_seen_at = active.last_seen_at)"
+    )
+}
+
+/// "No node is between redeeming a join token and proving what it runs."
+///
+/// `redeem` publishes the staging row *and* the `cluster_nodes` row before the
+/// joiner has started Raft or run a single compatibility check. Such a node is
+/// therefore a committed member with no capability row and no heartbeat, and
+/// the roster above deliberately cannot see it. Activating past it leaves a
+/// voter that counts for quorum and can never open its store again — on a 3→4
+/// growth that takes fault tolerance to zero.
+///
+/// The roster stays honest and the *commit* refuses instead.
+///
+/// A tombstoned node is excluded, and that is the operator's exit: a
+/// redemption that will never finish would otherwise hold activation for
+/// good. The other exit is time — a staged node that has stopped heartbeating
+/// is named by [`no_absent_node_predicate`] instead, with a refusal that says
+/// to start it or remove it. This one is reserved for a join that is actually
+/// in flight right now, where the honest answer is "wait".
+fn no_join_in_flight_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
+       WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removed \
+         WHERE removed.node_id = staged.node_id AND removed.removed_at IS NOT NULL))"
+}
+
+/// The same rule as a roster, so a refusal can name who is joining.
+fn join_in_flight_nodes_sql() -> &'static str {
+    "SELECT staged.node_id FROM cluster_node_join_staging AS staged \
+     WHERE NOT EXISTS (SELECT 1 FROM cluster_nodes AS removed \
+       WHERE removed.node_id = staged.node_id AND removed.removed_at IS NOT NULL) \
+     ORDER BY staged.node_id"
+}
+
+/// "Every member that is not tombstoned has heartbeated since `$3`."
+///
+/// The capability equality above proves which binary wrote the *last*
+/// heartbeat; it says nothing about whether that node still exists. A node
+/// that proved the capability and was then powered off stays "ready" forever,
+/// and a binary rolled back while the node is down never produces the
+/// desynchronising heartbeat the whole design leans on — so it comes back up
+/// unable to speak protocol 5 in a cluster that has already narrowed onto it.
+///
+/// A wall-clock window is a weak proof of presence. It is a perfectly good
+/// proof of *absence*, and absence is the only thing this has to establish.
+///
+/// Mid-join nodes are deliberately *not* excluded, even though `redeem`
+/// writes their `last_seen_at` as a redemption timestamp rather than a
+/// heartbeat. That timestamp stops advancing the moment a redemption is
+/// abandoned, which makes this the thing that eventually names an interrupted
+/// join — and names it with the refusal an operator can act on, "start it or
+/// remove it", rather than leaving it to a "wait for the join" that will never
+/// end.
+fn no_absent_node_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_nodes AS present \
+       WHERE present.removed_at IS NULL AND present.last_seen_at < $3)"
+}
+
+/// The same rule as a roster, so a refusal can name who is not answering.
+fn absent_nodes_sql() -> &'static str {
+    "SELECT present.node_id FROM cluster_nodes AS present \
+     WHERE present.removed_at IS NULL AND present.last_seen_at < $1 \
+     ORDER BY present.node_id"
+}
+
+/// Whether a failed `ALTER TABLE ... ADD COLUMN` failed only because the
+/// column is already there. SQLite reports this as a preparation error, so it
+/// arrives as an opaque message rather than a typed variant.
+fn is_duplicate_column_error(error: &hiqlite::Error) -> bool {
+    error.to_string().contains("duplicate column name")
+}
+
+/// "No node admitted under the learner protocol is still a member."
+///
+/// The deactivation precondition, as replicated SQL so it can travel inside
+/// the committing transaction. A read-only preflight can be won and then
+/// invalidated by a learner being admitted before the write commits.
+///
+/// `redeem` commits the `role = 'learner'` row before the joiner has joined
+/// Raft at all, so a redemption interrupted by a port conflict, crash, or ^C
+/// may leave a row for a process that has not started Raft yet. It has already
+/// received authority and may resume, which is why the row remains protected.
+///
+/// A staging row and an old timestamp are not proof of abandonment. The
+/// authorized process may be paused after redemption and resume later, so the
+/// durable learner row blocks rollback until an explicit removal protocol can
+/// tombstone it. PR-1 deliberately chooses a forward-only recovery over
+/// stranding a process that already holds cluster credentials.
+fn no_admitted_learner_predicate() -> &'static str {
+    "NOT EXISTS (SELECT 1 FROM cluster_nodes AS learner \
+       WHERE learner.role = 'learner' AND learner.removed_at IS NULL)"
+}
+
+/// The same rule as a roster, so a refusal can name what has to be removed.
+fn admitted_learner_nodes_sql() -> &'static str {
+    "SELECT learner.node_id FROM cluster_nodes AS learner \
+     WHERE learner.role = 'learner' AND learner.removed_at IS NULL \
+     ORDER BY learner.node_id"
+}
+
+/// "Every active node proves `capability` with the binary it is running now."
+fn capability_ready_predicate(capability: &str) -> String {
+    format!(
+        "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+       WHERE {})",
+        capability_unready_node_predicate(capability)
+    )
+}
+
+/// Whether committed Raft membership shows that `role` was actually admitted.
+///
+/// What "admitted" means depends on what the token admits, and both arms are
+/// load-bearing in a way that `is_member` alone is not.
+///
+/// A voter has to have committed a *vote*. The vendored client joins a voter
+/// with `add_learner` and only then `become_member`, so a voter that finalized
+/// on membership alone would finalize while it was still Raft's intermediate
+/// learner — before it had a vote at all, and while the cluster was counting
+/// on it for one.
+///
+/// A learner has to be a committed member and must *not* have a vote, because
+/// a learner that appears in the voter set was not admitted by this protocol
+/// and finalizing it would record a learner admission for a voting node.
+///
+/// How many times a clustered process declined leader-singleton work because
+/// it could not read committed membership at all.
+///
+/// The fail-closed branch below is unreachable for a real daemon today —
+/// `metrics_db()` borrows a local watch channel and cannot fail — so it had
+/// only a `tracing::warn!` and no way to notice if that ever changed. A counter
+/// that stays at zero is the evidence that the branch is still unreachable;
+/// one that moves is a cluster declining its own scheduled work in silence.
+static CLUSTER_JOB_AUTHORITY_UNREADABLE: AtomicU64 = AtomicU64::new(0);
+
+/// Render the fail-closed job-authority counter for `/metrics`.
+///
+/// Fixed cardinality, reads one atomic, and stays at `0` on an unclustered
+/// process because the question is never asked there.
+#[must_use]
+pub fn prometheus_cluster_job_authority() -> String {
+    format!(
+        "# HELP plurx_cluster_job_authority_unreadable_total Times this node declined \
+         leader-singleton work because committed cluster membership could not be read.\n\
+         # TYPE plurx_cluster_job_authority_unreadable_total counter\n\
+         plurx_cluster_job_authority_unreadable_total {}\n",
+        CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed)
+    )
+}
+
+/// Turn "what does committed membership say" into "may this process run the
+/// cluster's singleton work", counting the answer nobody can otherwise see.
+///
+/// A named function for the same reason [`role_is_admitted`] is one: the arm
+/// that matters is not reachable from any fixture, so leaving it inline left it
+/// both untested and unobservable.
+fn decide_cluster_job_authority(committed_voter: Result<bool, MembershipError>) -> bool {
+    match committed_voter {
+        Ok(is_voter) => is_voter,
+        Err(error) => {
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.fetch_add(1, Ordering::Relaxed);
+            tracing::warn!(
+                code = error.code(),
+                "cannot read committed cluster membership; declining leader-singleton work"
+            );
+            false
+        }
+    }
+}
+
+/// A named function because neither refusal is reachable from a one-voter
+/// replicated fixture — one needs a member that is not a voter, the other a
+/// voter holding a learner token — and both survived mutation while the
+/// decision was inline.
+fn role_is_admitted(role: ClusterRole, is_member: bool, is_voter: bool) -> bool {
+    match role {
+        ClusterRole::Voter => is_voter,
+        ClusterRole::Learner => is_member && !is_voter,
+    }
+}
+
+/// "`cluster_meta` still holds the range this operation was authorized
+/// against", with the min and max supplied as `$min` and `$max`.
+///
+/// A compare-and-swap on both values, so it catches a narrowing *and* a
+/// widening. `redeem` reads the range and then takes at least two more
+/// linearizable round-trips before its admitting transaction, and both
+/// protocol changes can land in that window — so the read alone decides
+/// nothing and this rides inside the write.
+fn unchanged_protocol_range_predicate(min: u8, max: u8) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM cluster_meta \
+           WHERE singleton = 1 AND protocol_min = ${min} AND protocol_max = ${max})"
+    )
+}
+
+/// Everything activation must be true of, as one predicate that travels
+/// inside the committing statement.
+///
+/// `$3` is the absence cutoff. Kept as one function so the read-only pass and
+/// the commit cannot drift apart.
+fn activation_guard_predicate() -> String {
+    format!(
+        "{} AND {} AND {}",
+        capability_ready_predicate(LEARNER_PROTOCOL_CAPABILITY),
+        no_join_in_flight_predicate(),
+        no_absent_node_predicate(),
+    )
+}
+
+/// The same rule as a roster, so a refusal can name the nodes to upgrade
+/// instead of telling an operator only that something is behind.
+fn capability_unready_nodes_sql(capability: &str) -> String {
+    format!(
+        "SELECT active.node_id FROM cluster_nodes AS active WHERE {} \
+         ORDER BY active.node_id",
+        capability_unready_node_predicate(capability)
+    )
+}
+
+/// Which copy of replicated state a read may answer from.
+///
+/// The roster route has to keep answering during quorum loss — that is when an
+/// operator most needs to see the cluster — so its reads are local. Anything
+/// that decides whether to commit a protocol change takes the quorum read, so
+/// a partitioned follower can never answer for the cluster.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Read {
+    Local,
+    Quorum,
+}
+
+/// Committed members that carry no vote, in a stable order.
+///
+/// Deliberately derived from the committed configuration rather than from
+/// replicated SQL: a node's *role* is decided by Raft, and reading it from a
+/// table would let a lagging row answer a question Raft has already answered.
+fn non_voting_members(voters: &BTreeSet<u64>, members: impl Iterator<Item = u64>) -> Vec<u64> {
+    let mut non_voters = members
+        .filter(|id| !voters.contains(id))
+        .collect::<Vec<_>>();
+    non_voters.sort_unstable();
+    non_voters.dedup();
+    non_voters
+}
 
 fn begin_removal_attempt_sql() -> String {
+    let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
-         SELECT $1, $2 WHERE {CAPABILITY_READY_PREDICATE} \
+         SELECT $1, $2 WHERE {ready} \
            AND NOT EXISTS (SELECT 1 FROM media_sessions \
              WHERE owner_node_id = $1 AND state = 'active' \
                AND lease_expires_at_ms > $3)"
     )
 }
 
+/// Narrow `cluster_meta` onto exactly one protocol.
+///
+/// `$1` is the protocol to move to and `$2` the protocol the caller believes is
+/// active, so a concurrent change loses instead of overwriting. `guard` is the
+/// precondition that must hold *inside this transaction*: a read-only preflight
+/// can be won and then invalidated by a heartbeat from an older binary before
+/// the write commits, exactly as with `begin_removal_attempt_sql`.
+fn narrow_protocol_range_sql(guard: Option<String>) -> String {
+    let guard = guard
+        .map(|guard| format!(" AND {guard}"))
+        .unwrap_or_default();
+    format!(
+        "UPDATE cluster_meta SET protocol_min = $1, protocol_max = $1 \
+         WHERE singleton = 1 AND protocol_min = $2 AND protocol_max = $2{guard}"
+    )
+}
+
 fn rollback_removal_attempt_sql() -> String {
+    let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
     format!(
         "DELETE FROM cluster_node_removal_attempts WHERE node_id = $1 AND attempt_id = $2 \
-         AND {CAPABILITY_READY_PREDICATE}"
+         AND {ready}"
     )
 }
 
@@ -839,6 +1536,11 @@ struct ReplicatedMembership {
     client: Client,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
+    /// What this process was *admitted* as. Used for the two things a boot
+    /// record legitimately decides — which schema work this process may run,
+    /// and what role a freshly created membership row carries — and for
+    /// nothing that decides leadership or singleton work.
+    role: ClusterRole,
     local: ClusterPeer,
     local_hostname: String,
     bootstrap_http: String,
@@ -1033,6 +1735,121 @@ pub struct JoinPayload {
     pub protocol_version: i64,
 }
 
+/// The learner-admission payload.
+///
+/// Two differences from v1 carry the whole protocol. It names the role the
+/// coordinator bound to this token, and it declares the cluster's *active*
+/// protocol range instead of one scalar — a v1 token says "protocol 4" even
+/// when it was minted by a cluster that has activated protocol 5, which
+/// under-describes what the joining binary actually has to implement.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JoinPayloadV2 {
+    version: u32,
+    pub cluster_id: String,
+    pub raft_id: u64,
+    pub expires_at: i64,
+    pub bootstrap_http: String,
+    pub bootstrap: Vec<ClusterPeer>,
+    pub secrets: JoinSecretPayload,
+    pub activation_marker: ActivationMarker,
+    pub schema_version: i64,
+    /// The range `cluster_meta` was on when this token was minted. Advisory:
+    /// the cluster can narrow it afterwards, so the joiner's live preflight
+    /// against the coordinator stays authoritative.
+    pub protocol_min: i64,
+    pub protocol_max: i64,
+    pub role: ClusterRole,
+}
+
+/// A decoded join token of either protocol version.
+///
+/// Every caller reads the token through this, so adding a version cannot
+/// silently leave one call site reading the old shape.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum JoinToken {
+    V1(JoinPayload),
+    V2(JoinPayloadV2),
+}
+
+impl JoinToken {
+    #[must_use]
+    pub fn cluster_id(&self) -> &str {
+        match self {
+            Self::V1(payload) => &payload.cluster_id,
+            Self::V2(payload) => &payload.cluster_id,
+        }
+    }
+
+    #[must_use]
+    pub fn raft_id(&self) -> u64 {
+        match self {
+            Self::V1(payload) => payload.raft_id,
+            Self::V2(payload) => payload.raft_id,
+        }
+    }
+
+    #[must_use]
+    pub fn bootstrap(&self) -> &[ClusterPeer] {
+        match self {
+            Self::V1(payload) => &payload.bootstrap,
+            Self::V2(payload) => &payload.bootstrap,
+        }
+    }
+
+    #[must_use]
+    pub fn bootstrap_http(&self) -> &str {
+        match self {
+            Self::V1(payload) => &payload.bootstrap_http,
+            Self::V2(payload) => &payload.bootstrap_http,
+        }
+    }
+
+    #[must_use]
+    pub fn secrets(&self) -> &JoinSecretPayload {
+        match self {
+            Self::V1(payload) => &payload.secrets,
+            Self::V2(payload) => &payload.secrets,
+        }
+    }
+
+    #[must_use]
+    pub fn activation_marker(&self) -> &ActivationMarker {
+        match self {
+            Self::V1(payload) => &payload.activation_marker,
+            Self::V2(payload) => &payload.activation_marker,
+        }
+    }
+
+    #[must_use]
+    pub fn schema_version(&self) -> i64 {
+        match self {
+            Self::V1(payload) => payload.schema_version,
+            Self::V2(payload) => payload.schema_version,
+        }
+    }
+
+    /// The protocols this token says the cluster is actively using. A v1 token
+    /// carries one scalar, which is the one-element range it always was.
+    #[must_use]
+    pub fn declared_protocol_range(&self) -> (i64, i64) {
+        match self {
+            Self::V1(payload) => (payload.protocol_version, payload.protocol_version),
+            Self::V2(payload) => (payload.protocol_min, payload.protocol_max),
+        }
+    }
+
+    /// The role this token admits. A v1 token has no role field and never
+    /// admits anything but a voter — that is what makes v2 a separate
+    /// protocol rather than an optional field.
+    #[must_use]
+    pub fn role(&self) -> ClusterRole {
+        match self {
+            Self::V1(_) => ClusterRole::Voter,
+            Self::V2(payload) => payload.role,
+        }
+    }
+}
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JoinSecretPayload {
     pub raft: String,
@@ -1081,6 +1898,7 @@ impl MembershipManager {
         secrets: JoinSecrets,
         activity_signing_key: ActivitySigningKey,
         activation_marker: ActivationMarker,
+        role: ClusterRole,
     ) -> Result<Self, MembershipError> {
         let replication = ReplicationMonitor::replicated(client.clone());
         let local_hostname = membership_hostname(
@@ -1093,6 +1911,7 @@ impl MembershipManager {
                 client,
                 store,
                 identity,
+                role,
                 local,
                 local_hostname,
                 bootstrap_http,
@@ -1134,9 +1953,131 @@ impl MembershipManager {
 
     async fn initialize(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
+        if inner.role.is_learner() {
+            // A learner never advances replicated schema — that is voter work
+            // and it is the one job whose duplication a lease cannot make
+            // safe. It still has to prove the cluster's membership schema is
+            // one it understands, so it takes the read and refuses on a
+            // mismatch rather than skipping the question.
+            self.require_membership_schema().await?;
+        } else {
+            self.install_membership_schema().await?;
+        }
+        self.heartbeat().await?;
+        self.publish_activity_signing_key().await?;
+        self.refresh_activity_public_keys().await?;
+        self.publish_http_url().await
+    }
+
+    async fn require_membership_schema(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<MembershipSchemaRow, _>(
+                "SELECT schema_version FROM cluster_membership_meta WHERE singleton = 1",
+                params!(),
+            )
+            .await?;
+        if rows.first().map(|row| row.schema_version) != Some(MEMBERSHIP_SCHEMA_VERSION) {
+            return Err(MembershipError::Incompatible);
+        }
+        // The version marker and the additive columns are separate Raft
+        // commands, so a learner can arrive between them — and a learner never
+        // installs replicated schema, so it cannot repair the gap. It can only
+        // say so. Without this probe the mismatch surfaces on its first
+        // heartbeat as an opaque `no such column: role`, which tells an
+        // operator nothing about what to do.
+        for column in MEMBERSHIP_ADDITIVE_COLUMNS {
+            if !self.membership_column_exists(column).await? {
+                tracing::warn!(
+                    table = column.table,
+                    column = column.column,
+                    "refusing to join: this cluster's membership schema is missing a column \
+                     this binary requires"
+                );
+                return Err(MembershipError::Incompatible);
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether one additive membership column is present in replicated SQL.
+    async fn membership_column_exists(
+        &self,
+        column: &AdditiveColumn,
+    ) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM pragma_table_info($1) WHERE name = $2",
+                params!(column.table, column.column),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    /// Add every missing additive membership column in one Raft transaction.
+    ///
+    /// One command per `ALTER` left a window between them in which
+    /// `cluster_nodes.role` existed and `cluster_join_tokens.role` did not.
+    /// Every statement on the join surface names both, so for the length of
+    /// that window the whole surface failed to *prepare* — `no such column:
+    /// role` — rather than failing one operation. One transaction means the
+    /// window does not exist.
+    ///
+    /// The list is filtered against `pragma_table_info` first, because SQLite
+    /// has no `ADD COLUMN IF NOT EXISTS` and a transaction containing an
+    /// `ALTER` for a column that is already there fails as a whole — and
+    /// "already there" is the steady state on every boot after the first. The
+    /// probe can be raced, so the transaction still tolerates the duplicate
+    /// and the loop re-reads instead of assuming.
+    async fn apply_additive_membership_columns(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        for _ in 0..3 {
+            let mut pending = Vec::new();
+            for column in MEMBERSHIP_ADDITIVE_COLUMNS {
+                if !self.membership_column_exists(column).await? {
+                    pending.push((column.statement.to_owned(), params!()));
+                }
+            }
+            if pending.is_empty() {
+                return Ok(());
+            }
+            match inner.client.txn(pending).await {
+                Ok(results) => {
+                    for result in results {
+                        match result {
+                            Ok(_) => {}
+                            // Another node applied the same list between this
+                            // node's probe and its write. The outcome is the
+                            // one this was trying to reach.
+                            Err(error) if is_duplicate_column_error(&error) => {}
+                            Err(error) => return Err(error.into()),
+                        }
+                    }
+                }
+                Err(error) if is_duplicate_column_error(&error) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        let missing = MEMBERSHIP_ADDITIVE_COLUMNS
+            .iter()
+            .map(|column| format!("{}.{}", column.table, column.column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Err(MembershipError::Internal(format!(
+            "could not apply the additive membership columns ({missing}); the join surface \
+             cannot be prepared until they exist"
+        )))
+    }
+
+    async fn install_membership_schema(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
         for statement in MEMBERSHIP_SCHEMA {
             inner.client.execute(*statement, params!()).await?;
         }
+        self.apply_additive_membership_columns().await?;
         // One replicated SQLite transaction closes both upgrade directions:
         // fences written before this schema gain a durable legacy reference,
         // and the trigger rejects every later old-coordinator insert. No Raft
@@ -1146,6 +2087,7 @@ impl MembershipManager {
             .txn(vec![
                 (BACKFILL_REMOVAL_ATTEMPT_REFS_SQL.to_owned(), params!()),
                 (REQUIRE_REMOVAL_INTENT_SQL.to_owned(), params!()),
+                (REQUIRE_LEARNER_JOIN_INTENT_SQL.to_owned(), params!()),
             ])
             .await?
             .into_iter()
@@ -1184,8 +2126,36 @@ impl MembershipManager {
         self.publish_http_url().await
     }
 
+    /// Mint a voter join token. Voter is the default because changing what an
+    /// existing token admits would change a cluster's availability silently.
     pub async fn issue_token(&self, ttl: Duration) -> Result<IssuedJoinToken, MembershipError> {
+        self.issue_token_for_role(ttl, ClusterRole::Voter).await
+    }
+
+    /// Mint a wire-distinct v2 credential for the dedicated learner flow.
+    pub async fn issue_learner_token(
+        &self,
+        ttl: Duration,
+    ) -> Result<IssuedJoinToken, MembershipError> {
+        self.issue_token_for_role(ttl, ClusterRole::Learner).await
+    }
+
+    /// Mint a join token bound to `role`.
+    ///
+    /// The role is written into the issued-token record, and redemption reads
+    /// it back from there. It is deliberately not something the joining node
+    /// can assert: a request body is under the joiner's control, and the token
+    /// row is under the coordinator's.
+    pub async fn issue_token_for_role(
+        &self,
+        ttl: Duration,
+        role: ClusterRole,
+    ) -> Result<IssuedJoinToken, MembershipError> {
         let inner = self.replicated_inner()?;
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        if role.is_learner() && !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
+            return Err(MembershipError::LearnerProtocolInactive);
+        }
         let now = unix_ms()?;
         let ttl_ms = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
         let expires_at = now.saturating_add(ttl_ms.clamp(1_000, 86_400_000));
@@ -1224,35 +2194,57 @@ impl MembershipManager {
                 .and_then(|row| row.max_raft_id)
                 .unwrap_or(1)
                 .saturating_add(1) as u64;
-            let payload = JoinPayload {
-                version: JOIN_TOKEN_VERSION,
-                cluster_id: inner.identity.cluster_id.clone(),
-                raft_id,
-                expires_at,
-                bootstrap_http: inner.bootstrap_http.clone(),
-                bootstrap: bootstrap.clone(),
-                secrets: JoinSecretPayload {
-                    raft: inner.secrets.raft.clone(),
-                    api: inner.secrets.api.clone(),
-                    credential_key: inner.secrets.credential_key.clone(),
-                },
-                activation_marker: inner.activation_marker.clone(),
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_version: AUTH_PROTOCOL_VERSION,
+            let secrets = JoinSecretPayload {
+                raft: inner.secrets.raft.clone(),
+                api: inner.secrets.api.clone(),
+                credential_key: inner.secrets.credential_key.clone(),
             };
-            let token = encode_join_token(&payload)?;
+            let token = match role {
+                // A v1 token still carries one scalar, because a coordinator
+                // and a joiner that predate the range compare it for equality.
+                // It names the cluster's active floor rather than a constant,
+                // so a build that cannot participate is turned away by its own
+                // cheap local check instead of getting as far as a preflight.
+                ClusterRole::Voter => encode_join_token(&JoinPayload {
+                    version: JOIN_TOKEN_VERSION,
+                    cluster_id: inner.identity.cluster_id.clone(),
+                    raft_id,
+                    expires_at,
+                    bootstrap_http: inner.bootstrap_http.clone(),
+                    bootstrap: bootstrap.clone(),
+                    secrets,
+                    activation_marker: inner.activation_marker.clone(),
+                    schema_version: AUTH_SCHEMA_VERSION,
+                    protocol_version: active_min,
+                })?,
+                ClusterRole::Learner => encode_join_token_v2(&JoinPayloadV2 {
+                    version: JOIN_TOKEN_V2_VERSION,
+                    cluster_id: inner.identity.cluster_id.clone(),
+                    raft_id,
+                    expires_at,
+                    bootstrap_http: inner.bootstrap_http.clone(),
+                    bootstrap: bootstrap.clone(),
+                    secrets,
+                    activation_marker: inner.activation_marker.clone(),
+                    schema_version: AUTH_SCHEMA_VERSION,
+                    protocol_min: active_min,
+                    protocol_max: active_max,
+                    role,
+                })?,
+            };
             let token_hash = join_token_digest(&token);
             let inserted = inner
                 .client
                 .execute(
                     "INSERT INTO cluster_join_tokens \
-                     (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at) \
-                     SELECT $1, $2, $3, 'issued', NULL, $4, NULL \
+                     (token_hash, raft_id, expires_at, state, node_id, created_at, redeemed_at, \
+                      role) \
+                     SELECT $1, $2, $3, 'issued', NULL, $4, NULL, $5 \
                      WHERE NOT EXISTS (\
                        SELECT 1 FROM cluster_join_tokens \
                        WHERE raft_id = $2 AND state IN ('issued', 'redeeming') AND expires_at > $4\
                      )",
-                    params!(token_hash, raft_id as i64, expires_at, now),
+                    params!(token_hash, raft_id as i64, expires_at, now, role.as_str()),
                 )
                 .await?;
             if inserted == 1 {
@@ -1269,27 +2261,67 @@ impl MembershipManager {
     }
 
     pub async fn redeem(&self, request: &RedeemJoinRequest) -> Result<(), MembershipError> {
+        self.redeem_for_role(request, ClusterRole::Voter).await
+    }
+
+    /// Redeem a token through the wire-distinct learner path.
+    pub async fn redeem_learner(&self, request: &RedeemJoinRequest) -> Result<(), MembershipError> {
+        self.redeem_for_role(request, ClusterRole::Learner).await
+    }
+
+    async fn redeem_for_role(
+        &self,
+        request: &RedeemJoinRequest,
+        expected_role: ClusterRole,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
-        if request.schema_version != AUTH_SCHEMA_VERSION
-            || request.protocol_version != AUTH_PROTOCOL_VERSION
-        {
+        if request.schema_version != AUTH_SCHEMA_VERSION {
             return Err(MembershipError::Incompatible);
         }
-        if !is_join_token_digest(&request.token_digest) {
-            return Err(MembershipError::InvalidToken);
-        }
-        let http_base = if request.http_base.is_empty() {
-            None
-        } else {
-            Some(
-                normalize_internal_http_base(&request.http_base)
-                    .ok_or(MembershipError::InvalidHttpEndpoint)?,
-            )
-        };
-        let now = unix_ms()?;
+        let http_base = validate_redeem_join_request(request)?;
+        // Possession is checked before the cluster-wide protocol projection.
+        // An unknown digest pays for one indexed token lookup, not an
+        // otherwise-valid quorum range read on behalf of an unauthenticated
+        // caller.
         let record = self.token_record(&request.token_digest).await?;
         if record.raft_id != request.raft_id as i64 {
             return Err(MembershipError::InvalidToken);
+        }
+        // The role is *derived*, never accepted. `RedeemJoinRequest` carries
+        // no role field precisely so that a joining process cannot ask to be
+        // something other than what the operator's token was minted for.
+        let role = record.role()?;
+        if role != expected_role {
+            return Err(MembershipError::InvalidToken);
+        }
+        // The same rule the boot-time guard applies, from the coordinator's
+        // side: the joiner has to implement every protocol this cluster is
+        // actively using. Comparing against a constant instead would admit a
+        // protocol-4-only binary into an activated cluster.
+        let (cluster_min, cluster_max) = self.active_protocol_range().await?;
+        let (joiner_min, joiner_max) = request.declared_protocol_range();
+        if !(joiner_min <= cluster_min && cluster_max <= joiner_max) {
+            tracing::warn!(
+                cluster_min,
+                cluster_max,
+                joiner_min,
+                joiner_max,
+                node_id = %request.node_id,
+                "refusing a join from a binary that does not implement this cluster's \
+                 active protocol range"
+            );
+            return Err(MembershipError::Incompatible);
+        }
+        let now = unix_ms()?;
+        if role.is_learner() && !(cluster_min..=cluster_max).contains(&AUTH_LEARNER_PROTOCOL) {
+            tracing::warn!(
+                cluster_min,
+                cluster_max,
+                node_id = %request.node_id,
+                "refusing a learner join because this cluster has not activated the \
+                 learner protocol"
+            );
+            return Err(MembershipError::LearnerProtocolInactive);
         }
         let resume_legacy_partial = match record.state.as_str() {
             "redeemed" => return Err(MembershipError::ReusedToken),
@@ -1317,6 +2349,11 @@ impl MembershipManager {
                     // The previous rolling version reserved the token before
                     // its node-publication transaction. Repair that crash
                     // shape below under the exact reservation.
+                    None if role.is_learner() => {
+                        return Err(MembershipError::Internal(
+                            "learner token reservation has no staged node".to_owned(),
+                        ));
+                    }
                     None => true,
                 }
             }
@@ -1331,39 +2368,70 @@ impl MembershipManager {
         // every publication statement consumes that output. A duplicate
         // origin or a lost token race therefore produces no dependency output
         // and Hiqlite rolls the entire transaction back.
+        //
+        // The protocol range this admission was authorized against rides in
+        // the *first* statement for exactly that reason. It was read above,
+        // with at least two more linearizable round-trips between there and
+        // here, and `deactivate_learner_protocol` can narrow the range in that
+        // window — admitting a learner into a cluster that has just rolled
+        // back, which cannot restart and which nothing can then remove. Every
+        // later statement consumes this statement's output, so a range that
+        // moved rolls the whole join back rather than half-committing it. It
+        // is a compare-and-swap on both values, so a widening is caught too: a
+        // protocol-4-only binary must not be admitted into a cluster that
+        // activated while its request was in flight.
         let mut statements = Vec::new();
-        let proof_statement_index = if let Some(http_base) = http_base.as_deref() {
+        if role.is_learner() && !resume_legacy_partial {
             statements.push((
-                "INSERT INTO cluster_node_http (node_id, public_http_url) \
-                 SELECT $1, $2 WHERE EXISTS (\
-                   SELECT 1 FROM cluster_join_tokens token \
-                   WHERE token.token_hash = $3 AND token.raft_id = $4 \
-                     AND ((token.state = 'issued' AND token.expires_at > $5) \
-                       OR (token.state = 'redeeming' AND token.node_id = $1))) \
-                 AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
-                   WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
-                 AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
-                 AND NOT EXISTS (\
-                   SELECT 1 FROM cluster_node_http owner_http \
-                   JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
-                   WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
-                     AND owner_node.removed_at IS NULL \
-                     AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
-                       WHERE removing.node_id = owner_node.node_id)) \
-                 ON CONFLICT(node_id) DO UPDATE SET public_http_url = excluded.public_http_url \
-                 RETURNING node_id"
+                "INSERT INTO cluster_learner_join_intents (token_hash) \
+                 SELECT token_hash FROM cluster_join_tokens \
+                 WHERE token_hash = $1 AND raft_id = $2 AND state = 'issued' \
+                   AND expires_at > $3 AND role = 'learner' \
+                 RETURNING token_hash"
                     .to_owned(),
+                params!(request.token_digest.as_str(), request.raft_id as i64, now),
+            ));
+        }
+        let proof_statement_index = if let Some(http_base) = http_base.as_deref() {
+            let http_statement_index = statements.len();
+            statements.push((
+                format!(
+                    "INSERT INTO cluster_node_http (node_id, public_http_url) \
+                     SELECT $1, $2 WHERE EXISTS (\
+                       SELECT 1 FROM cluster_join_tokens token \
+                       WHERE token.token_hash = $3 AND token.raft_id = $4 \
+                         AND ((token.state = 'issued' AND token.expires_at > $5) \
+                           OR (token.state = 'redeeming' AND token.node_id = $1))) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
+                       WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                     AND NOT EXISTS (\
+                       SELECT 1 FROM cluster_node_http owner_http \
+                       JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
+                       WHERE owner_http.public_http_url = $2 AND owner_http.node_id != $1 \
+                         AND owner_node.removed_at IS NULL \
+                         AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removing \
+                           WHERE removing.node_id = owner_node.node_id)) \
+                     AND {} \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       public_http_url = excluded.public_http_url \
+                     RETURNING node_id",
+                    unchanged_protocol_range_predicate(6, 7)
+                ),
                 params!(
                     request.node_id.as_str(),
                     http_base,
                     request.token_digest.as_str(),
                     request.raft_id as i64,
-                    now
+                    now,
+                    cluster_min,
+                    cluster_max
                 ),
             ));
             if resume_legacy_partial {
-                0
+                http_statement_index
             } else {
+                let reservation_statement_index = statements.len();
                 statements.push((
                     "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
@@ -1371,38 +2439,54 @@ impl MembershipManager {
                      RETURNING node_id"
                         .to_owned(),
                     vec![
-                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::StmtOutputNamed(http_statement_index, "node_id".into()),
                         Param::Text(request.token_digest.clone()),
                         Param::Integer(now),
                     ],
                 ));
-                1
+                reservation_statement_index
             }
         } else if resume_legacy_partial {
+            let reservation_statement_index = statements.len();
             statements.push((
-                "UPDATE cluster_join_tokens SET node_id = node_id \
-                 WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
-                   AND state = 'redeeming' \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
-                 RETURNING node_id"
-                    .to_owned(),
+                format!(
+                    "UPDATE cluster_join_tokens SET node_id = node_id \
+                     WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
+                       AND state = 'redeeming' \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                       AND {} \
+                     RETURNING node_id",
+                    unchanged_protocol_range_predicate(4, 5)
+                ),
                 params!(
                     request.node_id.as_str(),
                     request.token_digest.as_str(),
-                    request.raft_id as i64
+                    request.raft_id as i64,
+                    cluster_min,
+                    cluster_max
                 ),
             ));
-            0
+            reservation_statement_index
         } else {
+            let reservation_statement_index = statements.len();
             statements.push((
-                "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
-                 WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
-                   AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
-                 RETURNING node_id"
-                    .to_owned(),
-                params!(request.node_id.as_str(), request.token_digest.as_str(), now),
+                format!(
+                    "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
+                     WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                       AND {} \
+                     RETURNING node_id",
+                    unchanged_protocol_range_predicate(4, 5)
+                ),
+                params!(
+                    request.node_id.as_str(),
+                    request.token_digest.as_str(),
+                    now,
+                    cluster_min,
+                    cluster_max
+                ),
             ));
-            0
+            reservation_statement_index
         };
         if let Some(http_base) = http_base.as_deref() {
             statements.push((
@@ -1439,8 +2523,8 @@ impl MembershipManager {
             ),
             (
                 "INSERT INTO cluster_nodes \
-                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
-                 VALUES ($1, $2, $3, $4, $5, NULL)"
+                 (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at, role) \
+                 VALUES ($1, $2, $3, $4, $5, NULL, $6)"
                     .to_owned(),
                 vec![
                     Param::StmtOutputNamed(proof_statement_index, "node_id".into()),
@@ -1448,6 +2532,7 @@ impl MembershipManager {
                     Param::Text(request.raft_address.clone()),
                     Param::Text(request.api_address.clone()),
                     Param::Integer(now),
+                    Param::Text(role.as_str().to_owned()),
                 ],
             ),
             (
@@ -1469,12 +2554,35 @@ impl MembershipManager {
                 ],
             ),
         ]);
+        if role.is_learner() {
+            statements.push((
+                "DELETE FROM cluster_learner_join_intents WHERE token_hash = $1".to_owned(),
+                params!(request.token_digest.as_str()),
+            ));
+        }
         let transaction = inner.client.txn(statements).await;
         match transaction {
             Ok(results) => {
                 results.into_iter().collect::<Result<Vec<_>, _>>()?;
             }
             Err(error) if error.to_string().contains("StmtIndex(") => {
+                // The range predicate is one of the things that can have
+                // rolled this transaction back, and it is the one whose real
+                // answer would otherwise be reported as a bad token. Check it
+                // before anything else so the joiner is told what happened.
+                let (now_min, now_max) = self.active_protocol_range().await?;
+                if (now_min, now_max) != (cluster_min, cluster_max) {
+                    tracing::warn!(
+                        cluster_min,
+                        cluster_max,
+                        now_min,
+                        now_max,
+                        node_id = %request.node_id,
+                        "rolling back a join because the cluster's protocol range moved while \
+                         it was being admitted"
+                    );
+                    return Err(MembershipError::ProtocolRangeChanged);
+                }
                 let latest = self.token_record(&request.token_digest).await?;
                 if latest.state == "redeemed" {
                     return Err(MembershipError::ReusedToken);
@@ -1531,11 +2639,30 @@ impl MembershipManager {
     }
 
     pub async fn finalize(&self, request: &FinalizeJoinRequest) -> Result<(), MembershipError> {
+        self.finalize_for_role(request, ClusterRole::Voter).await
+    }
+
+    /// Finalize only a token admitted through the learner flow.
+    pub async fn finalize_learner(
+        &self,
+        request: &FinalizeJoinRequest,
+    ) -> Result<(), MembershipError> {
+        self.finalize_for_role(request, ClusterRole::Learner).await
+    }
+
+    async fn finalize_for_role(
+        &self,
+        request: &FinalizeJoinRequest,
+        expected_role: ClusterRole,
+    ) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         if !is_join_token_digest(&request.token_digest) {
             return Err(MembershipError::InvalidToken);
         }
         let record = self.token_record(&request.token_digest).await?;
+        if record.role()? != expected_role {
+            return Err(MembershipError::InvalidToken);
+        }
         if record.node_id.as_deref() != Some(&request.node_id)
             || record.raft_id != request.raft_id as i64
         {
@@ -1544,15 +2671,25 @@ impl MembershipManager {
         if record.state == "redeemed" {
             return Ok(());
         }
+        // What "admitted" means depends on what the token admits. A voter has
+        // to have committed a *vote*; a learner has to be a committed member
+        // and must not have acquired one, because a learner that appears in
+        // the voter set was not admitted by this protocol at all.
         let metrics = inner.client.metrics_db().await?;
-        if !metrics
+        let is_voter = metrics
             .membership_config
             .voter_ids()
-            .any(|id| id == request.raft_id)
-        {
-            return Err(MembershipError::Internal(
-                "joining node has not committed voter membership".to_owned(),
-            ));
+            .any(|id| id == request.raft_id);
+        let is_member = metrics
+            .membership_config
+            .nodes()
+            .any(|(id, _)| *id == request.raft_id);
+        let admitted = role_is_admitted(record.role()?, is_member, is_voter);
+        if !admitted {
+            return Err(MembershipError::Internal(format!(
+                "joining node has not committed {} membership",
+                record.role()?.as_str()
+            )));
         }
         let now = unix_ms()?;
         let changed = inner
@@ -1574,7 +2711,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<JoinTokenRow, _>(
-                "SELECT raft_id, expires_at, state, node_id FROM cluster_join_tokens \
+                "SELECT raft_id, expires_at, state, node_id, role FROM cluster_join_tokens \
                  WHERE token_hash = $1",
                 params!(token_hash),
             )
@@ -1722,54 +2859,82 @@ impl MembershipManager {
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
         let now = unix_ms()?;
-        inner
-            .client
-            .txn(vec![
-                (
-                    "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
+        let mut statements = vec![
+            (
+                "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(inner.identity.node_id.as_str(), now),
-                ),
-                (
-                    "INSERT INTO cluster_nodes \
-                     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at) \
-                     VALUES ($1, $2, $3, $4, $5, NULL) \
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), now),
+            ),
+            (
+                // `role` is supplied only on the insert branch. The row
+                // redemption already wrote owns the admission decision,
+                // and a promotion — which this slice does not implement —
+                // must be able to move it without a heartbeat undoing it.
+                "INSERT INTO cluster_nodes \
+                     (node_id, raft_id, raft_address, api_address, last_seen_at, removed_at, \
+                      role) \
+                     VALUES ($1, $2, $3, $4, $5, NULL, $6) \
                      ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at, \
                        removed_at = NULL WHERE cluster_nodes.removed_at IS NULL"
-                        .to_owned(),
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        inner.identity.raft_id as i64,
-                        inner.local.raft_address.as_str(),
-                        inner.local.api_address.as_str(),
-                        now
-                    ),
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    inner.identity.raft_id as i64,
+                    inner.local.raft_address.as_str(),
+                    inner.local.api_address.as_str(),
+                    now,
+                    inner.role.as_str()
                 ),
-                (
-                    "INSERT INTO cluster_node_capabilities \
+            ),
+            (
+                "INSERT INTO cluster_node_capabilities \
                      (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
                      ON CONFLICT(node_id, capability) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
-                        .to_owned(),
-                    params!(
-                        inner.identity.node_id.as_str(),
-                        REMOVAL_ATTEMPT_CAPABILITY,
-                        now
-                    ),
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    REMOVAL_ATTEMPT_CAPABILITY,
+                    now
                 ),
-                (
-                    "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
-                    params!(inner.identity.node_id.as_str()),
+            ),
+        ];
+        // Same transaction, same timestamp, same coupling: a protocol-5
+        // capability row can only carry this heartbeat's `last_seen_at` if this
+        // binary wrote this heartbeat. A rollback to an older build advances
+        // `cluster_nodes.last_seen_at` without touching this row, and the
+        // equality that activation requires breaks. That is the whole contract,
+        // so the only way to omit the statement is to be the emulated old
+        // binary the validation harness starts.
+        if !emulate_pre_learner_protocol_heartbeat() {
+            statements.push((
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    LEARNER_PROTOCOL_CAPABILITY,
+                    now
                 ),
-                (
-                    "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+            ));
+        }
+        statements.push((
+            "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
+            params!(inner.identity.node_id.as_str()),
+        ));
+        statements.push((
+            "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
                      AND last_seen_at = $2"
-                        .to_owned(),
-                    params!(inner.identity.node_id.as_str(), now),
-                ),
-            ])
+                .to_owned(),
+            params!(inner.identity.node_id.as_str(), now),
+        ));
+        inner
+            .client
+            .txn(statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
@@ -2168,6 +3333,26 @@ impl MembershipManager {
         Ok(rows.first().is_some_and(|row| row.count == 1))
     }
 
+    /// Whether this process may run cluster-wide leader-singleton work.
+    ///
+    /// Re-derived from live committed membership on every call, never from the
+    /// role this process booted with. A learner may be promoted while the
+    /// daemon runs, and Hiqlite's `learner_only` startup hint is consulted once
+    /// at startup and never again — so a cached answer would either keep a
+    /// promoted voter idle or, worse, let a node that was demoted keep running
+    /// the jobs the cluster now expects someone else to own.
+    ///
+    /// An unclustered process is the whole cluster and owns every job. A
+    /// clustered process whose membership cannot be read right now is refused:
+    /// duplicating a provider pass or a scan is the failure this exists to
+    /// prevent, and skipping a tick costs at most one interval.
+    pub async fn may_run_cluster_jobs(&self) -> bool {
+        if self.inner.is_none() {
+            return true;
+        }
+        decide_cluster_job_authority(self.local_node_is_committed_voter().await)
+    }
+
     pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
         let inner = self.replicated_inner()?;
         let metrics = inner.client.metrics_db().await?;
@@ -2175,6 +3360,24 @@ impl MembershipManager {
             .membership_config
             .voter_ids()
             .any(|raft_id| raft_id == inner.identity.raft_id))
+    }
+
+    /// Whether committed membership still lists this node at all.
+    ///
+    /// Not a synonym for [`Self::local_node_is_committed_voter`]: a learner is
+    /// a committed member for as long as it is admitted and never becomes a
+    /// voter, and so is a joining voter that Raft has added but not yet
+    /// promoted out of its intermediate learner state. Anything that reads
+    /// "carries no vote" as "was removed" stops work a healthy member still
+    /// has to do.
+    pub async fn local_node_is_committed_member(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let is_member = metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
+        Ok(is_member)
     }
 
     /// Retire one completed or timed-out provider repair generation. The
@@ -2926,7 +4129,7 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_map::<MembershipNodeRow, _>(
-                "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, \
+                "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, n.role, \
                         COALESCE(h.hostname, '') AS hostname, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
@@ -2936,25 +4139,36 @@ impl MembershipManager {
                 params!(),
             )
             .await?;
+        let protocol = self.protocol_status().await?;
+        let pending = protocol
+            .learner_protocol_pending
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
         let nodes = rows
             .into_iter()
             .filter(|row| members.contains(&(row.raft_id as u64)))
-            .map(|row| ClusterNodeRecord {
-                node_id: row.node_id,
-                hostname: membership_hostname(&row.hostname, &row.api_address),
-                advertised_host: advertised_host(&row.api_address),
-                raft_id: row.raft_id as u64,
-                role: if voters.contains(&(row.raft_id as u64)) {
-                    NodeRole::Voter
-                } else {
-                    NodeRole::Learner
-                },
-                is_leader: metrics.current_leader == Some(row.raft_id as u64),
-                reachable: node_is_reachable(now, row.last_seen_at),
-                last_seen_at: row.last_seen_at,
-                removal_pending: row.removal_pending,
+            .map(|row| {
+                let admitted_role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
+                let raft_id = row.raft_id as u64;
+                Ok(ClusterNodeRecord {
+                    learner_protocol_ready: !pending.contains(&row.node_id),
+                    node_id: row.node_id,
+                    hostname: membership_hostname(&row.hostname, &row.api_address),
+                    advertised_host: advertised_host(&row.api_address),
+                    raft_id,
+                    role: match admitted_role {
+                        ClusterRole::Voter => NodeRole::Voter,
+                        ClusterRole::Learner => NodeRole::Learner,
+                    },
+                    is_voter: voters.contains(&raft_id),
+                    is_leader: metrics.current_leader == Some(raft_id),
+                    reachable: node_is_reachable(now, row.last_seen_at),
+                    last_seen_at: row.last_seen_at,
+                    removal_pending: row.removal_pending,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, MembershipError>>()?;
         let availability = match voters.len() {
             0 | 1 => ClusterAvailability::SingleNode,
             2 => ClusterAvailability::DegradedReconfiguration,
@@ -2965,6 +4179,7 @@ impl MembershipManager {
             availability,
             nodes,
             replication: inner.replication.status().await,
+            protocol,
         })
     }
 
@@ -2994,6 +4209,19 @@ impl MembershipManager {
                 self.fence_removed_job_owner(node_id).await?;
                 self.finalize_node_removal(node_id).await;
                 return self.status().await;
+            }
+            // A committed member that is not a voter is not "not found" — the
+            // roster lists it, and answering 404 for a node an operator can
+            // see is the least useful thing this could say. PR-1 ships voter
+            // removal only, so name the gap instead of disguising it.
+            if metrics
+                .membership_config
+                .nodes()
+                .any(|(id, _)| *id == target_raft_id)
+            {
+                return Err(MembershipError::NonVoterRemovalUnsupported(
+                    node_id.to_owned(),
+                ));
             }
             return Err(MembershipError::NodeNotFound);
         }
@@ -3341,8 +4569,8 @@ impl MembershipManager {
             .client
             .query_consistent_map::<CountRow, _>(
                 format!(
-                    "SELECT CASE WHEN {CAPABILITY_READY_PREDICATE} \
-                     THEN 1 ELSE 0 END AS count"
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                    capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY)
                 ),
                 params!(),
             )
@@ -3352,6 +4580,337 @@ impl MembershipManager {
         } else {
             Err(MembershipError::MembershipUpgradeRequired)
         }
+    }
+
+    /// The protocol range the cluster's replicated features currently require.
+    ///
+    /// Read through the leader: an activation decision must never be made from
+    /// a follower's unapplied copy of `cluster_meta`.
+    pub async fn active_protocol_range(&self) -> Result<(i64, i64), MembershipError> {
+        self.protocol_range(Read::Quorum).await
+    }
+
+    async fn protocol_range(&self, read: Read) -> Result<(i64, i64), MembershipError> {
+        let inner = self.replicated_inner()?;
+        const SQL: &str = "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1";
+        let rows = match read {
+            Read::Quorum => {
+                inner
+                    .client
+                    .query_consistent_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .await?
+            }
+            Read::Local => {
+                inner
+                    .client
+                    .query_map::<ProtocolRangeRow, _>(SQL, params!())
+                    .await?
+            }
+        };
+        let [row] = rows.as_slice() else {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range returned {} rows",
+                rows.len()
+            )));
+        };
+        Ok((row.protocol_min, row.protocol_max))
+    }
+
+    /// Active nodes whose currently running binary has not proven `capability`.
+    async fn nodes_missing_capability(
+        &self,
+        capability: &str,
+    ) -> Result<Vec<String>, MembershipError> {
+        self.unready_nodes(capability, Read::Quorum).await
+    }
+
+    async fn unready_nodes(
+        &self,
+        capability: &str,
+        read: Read,
+    ) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let sql = capability_unready_nodes_sql(capability);
+        let rows = match read {
+            Read::Quorum => {
+                inner
+                    .client
+                    .query_consistent_map::<NodeIdRow, _>(sql, params!())
+                    .await?
+            }
+            Read::Local => {
+                inner
+                    .client
+                    .query_map::<NodeIdRow, _>(sql, params!())
+                    .await?
+            }
+        };
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
+    }
+
+    /// Members of the committed Raft configuration that do not carry a vote.
+    async fn committed_non_voters(&self) -> Result<Vec<u64>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        Ok(non_voting_members(
+            &metrics
+                .membership_config
+                .voter_ids()
+                .collect::<BTreeSet<_>>(),
+            metrics.membership_config.nodes().map(|(id, _)| *id),
+        ))
+    }
+
+    /// These operations commit one `cluster_meta` write. The Hiqlite client
+    /// routes writes to the leader on the caller's behalf — as every other
+    /// membership mutation here does — so the state an operator can actually
+    /// act on is not "you asked the wrong node" but "there is no leader to
+    /// route to right now".
+    async fn require_elected_leader(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        if metrics.current_leader.is_some() {
+            Ok(())
+        } else {
+            Err(MembershipError::LeaderUnavailable)
+        }
+    }
+
+    /// The operator-facing projection of the protocol range.
+    ///
+    /// This is a report, not a decision, and it is reached through the roster
+    /// route — which has to keep answering when the cluster has lost quorum,
+    /// precisely so an operator can see what the cluster looks like while it is
+    /// broken. It therefore reads the applied local state, exactly as the
+    /// roster beside it does. Every path that *acts* on the range takes the
+    /// quorum read instead.
+    pub async fn protocol_status(&self) -> Result<ClusterProtocolStatus, MembershipError> {
+        self.protocol_projection(Read::Local).await
+    }
+
+    async fn protocol_projection(
+        &self,
+        read: Read,
+    ) -> Result<ClusterProtocolStatus, MembershipError> {
+        let (active_min, active_max) = self.protocol_range(read).await?;
+        Ok(ClusterProtocolStatus {
+            active_min,
+            active_max,
+            binary_min: AUTH_PROTOCOL_MIN,
+            binary_max: AUTH_PROTOCOL_MAX,
+            // The learner protocol, named as itself. `AUTH_PROTOCOL_MAX` is
+            // the same number today and moves with every future protocol,
+            // which is precisely why `AUTH_LEARNER_PROTOCOL` exists.
+            learner_protocol_active: (active_min, active_max)
+                == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL),
+            learner_protocol_pending: self
+                .unready_nodes(LEARNER_PROTOCOL_CAPABILITY, read)
+                .await?,
+        })
+    }
+
+    /// Narrow the cluster's active range onto the learner protocol.
+    ///
+    /// Nothing about deploying this binary activates protocol 5; this call is
+    /// the only thing that does, and after it an older binary can no longer
+    /// boot, join, or rejoin as a voter. Every precondition is therefore
+    /// checked twice on purpose: the read-only pass exists to produce a
+    /// refusal that names nodes, and the same predicates are embedded in the
+    /// committing statement so a leader that won the reads and then lost a
+    /// race cannot commit anyway.
+    ///
+    /// Three preconditions, because "can this cluster speak protocol 5" has
+    /// three ways to be false and only one of them is about capability rows:
+    ///
+    /// 1. Every active node proves the capability with its *current*
+    ///    heartbeat, so a rolled-back binary is caught.
+    /// 2. No join is in flight. A node between redeeming its token and its
+    ///    first heartbeat is a committed member with no capability row that
+    ///    the roster is deliberately blind to; activating past it can leave a
+    ///    voter that counts for quorum and can never open its store again.
+    /// 3. No member has gone silent. A node that proved the capability and
+    ///    then died stays "ready" forever, and a binary rolled back while that
+    ///    node is down never writes the desynchronising heartbeat rule 1 is
+    ///    built on.
+    pub async fn activate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_elected_leader().await?;
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        if (active_min, active_max) == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL) {
+            return Ok(ProtocolChange {
+                changed: false,
+                protocol: self.protocol_projection(Read::Quorum).await?,
+            });
+        }
+        if (active_min, active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range {active_min}..={active_max} is neither the unactivated \
+                 range {AUTH_PROTOCOL_MIN}..={AUTH_PROTOCOL_MIN} nor the learner protocol \
+                 {AUTH_LEARNER_PROTOCOL}..={AUTH_LEARNER_PROTOCOL}; refusing to narrow it"
+            )));
+        }
+        let absence_cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+        self.refuse_unactivatable_cluster(absence_cutoff).await?;
+        let changed = inner
+            .client
+            .execute(
+                narrow_protocol_range_sql(Some(activation_guard_predicate())),
+                params!(AUTH_LEARNER_PROTOCOL, AUTH_PROTOCOL_MIN, absence_cutoff),
+            )
+            .await?;
+        let protocol = self.protocol_projection(Read::Quorum).await?;
+        if changed == 0 && !protocol.learner_protocol_active {
+            // The embedded predicates rejected the write after the read-only
+            // pass admitted it: an older binary's heartbeat, a redemption, or
+            // a node going quiet landed in between. Re-derive which, and say
+            // "retry" rather than naming an empty roster if the range itself
+            // moved under us.
+            let cutoff = unix_ms()?.saturating_sub(PROTOCOL_CHANGE_ABSENCE_WINDOW_MS);
+            self.refuse_unactivatable_cluster(cutoff).await?;
+            return Err(MembershipError::ProtocolRangeChanged);
+        }
+        Ok(ProtocolChange {
+            changed: changed == 1,
+            protocol,
+        })
+    }
+
+    /// The read-only pass behind [`Self::activate_learner_protocol`], which
+    /// exists to *name* what is in the way. Returns `Ok(())` when nothing is.
+    async fn refuse_unactivatable_cluster(&self, cutoff: i64) -> Result<(), MembershipError> {
+        // Absence first, deliberately. A join that was abandoned satisfies
+        // both rules, and "wait for it to finish" is the wrong thing to tell
+        // an operator about a process that is never coming back; "start it or
+        // remove it" is the one that ends.
+        let absent = self.absent_nodes(cutoff).await?;
+        if !absent.is_empty() {
+            return Err(MembershipError::LearnerProtocolNodeAbsent {
+                nodes: absent,
+                minutes: PROTOCOL_CHANGE_ABSENCE_WINDOW_MS / 60_000,
+            });
+        }
+        let joining = self.join_in_flight_nodes().await?;
+        if !joining.is_empty() {
+            return Err(MembershipError::JoinInFlight(joining));
+        }
+        let pending = self
+            .nodes_missing_capability(LEARNER_PROTOCOL_CAPABILITY)
+            .await?;
+        if !pending.is_empty() {
+            return Err(MembershipError::LearnerProtocolUpgradeRequired(pending));
+        }
+        Ok(())
+    }
+
+    /// Nodes that have redeemed a join token and not yet proven anything.
+    async fn join_in_flight_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<NodeIdRow, _>(join_in_flight_nodes_sql(), params!())
+            .await?;
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
+    }
+
+    /// Members that have not heartbeated since `cutoff`.
+    async fn absent_nodes(&self, cutoff: i64) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<NodeIdRow, _>(absent_nodes_sql(), params!(cutoff))
+            .await?;
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
+    }
+
+    /// Widen the cluster back onto protocol 4 for a degraded rollback.
+    ///
+    /// The plan concedes that activation may be irreversible in some orderings
+    /// — once learners exist and hold state, dropping protocol 5 strands them,
+    /// and rollback is then a forward fix (upgrade the lagging node instead of
+    /// downgrading the cluster). What is implemented here is the reversible
+    /// case: no learner is present, so nothing depends on protocol 5 and the
+    /// marker can simply be moved back.
+    ///
+    /// The refusal that protects a learner is carried by the committing
+    /// statement itself, as a SQL `NOT EXISTS` over the durable role column.
+    /// The Raft-metrics read below is the preflight that *names* what is in
+    /// the way, exactly as activation's read-only capability pass does.
+    pub async fn deactivate_learner_protocol(&self) -> Result<ProtocolChange, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_elected_leader().await?;
+        let (active_min, active_max) = self.active_protocol_range().await?;
+        if (active_min, active_max) == (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN) {
+            return Ok(ProtocolChange {
+                changed: false,
+                protocol: self.protocol_projection(Read::Quorum).await?,
+            });
+        }
+        if (active_min, active_max) != (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL) {
+            return Err(MembershipError::Internal(format!(
+                "cluster protocol range {active_min}..={active_max} is not the learner protocol \
+                 {AUTH_LEARNER_PROTOCOL}..={AUTH_LEARNER_PROTOCOL}; refusing to widen it"
+            )));
+        }
+        self.refuse_stranding_deactivation().await?;
+        let changed = inner
+            .client
+            .execute(
+                narrow_protocol_range_sql(Some(no_admitted_learner_predicate().to_owned())),
+                params!(AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL),
+            )
+            .await?;
+        let protocol = self.protocol_projection(Read::Quorum).await?;
+        if changed == 0 && protocol.learner_protocol_active {
+            // The embedded predicate rejected the write after the read-only
+            // pass admitted it: a learner was admitted in between.
+            self.refuse_stranding_deactivation().await?;
+            return Err(MembershipError::ProtocolRangeChanged);
+        }
+        Ok(ProtocolChange {
+            changed: changed == 1,
+            protocol,
+        })
+    }
+
+    /// The read-only pass behind [`Self::deactivate_learner_protocol`].
+    ///
+    /// Two rosters, because they answer two different questions and either one
+    /// alone would let an operator strand a node. The replicated role column
+    /// names every node *admitted* under protocol 5, including one that is
+    /// currently down and therefore absent from nothing. Committed Raft
+    /// membership names every member that carries no vote, including one whose
+    /// durable row predates this column.
+    ///
+    /// They are reported separately rather than unioned, because they are not
+    /// the same claim. The vendored client joins a voter with `add_learner`
+    /// and then `become_member`, so an ordinary voter that is mid-join is a
+    /// committed non-voter for a moment — true, and worth refusing on, but it
+    /// is not a learner and telling an operator to "remove it" would be wrong.
+    async fn refuse_stranding_deactivation(&self) -> Result<(), MembershipError> {
+        let admitted = self.admitted_learner_nodes().await?;
+        let non_voting = self
+            .committed_non_voters()
+            .await?
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>();
+        if admitted.is_empty() && non_voting.is_empty() {
+            return Ok(());
+        }
+        Err(MembershipError::LearnerProtocolInUse {
+            admitted,
+            non_voting,
+        })
+    }
+
+    /// Nodes whose durable membership row says they were admitted as learners.
+    async fn admitted_learner_nodes(&self) -> Result<Vec<String>, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<NodeIdRow, _>(admitted_learner_nodes_sql(), params!())
+            .await?;
+        Ok(rows.into_iter().map(|row| row.node_id).collect())
     }
 
     /// Restore the durable job-owner fence for state created before that
@@ -3886,9 +5445,19 @@ pub fn source_is_readable(package: &OfflinePackage) -> bool {
     file.read(&mut probe).is_ok()
 }
 
-pub fn decode_join_token(token: &str) -> Result<JoinPayload, MembershipError> {
+/// Decode a join token of any protocol version this binary implements.
+///
+/// The framing is checked before anything is decrypted: a token whose prefix
+/// this build does not know is refused without a key ever being derived, which
+/// is what makes an older coordinator or joiner reject the v2 flow rather than
+/// misread it. `plxjoin:v3` is refused here by the same rule, on this binary.
+pub fn decode_join_token(token: &str) -> Result<JoinToken, MembershipError> {
     let mut parts = token.split(':');
-    if parts.next() != Some("plxjoin") || parts.next() != Some("v1") || parts.clone().count() != 2 {
+    if parts.next() != Some("plxjoin") {
+        return Err(MembershipError::InvalidToken);
+    }
+    let framing = parts.next().ok_or(MembershipError::InvalidToken)?;
+    if parts.clone().count() != 2 {
         return Err(MembershipError::InvalidToken);
     }
     let key_bytes = hex::decode(parts.next().ok_or(MembershipError::InvalidToken)?)
@@ -3898,25 +5467,61 @@ pub fn decode_join_token(token: &str) -> Result<JoinPayload, MembershipError> {
     if key_bytes.len() != 32 || encrypted.len() <= 24 {
         return Err(MembershipError::InvalidToken);
     }
+    let aad = match framing {
+        "v1" => JOIN_TOKEN_AAD,
+        "v2" => JOIN_TOKEN_V2_AAD,
+        _ => return Err(MembershipError::InvalidToken),
+    };
     let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
     let plaintext = cipher
         .decrypt(
             XNonce::from_slice(&encrypted[..24]),
             chacha20poly1305::aead::Payload {
                 msg: &encrypted[24..],
-                aad: JOIN_TOKEN_AAD,
+                aad,
             },
         )
         .map_err(|_| MembershipError::InvalidToken)?;
-    let payload: JoinPayload =
-        serde_json::from_slice(&plaintext).map_err(|_| MembershipError::InvalidToken)?;
-    if payload.version != JOIN_TOKEN_VERSION || payload.cluster_id.trim().is_empty() {
+    let decoded = match framing {
+        "v1" => {
+            let payload: JoinPayload =
+                serde_json::from_slice(&plaintext).map_err(|_| MembershipError::InvalidToken)?;
+            if payload.version != JOIN_TOKEN_VERSION {
+                return Err(MembershipError::InvalidToken);
+            }
+            JoinToken::V1(payload)
+        }
+        _ => {
+            let payload: JoinPayloadV2 =
+                serde_json::from_slice(&plaintext).map_err(|_| MembershipError::InvalidToken)?;
+            if payload.version != JOIN_TOKEN_V2_VERSION
+                || payload.protocol_min <= 0
+                || payload.protocol_max < payload.protocol_min
+            {
+                return Err(MembershipError::InvalidToken);
+            }
+            JoinToken::V2(payload)
+        }
+    };
+    if decoded.cluster_id().trim().is_empty() {
         return Err(MembershipError::InvalidToken);
     }
-    Ok(payload)
+    Ok(decoded)
 }
 
 fn encode_join_token(payload: &JoinPayload) -> Result<String, MembershipError> {
+    seal_join_token(payload, JOIN_TOKEN_PREFIX, JOIN_TOKEN_AAD)
+}
+
+fn encode_join_token_v2(payload: &JoinPayloadV2) -> Result<String, MembershipError> {
+    seal_join_token(payload, JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_V2_AAD)
+}
+
+fn seal_join_token<T: Serialize>(
+    payload: &T,
+    prefix: &str,
+    aad: &[u8],
+) -> Result<String, MembershipError> {
     let mut key_bytes = [0_u8; 32];
     let mut nonce = [0_u8; 24];
     getrandom::getrandom(&mut key_bytes)
@@ -3931,14 +5536,14 @@ fn encode_join_token(payload: &JoinPayload) -> Result<String, MembershipError> {
             XNonce::from_slice(&nonce),
             chacha20poly1305::aead::Payload {
                 msg: &plaintext,
-                aad: JOIN_TOKEN_AAD,
+                aad,
             },
         )
         .map_err(|_| MembershipError::Internal("encrypting join token".to_owned()))?;
     let mut encrypted = nonce.to_vec();
     encrypted.extend(ciphertext);
     Ok(format!(
-        "{JOIN_TOKEN_PREFIX}:{}:{}",
+        "{prefix}:{}:{}",
         hex::encode(key_bytes),
         hex::encode(encrypted)
     ))
@@ -4151,6 +5756,15 @@ struct JoinTokenRow {
     expires_at: i64,
     state: String,
     node_id: Option<String>,
+    /// What this token admits. `NULL` on every row an older coordinator wrote,
+    /// which is exactly the set of tokens that can only admit a voter.
+    role: Option<String>,
+}
+
+impl JoinTokenRow {
+    fn role(&self) -> Result<ClusterRole, MembershipError> {
+        ClusterRole::from_stored(self.role.as_deref())
+    }
 }
 
 impl From<&mut Row<'_>> for JoinTokenRow {
@@ -4160,6 +5774,7 @@ impl From<&mut Row<'_>> for JoinTokenRow {
             expires_at: row.get("expires_at"),
             state: row.get("state"),
             node_id: row.get("node_id"),
+            role: row.get("role"),
         }
     }
 }
@@ -4193,6 +5808,7 @@ struct MembershipNodeRow {
     raft_id: i64,
     api_address: String,
     hostname: String,
+    admitted_role: Option<String>,
     last_seen_at: i64,
     removal_pending: bool,
 }
@@ -4263,6 +5879,32 @@ struct ArtworkRepairLeaseRow {
 
 struct CountRow {
     count: i64,
+}
+
+struct ProtocolRangeRow {
+    protocol_min: i64,
+    protocol_max: i64,
+}
+
+impl From<&mut Row<'_>> for ProtocolRangeRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            protocol_min: row.get("protocol_min"),
+            protocol_max: row.get("protocol_max"),
+        }
+    }
+}
+
+struct NodeIdRow {
+    node_id: String,
+}
+
+impl From<&mut Row<'_>> for NodeIdRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            node_id: row.get("node_id"),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -4380,6 +6022,7 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             raft_id: row.get("raft_id"),
             api_address: row.get("api_address"),
             hostname: row.get("hostname"),
+            admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
             removal_pending: row.get("removal_pending"),
         }
@@ -4897,6 +6540,1300 @@ mod tests {
             leader_self_leave_sequence(6),
             LeaderSelfLeaveSequence::CommitDirectly
         );
+    }
+
+    /// Seed a three-voter cluster whose nodes have all heartbeated once, on an
+    /// unactivated `cluster_meta` range. `ready` names the nodes whose current
+    /// binary proved the learner protocol.
+    fn protocol_fixture(ready: &[&str]) -> rusqlite::Connection {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_meta (\
+                   singleton INTEGER PRIMARY KEY, schema_version INTEGER, \
+                   protocol_min INTEGER, protocol_max INTEGER, migrated_at INTEGER); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, raft_id INTEGER, \
+                   last_seen_at INTEGER, removed_at INTEGER, role TEXT); \
+                 CREATE TABLE cluster_node_capabilities (\
+                   node_id TEXT, capability TEXT, last_seen_at INTEGER, \
+                   PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE cluster_node_heartbeat_intents (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY, started_at INT); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 INSERT INTO cluster_meta VALUES (1, 11, 4, 4, 0); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 1, 100, NULL, 'voter'); \
+                 INSERT INTO cluster_nodes VALUES ('node-b', 2, 200, NULL, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('node-c', 3, 300, NULL, 'voter');",
+            )
+            .expect("seed a three-voter cluster on the unactivated range");
+        for node_id in ready {
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                     SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                    rusqlite::params![node_id, LEARNER_PROTOCOL_CAPABILITY],
+                )
+                .expect("couple the capability to that node's current heartbeat");
+        }
+        connection
+    }
+
+    fn active_range(connection: &rusqlite::Connection) -> (i64, i64) {
+        connection
+            .query_row(
+                "SELECT protocol_min, protocol_max FROM cluster_meta WHERE singleton = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read the active protocol range")
+    }
+
+    fn unready_nodes(connection: &rusqlite::Connection) -> Vec<String> {
+        let sql = capability_unready_nodes_sql(LEARNER_PROTOCOL_CAPABILITY);
+        let mut statement = connection
+            .prepare(&sql)
+            .expect("prepare the unready roster");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run the unready roster")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect the unready roster");
+        rows
+    }
+
+    /// Every node in [`protocol_fixture`] heartbeated at or before 300, so a
+    /// cutoff below that treats all of them as present. Tests that want the
+    /// absence rule to bite pass their own.
+    const FIXTURE_PRESENT_CUTOFF: i64 = 1;
+
+    fn activate_at(connection: &rusqlite::Connection, cutoff: i64) -> usize {
+        connection
+            .execute(
+                &narrow_protocol_range_sql(Some(activation_guard_predicate())),
+                rusqlite::params![AUTH_LEARNER_PROTOCOL, AUTH_PROTOCOL_MIN, cutoff],
+            )
+            .expect("run the activation statement")
+    }
+
+    fn activate(connection: &rusqlite::Connection) -> usize {
+        activate_at(connection, FIXTURE_PRESENT_CUTOFF)
+    }
+
+    fn deactivate(connection: &rusqlite::Connection) -> usize {
+        connection
+            .execute(
+                &narrow_protocol_range_sql(Some(no_admitted_learner_predicate().to_owned())),
+                rusqlite::params![AUTH_PROTOCOL_MIN, AUTH_LEARNER_PROTOCOL],
+            )
+            .expect("run the deactivation statement")
+    }
+
+    fn absent_nodes(connection: &rusqlite::Connection, cutoff: i64) -> Vec<String> {
+        let mut statement = connection
+            .prepare(absent_nodes_sql())
+            .expect("prepare the absent roster");
+        let rows = statement
+            .query_map(rusqlite::params![cutoff], |row| row.get::<_, String>(0))
+            .expect("run the absent roster")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect the absent roster");
+        rows
+    }
+
+    fn joining_nodes(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare(join_in_flight_nodes_sql())
+            .expect("prepare the join-in-flight roster");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run the join-in-flight roster")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect the join-in-flight roster");
+        rows
+    }
+
+    fn admitted_learners(connection: &rusqlite::Connection) -> Vec<String> {
+        let mut statement = connection
+            .prepare(admitted_learner_nodes_sql())
+            .expect("prepare the learner roster");
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("run the learner roster")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect the learner roster");
+        rows
+    }
+
+    /// The role column is additive and nullable, so every row an older
+    /// coordinator wrote reads back as the voter it is. Only an explicit
+    /// `'learner'` names a node this cluster admitted under protocol 5.
+    #[test]
+    fn a_membership_row_without_a_role_is_a_voter() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert!(
+            admitted_learners(&connection).is_empty(),
+            "a NULL role must not be read as a learner"
+        );
+        assert_eq!(
+            ClusterRole::from_stored(None).expect("null role"),
+            ClusterRole::Voter
+        );
+        assert_eq!(
+            ClusterRole::from_stored(Some("voter")).expect("voter role"),
+            ClusterRole::Voter
+        );
+        assert_eq!(
+            ClusterRole::from_stored(Some("learner")).expect("learner role"),
+            ClusterRole::Learner
+        );
+        // Not a guess and not a default: a value this binary does not
+        // understand is a state it must not act on.
+        assert!(ClusterRole::from_stored(Some("observer")).is_err());
+    }
+
+    /// The refusal that keeps deactivation from stranding a learner rides in
+    /// the committing statement, not only in a preflight an admission can win
+    /// a race against.
+    #[test]
+    fn deactivation_is_refused_by_its_own_statement_while_a_learner_is_admitted() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert_eq!(activate(&connection), 1);
+
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes VALUES ('node-learner', 4, 400, NULL, 'learner')",
+                [],
+            )
+            .expect("admit a learner");
+        assert_eq!(
+            admitted_learners(&connection),
+            vec!["node-learner".to_owned()]
+        );
+        assert_eq!(
+            deactivate(&connection),
+            0,
+            "an admitted learner blocks deactivation"
+        );
+        assert_eq!(active_range(&connection), (5, 5));
+
+        // Removal tombstones the row rather than deleting it, so the guard has
+        // to read `removed_at` too — otherwise a cluster could never roll back
+        // once it had ever admitted a learner.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = 500 WHERE node_id = 'node-learner'",
+                [],
+            )
+            .expect("remove the learner");
+        assert!(admitted_learners(&connection).is_empty());
+        assert_eq!(
+            deactivate(&connection),
+            1,
+            "a removed learner strands nothing"
+        );
+        assert_eq!(active_range(&connection), (4, 4));
+    }
+
+    /// The committing statement — not just the preflight — carries the
+    /// capability precondition, and it is idempotent in both directions.
+    #[test]
+    fn activation_commits_once_and_only_with_every_voter_proven() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert!(unready_nodes(&connection).is_empty());
+        assert_eq!(active_range(&connection), (4, 4));
+
+        assert_eq!(activate(&connection), 1, "a proven cluster activates");
+        assert_eq!(active_range(&connection), (5, 5));
+
+        // Idempotent: the second call matches no row precisely because the
+        // range has already moved, so a retried request is not a second write.
+        assert_eq!(activate(&connection), 0, "activation is idempotent");
+        assert_eq!(active_range(&connection), (5, 5));
+
+        assert_eq!(deactivate(&connection), 1, "the reversible case rolls back");
+        assert_eq!(active_range(&connection), (4, 4));
+        assert_eq!(deactivate(&connection), 0, "deactivation is idempotent");
+        assert_eq!(active_range(&connection), (4, 4));
+    }
+
+    /// One voter that has never proven the capability blocks activation, and
+    /// the roster the refusal is built from names exactly that voter.
+    #[test]
+    fn one_unproven_voter_blocks_activation_and_is_named() {
+        let connection = protocol_fixture(&["node-a", "node-c"]);
+        assert_eq!(unready_nodes(&connection), vec!["node-b".to_owned()]);
+        assert_eq!(activate(&connection), 0, "an unproven voter blocks it");
+        assert_eq!(active_range(&connection), (4, 4));
+
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                rusqlite::params!["node-b", LEARNER_PROTOCOL_CAPABILITY],
+            )
+            .expect("the last voter heartbeats on the new binary");
+        assert!(unready_nodes(&connection).is_empty());
+        assert_eq!(activate(&connection), 1);
+    }
+
+    /// A node that redeemed a join token and has not yet proven anything
+    /// blocks activation, and is named as *joining* rather than as behind.
+    ///
+    /// This is the lockout: `redeem` publishes the staging row and the
+    /// `cluster_nodes` row before the joiner has started Raft or run a single
+    /// compatibility check, so a node that redeems on an older binary and is
+    /// then interrupted is a committed voter with no capability row that the
+    /// pending roster deliberately cannot see. Activating past it leaves a
+    /// voter that counts for quorum and can never open its store again — on a
+    /// 3→4 growth that takes fault tolerance to zero.
+    ///
+    /// The roster stays honest — a mid-join node is genuinely not "behind" —
+    /// and the *commit* is what refuses.
+    #[test]
+    fn a_join_in_flight_blocks_activation_without_making_the_pending_roster_lie() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-joining', 4, 300, NULL, 'voter'); \
+                 INSERT INTO cluster_node_join_staging VALUES ('node-joining');",
+            )
+            .expect("redeem a join token for a fourth node");
+
+        assert!(
+            unready_nodes(&connection).is_empty(),
+            "a mid-join node has not heartbeated, so it is not 'behind'"
+        );
+        assert_eq!(joining_nodes(&connection), vec!["node-joining".to_owned()]);
+        assert_eq!(
+            activate(&connection),
+            0,
+            "the committing statement refuses while a join is in flight"
+        );
+        assert_eq!(active_range(&connection), (4, 4));
+
+        // The joiner's first heartbeat clears the staging row; that is the
+        // moment it becomes visible to the capability rule instead.
+        connection
+            .execute(
+                "DELETE FROM cluster_node_join_staging WHERE node_id = 'node-joining'",
+                [],
+            )
+            .expect("the joiner heartbeats");
+        assert!(joining_nodes(&connection).is_empty());
+        assert_eq!(
+            unready_nodes(&connection),
+            vec!["node-joining".to_owned()],
+            "and now it is the capability rule that holds activation"
+        );
+        assert_eq!(activate(&connection), 0);
+
+        connection
+            .execute(
+                "INSERT INTO cluster_node_capabilities (node_id, capability, last_seen_at) \
+                 SELECT node_id, ?2, last_seen_at FROM cluster_nodes WHERE node_id = ?1",
+                rusqlite::params!["node-joining", LEARNER_PROTOCOL_CAPABILITY],
+            )
+            .expect("the joined node proves the protocol");
+        assert_eq!(activate(&connection), 1);
+    }
+
+    /// A join that is never coming back must not hold activation for good.
+    ///
+    /// Two exits, because a refusal with no exit is a lockout of its own. The
+    /// operator can tombstone the node, and time can answer for them: a staged
+    /// node's `last_seen_at` is its redemption timestamp and stops advancing
+    /// the moment the join is abandoned, so it becomes *absent* — refused with
+    /// "start it or remove it" rather than "wait for the join".
+    #[test]
+    fn an_abandoned_join_stops_holding_activation() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-abandoned', 4, 300, NULL, 'voter'); \
+                 INSERT INTO cluster_node_join_staging VALUES ('node-abandoned');",
+            )
+            .expect("redeem a token for a node that never arrives");
+        assert_eq!(activate(&connection), 0);
+
+        // Exit one: time. Nothing about this node has advanced since it
+        // redeemed, and the refusal that names it says what to do about that.
+        connection
+            .execute_batch(
+                "UPDATE cluster_nodes SET last_seen_at = 400 WHERE node_id != 'node-abandoned'; \
+                 UPDATE cluster_node_capabilities SET last_seen_at = 400;",
+            )
+            .expect("the three real voters keep heartbeating and proving");
+        assert_eq!(
+            absent_nodes(&connection, 301),
+            vec!["node-abandoned".to_owned()]
+        );
+        assert_eq!(
+            activate_at(&connection, 301),
+            0,
+            "still refused — but now as an absent node, not as a join to wait for"
+        );
+
+        // Exit two: the operator removes it. Neither rule names a tombstoned
+        // node, and the leftover staging row does not resurrect it.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = 999 WHERE node_id = 'node-abandoned'",
+                [],
+            )
+            .expect("tombstone the abandoned join");
+        assert!(joining_nodes(&connection).is_empty());
+        assert!(absent_nodes(&connection, 301).is_empty());
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_join_staging",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count staging rows"),
+            1,
+            "the staging row is still there; the tombstone is what stops it counting"
+        );
+        assert_eq!(activate(&connection), 1);
+        assert_eq!(active_range(&connection), (5, 5));
+    }
+
+    /// A node that proved the capability and then stopped is not a proof.
+    ///
+    /// The capability equality says which binary wrote the *last* heartbeat.
+    /// It says nothing about whether that node still exists, so a node that
+    /// was powered off after proving stays "ready" forever — and a binary
+    /// rolled back while the node is down never writes the desynchronising
+    /// heartbeat the whole rule leans on. It simply comes back up unable to
+    /// speak protocol 5 in a cluster that has already narrowed onto it.
+    ///
+    /// A wall-clock window is a weak proof of presence. It is a perfectly good
+    /// proof of absence, and absence is all this has to establish.
+    #[test]
+    fn a_node_that_proved_the_protocol_and_then_stopped_blocks_activation() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        // Every node is proven and the fixture's timestamps are all current:
+        // the earliest heartbeat is 100, so a cutoff of 100 leaves nobody
+        // strictly behind it.
+        assert!(unready_nodes(&connection).is_empty());
+        assert!(absent_nodes(&connection, 100).is_empty());
+
+        // node-c last heartbeated at 300 and the others later; a cutoff of 301
+        // is "node-c has said nothing for the whole window".
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 400 WHERE node_id IN ('node-a','node-b')",
+                [],
+            )
+            .expect("the two live nodes keep heartbeating");
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 400 \
+                 WHERE node_id IN ('node-a','node-b')",
+                [],
+            )
+            .expect("and keep proving the protocol as they do");
+
+        assert_eq!(
+            absent_nodes(&connection, 301),
+            vec!["node-c".to_owned()],
+            "the stopped node is named, so the refusal can say to start or remove it"
+        );
+        assert!(
+            unready_nodes(&connection).is_empty(),
+            "its capability row still looks like a proof; only the clock disproves it"
+        );
+        assert_eq!(
+            activate_at(&connection, 301),
+            0,
+            "a member that has gone silent blocks the commit"
+        );
+        assert_eq!(active_range(&connection), (4, 4));
+
+        // Start it again and it proves itself the ordinary way.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 500 WHERE node_id = 'node-c'",
+                [],
+            )
+            .expect("node-c comes back");
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 500 \
+                 WHERE node_id = 'node-c'",
+                [],
+            )
+            .expect("on a binary that still knows the protocol");
+        assert!(absent_nodes(&connection, 301).is_empty());
+        assert_eq!(activate_at(&connection, 301), 1);
+        assert_eq!(active_range(&connection), (5, 5));
+    }
+
+    /// Removing the node instead of starting it also unblocks activation, and
+    /// a tombstoned node never counts as absent.
+    #[test]
+    fn a_removed_node_is_not_an_absent_one() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 1000 \
+                 WHERE node_id IN ('node-a','node-b')",
+                [],
+            )
+            .expect("the survivors keep heartbeating");
+        connection
+            .execute(
+                "UPDATE cluster_node_capabilities SET last_seen_at = 1000 \
+                 WHERE node_id IN ('node-a','node-b')",
+                [],
+            )
+            .expect("and keep proving the protocol");
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET removed_at = 999 WHERE node_id = 'node-c'",
+                [],
+            )
+            .expect("remove the stopped node");
+        assert!(
+            absent_nodes(&connection, 1_000).is_empty(),
+            "a removed node is nobody's problem, however long ago it spoke"
+        );
+        assert_eq!(activate_at(&connection, 1_000), 1);
+    }
+
+    /// The absence window is coupled to the heartbeat cadence rather than
+    /// picked, and is deliberately much wider than the reachability window a
+    /// human reads: this decides a one-way narrowing, not a health badge.
+    #[test]
+    fn the_absence_window_is_a_stated_multiple_of_the_heartbeat_interval() {
+        assert_eq!(
+            PROTOCOL_CHANGE_ABSENCE_WINDOW_MS as u128,
+            HEARTBEAT_INTERVAL.as_millis() * 12
+        );
+        const {
+            assert!(
+                PROTOCOL_CHANGE_ABSENCE_WINDOW_MS > NODE_REACHABLE_WINDOW_MS,
+                "a node that is merely unreachable must not block activation"
+            );
+        }
+    }
+
+    /// An old staged learner redemption still blocks rollback.
+    ///
+    /// `redeem` commits `role = 'learner'` before the joiner has joined Raft
+    /// at all, so a redemption that then failed — port conflict, crash,
+    /// operator ^C — leaves a row for a node that was never a member. PR-1
+    /// ships no learner removal, so that phantom row used to pin the cluster
+    /// on protocol 5 permanently, with a refusal naming a node that does not
+    /// exist.
+    ///
+    /// A staging row plus age is not proof of abandonment: the authorized
+    /// process may be paused after redemption and resume after any wall-clock
+    /// cutoff. Until learner removal can atomically cancel the admission,
+    /// rollback must fail closed.
+    #[test]
+    fn a_staged_learner_redemption_blocks_rollback_regardless_of_age() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert_eq!(activate(&connection), 1);
+
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-abandoned', 4, 400, NULL, 'learner'); \
+                 INSERT INTO cluster_node_join_staging VALUES ('node-abandoned');",
+            )
+            .expect("redeem a learner token for a node that never arrives");
+
+        assert_eq!(
+            admitted_learners(&connection),
+            vec!["node-abandoned".to_owned()],
+            "the durable admission is protected"
+        );
+        assert_eq!(deactivate(&connection), 0);
+        assert_eq!(active_range(&connection), (5, 5));
+
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = -999999999 \
+                 WHERE node_id = 'node-abandoned'",
+                [],
+            )
+            .expect("make the staged admission arbitrarily old");
+        assert_eq!(admitted_learners(&connection), vec!["node-abandoned"]);
+        assert_eq!(deactivate(&connection), 0);
+        assert_eq!(active_range(&connection), (5, 5));
+    }
+
+    /// A learner that actually joined keeps blocking rollback however long it
+    /// has been quiet, because it is a real member holding real state.
+    #[test]
+    fn a_learner_that_finished_joining_blocks_rollback_however_stale_it_is() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert_eq!(activate(&connection), 1);
+        connection
+            .execute(
+                "INSERT INTO cluster_nodes VALUES ('node-learner', 4, 400, NULL, 'learner')",
+                [],
+            )
+            .expect("admit a learner whose first heartbeat cleared its staging row");
+        assert_eq!(
+            admitted_learners(&connection),
+            vec!["node-learner".to_owned()],
+            "no staging row means the admission finished; staleness is irrelevant"
+        );
+        assert_eq!(deactivate(&connection), 0);
+        assert_eq!(active_range(&connection), (5, 5));
+    }
+
+    /// The additive columns land together, because the window between them
+    /// breaks the whole join surface rather than one statement in it.
+    ///
+    /// Both `ALTER`s were separate Raft commands. Between them
+    /// `cluster_nodes.role` existed and `cluster_join_tokens.role` did not —
+    /// and every statement on the join surface names both, so for the length
+    /// of that window nothing on it could even *prepare*: SQLite reports `no
+    /// such column: role` at preparation, not at execution.
+    ///
+    /// This reconstructs the half-applied state and shows that the surface is
+    /// unusable in it, that the probe finds exactly the missing column, and
+    /// that applying the remainder as one statement list closes it.
+    #[test]
+    fn a_half_applied_additive_column_breaks_the_join_surface_it_is_not_on() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
+                 CREATE TABLE cluster_join_tokens (token_hash TEXT PRIMARY KEY, node_id TEXT);",
+            )
+            .expect("seed the pre-upgrade tables");
+
+        let missing = |connection: &rusqlite::Connection| {
+            MEMBERSHIP_ADDITIVE_COLUMNS
+                .iter()
+                .filter(|column| {
+                    connection
+                        .query_row(
+                            "SELECT COUNT(*) FROM pragma_table_info(?1) WHERE name = ?2",
+                            rusqlite::params![column.table, column.column],
+                            |row| row.get::<_, i64>(0),
+                        )
+                        .expect("probe the column")
+                        == 0
+                })
+                .map(|column| format!("{}.{}", column.table, column.column))
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(
+            missing(&connection),
+            vec![
+                "cluster_nodes.role".to_owned(),
+                "cluster_join_tokens.role".to_owned()
+            ],
+            "the probe has to be able to see both, or it cannot decide anything"
+        );
+
+        // The half-applied state: statement [0] committed, [1] did not.
+        connection
+            .execute(MEMBERSHIP_ADDITIVE_COLUMNS[0].statement, [])
+            .expect("apply only the first column");
+        assert_eq!(
+            missing(&connection),
+            vec!["cluster_join_tokens.role".to_owned()],
+            "the probe names exactly what is left, so the remainder is applyable"
+        );
+
+        // And the surface is not merely degraded — it will not prepare.
+        let refused = connection
+            .prepare("SELECT raft_id, expires_at, state, node_id, role FROM cluster_join_tokens")
+            .expect_err("the token read must not prepare against a half-applied schema")
+            .to_string();
+        assert!(refused.contains("role"), "{refused}");
+
+        // Applying the remainder — which is what one transaction does — closes
+        // it, and the probe is then satisfied.
+        for column in MEMBERSHIP_ADDITIVE_COLUMNS.iter().skip(1) {
+            connection
+                .execute(column.statement, [])
+                .expect("apply the rest in one go");
+        }
+        assert!(missing(&connection).is_empty());
+        connection
+            .prepare("SELECT node_id, role FROM cluster_join_tokens")
+            .expect("the join surface prepares once every column exists");
+    }
+
+    /// The fail-closed branch of the job-authority decision: refuse, and say
+    /// so somewhere a machine can read.
+    ///
+    /// `metrics_db()` borrows a local watch channel and cannot fail, so no real
+    /// daemon reaches this arm today and no fixture can force it. That is the
+    /// reason it needs both a named function and a counter rather than only a
+    /// log line: a counter at zero is the standing evidence that the arm is
+    /// still unreachable, and one that moves is a node quietly declining the
+    /// cluster's scheduled work.
+    #[test]
+    fn unreadable_membership_declines_cluster_work_and_is_counted() {
+        let before = CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed);
+        assert!(
+            decide_cluster_job_authority(Ok(true)),
+            "a committed voter runs the cluster's singleton work"
+        );
+        assert!(!decide_cluster_job_authority(Ok(false)));
+        assert_eq!(
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed),
+            before,
+            "an answered question is not an unreadable one"
+        );
+
+        assert!(
+            !decide_cluster_job_authority(Err(MembershipError::Unavailable)),
+            "membership that cannot be read must fail closed"
+        );
+        assert_eq!(
+            CLUSTER_JOB_AUTHORITY_UNREADABLE.load(Ordering::Relaxed),
+            before + 1
+        );
+        assert!(prometheus_cluster_job_authority()
+            .contains("plurx_cluster_job_authority_unreadable_total "));
+    }
+
+    /// `finalize`'s role assertion, in every state committed membership can
+    /// be in.
+    ///
+    /// Both arms survived mutation before this existed. Weakening the learner
+    /// arm to `is_member` let a *voter* finalize a learner token; weakening
+    /// the voter arm to `is_member` let a voter finalize while it was still
+    /// Raft's intermediate learner — before it had the vote the cluster was
+    /// already counting on. Neither state is reachable from a one-voter
+    /// replicated fixture, which is exactly why both survived: the live test
+    /// only ever produces the two states that pass.
+    #[test]
+    fn finalizing_requires_the_membership_the_token_actually_admits() {
+        // (is_member, is_voter) → what each role may finalize on.
+        let cases = [
+            // Not in committed membership at all: nothing finalizes.
+            (false, false, false, false),
+            // A committed member with no vote: a learner, and only a learner.
+            (true, false, false, true),
+            // A committed voter: a voter, and only a voter. `is_member` is
+            // true here too, which is what made the weakened arms pass.
+            (true, true, true, false),
+        ];
+        for (is_member, is_voter, voter_ok, learner_ok) in cases {
+            assert_eq!(
+                role_is_admitted(ClusterRole::Voter, is_member, is_voter),
+                voter_ok,
+                "voter token with member={is_member} voter={is_voter}"
+            );
+            assert_eq!(
+                role_is_admitted(ClusterRole::Learner, is_member, is_voter),
+                learner_ok,
+                "learner token with member={is_member} voter={is_voter}"
+            );
+        }
+
+        // Stated as the two mutations rather than only as a table, so the
+        // failure message names what went wrong.
+        assert!(
+            !role_is_admitted(ClusterRole::Voter, true, false),
+            "a voter must not finalize while it is still Raft's intermediate \
+             learner and carries no vote"
+        );
+        assert!(
+            !role_is_admitted(ClusterRole::Learner, true, true),
+            "a node in the voter set was not admitted by the learner protocol"
+        );
+    }
+
+    /// The learner operations act on the learner protocol, named as itself.
+    ///
+    /// `AUTH_PROTOCOL_MAX` and `AUTH_LEARNER_PROTOCOL` are the same number
+    /// today, and `AUTH_LEARNER_PROTOCOL` exists precisely because the first
+    /// moves with every future protocol and the second must not. No
+    /// behavioural test can tell them apart while they agree, so the call
+    /// sites are pinned here instead: the day protocol 6 lands, an
+    /// `AUTH_PROTOCOL_MAX` left in any of these would silently retarget
+    /// activation, deactivation, and the status projection at it.
+    #[test]
+    fn the_learner_operations_name_the_learner_protocol_not_the_newest_one() {
+        let source = production_source();
+        let between = |from: &str, to: &str| {
+            source
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} is missing"))
+                .1
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
+                .0
+                .to_owned()
+        };
+
+        let projection = between(
+            "async fn protocol_projection(",
+            "\n    /// Narrow the cluster",
+        );
+        assert!(
+            projection.contains("learner_protocol_active: (active_min, active_max)\n                == (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL)"),
+            "the status projection must compare against the learner protocol: {projection}"
+        );
+        // `binary_max` genuinely is "the newest protocol this build knows".
+        assert!(projection.contains("binary_max: AUTH_PROTOCOL_MAX"));
+
+        for (name, body) in [
+            (
+                "activate_learner_protocol",
+                between(
+                    "pub async fn activate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+            (
+                "deactivate_learner_protocol",
+                between(
+                    "pub async fn deactivate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+        ] {
+            assert!(
+                !body.contains("AUTH_PROTOCOL_MAX"),
+                "{name} must name AUTH_LEARNER_PROTOCOL, not the moving maximum: {body}"
+            );
+            assert!(body.contains("AUTH_LEARNER_PROTOCOL"), "{name}: {body}");
+        }
+    }
+
+    /// A member with no vote is not "not found".
+    ///
+    /// `DELETE /cluster/nodes/{id}` used to fall through to `NodeNotFound` and
+    /// answer 404 for a node the roster lists — which reads as "you typed the
+    /// wrong id" for a node the operator is looking straight at. PR-1 ships
+    /// voter removal only; the refusal has to say so.
+    #[test]
+    fn removing_a_member_with_no_vote_is_refused_by_name_rather_than_as_not_found() {
+        let refusal = MembershipError::NonVoterRemovalUnsupported("node-learner".to_owned());
+        assert_eq!(refusal.code(), "cluster_non_voter_removal_unsupported");
+        assert_ne!(refusal.code(), MembershipError::NodeNotFound.code());
+        assert!(refusal.to_string().contains("node-learner"), "{refusal}");
+    }
+
+    /// A join refused by the cluster's own rules is not a migration failure.
+    ///
+    /// The refusal reached operators as `schema migration failed:
+    /// learner_protocol_inactive: …`, which points at the database when the
+    /// actual answer is "run the activation command".
+    #[test]
+    fn a_join_the_cluster_refuses_is_not_reported_as_a_migration_failure() {
+        let refused = crate::error::StoreError::JoinRefused(
+            "learner_protocol_inactive: activate it first".to_owned(),
+        )
+        .to_string();
+        assert!(
+            !refused.contains("migration"),
+            "a policy refusal must not be dressed as a schema failure: {refused}"
+        );
+        assert!(refused.contains("learner_protocol_inactive"), "{refused}");
+    }
+
+    /// An admission is a compare-and-swap on the protocol range, not a read
+    /// followed by a hopeful write.
+    ///
+    /// `redeem` reads the active range and refuses a learner on an unactivated
+    /// cluster, but there are at least two more linearizable round-trips
+    /// between that read and the admitting transaction —
+    /// `deactivate_learner_protocol` can narrow the range to `4..=4` in that
+    /// window and have the learner row commit anyway. That learner is admitted
+    /// into a cluster that has just rolled back: it cannot restart, and PR-1
+    /// ships nothing that can remove it. The code's own comment beside
+    /// `narrow_protocol_range_sql` states this principle; the join did not
+    /// apply it.
+    ///
+    /// Both directions matter, so this is equality on min *and* max: a
+    /// protocol-4-only binary must not be admitted into a cluster that
+    /// activated while its request was in flight either.
+    #[test]
+    fn an_admission_is_rolled_back_when_the_protocol_range_moves_under_it() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        let guarded = format!(
+            "INSERT INTO cluster_nodes (node_id, raft_id, last_seen_at, removed_at, role) \
+             SELECT 'node-joining', 4, 400, NULL, 'learner' WHERE {}",
+            unchanged_protocol_range_predicate(1, 2)
+        );
+        let undo = || {
+            connection
+                .execute(
+                    "DELETE FROM cluster_nodes WHERE node_id = 'node-joining'",
+                    [],
+                )
+                .expect("undo the admission");
+        };
+
+        // Authorized against 4..=4, and the range has not moved.
+        assert_eq!(
+            connection
+                .execute(&guarded, rusqlite::params![4_i64, 4_i64])
+                .expect("run the guarded admission"),
+            1
+        );
+        undo();
+
+        // A concurrent activation narrowed it: this join was authorized
+        // against a range that no longer exists.
+        assert_eq!(activate(&connection), 1);
+        assert_eq!(active_range(&connection), (5, 5));
+        assert_eq!(
+            connection
+                .execute(&guarded, rusqlite::params![4_i64, 4_i64])
+                .expect("run the guarded admission"),
+            0,
+            "an admission authorized against the old range must not commit"
+        );
+
+        // And the mirror case: authorized against 5..=5, deactivated under it.
+        assert_eq!(
+            connection
+                .execute(&guarded, rusqlite::params![5_i64, 5_i64])
+                .expect("run the guarded admission"),
+            1
+        );
+        undo();
+        assert_eq!(deactivate(&connection), 1);
+        assert_eq!(
+            connection
+                .execute(&guarded, rusqlite::params![5_i64, 5_i64])
+                .expect("run the guarded admission"),
+            0,
+            "a learner admitted into a rolled-back cluster is unrecoverable"
+        );
+    }
+
+    /// Every statement that can publish a join carries the range guard.
+    ///
+    /// The predicate above only helps where it is used, and `redeem` has three
+    /// admitting shapes — with a public HTTP origin, without one, and the
+    /// legacy partial-redemption resume. Each builds the *first* statement of
+    /// the transaction, which every later statement consumes, so the guard
+    /// belongs on all three or the transaction can half-commit.
+    #[test]
+    fn every_admitting_statement_carries_the_protocol_range_guard() {
+        let source = production_source();
+        let redeem = source
+            .split_once("pub async fn redeem(")
+            .expect("redeem")
+            .1
+            .split_once("async fn upsert_hostname(")
+            .expect("the method after redeem")
+            .0;
+        assert_eq!(
+            redeem
+                .matches("unchanged_protocol_range_predicate(")
+                .count(),
+            3,
+            "each of redeem's three admitting shapes must carry the range guard"
+        );
+    }
+
+    /// The case the heartbeat coupling exists to catch, constructed on purpose.
+    ///
+    /// A node was upgraded, wrote its capability, and was then rolled back to a
+    /// binary that still heartbeats but knows nothing about protocol 5. The
+    /// capability row survives with its old timestamp while `cluster_nodes`
+    /// moves on. Any rule that only asked "does a capability row exist?" would
+    /// activate onto a cluster containing a binary that cannot participate.
+    #[test]
+    fn a_capability_stranded_by_a_rollback_is_not_a_current_proof() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        assert_eq!(
+            activate(&connection),
+            1,
+            "the proven cluster would activate"
+        );
+        connection
+            .execute(
+                "UPDATE cluster_meta SET protocol_min = 4, protocol_max = 4",
+                [],
+            )
+            .expect("rewind the fixture to the unactivated range");
+
+        // The rolled-back binary heartbeats: cluster_nodes advances, the
+        // protocol-5 capability row it does not know about does not.
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = last_seen_at + 1 \
+                 WHERE node_id = 'node-b'",
+                [],
+            )
+            .expect("old binary heartbeat");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_capabilities \
+                     WHERE node_id = 'node-b' AND capability = ?1",
+                    rusqlite::params![LEARNER_PROTOCOL_CAPABILITY],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count the stranded capability row"),
+            1,
+            "the stale row is still present; only its timestamp disproves it"
+        );
+        assert_eq!(unready_nodes(&connection), vec!["node-b".to_owned()]);
+        assert_eq!(
+            activate(&connection),
+            0,
+            "a capability older than its node's heartbeat is not a current proof"
+        );
+        assert_eq!(active_range(&connection), (4, 4));
+    }
+
+    /// A binary old enough to predate heartbeat intents is caught one step
+    /// earlier: the replicated trigger drops every capability that node holds,
+    /// including the protocol-5 one, the moment it writes a heartbeat.
+    #[test]
+    fn a_pre_intent_binary_heartbeat_invalidates_the_learner_capability() {
+        let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
+        connection
+            .execute_batch(MARK_LEGACY_NODE_HEARTBEAT_DURING_REMOVAL_SQL)
+            .expect("install the replicated legacy heartbeat marker");
+        assert!(unready_nodes(&connection).is_empty());
+
+        connection
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 999 WHERE node_id = 'node-c'",
+                [],
+            )
+            .expect("a binary that writes no heartbeat intent");
+
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT COUNT(*) FROM cluster_node_capabilities WHERE node_id = 'node-c'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("count node-c capabilities"),
+            0,
+            "the trigger invalidates every capability the legacy writer's node held"
+        );
+        assert_eq!(unready_nodes(&connection), vec!["node-c".to_owned()]);
+        assert_eq!(activate(&connection), 0);
+    }
+
+    // A mid-join node's effect on the pending roster *and* on the commit is
+    // pinned by `a_join_in_flight_blocks_activation_without_making_the_pending_
+    // roster_lie` above. The staging exclusion keeps the roster honest; it is
+    // deliberately no longer permission to activate.
+
+    /// The roster route answers during quorum loss; that is when an operator
+    /// most needs it. Adding the protocol block to it must not turn it into a
+    /// leader read, and the paths that commit a change must not become local
+    /// ones. The separate-process membership scenario proves the first half
+    /// end to end; this pins both halves where they are decided.
+    #[test]
+    fn the_roster_projection_reads_locally_and_the_decisions_do_not() {
+        let source = production_source();
+        let between = |from: &str, to: &str| {
+            source
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} is missing"))
+                .1
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
+                .0
+                .to_owned()
+        };
+
+        let status = between(
+            "pub async fn status(&self)",
+            "\n    pub async fn remove_voter",
+        );
+        assert!(
+            !status.contains("query_consistent_map"),
+            "the roster must stay readable without a quorum"
+        );
+        let projection = between(
+            "pub async fn protocol_status(&self)",
+            "\n    async fn protocol_projection",
+        );
+        assert!(
+            projection.contains("Read::Local") && !projection.contains("Read::Quorum"),
+            "the roster's protocol block must read the applied local state"
+        );
+
+        for decision in [
+            between(
+                "pub async fn activate_learner_protocol",
+                "\n    /// Widen the cluster back",
+            ),
+            between(
+                "pub async fn deactivate_learner_protocol",
+                "\n    /// Restore the durable job-owner fence",
+            ),
+        ] {
+            assert!(
+                !decision.contains("Read::Local"),
+                "a protocol change must never be decided from unapplied local state"
+            );
+            assert!(
+                decision.contains("active_protocol_range") && decision.contains("Read::Quorum"),
+                "a protocol change reads the range and its roster through the leader"
+            );
+        }
+    }
+
+    /// Deactivation must refuse before it can strand a member that only exists
+    /// under the protocol being removed.
+    ///
+    /// This covers the half of the refusal that comes from committed Raft
+    /// membership, which still runs as the preflight that names what is in the
+    /// way — including a member whose durable row predates the role column.
+    /// The replicated half rides in the committing statement and is covered by
+    /// `deactivation_is_refused_by_its_own_statement_while_a_learner_is_admitted`;
+    /// the end-to-end version, against a real admitted learner, is in
+    /// `cluster::migration`.
+    #[test]
+    fn deactivation_is_refused_for_any_committed_member_without_a_vote() {
+        let voters = BTreeSet::from([1_u64, 2, 3]);
+        assert!(
+            non_voting_members(&voters, [1_u64, 2, 3].into_iter()).is_empty(),
+            "a voter-only cluster strands nothing"
+        );
+        assert_eq!(
+            non_voting_members(&voters, [1_u64, 2, 3, 9, 7, 9].into_iter()),
+            vec![7, 9],
+            "every committed member without a vote is named, once, in order"
+        );
+        let refusal = MembershipError::LearnerProtocolInUse {
+            admitted: Vec::new(),
+            non_voting: vec!["7".to_owned(), "9".to_owned()],
+        };
+        assert_eq!(refusal.code(), "learner_protocol_in_use");
+        assert!(refusal.to_string().contains("7, 9"), "{refusal}");
+        assert_ne!(
+            refusal.code(),
+            MembershipError::LearnerProtocolUpgradeRequired(Vec::new()).code(),
+            "an operator must be able to tell the two refusals apart"
+        );
+    }
+
+    /// The two rosters name two different things, and the message has to keep
+    /// them apart.
+    ///
+    /// The vendored client joins a voter with `add_learner` and only then
+    /// `become_member`, so an ordinary voter is a committed non-voter for a
+    /// moment. Unioning the rosters told the operator that voter had been
+    /// "admitted as a learner" and that they should remove it — advice that
+    /// would have destroyed a healthy join.
+    #[test]
+    fn a_mid_join_voter_is_not_reported_as_an_admitted_learner() {
+        let mid_join = MembershipError::LearnerProtocolInUse {
+            admitted: Vec::new(),
+            non_voting: vec!["4".to_owned()],
+        };
+        let message = mid_join.to_string();
+        assert!(
+            !message.contains("admitted as learners"),
+            "a mid-join voter must not be labelled an admitted learner: {message}"
+        );
+        assert!(message.contains("mid-join"), "{message}");
+        assert!(message.contains('4'), "{message}");
+
+        let learner = MembershipError::LearnerProtocolInUse {
+            admitted: vec!["node-learner".to_owned()],
+            non_voting: Vec::new(),
+        };
+        let message = learner.to_string();
+        assert!(message.contains("admitted as learners"), "{message}");
+        assert!(
+            !message.contains("mid-join"),
+            "an empty roster must leave no dangling label: {message}"
+        );
+
+        let both = MembershipError::LearnerProtocolInUse {
+            admitted: vec!["node-learner".to_owned()],
+            non_voting: vec!["4".to_owned()],
+        };
+        let message = both.to_string();
+        assert!(message.contains("node-learner"), "{message}");
+        assert!(message.contains("mid-join"), "{message}");
+    }
+
+    /// A lost compare-and-swap must not tell an operator to "upgrade these
+    /// nodes: []". When the re-read roster comes back empty, what actually
+    /// happened is that the range moved.
+    ///
+    /// The variant is asserted first, and then the two call sites that have to
+    /// reach it. The call sites are pinned as text because the branch is a lost
+    /// race between two linearizable writes on one leader: there is no fixture
+    /// that loses it on demand, and asserting the variant alone left the whole
+    /// finding revertible — putting `LearnerProtocolUpgradeRequired(Vec::new())`
+    /// back kept every test green.
+    #[test]
+    fn a_lost_protocol_race_names_the_race_rather_than_an_empty_roster() {
+        let refusal = MembershipError::ProtocolRangeChanged;
+        assert_eq!(refusal.code(), "cluster_protocol_range_changed");
+        let message = refusal.to_string();
+        assert!(message.contains("retry"), "{message}");
+        assert!(
+            !message.contains("[]"),
+            "an empty roster must never reach an operator: {message}"
+        );
+
+        let source = production_source();
+        let between = |from: &str, to: &str| {
+            source
+                .split_once(from)
+                .unwrap_or_else(|| panic!("{from} is missing"))
+                .1
+                .split_once(to)
+                .unwrap_or_else(|| panic!("{to} is missing after {from}"))
+                .0
+                .to_owned()
+        };
+        for (name, body) in [
+            (
+                "activate_learner_protocol",
+                between(
+                    "pub async fn activate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+            (
+                "deactivate_learner_protocol",
+                between(
+                    "pub async fn deactivate_learner_protocol(",
+                    "/// The read-only pass behind",
+                ),
+            ),
+        ] {
+            assert!(
+                body.contains("MembershipError::ProtocolRangeChanged"),
+                "{name} must say the range moved when its re-read names nobody: {body}"
+            );
+            assert!(
+                !body.contains("LearnerProtocolUpgradeRequired")
+                    && !body.contains("LearnerProtocolInUse"),
+                "{name} must build its named refusals in the read-only pass, never inline with \
+                 a roster it has not re-read: {body}"
+            );
+        }
+    }
+
+    /// Making the capability predicate generic must not have changed the
+    /// removal capability's meaning; this pins the removal predicate's text
+    /// against the literal that shipped before the refactor.
+    #[test]
+    fn the_generic_capability_predicate_preserves_the_removal_rule() {
+        const SHIPPED: &str = "NOT EXISTS (SELECT 1 FROM cluster_nodes AS active \
+       WHERE active.removed_at IS NULL \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging AS staged \
+           WHERE staged.node_id = active.node_id) \
+         AND NOT EXISTS (SELECT 1 FROM cluster_node_capabilities AS capability \
+           WHERE capability.node_id = active.node_id \
+             AND capability.capability = 'membership_removal_attempt_refs_v1' \
+             AND capability.last_seen_at = active.last_seen_at))";
+        assert_eq!(
+            capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY),
+            SHIPPED
+        );
+        assert_ne!(
+            capability_ready_predicate(LEARNER_PROTOCOL_CAPABILITY),
+            SHIPPED,
+            "the two capabilities must be proven independently"
+        );
+    }
+
+    /// The heartbeat is where the proof is made. If the capability write ever
+    /// leaves that transaction, an upgraded-then-rolled-back node can look
+    /// current, so pin the coupling itself.
+    #[test]
+    fn the_learner_capability_is_written_inside_the_heartbeat_transaction() {
+        let commit_heartbeat = production_source()
+            .split_once("async fn commit_heartbeat")
+            .expect("commit_heartbeat")
+            .1
+            .split_once("\n    /// Publish the public half")
+            .expect("end of commit_heartbeat")
+            .0
+            .to_owned();
+        assert!(
+            commit_heartbeat.contains("LEARNER_PROTOCOL_CAPABILITY"),
+            "the learner capability must be written by the heartbeat itself"
+        );
+        // One statement list, submitted once. The heartbeat builds its
+        // statements before it submits them so the capability write can be
+        // omitted by a validation build, but every statement it builds still
+        // reaches the same single Raft transaction.
+        assert_eq!(
+            commit_heartbeat.matches(".txn(").count(),
+            1,
+            "and inside the heartbeat's single Raft transaction"
+        );
+        assert!(
+            commit_heartbeat.contains(".txn(statements)"),
+            "which must be the statement list the heartbeat just built"
+        );
+        assert_eq!(
+            commit_heartbeat
+                .matches("LEARNER_PROTOCOL_CAPABILITY")
+                .count(),
+            1,
+            "exactly one place may stamp this capability with a heartbeat time"
+        );
+    }
+
+    /// The heartbeat may skip its capability proof only in a build the daemon
+    /// never produces. A production `plurx-core` compiles a constant `false`
+    /// instead, so there is no environment variable to set and no branch to
+    /// take — which is what keeps the emulation from becoming a way for a real
+    /// node to look current while running an old binary.
+    #[test]
+    fn the_capability_proof_can_only_be_skipped_by_a_validation_build() {
+        let source = production_source();
+        assert_eq!(
+            source
+                .matches("fn emulate_pre_learner_protocol_heartbeat")
+                .count(),
+            2,
+            "one gated definition and one production constant"
+        );
+        assert_eq!(
+            source
+                .matches("if !emulate_pre_learner_protocol_heartbeat() {")
+                .count(),
+            1,
+            "and exactly one caller, in the heartbeat"
+        );
+        assert!(source.contains(
+            "#[cfg(feature = \"cluster-validation\")]\nfn emulate_pre_learner_protocol_heartbeat("
+        ));
+        assert!(source.contains(
+            "#[cfg(not(feature = \"cluster-validation\"))]\nconst fn \
+             emulate_pre_learner_protocol_heartbeat() -> bool {\n    false\n}"
+        ));
+        assert_eq!(
+            source
+                .matches("PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT")
+                .count(),
+            1,
+            "the emulation is reachable only through its own gated definition"
+        );
+    }
+
+    /// This module's own source, so a text-shape assertion cannot be satisfied
+    /// by the string literal that states it.
+    fn production_source() -> String {
+        include_str!("membership.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("the test module")
+            .0
+            .to_owned()
     }
 
     #[test]
@@ -5453,9 +8390,29 @@ mod tests {
                     row_count: 1,
                     sha256: "e".repeat(64),
                 }],
+                admitted_role: None,
             },
             schema_version: AUTH_SCHEMA_VERSION,
-            protocol_version: AUTH_PROTOCOL_VERSION,
+            protocol_version: AUTH_PROTOCOL_MIN,
+        }
+    }
+
+    /// The v2 payload for the same fixture cluster, as a learner token.
+    fn learner_payload() -> JoinPayloadV2 {
+        let v1 = payload();
+        JoinPayloadV2 {
+            version: JOIN_TOKEN_V2_VERSION,
+            cluster_id: v1.cluster_id,
+            raft_id: v1.raft_id,
+            expires_at: v1.expires_at,
+            bootstrap_http: v1.bootstrap_http,
+            bootstrap: v1.bootstrap,
+            secrets: v1.secrets,
+            activation_marker: v1.activation_marker,
+            schema_version: v1.schema_version,
+            protocol_min: AUTH_LEARNER_PROTOCOL,
+            protocol_max: AUTH_LEARNER_PROTOCOL,
+            role: ClusterRole::Learner,
         }
     }
 
@@ -5466,7 +8423,269 @@ mod tests {
         assert!(token.starts_with(JOIN_TOKEN_PREFIX));
         assert!(!token.contains("cluster-a"));
         assert!(!token.contains(&"r".repeat(64)));
-        assert_eq!(decode_join_token(&token).expect("decode token"), expected);
+        assert_eq!(
+            decode_join_token(&token).expect("decode token"),
+            JoinToken::V1(expected)
+        );
+    }
+
+    /// The previous release's join-token decoder, transcribed.
+    ///
+    /// A v1-only coordinator or joiner has to refuse a v2 token rather than
+    /// misread it, and "it obviously will" is not a proof. This is the exact
+    /// shipped v1 rule — prefix, then AAD, then version — so the assertions
+    /// below test the refusal rather than assuming it.
+    fn decode_join_token_as_the_previous_release(
+        token: &str,
+    ) -> Result<JoinPayload, MembershipError> {
+        let mut parts = token.split(':');
+        if parts.next() != Some("plxjoin")
+            || parts.next() != Some("v1")
+            || parts.clone().count() != 2
+        {
+            return Err(MembershipError::InvalidToken);
+        }
+        let key_bytes = hex::decode(parts.next().ok_or(MembershipError::InvalidToken)?)
+            .map_err(|_| MembershipError::InvalidToken)?;
+        let encrypted = hex::decode(parts.next().ok_or(MembershipError::InvalidToken)?)
+            .map_err(|_| MembershipError::InvalidToken)?;
+        if key_bytes.len() != 32 || encrypted.len() <= 24 {
+            return Err(MembershipError::InvalidToken);
+        }
+        let cipher = XChaCha20Poly1305::new(Key::from_slice(&key_bytes));
+        let plaintext = cipher
+            .decrypt(
+                XNonce::from_slice(&encrypted[..24]),
+                chacha20poly1305::aead::Payload {
+                    msg: &encrypted[24..],
+                    aad: JOIN_TOKEN_AAD,
+                },
+            )
+            .map_err(|_| MembershipError::InvalidToken)?;
+        let payload: JoinPayload =
+            serde_json::from_slice(&plaintext).map_err(|_| MembershipError::InvalidToken)?;
+        if payload.version != JOIN_TOKEN_VERSION || payload.cluster_id.trim().is_empty() {
+            return Err(MembershipError::InvalidToken);
+        }
+        Ok(payload)
+    }
+
+    /// Decrypt a token's payload under an explicit associated data, so a test
+    /// can assert on the *layer* that refused rather than on a code every
+    /// layer shares.
+    ///
+    /// Every refusal in `decode_join_token` is `join_token_invalid`, which is
+    /// the right thing for an attacker to see and useless for telling three
+    /// independent defences apart. This reaches past the decoder and asks the
+    /// AEAD directly.
+    fn aead_opens(token: &str, aad: &[u8]) -> bool {
+        let parts = token.split(':').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4, "token framing changed: {token}");
+        let key_bytes = hex::decode(parts[2]).expect("token key");
+        let encrypted = hex::decode(parts[3]).expect("token ciphertext");
+        XChaCha20Poly1305::new(Key::from_slice(&key_bytes))
+            .decrypt(
+                XNonce::from_slice(&encrypted[..24]),
+                chacha20poly1305::aead::Payload {
+                    msg: &encrypted[24..],
+                    aad,
+                },
+            )
+            .is_ok()
+    }
+
+    /// Three independent refusals, each asserted at the layer that produces
+    /// it.
+    ///
+    /// The prefix stops the ordinary case. Rewriting the prefix defeats that
+    /// check and the AEAD's associated data stops it instead. Re-sealing the
+    /// same payload under v1's key derivation defeats *that*, and the version
+    /// field stops it. An old build has to fail all three ways, because a
+    /// single one of them could be lost to a future refactor.
+    ///
+    /// Asserting `.code() == "join_token_invalid"` three times cannot tell
+    /// which layer fired — every layer returns it — so collapsing
+    /// `JOIN_TOKEN_V2_AAD` onto v1's value left this test green while the
+    /// second defence no longer existed. The AEAD is now asked directly.
+    #[test]
+    fn a_previous_release_refuses_a_v2_token_three_separate_ways() {
+        let token = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
+        assert!(token.starts_with(JOIN_TOKEN_V2_PREFIX));
+        assert_eq!(
+            decode_join_token_as_the_previous_release(&token)
+                .expect_err("a v1-only build must refuse the v2 prefix")
+                .code(),
+            "join_token_invalid"
+        );
+
+        // 2. Prefix relabelled to v1: the associated data no longer matches,
+        //    so the payload cannot even be decrypted.
+        let relabelled = token.replacen(JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_PREFIX, 1);
+        // The layer itself, not the shared code the decoder returns: a v2
+        // token's ciphertext does not open under v1's associated data, and
+        // does open under its own. Two assertions, because only the pair
+        // proves the difference is the AAD rather than a broken token.
+        assert!(
+            !aead_opens(&relabelled, JOIN_TOKEN_AAD),
+            "a v2 token must not decrypt under v1's associated data"
+        );
+        assert!(
+            aead_opens(&relabelled, JOIN_TOKEN_V2_AAD),
+            "and it must decrypt under its own, or the test above proves nothing"
+        );
+        assert_ne!(
+            JOIN_TOKEN_AAD, JOIN_TOKEN_V2_AAD,
+            "the two framings must not share associated data"
+        );
+        assert_eq!(
+            decode_join_token_as_the_previous_release(&relabelled)
+                .expect_err("a relabelled v2 token must fail its AEAD check")
+                .code(),
+            "join_token_invalid"
+        );
+        // And this build refuses it too: a v1 frame is read with the v1 rules.
+        assert_eq!(
+            decode_join_token(&relabelled)
+                .expect_err("this build must not read a v2 payload through the v1 frame")
+                .code(),
+            "join_token_invalid"
+        );
+
+        // 3. Re-sealed under v1's associated data, so decryption succeeds and
+        //    only the version field is left to refuse it.
+        let resealed = seal_join_token(&learner_payload(), JOIN_TOKEN_PREFIX, JOIN_TOKEN_AAD)
+            .expect("re-seal the learner payload under v1 framing");
+        assert_eq!(
+            decode_join_token_as_the_previous_release(&resealed)
+                .expect_err("version 2 is not a v1 payload")
+                .code(),
+            "join_token_invalid"
+        );
+        assert_eq!(
+            decode_join_token(&resealed)
+                .expect_err("nor is it one for this build")
+                .code(),
+            "join_token_invalid"
+        );
+
+        // The v1 token this build still mints stays readable by that release.
+        let voter = encode_join_token(&payload()).expect("encode a v1 token");
+        let decoded = decode_join_token_as_the_previous_release(&voter)
+            .expect("the previous release still reads a voter token");
+        assert_eq!(decoded, payload());
+    }
+
+    /// The v2 frame's own version gate, reached through the production
+    /// decoder.
+    ///
+    /// Every v2-version assertion above goes through the v1 arm — a payload
+    /// re-sealed under v1 framing is read by v1's rules — so the production v2
+    /// arm's `payload.version != JOIN_TOKEN_V2_VERSION` was never executed and
+    /// deleting it kept everything green. A payload sealed with the *v2*
+    /// prefix and the *v2* associated data is the only thing that reaches it:
+    /// framing and AEAD both pass, and the version field is all that is left.
+    #[test]
+    fn the_v2_frame_refuses_a_payload_that_is_not_version_two() {
+        let mut wrong_version = learner_payload();
+        wrong_version.version = JOIN_TOKEN_V2_VERSION + 1;
+        let token = seal_join_token(&wrong_version, JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_V2_AAD)
+            .expect("seal a v2-framed payload carrying the wrong version");
+
+        // The two layers before the version gate both pass, so the refusal
+        // below can only come from the gate itself.
+        assert!(token.starts_with(JOIN_TOKEN_V2_PREFIX));
+        assert!(
+            aead_opens(&token, JOIN_TOKEN_V2_AAD),
+            "the AEAD must accept this token, or the version gate is unreached"
+        );
+        assert_eq!(
+            decode_join_token(&token)
+                .expect_err("a v2 frame must refuse a payload that is not version 2")
+                .code(),
+            "join_token_invalid"
+        );
+
+        // The same shape one version below, so the gate is equality and not a
+        // minimum that a future v3 payload would sail through.
+        let mut older = learner_payload();
+        older.version = JOIN_TOKEN_V2_VERSION - 1;
+        let token = seal_join_token(&older, JOIN_TOKEN_V2_PREFIX, JOIN_TOKEN_V2_AAD)
+            .expect("seal a v2-framed payload carrying an older version");
+        assert!(decode_join_token(&token).is_err());
+
+        // And the honest payload still decodes, so none of the above is
+        // passing for an unrelated reason.
+        let good = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
+        assert_eq!(
+            decode_join_token(&good).expect("a real v2 token decodes"),
+            JoinToken::V2(learner_payload())
+        );
+    }
+
+    /// A token says what it admits, and a v1 token can only ever say "voter".
+    #[test]
+    fn a_decoded_token_reports_its_role_and_the_range_it_was_minted_for() {
+        let voter = encode_join_token(&payload()).expect("encode a v1 token");
+        let voter = decode_join_token(&voter).expect("decode the v1 token");
+        assert_eq!(voter.role(), ClusterRole::Voter);
+        assert_eq!(
+            voter.declared_protocol_range(),
+            (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN),
+            "a v1 token's one scalar is the one-element range it always was"
+        );
+
+        let learner = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
+        assert!(
+            !learner.contains("learner"),
+            "the role must not be plaintext"
+        );
+        let learner = decode_join_token(&learner).expect("decode the v2 token");
+        assert_eq!(learner.role(), ClusterRole::Learner);
+        assert_eq!(
+            learner.declared_protocol_range(),
+            (AUTH_LEARNER_PROTOCOL, AUTH_LEARNER_PROTOCOL)
+        );
+    }
+
+    /// A framing this build has never heard of is refused before a key is
+    /// derived — which is what a joiner relies on to leave nothing on disk.
+    #[test]
+    fn an_unknown_token_framing_is_refused() {
+        let token = encode_join_token_v2(&learner_payload()).expect("encode a v2 token");
+        let future = token.replacen(JOIN_TOKEN_V2_PREFIX, "plxjoin:v3", 1);
+        assert_eq!(
+            decode_join_token(&future)
+                .expect_err("a future framing is not something this build may guess at")
+                .code(),
+            "join_token_invalid"
+        );
+    }
+
+    /// `membership.json` versions and roles are one fact written twice, and a
+    /// record where the two disagree is refused rather than resolved.
+    #[test]
+    fn a_membership_record_version_names_exactly_one_role() {
+        assert_eq!(local_membership_version(ClusterRole::Voter), 1);
+        assert_eq!(local_membership_version(ClusterRole::Learner), 2);
+        assert!(local_membership_version_matches_role(1, ClusterRole::Voter));
+        assert!(local_membership_version_matches_role(
+            2,
+            ClusterRole::Learner
+        ));
+        // A voter keeps writing version 1 so the previous release can still
+        // read it; a learner writes version 2 so that release refuses it.
+        assert!(!local_membership_version_matches_role(
+            1,
+            ClusterRole::Learner
+        ));
+        assert!(!local_membership_version_matches_role(
+            2,
+            ClusterRole::Voter
+        ));
+        assert!(!local_membership_version_matches_role(
+            3,
+            ClusterRole::Voter
+        ));
     }
 
     #[test]
@@ -5496,6 +8715,37 @@ mod tests {
             MembershipError::QuorumLoss.code(),
             "removal_would_lose_quorum"
         );
+        // Activation's three refusals are three different operator actions —
+        // wait, start-or-remove, upgrade — so they cannot share a code.
+        assert_eq!(
+            MembershipError::JoinInFlight(vec!["node-joining".to_owned()]).code(),
+            "join_in_flight"
+        );
+        assert_eq!(
+            MembershipError::LearnerProtocolNodeAbsent {
+                nodes: vec!["node-c".to_owned()],
+                minutes: 2,
+            }
+            .code(),
+            "learner_protocol_node_absent"
+        );
+        assert_eq!(
+            MembershipError::LearnerProtocolUpgradeRequired(vec!["node-b".to_owned()]).code(),
+            "learner_protocol_upgrade_required"
+        );
+        // And each names what is in the way.
+        assert!(
+            MembershipError::JoinInFlight(vec!["node-joining".to_owned()])
+                .to_string()
+                .contains("node-joining")
+        );
+        let absent = MembershipError::LearnerProtocolNodeAbsent {
+            nodes: vec!["node-c".to_owned()],
+            minutes: 2,
+        }
+        .to_string();
+        assert!(absent.contains("node-c"), "{absent}");
+        assert!(absent.contains("2 minutes"), "{absent}");
     }
 
     #[test]
@@ -5513,7 +8763,7 @@ mod tests {
 
     #[test]
     fn repair_observation_cannot_cross_the_generation_cas_boundary() {
-        let source = include_str!("membership.rs");
+        let source = production_source();
         let observation = source
             .split_once("pub async fn observe_artwork_source_repair")
             .expect("observation method")
@@ -5546,6 +8796,76 @@ mod tests {
         assert_eq!(short_hostname("192.0.2.40"), None);
         assert_eq!(membership_hostname("", "plurx-a.lan:32402"), "plurx-a");
         assert_eq!(membership_hostname("", "127.0.0.1:32402"), "unknown-host");
+    }
+
+    #[test]
+    fn malformed_redeem_fields_are_rejected_before_any_cluster_lookup() {
+        let valid = RedeemJoinRequest {
+            token_digest: "a".repeat(64),
+            raft_id: 4,
+            node_id: "node-d".to_owned(),
+            hostname: "node-d.example.net".to_owned(),
+            raft_address: "node-d:32401".to_owned(),
+            api_address: "node-d:32402".to_owned(),
+            http_base: "http://node-d:32400".to_owned(),
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_version: AUTH_PROTOCOL_MIN,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
+        };
+        assert_eq!(
+            validate_redeem_join_request(&valid).expect("valid request"),
+            Some("http://node-d:32400".to_owned())
+        );
+        for malformed in [
+            RedeemJoinRequest {
+                token_digest: "not-a-digest".to_owned(),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                node_id: "x".repeat(MAX_PEER_NODE_ID_BYTES + 1),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                raft_address: "node-d-without-a-port".to_owned(),
+                ..valid.clone()
+            },
+            RedeemJoinRequest {
+                api_address: format!("node-d:{}", "9".repeat(MAX_JOIN_SOCKET_ADDRESS_BYTES)),
+                ..valid.clone()
+            },
+        ] {
+            assert!(matches!(
+                validate_redeem_join_request(&malformed),
+                Err(MembershipError::InvalidToken)
+            ));
+        }
+        assert!(matches!(
+            validate_redeem_join_request(&RedeemJoinRequest {
+                http_base: format!("http://node-d/{}", "x".repeat(MAX_JOIN_HTTP_ORIGIN_BYTES)),
+                ..valid
+            }),
+            Err(MembershipError::InvalidHttpEndpoint)
+        ));
+
+        let source = production_source();
+        let redeem = source
+            .split_once("pub async fn redeem(")
+            .expect("redeem method")
+            .1
+            .split_once("async fn upsert_hostname(")
+            .expect("method after redeem")
+            .0;
+        let cheap = redeem
+            .find("validate_redeem_join_request(request)")
+            .expect("cheap validation");
+        let possession = redeem
+            .find("token_record(&request.token_digest)")
+            .expect("token lookup");
+        let protocol = redeem
+            .find("active_protocol_range()")
+            .expect("protocol range lookup");
+        assert!(cheap < possession && possession < protocol);
     }
 
     #[test]
@@ -5595,6 +8915,8 @@ mod tests {
             http_base: "http://node-b:32400".to_owned(),
             schema_version: payload.schema_version,
             protocol_version: payload.protocol_version,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
         };
         let finalize = FinalizeJoinRequest {
             token_digest: digest.clone(),

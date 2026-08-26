@@ -2,7 +2,9 @@
 
 **Status:** executing — M0 through M3 are complete; M4's production fences,
 real-process singleton pause/takeover proof, and distinct serving-process
-partition proof are staged, while the later client failover milestones remain
+partition proof are staged; a non-voting learner role is admitted but not yet
+useful (see [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7),
+while the later client failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
 2026-08-22
@@ -949,12 +951,28 @@ apply-lag value. The short proof can gate media readiness, but cannot authorize
 a bounded local catalogue read; that later optimization requires a fresh local
 term, leader, epoch, and applied-index binding on an embedded replica.
 
+M4's fenced leases decide *who takes a turn*, not *who is allowed one*. Since
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1, a
+non-voting member exists that holds the same shared cluster credential and would
+win a lease exactly as often, so eligibility is asked first, re-derived from
+committed Raft membership on every decision, and every leased singleton passes
+through the one gate. The same harness proves it against a real learner process:
+the learner is refused while the lease row is absent, and a voter then takes the
+same resource. That refusal prevents duplicated work; it is not authorization,
+for the reason recorded in §7 non-goal 7.
+
 ### 6.9 M5 — web failover for direct, remux, and transcode
 
 Implement the exact §3.5/[PERF-PLAN.md](PERF-PLAN.md) §7.3 contract. Proxy
 non-owner requests first; add web node-list retry after the server corpus is
 green. Update `validation/points.toml` and the operations contract whenever
 new ports or daemon files enter governed surfaces.
+
+M5's node lists and retry budgets are voter lists. A learner is a member and is
+not an address a client may fail over to: PR-1 routes no eligible traffic to
+one, and the eligibility matrix that would change that belongs to
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-2. Until
+then, a learner must never appear in a discovery response.
 
 **Acceptance:** kill the serving node during direct, copy-remux, and transcode,
 including mid-segment response. Resume within 10 seconds with one
@@ -977,6 +995,22 @@ Expose leader id, voter health, commit index, applied-vs-committed lag, lease
 acquisitions/rejections, fence rejections, takeover count/duration, and
 compaction growth. Every number includes a sentence in
 [OPERATIONS.md](OPERATIONS.md) explaining healthy and actionable shapes.
+
+M6's mixed-version drill has a concrete subject since
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1: the
+cluster carries an active protocol *range*, a node participates only when its
+binary covers all of it, and narrowing that range is an explicit admin step that
+is refused while any active node's running binary is unproven. `make
+cluster-check` runs that drill as separate processes. Two rolling-upgrade rules
+follow and belong in the runbook rather than in a drill script. First, a node
+that is down is refused by its own rule and not by the unproven-binary one: the
+capability row carries the heartbeat's own timestamp, so a node that proved the
+capability and then stopped keeps both timestamps frozen and equal and reads as
+proven forever. Activation therefore refuses separately for any member silent
+for over two minutes — start it or remove it — rather than leaving it to the
+unproven-binary roster, which would activate straight past it. Second, once a
+learner is admitted the protocol rollback is unavailable because learner
+removal does not exist yet.
 
 **Acceptance:** `make cluster-check` exercises the failure harness; a fresh
 operator reaches three healthy nodes in under 10 minutes; backup, destroy, and
@@ -1007,6 +1041,19 @@ mode without lowering quality or losing selected tracks.
    changes obscure the induced failure each milestone must prove.
 6. **Do not call a VIP the failover implementation.** A VIP locates a process;
    replicated state, fencing, and takeover let it continue the film.
+7. **Do not call a learner a security boundary.** Since
+   [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-1 a
+   non-voting role exists, and it is a capacity decision. `secret_api` is at
+   once the membership-mutation credential, the replicated read/write client
+   credential, and the artwork HMAC key, and it ships whole inside the join
+   token; a learner holding it can promote itself through vendored Hiqlite's
+   `become_member`, which honours nothing else. Every plurx-side refusal is
+   defence in depth. Splitting the credential is
+   [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
+8. **Do not treat a learner as a spare voter.** It never becomes one: PR-1
+   implements no promotion and no removal, so a learner adds a replica, never
+   failure tolerance, and non-goal 2 still governs — two voters plus a learner
+   is two voters.
 
 ## 8. Handoff checkpoint — M3 owns the complete membership surface
 
@@ -1029,6 +1076,8 @@ make cluster-check            # M1b-M4 state, membership, singleton, and loss ga
 make cluster-growth           # 10,000-beat compacted growth + raw control
 cargo run --locked -p plurx-cluster-check -- membership
                               # focused real-process 1 -> 3 -> 2 lifecycle
+cargo run --locked -p plurx-cluster-check -- learner
+                              # focused real-process three-voter-plus-learner proof
 cargo run --locked -p plurx-cluster-check -- singleton
                               # focused SIGSTOP/TTL/takeover/stale-token proof
 cargo run --locked -p plurx-cluster-check -- serving-partition

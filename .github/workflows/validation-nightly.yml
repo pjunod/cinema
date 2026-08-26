@@ -20,7 +20,7 @@ jobs:
     # The deep tier is the gate's own evidence run one level further, so it uses
     # the gate's pinned ffmpeg. `ffmpeg8-pacing` below is where the other major
     # gets covered. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v4
@@ -143,7 +143,7 @@ jobs:
     name: report-only weekly mutation spot-check
     # Mutants are judged by whether the suite kills them, and the suite spawns
     # ffmpeg, so this needs the same pinned build. See .github/actions/ffmpeg.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4

@@ -10,6 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use crate::error::StoreError;
 use crate::store::Store;
 
+// Implementors outside plurx-core use the same object-safe async-trait
+// expansion without each crate taking a duplicate direct macro dependency.
+pub use async_trait::async_trait as cluster_job_async_trait;
+
 pub const MIN_LEASE_TTL: Duration = Duration::from_secs(1);
 pub const MAX_LEASE_TTL: Duration = Duration::from_secs(5 * 60);
 pub(crate) const MAX_LEASE_RESOURCE_BYTES: usize = 256;
@@ -57,6 +61,32 @@ impl Lease {
             revision: self.revision + 1,
             expires_at_unix_ms: now.saturating_add(PUBLICATION_TTL_MS).max(minimum_expiry),
         })
+    }
+}
+
+/// Whether this process may run cluster-wide leader-singleton work right now.
+///
+/// A lease makes two nodes take turns; it does not decide who is *allowed* a
+/// turn. A learner holds the same shared cluster credential as every voter and
+/// would win a lease exactly as often, so the refusal has to sit in front of
+/// the lease rather than inside it.
+///
+/// The answer must be re-derived on every call. Committed membership can move
+/// under a running process, so an authority that answered once at startup
+/// would be wrong for exactly the promotion this exists to allow.
+#[async_trait::async_trait]
+pub trait ClusterJobAuthority: Send + Sync {
+    async fn may_run_cluster_jobs(&self) -> bool;
+}
+
+/// The authority for a process that has no cluster membership handle: an
+/// unclustered daemon is the whole cluster and owns every job.
+pub struct UnclusteredJobAuthority;
+
+#[async_trait::async_trait]
+impl ClusterJobAuthority for UnclusteredJobAuthority {
+    async fn may_run_cluster_jobs(&self) -> bool {
+        true
     }
 }
 

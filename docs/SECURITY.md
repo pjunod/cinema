@@ -235,17 +235,21 @@ join token carries it with `secret_raft` and `secret_api` inside one encrypted,
 single-use envelope. Raft and the redemption/finalization HTTP bodies never
 carry the key or that envelope.
 
-## Cluster admission — one bearer, one voter, one use
+## Cluster admission — one bearer, one member, one use
 
-`POST /api/v1/cluster/join-tokens` requires an admin login token and returns a
-join token once. The joining node opens that token locally, then sends only its
-SHA-256 digest to the narrow redeem/finalize endpoints. That digest proves
-possession against the coordinator's stored digest without putting the
-self-contained cluster secrets on the public HTTP wire. Requiring a user login
-there would make a fresh node impossible to admit, while accepting an admin
-token as a node credential would give it much broader authority than it needs.
+The voter `/api/v1/cluster/join-tokens` endpoint and the learner
+`/api/v1/cluster/learner-join-tokens` endpoint require an admin login token and
+return a join token once. The joining node opens that token locally, then sends
+only its SHA-256 digest to the matching narrow redeem/finalize endpoints. That
+digest proves possession against the coordinator's stored digest without
+putting the self-contained cluster secrets on the public HTTP wire. Requiring
+a user login there would make a fresh node impossible to admit, while accepting
+an admin token as a node credential would give it much broader authority than
+it needs.
 
-The token is `plxjoin:v1:<key>:<nonce+ciphertext+tag>`. XChaCha20-Poly1305
+Voter tokens are `plxjoin:v1:<key>:<nonce+ciphertext+tag>`; learner tokens use
+the wire-distinct `plxjoin:v2` prefix, AAD, payload, and endpoints.
+XChaCha20-Poly1305
 authenticates and hides cluster id · assigned Raft id · bootstrap addresses ·
 expiry · schema/protocol versions · activation proof · Raft/API secrets · the
 credential-wrapping key. The self-contained key makes this an opaque bearer,
@@ -258,7 +262,7 @@ disclosure and tampering; single-use state and a short lifetime limit replay.
 | Issuance | Admin-only, 10 minutes by default, clamped to 60–3,600 seconds. A typo must not mint a near-permanent cluster credential |
 | Replicated record | SHA-256 token digest · expiry · assigned Raft id · state · admitted node id. The token and cluster secrets never enter replicated SQL |
 | Redemption | The fresh node sends the token digest, assigned Raft id, compatibility versions, node id, and peer addresses — never the full token. The stored digest changes atomically from `issued` to `redeeming` and is reserved to one generated `node.id`. Another node gets `join_token_reserved` rather than sharing authority |
-| Finalization | Only after Hiqlite reports the assigned Raft id as a voter does state become `redeemed`. Later redemption gets `join_token_reused`; an expired token gets `join_token_expired` |
+| Finalization | Only after Hiqlite reports the assigned Raft id in the token's committed role does state become `redeemed`: voter in the voter set, learner present but non-voting. Later redemption gets `join_token_reused`; an expired token gets `join_token_expired` |
 | Local material | Put the token in an owner-only file named by `cluster.join_token_file`, never in TOML or a command transcript. Successful finalization deletes that file; interrupted startup retains it only to resume the same staged identity. Local membership stores its digest, so an unrelated or copied token file warns and is ignored rather than bricking a healthy voter |
 | Public status | Node id · Raft id · role · reachability · last-seen and the existing replication projection. It omits token material, peer addresses, media paths, and library data |
 
@@ -267,6 +271,13 @@ join instead of overwriting an installation. Schema and auth-protocol versions
 are checked against the existing cluster before the process enters membership.
 The join path is LAN-only and contacts only addresses carried by the token; it
 has no discovery service or cloud dependency.
+
+All admitted nodes are trusted cluster principals. Voters and learners receive
+the same Hiqlite Raft/API secrets because replication requires them, so a
+learner host can reach private membership-mutation routes directly. Public API
+role checks and the learner job matrix are safety boundaries against accidental
+work, not a defence against a compromised cluster host. Protect learner hosts
+and their data directories to the same standard as voters.
 
 Removal is also fail-closed. It refuses the current leader, a change that would
 leave fewer than two voters, and any target owning offline work. A replicated
@@ -459,8 +470,8 @@ the protections above believable. plurx does **not**:
   the cluster listeners on a trusted network; this milestone does not deliver
   managed peer certificates or pinning.
 - **Rate-limit login or cluster admission.** There is no per-IP throttle or
-  lockout on `/auth/login`, `/api/v1/cluster/join/redeem`, or
-  `/api/v1/cluster/join/finalize`. Login brute-force resistance rests on
+  lockout on `/auth/login`, the voter join endpoints, or the corresponding
+  `/api/v1/cluster/learner/join/*` endpoints. Login brute-force resistance rests on
   Argon2id's cost and 256-bit tokens; admission accepts only a 256-bit token
   digest already present in replicated state. Invalid admission attempts still
   cost one leader lookup. If either surface is reachable from an untrusted

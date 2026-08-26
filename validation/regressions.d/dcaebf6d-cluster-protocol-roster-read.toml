@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dcaebf6d"]
+points = ["cluster.membership"]
+checks = ["cluster-auth"]
+reason = "The roster's readability during quorum loss is a separate-process property, not a unit-testable one: it needs a real three-voter cluster driven into quorum loss, which is what `run_membership_lifecycle_case` inside `make cluster-check` already does — that scenario is what caught this regression. The Rust-level guard that landed with the commit (`the_roster_projection_reads_locally_and_the_decisions_do_not`) pins where each read is decided, but it lives beside the production code in `crates/plurx-core/src/cluster/membership.rs` rather than under a governed test path, so it cannot serve as the anchor on its own."

@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["289287c3"]
+reason = "This commit only records the retained cluster-activity publication-wait evidence in a regressions.d fragment."
+ignore = true

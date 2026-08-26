@@ -7810,6 +7810,7 @@ async fn an_ambiguous_active_target_refuses_rather_than_reverting_to_sqlite() {
             replicated_schema_version: AUTH_SCHEMA_VERSION,
             imported_rows: 1,
             table_hashes: Vec::new(),
+            admitted_role: None,
         }
     };
 

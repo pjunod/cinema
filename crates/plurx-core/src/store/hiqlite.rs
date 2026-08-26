@@ -50,9 +50,33 @@ const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
 const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
 // Session routing and shared-cache identity are additive durable state and use
-// the existing Hiqlite transport contract. Keep protocol v4 so a healthy
-// v9/v10 cluster can authorize the daemon that advances its schema.
-pub const AUTH_PROTOCOL_VERSION: i64 = 4;
+// the existing Hiqlite transport contract. Protocol 4 stays supported so a
+// healthy v9/v10 cluster can authorize the daemon that advances its schema.
+//
+// P6 turns the single protocol number into a supported *range*. This binary
+// implements every protocol in `AUTH_PROTOCOL_MIN..=AUTH_PROTOCOL_MAX`, while
+// the cluster records the range its features actually depend on in
+// `cluster_meta.protocol_min..=protocol_max`. Installing this binary therefore
+// changes nothing by itself: the range widens on the binary side only, and
+// only an explicit activation narrows a cluster onto protocol 5.
+/// Oldest replicated protocol this binary can still participate in.
+pub const AUTH_PROTOCOL_MIN: i64 = 4;
+/// Newest replicated protocol this binary implements. Protocol 5 is the
+/// non-voting learner admission protocol; it stays inert until activated.
+pub const AUTH_PROTOCOL_MAX: i64 = 5;
+/// The single protocol scalar this binary still puts on the v1 join wire.
+///
+/// A peer that predates the range compares this field for exact equality, so
+/// it must keep naming the oldest protocol we support; otherwise every
+/// mixed-version join breaks before either side reads a range field.
+pub const AUTH_PROTOCOL_VERSION: i64 = AUTH_PROTOCOL_MIN;
+/// The protocol under which a cluster can admit a non-voting learner at all.
+///
+/// Named separately from [`AUTH_PROTOCOL_MAX`] because the two mean different
+/// things: `AUTH_PROTOCOL_MAX` is "the newest thing this build implements" and
+/// moves with every future protocol, while this is "the protocol that carries
+/// learner admission" and must not.
+pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
@@ -110,10 +134,13 @@ CREATE TABLE IF NOT EXISTS job_leases (
 ) STRICT;
 "#;
 
+/// What one binary can participate in: exactly one schema version, and every
+/// protocol in an inclusive range.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClusterCompatibility {
     pub schema_version: i64,
-    pub protocol_version: i64,
+    pub protocol_min: i64,
+    pub protocol_max: i64,
 }
 
 /// Deterministic client-call accounting for clustered-read regression gates.
@@ -160,8 +187,45 @@ impl OperationCounters {
 impl ClusterCompatibility {
     pub const CURRENT: Self = Self {
         schema_version: AUTH_SCHEMA_VERSION,
-        protocol_version: AUTH_PROTOCOL_VERSION,
+        protocol_min: AUTH_PROTOCOL_MIN,
+        protocol_max: AUTH_PROTOCOL_MAX,
     };
+
+    /// The P6 compatibility rule, in one place.
+    ///
+    /// `cluster_min..=cluster_max` is the range of protocols the cluster's
+    /// features are *actively using*, so a participant has to implement all of
+    /// it — not merely overlap with it. Overlap would let a binary that only
+    /// speaks 4 join a cluster whose learners depend on 5.
+    #[must_use]
+    pub fn covers(&self, cluster_min: i64, cluster_max: i64) -> bool {
+        self.protocol_min <= cluster_min && cluster_max <= self.protocol_max
+    }
+
+    /// Why this binary cannot participate, written for an operator reading a
+    /// log at three in the morning: which side is behind, and what to do.
+    #[must_use]
+    pub fn protocol_refusal(&self, cluster_min: i64, cluster_max: i64) -> String {
+        if cluster_max > self.protocol_max {
+            format!(
+                "this cluster has activated protocol {cluster_max} (active range \
+                 {cluster_min}..={cluster_max}) and this binary is too old for it: it implements \
+                 only protocol {}..={}. Install a build that supports protocol {cluster_max} on \
+                 this node, or deactivate protocol {cluster_max} from a node that already runs \
+                 the newer build.",
+                self.protocol_min, self.protocol_max
+            )
+        } else {
+            format!(
+                "this cluster still requires protocol {cluster_min} (active range \
+                 {cluster_min}..={cluster_max}) and this binary is too new for it: it implements \
+                 only protocol {}..={} and has dropped protocol {cluster_min}. Move the cluster \
+                 forward from a node that still supports protocol {cluster_min}, or install a \
+                 build that still supports it on this node.",
+                self.protocol_min, self.protocol_max
+            )
+        }
+    }
 }
 
 /// A hiqlite client implementing the complete replicated [`Store`](super::Store).
@@ -987,13 +1051,17 @@ impl HiqliteAuthStore {
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
+        // A fresh cluster starts on the oldest protocol this binary supports,
+        // not the newest. Bootstrapping is not consent to activate protocol 5:
+        // a brand new cluster must stay joinable by the previous release until
+        // an operator explicitly narrows the active range.
         store
             .execute(
                 "INSERT INTO cluster_meta \
                  (singleton, schema_version, protocol_min, protocol_max, migrated_at) \
                  VALUES (1, $1, $2, $2, $3) \
                  ON CONFLICT(singleton) DO NOTHING",
-                params!(AUTH_SCHEMA_VERSION, AUTH_PROTOCOL_VERSION, now),
+                params!(AUTH_SCHEMA_VERSION, AUTH_PROTOCOL_MIN, now),
             )
             .await?;
         store
@@ -1312,13 +1380,50 @@ impl HiqliteAuthStore {
         remote: &Client,
         supported: ClusterCompatibility,
     ) -> Result<(), StoreError> {
+        Self::preflight_role(remote, supported, false).await
+    }
+
+    /// The same guard, plus the one extra thing a learner has to prove: that
+    /// the cluster has actually activated the protocol that admits one.
+    ///
+    /// The compatibility rule alone cannot catch this. A binary implementing
+    /// `4..=5` covers an unactivated `4..=4` cluster perfectly well, so a
+    /// learner would sail through the voter preflight and be refused later, by
+    /// the coordinator, after this process had already decided it was joining.
+    pub async fn preflight_role(
+        remote: &Client,
+        supported: ClusterCompatibility,
+        learner: bool,
+    ) -> Result<(), StoreError> {
         let sql = "SELECT schema_version, protocol_min, protocol_max \
                    FROM cluster_meta WHERE singleton = 1";
         validate_sql(sql)?;
         let meta =
             timeout_store(remote.query_consistent_map::<CompatibilityRow, _>(sql, params!()))
                 .await?;
-        verify_compatibility_rows(meta, supported)
+        let active = meta
+            .first()
+            .filter(|_| meta.len() == 1)
+            .map(|row| (row.protocol_min, row.protocol_max));
+        verify_compatibility_rows(meta, supported)?;
+        if learner {
+            let (active_min, active_max) = active.ok_or_else(|| {
+                StoreError::Migration("cluster compatibility marker is missing".to_owned())
+            })?;
+            if !(active_min..=active_max).contains(&AUTH_LEARNER_PROTOCOL) {
+                // Not a migration failure: nothing is being migrated and
+                // nothing is broken. The cluster has simply not activated the
+                // protocol that admits a learner, and prefixing this with
+                // "schema migration failed" sent operators to the wrong place.
+                return Err(StoreError::JoinRefused(format!(
+                    "learner_protocol_inactive: this join token admits this node as a learner, \
+                     but the cluster's active protocol range is {active_min}..={active_max} and \
+                     does not include protocol {AUTH_LEARNER_PROTOCOL}; activate the learner \
+                     protocol on the cluster first, then retry this join"
+                )));
+            }
+        }
+        Ok(())
     }
 
     pub async fn verify_compatibility(
@@ -2422,11 +2527,10 @@ fn schema_migration_action(
             rows.len()
         )));
     };
-    if !(meta.protocol_min..=meta.protocol_max).contains(&supported.protocol_version) {
-        return Err(StoreError::Migration(format!(
-            "cluster protocol range {}..={} excludes voter protocol {}",
-            meta.protocol_min, meta.protocol_max, supported.protocol_version
-        )));
+    if !supported.covers(meta.protocol_min, meta.protocol_max) {
+        return Err(StoreError::Migration(
+            supported.protocol_refusal(meta.protocol_min, meta.protocol_max),
+        ));
     }
     match meta.schema_version {
         version if version == supported.schema_version => Ok(SchemaMigrationAction::Current),
@@ -2461,11 +2565,10 @@ fn verify_compatibility_rows(
             meta.schema_version, supported.schema_version
         )));
     }
-    if !(meta.protocol_min..=meta.protocol_max).contains(&supported.protocol_version) {
-        return Err(StoreError::Migration(format!(
-            "cluster protocol range {}..={} excludes voter protocol {}",
-            meta.protocol_min, meta.protocol_max, supported.protocol_version
-        )));
+    if !supported.covers(meta.protocol_min, meta.protocol_max) {
+        return Err(StoreError::Migration(
+            supported.protocol_refusal(meta.protocol_min, meta.protocol_max),
+        ));
     }
     Ok(())
 }
@@ -3498,54 +3601,147 @@ mod tests {
             .expect_err("bracket quote cannot hide misordered placeholders");
     }
 
+    /// The binary that shipped before P6: it implements exactly protocol 4.
+    const PREVIOUS_RELEASE: ClusterCompatibility = ClusterCompatibility {
+        schema_version: AUTH_SCHEMA_VERSION,
+        protocol_min: AUTH_PROTOCOL_VERSION,
+        protocol_max: AUTH_PROTOCOL_VERSION,
+    };
+
+    fn meta(protocol_min: i64, protocol_max: i64) -> CompatibilityRow {
+        CompatibilityRow {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min,
+            protocol_max,
+        }
+    }
+
     #[test]
     fn compatibility_rejects_schema_and_protocol_drift() {
-        let current = CompatibilityRow {
-            schema_version: AUTH_SCHEMA_VERSION,
-            protocol_min: AUTH_PROTOCOL_VERSION,
-            protocol_max: AUTH_PROTOCOL_VERSION,
-        };
-        verify_compatibility_rows(vec![current], ClusterCompatibility::CURRENT)
-            .expect("current voter");
+        verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)],
+            ClusterCompatibility::CURRENT,
+        )
+        .expect("current voter");
 
         let old_schema = ClusterCompatibility {
             schema_version: AUTH_SCHEMA_VERSION - 1,
-            protocol_version: AUTH_PROTOCOL_VERSION,
+            ..ClusterCompatibility::CURRENT
         };
-        let error = verify_compatibility_rows(
-            vec![CompatibilityRow {
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_min: AUTH_PROTOCOL_VERSION,
-                protocol_max: AUTH_PROTOCOL_VERSION,
-            }],
-            old_schema,
-        )
-        .expect_err("old schema must refuse");
+        let error =
+            verify_compatibility_rows(vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)], old_schema)
+                .expect_err("old schema must refuse");
         assert!(error.to_string().contains("incompatible"));
 
-        let existing_v4 = CompatibilityRow {
+        let existing_v4_schema = CompatibilityRow {
             schema_version: 4,
-            protocol_min: AUTH_PROTOCOL_VERSION,
-            protocol_max: AUTH_PROTOCOL_VERSION,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MIN,
         };
-        let error = verify_compatibility_rows(vec![existing_v4], ClusterCompatibility::CURRENT)
-            .expect_err("the strict open path must never migrate");
+        let error =
+            verify_compatibility_rows(vec![existing_v4_schema], ClusterCompatibility::CURRENT)
+                .expect_err("the strict open path must never migrate");
         assert!(error.to_string().contains("schema 4 is incompatible"));
 
-        let old_protocol = ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION,
-            protocol_version: AUTH_PROTOCOL_VERSION - 1,
-        };
+        // A cluster that has moved past every protocol this binary knows.
         let error = verify_compatibility_rows(
-            vec![CompatibilityRow {
-                schema_version: AUTH_SCHEMA_VERSION,
-                protocol_min: AUTH_PROTOCOL_VERSION,
-                protocol_max: AUTH_PROTOCOL_VERSION,
-            }],
-            old_protocol,
+            vec![meta(AUTH_PROTOCOL_MIN - 1, AUTH_PROTOCOL_MIN - 1)],
+            ClusterCompatibility::CURRENT,
         )
-        .expect_err("old protocol must refuse");
-        assert!(error.to_string().contains("excludes"));
+        .expect_err("a dropped protocol must refuse");
+        assert!(error.to_string().contains("too new"), "{error}");
+    }
+
+    /// The four P6 transitions, in one place, in the order an operator meets
+    /// them. Each assertion is a supported-or-refused verdict for a real
+    /// deployment step, not a field copy.
+    #[test]
+    fn protocol_range_governs_every_upgrade_and_activation_transition() {
+        // 1. Existing cluster on 4..=4, new binary. This is the whole upgrade
+        //    path: installing the range-aware build must need no operator
+        //    action and must not change anything.
+        verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)],
+            ClusterCompatibility::CURRENT,
+        )
+        .expect("a 4..=4 cluster admits the [4,5] binary unchanged");
+
+        // 2. Existing cluster on 4..=4, previous release. Rolling upgrades mean
+        //    both binaries run against the same unchanged cluster range.
+        verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)],
+            PREVIOUS_RELEASE,
+        )
+        .expect("a 4..=4 cluster still admits the previous release");
+
+        // 3. Activated cluster on 5..=5, new binary.
+        verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX)],
+            ClusterCompatibility::CURRENT,
+        )
+        .expect("an activated cluster admits the [4,5] binary");
+
+        // 4. Activated cluster on 5..=5, previous release. This is the refusal
+        //    that keeps an old voter from rejoining a learner-bearing cluster
+        //    and reinterpreting its membership.
+        let error = verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX)],
+            PREVIOUS_RELEASE,
+        )
+        .expect_err("an activated cluster must refuse the previous release");
+        let message = error.to_string();
+        assert!(message.contains("protocol 5"), "{message}");
+        assert!(message.contains("too old"), "{message}");
+        assert!(message.contains("4..=4"), "{message}");
+
+        // Overlap is not enough: a cluster that still needs 4 while also using
+        // 5 is covered only by a binary that implements both.
+        assert!(ClusterCompatibility::CURRENT.covers(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX));
+        assert!(!PREVIOUS_RELEASE.covers(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX));
+    }
+
+    /// Widening `protocol_max` is the one mistake that silently strands the
+    /// rest of the fleet, so pin that bootstrap picks the floor of the
+    /// binary's range and that the range is written exactly once.
+    #[test]
+    fn bootstrap_writes_the_unactivated_floor_and_never_widens_it() {
+        let production = include_str!("hiqlite.rs")
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        let bootstrap = production
+            .split_once("INSERT INTO cluster_meta")
+            .expect("bootstrap insert")
+            .1
+            .split_once(".await?;")
+            .expect("end of the bootstrap statement")
+            .0;
+        assert!(
+            bootstrap.contains("VALUES (1, $1, $2, $2, $3)"),
+            "bootstrap must write one protocol value into both range columns"
+        );
+        assert!(
+            bootstrap.contains("AUTH_PROTOCOL_MIN"),
+            "bootstrap must seed the range floor, never the activated maximum"
+        );
+        // Every `cluster_meta` write in the store layer belongs to the schema
+        // migration chain and touches only `schema_version`/`migrated_at`. The
+        // protocol range is moved by an explicit membership operation, never as
+        // a side effect of opening or migrating a store.
+        assert_eq!(
+            production.matches("UPDATE cluster_meta").count(),
+            production
+                .matches("UPDATE cluster_meta SET schema_version = $1, migrated_at = $2")
+                .count(),
+            "a cluster_meta write in the store layer touched something other than \
+             the schema version"
+        );
+        // A freshly bootstrapped cluster is joinable by the previous release.
+        verify_compatibility_rows(
+            vec![meta(AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)],
+            PREVIOUS_RELEASE,
+        )
+        .expect("a fresh cluster stays on the unactivated range");
     }
 
     #[test]
@@ -3616,14 +3812,31 @@ mod tests {
             );
         }
 
+        // A cluster whose active protocol this binary does not implement must
+        // be refused before the migration chain runs, not after.
         let incompatible_protocol = CompatibilityRow {
             schema_version: AUTH_SCHEMA_MIGRATION_SOURCE,
-            protocol_min: AUTH_PROTOCOL_VERSION + 1,
-            protocol_max: AUTH_PROTOCOL_VERSION + 1,
+            protocol_min: AUTH_PROTOCOL_MAX + 1,
+            protocol_max: AUTH_PROTOCOL_MAX + 1,
         };
         let error =
             schema_migration_action(&[incompatible_protocol], ClusterCompatibility::CURRENT)
                 .expect_err("protocol drift must fail before migration");
-        assert!(error.to_string().contains("excludes"), "{error}");
+        assert!(error.to_string().contains("too old"), "{error}");
+
+        // The activated range is inside this binary's range, so the migration
+        // chain still runs against an activated cluster.
+        assert_eq!(
+            schema_migration_action(
+                &[CompatibilityRow {
+                    schema_version: AUTH_SCHEMA_MIGRATION_SOURCE,
+                    protocol_min: AUTH_PROTOCOL_MAX,
+                    protocol_max: AUTH_PROTOCOL_MAX,
+                }],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("an activated cluster may still be migrated by this binary"),
+            SchemaMigrationAction::MigrateFrom(AUTH_SCHEMA_MIGRATION_SOURCE)
+        );
     }
 }

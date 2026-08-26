@@ -6,7 +6,8 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
 use plurx_core::cluster::membership::{
-    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, RedeemJoinRequest,
+    FinalizeJoinRequest, IssuedJoinToken, MembershipError, MembershipStatus, ProtocolChange,
+    RedeemJoinRequest,
 };
 use serde::Deserialize;
 
@@ -15,7 +16,7 @@ use super::extract::{AdminUser, AuthUser};
 use crate::state::AppState;
 
 #[derive(Deserialize, Default)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct IssueJoinTokenRequest {
     /// Short by default because the token carries the complete authority to
     /// enter the cluster. Bounds prevent a typo from minting a near-permanent
@@ -40,6 +41,20 @@ pub async fn issue_join_token(
     state
         .membership
         .issue_token(Duration::from_secs(seconds))
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+pub async fn issue_learner_join_token(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Json(request): Json<IssueJoinTokenRequest>,
+) -> Result<Json<IssuedJoinToken>, ApiError> {
+    let seconds = request.expires_in_seconds.unwrap_or(600).clamp(60, 3_600);
+    state
+        .membership
+        .issue_learner_token(Duration::from_secs(seconds))
         .await
         .map(Json)
         .map_err(api_error)
@@ -89,6 +104,37 @@ const MAX_ADVERTISED_INGRESSES: usize = 8;
 #[derive(serde::Serialize)]
 pub struct ClusterIngress {
     pub node_urls: Vec<String>,
+}
+
+/// Narrow the cluster onto the learner protocol.
+///
+/// This is the one step that makes a previously compatible binary unable to
+/// boot here, so it is deliberately explicit, admin-only, and separate from
+/// deploying the binary that supports it. `GET /cluster/nodes` reports the
+/// active range and which nodes are not ready yet.
+pub async fn activate_learner_protocol(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ProtocolChange>, ApiError> {
+    state
+        .membership
+        .activate_learner_protocol()
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+/// Widen the cluster back to the pre-learner protocol for a degraded rollback.
+pub async fn deactivate_learner_protocol(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<ProtocolChange>, ApiError> {
+    state
+        .membership
+        .deactivate_learner_protocol()
+        .await
+        .map(Json)
+        .map_err(api_error)
 }
 
 pub async fn remove_node(
@@ -161,6 +207,18 @@ pub async fn redeem_join(
         .map_err(api_error)
 }
 
+pub async fn redeem_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<RedeemJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .redeem_learner(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
 pub async fn finalize_join(
     State(state): State<AppState>,
     Json(request): Json<FinalizeJoinRequest>,
@@ -168,6 +226,18 @@ pub async fn finalize_join(
     state
         .membership
         .finalize(&request)
+        .await
+        .map(|()| StatusCode::NO_CONTENT)
+        .map_err(api_error)
+}
+
+pub async fn finalize_learner_join(
+    State(state): State<AppState>,
+    Json(request): Json<FinalizeJoinRequest>,
+) -> Result<StatusCode, ApiError> {
+    state
+        .membership
+        .finalize_learner(&request)
         .await
         .map(|()| StatusCode::NO_CONTENT)
         .map_err(api_error)
@@ -186,6 +256,23 @@ fn api_error(error: MembershipError) -> ApiError {
         MembershipError::ReusedToken
         | MembershipError::ReservedToken
         | MembershipError::MembershipUpgradeRequired
+        // Not "you asked the wrong node" and not "already active": a specific
+        // set of nodes is behind, and the message names them.
+        | MembershipError::LearnerProtocolUpgradeRequired(_)
+        | MembershipError::LearnerProtocolInUse { .. }
+        // Same shape: a named set of nodes is in the way, and none of them
+        // will be in the way forever.
+        | MembershipError::JoinInFlight(_)
+        | MembershipError::LearnerProtocolNodeAbsent { .. }
+        // A compare-and-swap this caller lost. Nothing is broken and the
+        // request is worth repeating against a re-read status.
+        | MembershipError::ProtocolRangeChanged
+        // The node is real and the roster lists it; this release has no
+        // removal path for a member with no vote. Not a 404.
+        | MembershipError::NonVoterRemovalUnsupported(_)
+        // The cluster is fine and the request is well formed; the protocol
+        // that admits a learner has simply not been activated yet.
+        | MembershipError::LearnerProtocolInactive
         | MembershipError::RemovalPending(_)
         | MembershipError::LeaderRemoval
         | MembershipError::SelfRemovalRequiresLeave
@@ -195,9 +282,11 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::ActiveMediaSessions
         | MembershipError::OfflineWork(_) => StatusCode::CONFLICT,
         MembershipError::NodeNotFound => StatusCode::NOT_FOUND,
-        MembershipError::LeaderChanged(_) | MembershipError::Internal(_) => {
-            StatusCode::SERVICE_UNAVAILABLE
-        }
+        // Distinct from the roster refusals above: nothing is wrong with the
+        // request, there is simply no leader to commit it right now.
+        MembershipError::LeaderUnavailable
+        | MembershipError::LeaderChanged(_)
+        | MembershipError::Internal(_) => StatusCode::SERVICE_UNAVAILABLE,
     };
     ApiError::typed(status, error.code(), error.to_string())
 }

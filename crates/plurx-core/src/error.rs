@@ -14,6 +14,14 @@ pub enum StoreError {
     #[error("schema migration failed: {0}")]
     Migration(String),
 
+    /// A join was refused by the cluster's own rules, with nothing wrong
+    /// anywhere. Distinct from [`StoreError::Migration`] because that variant
+    /// prefixes its payload with "schema migration failed" — and telling an
+    /// operator that "the learner protocol is not active" is a migration
+    /// failure sends them to look at the wrong thing entirely.
+    #[error("the cluster refused this join: {0}")]
+    JoinRefused(String),
+
     #[error("storage task failed: {0}")]
     Task(String),
 

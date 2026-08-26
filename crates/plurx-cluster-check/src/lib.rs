@@ -36,8 +36,9 @@ use hmac::{Hmac, Mac};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim, StoreCoordinator};
 use plurx_core::cluster::membership::{
     join_token_digest, ActivityPeerAuth, ActivitySigningKey, ArtworkPeerAuth, ClusterAvailability,
-    ClusterPeer, FinalizeJoinRequest, InternalPeerAuth, IssuedJoinToken, JoinSecrets,
-    MembershipError, MembershipManager, MembershipStatus, RedeemJoinRequest,
+    ClusterPeer, ClusterProtocolStatus, ClusterRole, FinalizeJoinRequest, InternalPeerAuth,
+    IssuedJoinToken, JoinSecrets, MembershipError, MembershipManager, MembershipStatus, NodeRole,
+    ProtocolChange, RedeemJoinRequest,
 };
 use plurx_core::cluster::migration::status::{
     ReplicationHealth, ReplicationMonitor, ReplicationStatus,
@@ -57,8 +58,8 @@ use plurx_core::store::{
     ApiKeyStore, ArtworkRepairFence, CatalogueReader, ClusterCompatibility, CoordinationStore,
     FencedPublicationStore, HiqliteAuthStore, LibraryStore, MediaStore, OfflinePackageStore,
     PlaybackTelemetryStore, ReconcileOutcome, RootFingerprintStatus, SettingsStore, TraktStore,
-    TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_VERSION,
-    AUTH_SCHEMA_VERSION,
+    TranscodeCacheStore, UserStore, WatchStore, WatchedOutboxStore, AUTH_PROTOCOL_MAX,
+    AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_VERSION,
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -106,6 +107,11 @@ const RAFT_SECRET: &str = "plurx-m1b-raft-secret";
 const API_SECRET: &str = "plurx-m1b-api-secret";
 const OLD_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_OLD_DB_QUORUM_WATERMARK_HANDLER";
 const P3A_WATERMARK_HANDLER_ENV: &str = "HQLITE_TEST_P3A_DB_QUORUM_WATERMARK_HANDLER";
+/// Read by `plurx-core`'s `cluster-validation` build to drop the
+/// `learner_protocol_v5` capability write from its heartbeat. The name is
+/// duplicated rather than exported because a production `plurx-core` does not
+/// compile the constant at all.
+const PRE_LEARNER_HEARTBEAT_ENV: &str = "PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT";
 const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
@@ -240,6 +246,7 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             controller().await
         }
         Some("membership") => run_membership_lifecycle_case().await,
+        Some("learner") => run_learner_membership_case().await,
         Some("singleton") => run_singleton_takeover_case().await,
         Some("singleton-attempt") => run_singleton_takeover_attempt().await,
         Some("serving-partition") => run_serving_partition_case().await,
@@ -678,6 +685,8 @@ async fn controller() -> Result<()> {
     run_p3a_watermark_rolling_compatibility_case().await?;
     println!("cluster-check: bounded catalogue apply-pause and follower partition");
     run_bounded_catalogue_failure_case().await?;
+    println!("cluster-check: three voters plus an admitted learner");
+    run_learner_membership_case().await?;
     println!("cluster-check: paused singleton provider takeover");
     run_singleton_takeover_case().await?;
     println!("cluster-check: isolated serving-node readiness and media fence");
@@ -2718,6 +2727,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: String::new(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -2739,6 +2750,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:33001".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -2808,6 +2821,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             http_base: format!("http://127.0.0.1:{}", 33_000 + node_id),
             schema_version: AUTH_SCHEMA_VERSION,
             protocol_version: AUTH_PROTOCOL_VERSION,
+            protocol_min: AUTH_PROTOCOL_MIN,
+            protocol_max: AUTH_PROTOCOL_MAX,
         };
         if node_id == 2 {
             let mut no_http_resume = request.clone();
@@ -2859,15 +2874,11 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         cluster
             .spawn_node(
                 &executable,
-                NodeLaunch {
+                NodeLaunch::voter(
                     node_id,
-                    root: cluster_root.clone(),
-                    nodes: specs[..node_id as usize].to_vec(),
-                    listen_addr: default_listen_addr(),
-                    read_pool_size: default_read_pool_size(),
-                    emulate_old_watermark_handler: false,
-                    emulate_p3a_watermark_handler: false,
-                },
+                    cluster_root.clone(),
+                    specs[..node_id as usize].to_vec(),
+                ),
             )
             .await?;
         cluster
@@ -2923,6 +2934,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:3".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -4051,6 +4064,8 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                         http_base: "http://127.0.0.1:33999".to_owned(),
                         schema_version: AUTH_SCHEMA_VERSION,
                         protocol_version: AUTH_PROTOCOL_VERSION,
+                        protocol_min: AUTH_PROTOCOL_MIN,
+                        protocol_max: AUTH_PROTOCOL_MAX,
                     },
                 },
             )
@@ -4699,6 +4714,410 @@ async fn offline_summary(
         .await
 }
 
+/// The P6 learner contract, on real processes.
+///
+/// Every clause here needs a second operating-system process and would be
+/// unfalsifiable without one. Hiqlite 0.14 keeps a node's TLS listener alive
+/// until its runtime exits, so an in-process restart fails on the port before
+/// it can prove catch-up; a stubbed job authority proves the stub, not
+/// `acquire_cluster_job`; and a binary that does not implement the learner
+/// protocol is a *binary*, not a flag on a struct. So this scenario runs three
+/// real voters plus one real learner and asserts, in order:
+///
+/// - a live process whose heartbeat omits `learner_protocol_v5` blocks
+///   activation, and the refusal names it;
+/// - restarting that process on a binary that writes the capability unblocks
+///   activation;
+/// - the admitted learner enters committed Raft membership and never the voter
+///   set, so quorum size stays three;
+/// - the learner takes no cluster-wide job lease through plurxd's own
+///   `acquire_cluster_job`, and the resource it was refused is left unheld;
+/// - the learner catches up after its own process is killed and restarted;
+/// - deactivation is refused while it is a member, and names it.
+async fn run_learner_membership_case() -> Result<()> {
+    /// The voter that starts on a binary predating the learner protocol.
+    const OLD_BINARY_VOTER: u64 = 3;
+    /// The non-voting member. Its raft id is not chosen: token issuance
+    /// allocates one above every durable node and live token, and the
+    /// assertion below is that it allocated exactly this.
+    const LEARNER: u64 = 4;
+    const CATCHUP_KEY: &str = "learner.catchup";
+    const CATCHUP_VALUE: &str = "committed-while-the-learner-was-down";
+    /// The resource whose duplication P6 is most worried about, and the one
+    /// `spawn_background_loops` starts on every node.
+    const FIRST_JOB: &str = "provider:artwork";
+    /// A second, never-contended resource, so the post-restart gate is proved
+    /// against an unheld row rather than against the first job's owner.
+    const SECOND_JOB: &str = "repair:probe";
+
+    let executable = harness_executable()?;
+    let root = tempfile::tempdir().context("learner membership data root")?;
+    let (mut cluster, specs, cluster_root) = with_port_retry(|attempt| {
+        let executable = executable.clone();
+        let attempt_root = root.path().join(format!("attempt-{attempt}"));
+        async move {
+            // Four addresses, three processes: the learner's ports are
+            // allocated with the rest so its spec is stable, and it is not
+            // started until the cluster has admitted it.
+            let (listeners, all_specs) = allocate_nodes(4)?.into_inner();
+            let cluster = ClusterProcesses::start_with_pre_learner_heartbeat(
+                &executable,
+                &attempt_root,
+                PortReservation {
+                    listeners,
+                    specs: all_specs[..3].to_vec(),
+                },
+                OLD_BINARY_VOTER,
+            )
+            .await?;
+            Ok((cluster, all_specs, attempt_root))
+        }
+    })
+    .await?;
+    cluster.request(1, Request::Bootstrap).await?.require_ok()?;
+    for node_id in 2..=3 {
+        cluster
+            .request(node_id, Request::Open)
+            .await?
+            .require_ok()?;
+    }
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+
+    // Installing this binary activates nothing. Three voters are running it,
+    // one of them is not, and the cluster is still on the unactivated range.
+    let pending =
+        wait_for_protocol_pending(&mut cluster, leader, &[format!("node-{OLD_BINARY_VOTER}")])
+            .await?;
+    if (pending.active_min, pending.active_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MIN)
+        || (pending.binary_min, pending.binary_max) != (AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_MAX)
+        || pending.learner_protocol_active
+    {
+        bail!("a deployed binary moved the protocol range on its own: {pending:?}");
+    }
+
+    // Before activation there is no learner role to hand out at all.
+    require_membership_error(
+        cluster
+            .request(leader, Request::IssueLearnerJoinToken { ttl_ms: 120_000 })
+            .await?,
+        "learner_protocol_inactive",
+    )?;
+
+    // The whole point of coupling the capability to the heartbeat: a second
+    // process that heartbeats without proving protocol 5 blocks activation,
+    // and the refusal is actionable because it names the node to upgrade.
+    require_membership_error_message(
+        cluster
+            .request(leader, Request::ActivateLearnerProtocol)
+            .await?,
+        "learner_protocol_upgrade_required",
+        &format!("node-{OLD_BINARY_VOTER}"),
+    )?;
+
+    // Upgrade that node the way an operator does: stop the process, start the
+    // new binary. Quorum survives the restart because two voters remain.
+    cluster.kill(OLD_BINARY_VOTER).await?;
+    cluster
+        .spawn_node(
+            &executable,
+            NodeLaunch::voter(OLD_BINARY_VOTER, cluster_root.clone(), specs[..3].to_vec()),
+        )
+        .await?;
+    cluster
+        .request(OLD_BINARY_VOTER, Request::Open)
+        .await?
+        .require_ok()?;
+    cluster.wait_for_voters(&[1, 2, 3]).await?;
+    let leader = cluster.leader().await?;
+    wait_for_protocol_pending(&mut cluster, leader, &[]).await?;
+
+    let activated = match cluster
+        .request(leader, Request::ActivateLearnerProtocol)
+        .await?
+    {
+        Response::ProtocolChange { change } => change,
+        response => bail!("unexpected activation response: {response:?}"),
+    };
+    if !activated.changed
+        || !activated.protocol.learner_protocol_active
+        || (activated.protocol.active_min, activated.protocol.active_max)
+            != (AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MAX)
+    {
+        bail!("activation did not narrow the range onto protocol 5: {activated:?}");
+    }
+
+    let issued = match cluster
+        .request(leader, Request::IssueLearnerJoinToken { ttl_ms: 120_000 })
+        .await?
+    {
+        Response::IssuedJoinToken { token } => token,
+        response => bail!("unexpected learner join-token response: {response:?}"),
+    };
+    if issued.raft_id != LEARNER {
+        bail!(
+            "learner token assigned raft id {}, expected {LEARNER}",
+            issued.raft_id
+        );
+    }
+    let learner_spec = specs[(LEARNER - 1) as usize].clone();
+    cluster
+        .request(
+            leader,
+            Request::RedeemLearnerJoin {
+                request: RedeemJoinRequest {
+                    token_digest: join_token_digest(&issued.token),
+                    raft_id: issued.raft_id,
+                    node_id: format!("node-{LEARNER}"),
+                    hostname: format!("cluster-node-{LEARNER}"),
+                    raft_address: learner_spec.raft.clone(),
+                    api_address: learner_spec.api.clone(),
+                    http_base: format!("http://127.0.0.1:{}", 33_000 + LEARNER),
+                    schema_version: AUTH_SCHEMA_VERSION,
+                    protocol_version: AUTH_PROTOCOL_MIN,
+                    protocol_min: AUTH_PROTOCOL_MIN,
+                    protocol_max: AUTH_PROTOCOL_MAX,
+                },
+            },
+        )
+        .await?
+        .require_ok()?;
+
+    // A real fourth process, started with Hiqlite's `learner_only` hint set
+    // from its admitted role — the same thing the daemon does.
+    cluster
+        .spawn_node(
+            &executable,
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+        )
+        .await?;
+    cluster
+        .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
+        .await?;
+    cluster
+        .request(LEARNER, Request::Open)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(LEARNER, Request::ForceHeartbeat)
+        .await?
+        .require_ok()?;
+    cluster
+        .request(
+            leader,
+            Request::FinalizeLearnerJoin {
+                request: FinalizeJoinRequest {
+                    token_digest: join_token_digest(&issued.token),
+                    raft_id: issued.raft_id,
+                    node_id: format!("node-{LEARNER}"),
+                },
+            },
+        )
+        .await?
+        .require_ok()?;
+
+    // Quorum is still three. Every process agrees, including the learner: a
+    // node that believed itself a voter would campaign.
+    for node_id in [1, 2, 3, LEARNER] {
+        cluster
+            .wait_for_members(node_id, &[1, 2, 3], &[1, 2, 3, LEARNER])
+            .await?;
+    }
+    let status = match cluster.request(leader, Request::MembershipStatus).await? {
+        Response::MembershipStatus { status } => status,
+        response => bail!("unexpected learner membership status: {response:?}"),
+    };
+    let learner_record = status
+        .nodes
+        .iter()
+        .find(|node| node.node_id == format!("node-{LEARNER}"))
+        .context("the admitted learner is missing from the roster")?;
+    if status.nodes.len() != 4
+        || status.availability != ClusterAvailability::HighAvailability
+        || learner_record.role != NodeRole::Learner
+        || learner_record.is_voter
+        || learner_record.is_leader
+        || !learner_record.reachable
+        || status.nodes.iter().filter(|node| node.is_voter).count() != 3
+    {
+        bail!("the roster did not describe a three-voter cluster with one learner: {status:?}");
+    }
+
+    // The job gate, through plurxd's own `acquire_cluster_job`. The learner is
+    // refused while the row is absent, so the refusal is the authority and not
+    // a lease someone else already held.
+    match cluster
+        .request(
+            LEARNER,
+            Request::AcquireClusterJob {
+                resource: FIRST_JOB.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::ClusterJobAttempt {
+            acquired: false,
+            lease: None,
+        } => {}
+        response => bail!("a learner was not refused an uncontended cluster job: {response:?}"),
+    }
+    match cluster
+        .request(
+            leader,
+            Request::AcquireClusterJob {
+                resource: FIRST_JOB.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::ClusterJobAttempt {
+            acquired: true,
+            lease: Some(lease),
+        } if lease.owner_node_id == format!("node-{leader}") => {}
+        response => bail!("a voter could not take the same cluster job: {response:?}"),
+    }
+    match cluster
+        .request(
+            LEARNER,
+            Request::ReadClusterJobLease {
+                resource: FIRST_JOB.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::ClusterJobAttempt {
+            lease: Some(lease), ..
+        } if lease.owner_node_id == format!("node-{leader}") => {}
+        response => bail!("the cluster job did not stay with its voter owner: {response:?}"),
+    }
+
+    // Kill the learner's own process. The cluster keeps committing without it,
+    // which is the point of it holding no vote, and the write it misses is
+    // what its restart has to catch up on. Read the key first, so "the
+    // restarted process applied it" cannot be satisfied by a value that was
+    // already there.
+    match cluster
+        .request(
+            LEARNER,
+            Request::ReadLocalSetting {
+                key: CATCHUP_KEY.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::Setting { value: None } => {}
+        response => bail!("the catch-up key existed before the learner was stopped: {response:?}"),
+    }
+    cluster.kill(LEARNER).await?;
+    cluster
+        .request(
+            leader,
+            Request::PutSetting {
+                key: CATCHUP_KEY.to_owned(),
+                value: CATCHUP_VALUE.to_owned(),
+            },
+        )
+        .await?
+        .require_ok()?;
+    cluster
+        .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
+        .await?;
+    cluster
+        .spawn_node(
+            &executable,
+            NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
+        )
+        .await?;
+    cluster
+        .request(LEARNER, Request::Open)
+        .await?
+        .require_ok()?;
+    let catchup_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        match cluster
+            .request(
+                LEARNER,
+                Request::ReadLocalSetting {
+                    key: CATCHUP_KEY.to_owned(),
+                },
+            )
+            .await?
+        {
+            Response::Setting { value } if value.as_deref() == Some(CATCHUP_VALUE) => break,
+            Response::Setting { .. } => {}
+            response => bail!("unexpected learner catch-up read: {response:?}"),
+        }
+        if Instant::now() >= catchup_deadline {
+            bail!("the restarted learner never applied the write it missed");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    cluster
+        .wait_for_members(LEARNER, &[1, 2, 3], &[1, 2, 3, LEARNER])
+        .await?;
+
+    // The restart did not make it eligible either. Eligibility is re-derived
+    // from committed membership on every call, so a fresh process is refused
+    // for the same reason the old one was.
+    match cluster
+        .request(
+            LEARNER,
+            Request::AcquireClusterJob {
+                resource: SECOND_JOB.to_owned(),
+            },
+        )
+        .await?
+    {
+        Response::ClusterJobAttempt {
+            acquired: false,
+            lease: None,
+        } => {}
+        response => bail!("a restarted learner was not refused a cluster job: {response:?}"),
+    }
+
+    // Rollback is unavailable while a learner is a member, and the refusal
+    // names what it would strand. Learner removal does not exist yet, so this
+    // is a one-way door an operator has to plan around.
+    require_membership_error_message(
+        cluster
+            .request(leader, Request::DeactivateLearnerProtocol)
+            .await?,
+        "learner_protocol_in_use",
+        &format!("node-{LEARNER}"),
+    )?;
+
+    cluster.assert_running().await?;
+    cluster.kill_all().await;
+    Ok(())
+}
+
+/// Wait until `observer` reports exactly `expected` as the nodes whose running
+/// binary has not proven the learner protocol, and return the projection.
+///
+/// The projection is an applied local read — deliberately, so the roster keeps
+/// answering during quorum loss — so a scenario that read it once could observe
+/// a heartbeat that has committed but not yet applied here.
+async fn wait_for_protocol_pending(
+    cluster: &mut ClusterProcesses,
+    observer: u64,
+    expected: &[String],
+) -> Result<ClusterProtocolStatus> {
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        let status = match cluster.request(observer, Request::ProtocolStatus).await? {
+            Response::ProtocolStatus { status } => status,
+            response => bail!("unexpected protocol status response: {response:?}"),
+        };
+        if status.learner_protocol_pending == expected {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            bail!("protocol readiness did not converge on pending {expected:?}: {status:?}");
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn require_membership_error(response: Response, expected: &str) -> Result<()> {
     match response {
         Response::MembershipError { code, .. } if code == expected => Ok(()),
@@ -4741,15 +5160,7 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     });
     let reservation = allocate_nodes(1)?;
     let (listeners, specs) = reservation.into_inner();
-    let launch = NodeLaunch {
-        node_id: 1,
-        root,
-        nodes: specs,
-        listen_addr: default_listen_addr(),
-        read_pool_size: default_read_pool_size(),
-        emulate_old_watermark_handler: false,
-        emulate_p3a_watermark_handler: false,
-    };
+    let launch = NodeLaunch::voter(1, root, specs);
     // The reservation is dropped here: hiqlite binds its own sockets from the
     // address strings, so we must release the port before it can bind it. A
     // collision is returned synchronously and the binary maps it to the
@@ -5550,6 +5961,43 @@ pub struct NodeLaunch {
     pub emulate_old_watermark_handler: bool,
     #[serde(default)]
     pub emulate_p3a_watermark_handler: bool,
+    /// What this process starts as. A learner sets Hiqlite's `learner_only`
+    /// hint, so it adds itself to Raft as a learner and then stops, rather than
+    /// asking the leader to promote it — exactly what the daemon does with the
+    /// role its join token admitted it under.
+    #[serde(default)]
+    pub role: ClusterRole,
+    /// Start a binary that heartbeats without proving the learner protocol.
+    /// Env-plumbed like the two watermark emulations beside it, and read on the
+    /// far side only by a `plurx-core` compiled with `cluster-validation`.
+    #[serde(default)]
+    pub emulate_pre_learner_heartbeat: bool,
+}
+
+/// A voter launch with no emulation, which is what almost every call site
+/// wants. Written out rather than derived so a new field is a compile error at
+/// the one place that decides its default, not silently `false` everywhere.
+impl NodeLaunch {
+    pub fn voter(node_id: u64, root: PathBuf, nodes: Vec<NodeSpec>) -> Self {
+        Self {
+            node_id,
+            root,
+            nodes,
+            listen_addr: default_listen_addr(),
+            read_pool_size: default_read_pool_size(),
+            emulate_old_watermark_handler: false,
+            emulate_p3a_watermark_handler: false,
+            role: ClusterRole::Voter,
+            emulate_pre_learner_heartbeat: false,
+        }
+    }
+
+    /// The same launch for a node admitted as a non-voting learner.
+    #[must_use]
+    pub fn as_learner(mut self) -> Self {
+        self.role = ClusterRole::Learner;
+        self
+    }
 }
 
 fn default_listen_addr() -> String {
@@ -5600,10 +6048,44 @@ pub enum Request {
     IssueJoinToken {
         ttl_ms: u64,
     },
+    /// Mint a token that admits a non-voting learner. The role lives in the
+    /// coordinator's token record, never in the joiner's redeem request, so
+    /// this is the only place a learner can be asked for.
+    IssueLearnerJoinToken {
+        ttl_ms: u64,
+    },
+    /// The operator-facing protocol projection: the cluster's active range,
+    /// this binary's range, and the nodes whose running binary is the reason
+    /// activation would be refused.
+    ProtocolStatus,
+    ActivateLearnerProtocol,
+    DeactivateLearnerProtocol,
+    /// Commit a heartbeat past the write-coalescing window, so a scenario that
+    /// has just restarted a process can refresh its capability proof without
+    /// waiting one production interval.
+    ForceHeartbeat,
+    /// Take one cluster-wide singleton job through plurxd's own
+    /// `acquire_cluster_job`, including its eligibility gate. The harness
+    /// compiles that function from plurxd's source, so a learner refused here
+    /// is refused by the code the daemon runs.
+    AcquireClusterJob {
+        resource: String,
+    },
+    /// Read the durable lease row for `resource`, so a refusal can be told
+    /// apart from a lease someone else already held.
+    ReadClusterJobLease {
+        resource: String,
+    },
     RedeemJoin {
         request: RedeemJoinRequest,
     },
+    RedeemLearnerJoin {
+        request: RedeemJoinRequest,
+    },
     FinalizeJoin {
+        request: FinalizeJoinRequest,
+    },
+    FinalizeLearnerJoin {
         request: FinalizeJoinRequest,
     },
     MembershipStatus,
@@ -5880,6 +6362,11 @@ pub enum Response {
         leader: Option<u64>,
         current_term: u64,
         voters: Vec<u64>,
+        /// Every committed member, voting or not. `members` minus `voters` is
+        /// the learner set, and it is derived from the committed Raft
+        /// configuration rather than from replicated SQL because Raft is what
+        /// decides a member's role.
+        members: Vec<u64>,
         applied_index: Option<u64>,
         quorum_acknowledged: bool,
     },
@@ -5934,6 +6421,16 @@ pub enum Response {
         mdns_name: String,
         mdns_instance_id: String,
         mdns_node_id: String,
+    },
+    ProtocolStatus {
+        status: ClusterProtocolStatus,
+    },
+    ProtocolChange {
+        change: ProtocolChange,
+    },
+    ClusterJobAttempt {
+        acquired: bool,
+        lease: Option<Lease>,
     },
     ArtworkPeerUrls {
         urls: Vec<String>,
@@ -6396,6 +6893,9 @@ impl NodeProcess {
         if launch.emulate_p3a_watermark_handler {
             command.env(P3A_WATERMARK_HANDLER_ENV, "1");
         }
+        if launch.emulate_pre_learner_heartbeat {
+            command.env(PRE_LEARNER_HEARTBEAT_ENV, "1");
+        }
         let mut child = command.spawn().context("spawn cluster voter")?;
         let input = child.stdin.take().context("voter stdin")?;
         let output = BufReader::new(child.stdout.take().context("voter stdout")?);
@@ -6556,7 +7056,7 @@ impl ClusterProcesses {
         root: &Path,
         reservation: PortReservation,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, None, None).await
+        Self::start_inner(executable, root, reservation, None, None, None).await
     }
 
     async fn start_with_old_watermark_handler(
@@ -6565,7 +7065,15 @@ impl ClusterProcesses {
         reservation: PortReservation,
         old_handler_node: u64,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, Some(old_handler_node), None).await
+        Self::start_inner(
+            executable,
+            root,
+            reservation,
+            Some(old_handler_node),
+            None,
+            None,
+        )
+        .await
     }
 
     async fn start_with_p3a_watermark_handler(
@@ -6574,7 +7082,36 @@ impl ClusterProcesses {
         reservation: PortReservation,
         p3a_handler_node: u64,
     ) -> Result<Self> {
-        Self::start_inner(executable, root, reservation, None, Some(p3a_handler_node)).await
+        Self::start_inner(
+            executable,
+            root,
+            reservation,
+            None,
+            Some(p3a_handler_node),
+            None,
+        )
+        .await
+    }
+
+    /// Start a cluster in which exactly one voter runs a binary that predates
+    /// the learner protocol: it heartbeats, so it stays an active member, and
+    /// it never writes the `learner_protocol_v5` capability row. That is the
+    /// only node in the cluster whose presence must refuse activation.
+    async fn start_with_pre_learner_heartbeat(
+        executable: &Path,
+        root: &Path,
+        reservation: PortReservation,
+        pre_learner_node: u64,
+    ) -> Result<Self> {
+        Self::start_inner(
+            executable,
+            root,
+            reservation,
+            None,
+            None,
+            Some(pre_learner_node),
+        )
+        .await
     }
 
     async fn start_inner(
@@ -6583,6 +7120,7 @@ impl ClusterProcesses {
         reservation: PortReservation,
         old_handler_node: Option<u64>,
         p3a_handler_node: Option<u64>,
+        pre_learner_heartbeat_node: Option<u64>,
     ) -> Result<Self> {
         let (_listeners, specs) = reservation.into_inner();
         // Listeners are dropped here: the child process must bind the same
@@ -6593,13 +7131,10 @@ impl ClusterProcesses {
         let mut nodes = Vec::with_capacity(specs.len());
         for node_id in 1..=specs.len() as u64 {
             let launch = NodeLaunch {
-                node_id,
-                root: root.to_path_buf(),
-                nodes: specs.clone(),
-                listen_addr: default_listen_addr(),
-                read_pool_size: default_read_pool_size(),
                 emulate_old_watermark_handler: old_handler_node == Some(node_id),
                 emulate_p3a_watermark_handler: p3a_handler_node == Some(node_id),
+                emulate_pre_learner_heartbeat: pre_learner_heartbeat_node == Some(node_id),
+                ..NodeLaunch::voter(node_id, root.to_path_buf(), specs.clone())
             };
             nodes.push(Some(NodeProcess::spawn(executable, &launch)?));
         }
@@ -6885,6 +7420,42 @@ impl ClusterProcesses {
             }
             if Instant::now() >= deadline {
                 bail!("cluster did not converge to voters {expected:?}");
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// Wait until `observer` reports exactly `voters` as the voting set and
+    /// exactly `members` as the whole committed configuration.
+    ///
+    /// [`Self::wait_for_voters`] cannot express a learner: a node that joins as
+    /// one never enters the voter set at all, so a scenario that only waited on
+    /// voters would pass the instant the cluster ignored the join entirely.
+    pub async fn wait_for_members(
+        &mut self,
+        observer: u64,
+        voters: &[u64],
+        members: &[u64],
+    ) -> Result<()> {
+        let deadline = Instant::now() + self.convergence_timeout;
+        let mut last = None;
+        loop {
+            if let Ok(Response::Metrics {
+                voters: observed_voters,
+                members: observed_members,
+                ..
+            }) = self.request(observer, Request::Metrics).await
+            {
+                if observed_voters == voters && observed_members == members {
+                    return Ok(());
+                }
+                last = Some((observed_voters, observed_members));
+            }
+            if Instant::now() >= deadline {
+                bail!(
+                    "voter {observer} did not converge on voters {voters:?} and members \
+                     {members:?}: {last:?}"
+                );
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -7228,6 +7799,9 @@ struct NodeMutableState {
     catalogue: Option<CatalogueReader>,
     membership: Option<MembershipManager>,
     singleton_probe: Option<SingletonProbe>,
+    /// A cluster-wide job lease this process won through the production
+    /// acquisition path, kept alive so its renewal loop keeps running.
+    cluster_job: Option<ActiveJobLease>,
 }
 
 /// Run one embedded voter: start hiqlite, announce readiness, then serve the
@@ -7334,6 +7908,7 @@ async fn handle_request(
         catalogue,
         membership,
         singleton_probe,
+        cluster_job,
     } = state;
     match request {
         Request::SeedLegacyArtworkUrls => {
@@ -7464,13 +8039,76 @@ async fn handle_request(
             .await
             .map(|token| Response::IssuedJoinToken { token })
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::IssueLearnerJoinToken { ttl_ms } => membership_ref(membership)?
+            .issue_learner_token(Duration::from_millis(ttl_ms))
+            .await
+            .map(|token| Response::IssuedJoinToken { token })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ProtocolStatus => membership_ref(membership)?
+            .protocol_status()
+            .await
+            .map(|status| Response::ProtocolStatus { status })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ActivateLearnerProtocol => membership_ref(membership)?
+            .activate_learner_protocol()
+            .await
+            .map(|change| Response::ProtocolChange { change })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::DeactivateLearnerProtocol => membership_ref(membership)?
+            .deactivate_learner_protocol()
+            .await
+            .map(|change| Response::ProtocolChange { change })
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::ForceHeartbeat => {
+            membership_ref(membership)?
+                .validation_force_heartbeat()
+                .await?;
+            Ok(Response::Ok)
+        }
+        Request::AcquireClusterJob { ref resource } => {
+            let opened = store.clone().context("node store is not open")?;
+            let coordinator = StoreCoordinator::new(
+                opened as Arc<dyn plurx_core::store::Store>,
+                format!("node-{}", launch.node_id),
+            )?;
+            // The production function, compiled from plurxd's own source, with
+            // the production authority: this node's live membership manager.
+            let acquired = production_job_lease::acquire_cluster_job(
+                &coordinator,
+                membership_ref(membership)?,
+                resource.clone(),
+            )
+            .await?;
+            let held = acquired.is_some();
+            // Retained rather than dropped, so the durable row the caller reads
+            // next is one a live lease is actually renewing.
+            *cluster_job = acquired;
+            Ok(Response::ClusterJobAttempt {
+                acquired: held,
+                lease: read_job_lease(client, resource).await?,
+            })
+        }
+        Request::ReadClusterJobLease { ref resource } => Ok(Response::ClusterJobAttempt {
+            acquired: false,
+            lease: read_job_lease(client, resource).await?,
+        }),
         Request::RedeemJoin { request } => membership_ref(membership)?
             .redeem(&request)
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::RedeemLearnerJoin { request } => membership_ref(membership)?
+            .redeem_learner(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
         Request::FinalizeJoin { request } => membership_ref(membership)?
             .finalize(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::FinalizeLearnerJoin { request } => membership_ref(membership)?
+            .finalize_learner(&request)
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
@@ -8412,10 +9050,18 @@ async fn handle_request(
             let metrics = client.metrics_db().await?;
             let mut voters = metrics.membership_config.voter_ids().collect::<Vec<_>>();
             voters.sort_unstable();
+            let mut members = metrics
+                .membership_config
+                .nodes()
+                .map(|(id, _)| *id)
+                .collect::<Vec<_>>();
+            members.sort_unstable();
+            members.dedup();
             Ok(Response::Metrics {
                 leader: metrics.current_leader,
                 current_term: metrics.current_term,
                 voters,
+                members,
                 applied_index: metrics.last_applied.as_ref().map(|log| log.index),
                 quorum_acknowledged: metrics
                     .millis_since_quorum_ack
@@ -8952,7 +9598,9 @@ async fn membership_manager_with_identity_artwork_url(
             replicated_schema_version: AUTH_SCHEMA_VERSION,
             imported_rows: 0,
             table_hashes: Vec::new(),
+            admitted_role: Some(launch.role),
         },
+        launch.role,
     )
     .await
 }
@@ -10208,12 +10856,50 @@ pub async fn preflight_voter(preflight: Preflight) -> Result<()> {
 /// Start a candidate voter one schema version behind and return the refusal it
 /// printed. Any other exit status is itself a failure.
 pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -> Result<String> {
+    run_preflight(
+        executable,
+        specs,
+        ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION - 1,
+            ..ClusterCompatibility::CURRENT
+        },
+        Some(42),
+    )
+    .await
+}
+
+/// Start a candidate voter that implements only the pre-P6 protocol. Against a
+/// cluster that has not activated protocol 5 this must succeed; against an
+/// activated one it must refuse. The caller says which it expects.
+pub async fn run_previous_release_preflight(
+    executable: &Path,
+    specs: &[NodeSpec],
+    expect_refusal: bool,
+) -> Result<String> {
+    run_preflight(
+        executable,
+        specs,
+        ClusterCompatibility {
+            schema_version: AUTH_SCHEMA_VERSION,
+            protocol_min: AUTH_PROTOCOL_VERSION,
+            protocol_max: AUTH_PROTOCOL_VERSION,
+        },
+        expect_refusal.then_some(42),
+    )
+    .await
+}
+
+/// Run one candidate voter's compatibility preflight in its own process and
+/// require the exit status the caller expects (`None` meaning success).
+async fn run_preflight(
+    executable: &Path,
+    specs: &[NodeSpec],
+    compatibility: ClusterCompatibility,
+    expected_exit: Option<i32>,
+) -> Result<String> {
     let input = Preflight {
         addresses: specs.iter().map(|node| node.api.clone()).collect(),
-        compatibility: ClusterCompatibility {
-            schema_version: AUTH_SCHEMA_VERSION - 1,
-            protocol_version: AUTH_PROTOCOL_VERSION,
-        },
+        compatibility,
     };
     let output = tokio::time::timeout(
         REQUEST_TIMEOUT,
@@ -10223,11 +10909,15 @@ pub async fn run_incompatible_preflight(executable: &Path, specs: &[NodeSpec]) -
             .output(),
     )
     .await
-    .context("incompatible voter preflight timed out")??;
-    if output.status.code() != Some(42) {
+    .context("candidate voter preflight timed out")??;
+    let expected = expected_exit.unwrap_or(0);
+    if output.status.code() != Some(expected) {
         bail!(
-            "incompatible voter exited {:?}: {}",
+            "candidate voter exited {:?}, expected {expected} for schema {} protocol {}..={}: {}",
             output.status.code(),
+            compatibility.schema_version,
+            compatibility.protocol_min,
+            compatibility.protocol_max,
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -10257,6 +10947,12 @@ pub fn node_config(launch: &NodeLaunch) -> Result<NodeConfig> {
         secret_api: API_SECRET.to_owned(),
         tls_raft: Some(ServerTlsConfig::TlsAutoCertificates),
         tls_api: Some(ServerTlsConfig::TlsAutoCertificates),
+        // The same hint, for the same reason, as the daemon sets from the role
+        // its join token admitted it under: Hiqlite reads it once, to decide
+        // whether this process asks the leader to promote it during startup
+        // reconciliation. It is what makes this a real learner process rather
+        // than a voter the harness merely calls one.
+        learner_only: launch.role.is_learner(),
         // Raft, WAL, and read-pool settings come from the daemon's own builder
         // rather than a second copy here, so a harness run cannot measure a
         // configuration production never runs.
@@ -10632,6 +11328,8 @@ mod tests {
             read_pool_size,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
+            role: ClusterRole::Voter,
+            emulate_pre_learner_heartbeat: false,
         }
     }
 
