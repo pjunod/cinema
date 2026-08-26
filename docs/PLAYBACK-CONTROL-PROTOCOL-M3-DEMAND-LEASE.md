@@ -15,9 +15,12 @@ old recovery watchdogs in M4.
 
 The first newly accepted rolling control sequence now changes the same actor
 lease from the 60-second media-only compatibility mode to a 30-second explicit
-mode. Control heartbeats and successful capability-authenticated media GETs
-renew that one deadline. A command received at or after the deadline expires
-and fences the actor before it can renew. The actor also arms its own exact
+mode. Control heartbeats and successfully resolved capability-authenticated
+playlist, subtitle, init, and media responses renew that one deadline. Lookup,
+publication wait, integrity validation, and renewal are separate: missing,
+pruned, failed, or timed-out requests cannot manufacture playback activity. A
+command received at or after the deadline expires and fences the actor before
+it can renew. The actor also arms its own exact
 monotonic deadline, so a session receiving no command is fenced at expiry;
 the 15-second repair cadence is cleanup scheduling rather than hidden lease
 authority.
@@ -90,9 +93,12 @@ Flow control always re-reads the newest actor snapshot after it acquires that
 gate. A control request may therefore be superseded by a newer request, but a
 stale snapshot cannot signal the child after that newer request, an expiry, or
 a retirement. The actor's exact timer does not await the compatibility gate;
-a short process-local mutex instead orders the timer/control/retirement verdict
-with the final `kill(2)` signal and is never held across an await. M4 deletes
-both temporary gates only when child transitions themselves are actor messages.
+a short process-local mutex instead carries the actor's current exact deadline
+and orders the timer/control/retirement verdict with the final `kill(2)`
+signal. Signal authorization compares its linearization instant with that
+deadline, so scheduler delay cannot permit a post-expiry signal. The mutex is
+never held across an await. M4 deletes both temporary gates only when child
+transitions themselves are actor messages.
 
 Equal-sequence replays, rejected controls, expired actors, and unavailable
 mailboxes never change demand or signal the producer. A dead mailbox fences
@@ -149,19 +155,21 @@ The PR is not mergeable until adversarial review precedes tests and the final
 diff proves:
 
 1. the actor's exact explicit timer fences a commandless session and expiry
-   cannot be revived between repair ticks;
+   cannot be revived between repair ticks or bypassed by a deadline-edge
+   snapshot/signal race;
 2. media renewal immediately before the deadline moves the one deadline;
-3. a virtual 30-minute foreground hold with delivered heartbeats stays live;
-4. accepted `hold` and `active` signal a real child immediately;
-5. hold before first publication stops production;
-6. seek uses the target rather than the stale pre-seek playhead;
-7. playback rate scales reserve while client runway cannot raise the configured
+3. missing, pruned, failed, and timed-out object requests do not renew it;
+4. a virtual 30-minute foreground hold with delivered heartbeats stays live;
+5. accepted `hold` and `active` signal a real child immediately;
+6. hold before first publication stops production;
+7. seek uses the target rather than the stale pre-seek playhead;
+8. playback rate scales reserve while client runway cannot raise the configured
    ceiling;
-8. byte and global caps remain effective under adversarial snapshots;
-9. demand-to-capacity hold changes never briefly resume the child;
-10. status, events, logs, and metrics agree on the current reason and policy;
-11. legacy media-only pacing and lifetime remain compatible; and
-12. the focused suites, full local gate, and every required hosted job pass.
+9. byte and global caps remain effective under adversarial snapshots;
+10. demand-to-capacity hold changes never briefly resume the child;
+11. status, events, logs, and metrics agree on the current reason and policy;
+12. legacy media-only pacing and lifetime remain compatible; and
+13. the focused suites, full local gate, and every required hosted job pass.
 
 Rollback disables protocol advertisement for new sessions. Those sessions
 remain in the 60-second legacy lease and fetched-frontier pacing path. An

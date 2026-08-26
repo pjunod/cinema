@@ -9414,7 +9414,8 @@ function updateStats(){
   const controlStatus=controlReporter&&controlReporter.status();
   if(controlStatus){
     const controlHealth=PLAYER.health||null;
-    const demandOwned=controlHealth&&controlHealth.lease_mode==='explicit';
+    const leaseMode=controlHealth&&controlHealth.lease_mode?controlHealth.lease_mode:'legacy';
+    const leasePresentation=PlaybackPolicy.controlLeasePresentation(leaseMode);
     const leaseState=controlHealth&&controlHealth.lease_state?controlHealth.lease_state:'active';
     const phase=controlStatus.stopped?"stopped"
       :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
@@ -9425,12 +9426,12 @@ function updateStats(){
     const acceptedAge=PLAYER.controlLastExchangeAt
       ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
     srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError||leaseState!=='active'?"warn":"good"),
-      v:`${demandOwned?'demand-owned':'passive'} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
+      v:`${leasePresentation.ownership} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
     const enforcedLease=controlHealth&&Number.isSafeInteger(controlHealth.lease_timeout_ms)
       ?controlHealth.lease_timeout_ms:controlStatus.lease_timeout_ms;
     srv.push({l:"Control timing",c:"stat-muted",
       v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
-        `${Math.round(enforcedLease/1000)} s ${demandOwned?'explicit':'legacy'} lease`});
+        `${Math.round(enforcedLease/1000)} s ${leasePresentation.label} lease`});
   }
   if(PLAYER.controlLastError){
     const age=Math.max(0,Math.round((Date.now()-PLAYER.controlLastError.at)/1000));

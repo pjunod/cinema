@@ -51,6 +51,17 @@
       : "transcode";
   }
 
+  function controlLeasePresentation(mode) {
+    switch (mode) {
+      case "explicit":
+        return Object.freeze({ ownership: "demand-owned", label: "explicit" });
+      case "vod":
+        return Object.freeze({ ownership: "immutable VOD", label: "VOD" });
+      default:
+        return Object.freeze({ ownership: "passive", label: "legacy" });
+    }
+  }
+
   function transcodeHeight(quality) {
     return /^\d+$/.test(String(quality || ""))
       ? Number.parseInt(quality, 10)
@@ -978,6 +989,7 @@
     AUTO_DEFAULTS,
     DECODE_LIMIT_DEFAULTS,
     qualityForce,
+    controlLeasePresentation,
     transcodeHeight,
     normalizedLadder,
     initialAutoRung,

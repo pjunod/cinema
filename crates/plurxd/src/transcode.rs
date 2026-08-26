@@ -2472,6 +2472,15 @@ pub struct SegmentFile {
     pub(crate) delivery: SegmentDelivery,
 }
 
+impl SegmentFile {
+    /// Commit liveness only after the HTTP layer has validated the concrete
+    /// object and request shape it is about to serve. Internal init probes,
+    /// empty files, invalid ranges, and failed reads never call this method.
+    pub(crate) async fn renew_for_response(&self, kind: &'static str) -> bool {
+        self.delivery.session.touch_if_active(kind).await
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentOpenError {
     /// Authenticated snapshot memory is still owned by earlier response
@@ -11802,12 +11811,26 @@ impl TranscodeManager {
         }
     }
 
-    async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
+    /// Resolve a rolling capability without extending its lease.
+    ///
+    /// Object readers call this before publication/integrity/wait checks and
+    /// renew only after they have a concrete response to serve. Keeping those
+    /// operations separate prevents repeated misses from becoming synthetic
+    /// playback activity.
+    async fn live_session(&self, session_id: &str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if !session.touch_if_active(kind).await {
-            return None;
+        (!session.control.is_retired()).then_some(session)
+    }
+
+    /// Renew a successfully resolved rolling response.
+    ///
+    /// The rolling actor or immutable registry must still own the capability
+    /// when the response authorization linearizes.
+    pub(crate) async fn renew_resolved_media(&self, session_id: &str, kind: &'static str) -> bool {
+        if let Some(session) = self.sessions.lock().await.get(session_id).cloned() {
+            return session.touch_if_active(kind).await;
         }
-        Some(session)
+        self.vod.renew_resolved_media(session_id).await
     }
 
     /// Resolve the source and resume base attached to a live HLS capability.
@@ -11832,7 +11855,7 @@ impl TranscodeManager {
                 frame_rate: None,
             });
         }
-        let session = self.touch(session_id, "hls-context").await?;
+        let session = self.live_session(session_id).await?;
         Some(HlsContext {
             file_id: session.file_id,
             start_seconds: session.start_seconds,
@@ -11914,7 +11937,7 @@ impl TranscodeManager {
     /// [`PlaylistError`] for why an anonymous `None` was not survivable
     /// downstream.
     pub async fn playlist(&self, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
-        let Some(session) = self.touch(session_id, "playlist").await else {
+        let Some(session) = self.live_session(session_id).await else {
             return Err(PlaylistError::SessionGone);
         };
         // Hold the request until the playlist exists. On the transcode path
@@ -12012,6 +12035,9 @@ impl TranscodeManager {
                         return Err(PlaylistError::SessionGone);
                     }
                     if session.cached {
+                        if !session.touch_if_active("playlist").await {
+                            return Err(PlaylistError::SessionGone);
+                        }
                         return Ok(bytes);
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
@@ -12057,12 +12083,16 @@ impl TranscodeManager {
                     if session.control.is_retired() {
                         return Err(PlaylistError::SessionGone);
                     }
-                    return Ok(served_live_playlist(
+                    let served = served_live_playlist(
                         bytes,
                         first_retained,
                         session.typeless_sliding,
                         session.takeover.as_ref(),
-                    ));
+                    );
+                    if !session.touch_if_active("playlist").await {
+                        return Err(PlaylistError::SessionGone);
+                    }
+                    return Ok(served);
                 }
             }
             if session.cached {
@@ -12133,9 +12163,12 @@ impl TranscodeManager {
         if let Some(window) = self.vod.segment_window(session_id, segment_index).await {
             return Some(window);
         }
-        let session = self.touch(session_id, "segment-window").await?;
+        let session = self.live_session(session_id).await?;
         self.flow_control(&session, session_id).await;
         let (start_ms, end_ms) = session.segments.lock().await.window_ms_of(segment_index)?;
+        if !session.touch_if_active("subtitle-segment").await {
+            return None;
+        }
         Some((start_ms as f64 / 1000.0, end_ms as f64 / 1000.0))
     }
 
@@ -12159,7 +12192,7 @@ impl TranscodeManager {
         if !is_safe_segment(name) {
             return Ok(None);
         }
-        let Some(session) = self.touch(session_id, "segment").await else {
+        let Some(session) = self.live_session(session_id).await else {
             return Ok(None);
         };
         let path = session.dir.join(name);
@@ -12603,8 +12636,11 @@ impl TranscodeManager {
             // kill(2) call strictly ordered without holding it across an
             // await. A signal that wins is before the fence; a fence that
             // wins makes this decision a no-op.
-            let _producer_transition = session.control.lock_producer_transition();
-            if session.control.is_retired() {
+            let producer_transition = session.control.lock_producer_transition();
+            if !session
+                .control
+                .producer_transition_is_live(&producer_transition)
+            {
                 return;
             }
             match child.as_ref().and_then(|c| c.id()) {
@@ -15981,12 +16017,15 @@ mod tests {
             "idle time must keep running while status is polled"
         );
 
-        // A real fetch DOES reset it — the contrast that keeps the assertion
-        // above from passing vacuously on a session whose clock never moved.
-        // (`touch` is the shared front half of the playlist and segment
-        // readers; calling those here would long-poll for output this fixture
-        // can never produce.)
-        assert!(mgr.touch(&info.session_id, "test-fetch").await.is_some());
+        // A successfully resolved fetch DOES reset it — the contrast that
+        // keeps the assertion above from passing vacuously on a session whose
+        // clock never moved. This is the shared response commit point; the
+        // actual readers would long-poll for output this fixture cannot make.
+        assert_eq!(
+            mgr.renew_resolved_media(&info.session_id, "test-fetch")
+                .await,
+            true
+        );
         assert_eq!(
             mgr.session_status(&info.session_id)
                 .await
@@ -17270,6 +17309,11 @@ mod tests {
             "it must have actually waited rather than found the playlist already there"
         );
         publish.await.expect("publisher");
+        assert!(session
+            .control
+            .snapshot()
+            .await
+            .is_some_and(|lease| lease.last_renewal_kind == "playlist"));
 
         // Never published. Refused at the deadline — and as a retryable
         // "still starting", never as a session that failed or went away.
@@ -17299,6 +17343,14 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_secs(5),
             "and it must actually end at the budget"
+        );
+        assert!(
+            stuck
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "a timed-out playlist miss must not renew the playback lease"
         );
     }
 
@@ -17563,21 +17615,19 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist("retired-session").await }
         });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if session
-                    .control
-                    .snapshot()
-                    .await
-                    .is_some_and(|lease| lease.last_renewal_kind == "playlist")
-                {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("playlist request must acquire the live session");
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
+        assert!(
+            !playlist.is_finished(),
+            "the playlist request acquired the session and is waiting for publication"
+        );
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "waiting itself must not renew the lease"
+        );
         assert!(
             mgr.retire_session("retired-session", &session).await,
             "the production retirement path must own this live session"
@@ -17767,6 +17817,20 @@ mod tests {
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
+
+        assert!(mgr
+            .segment("retained-window", "seg00029.ts")
+            .await
+            .expect("pruned request")
+            .is_none());
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "playlist"),
+            "a pruned media miss must not renew the playback lease"
+        );
 
         // Subtitle timing still sees the discarded prefix through the full
         // internal index: segment 30 begins at 120 seconds, not at zero.

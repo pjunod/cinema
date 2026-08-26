@@ -1,9 +1,9 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-26  
-**Merged baseline:** `origin/main` at `8fca4ab2` (PR #611)  
+**Updated:** 2026-08-26
+**Merged baseline:** `origin/main` at `8fca4ab2` (PR #611)
 **Current work:** `codex/playback-control-m3-demand-lease` — M3b, pushed branch,
-pre-review
+draft PR [#612](https://github.com/pjunod/plurx/pull/612), review corrections in progress
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -41,9 +41,15 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch is pushed but has not been adversarially reviewed yet. Its
-acceptance boundary is intentionally smaller than the whole actor migration;
-the exact behavior and timer ledger are in
+The active branch is pushed as draft PR #612. Its first adversarial review at
+`cbc8029c` requested changes: two P1 ordering/liveness corrections, two P2
+status/UI corrections, and one P3 whitespace correction. The corrected head
+linearizes snapshots and physical signals at the exact actor deadline, renews
+only resolved response objects, names VOD correctly, and fixes this ledger;
+second review still precedes every test command. The slice's acceptance
+boundary is intentionally smaller than the whole actor migration; the exact
+behavior
+and timer ledger are in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
 
 - explicit rolling sessions use a 30-second lease while legacy media-only
@@ -70,11 +76,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Initial diff complete; pre-review inspection in progress |
-| Adversarial diff review | Not run |
-| Unit/focused tests | Not run — intentionally waits for adversarial review |
+| Implementation | Five first-review findings corrected; corrected head pending push/re-review |
+| Adversarial diff review | **Changes requested** at `cbc8029c`; second review required on the corrected head |
+| Unit/focused tests | Not run — intentionally waits for second-review approval |
 | Full local gate | Not run |
-| Hosted CI | No PR yet |
+| Hosted CI | Draft PR exists; local test gate remains closed until adversarial approval |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger

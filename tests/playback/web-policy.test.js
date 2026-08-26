@@ -2820,6 +2820,21 @@ test("HDR10 Auto leaves the cold-start height to the grade-aware server", () => 
   );
 });
 
+test("control lease labels distinguish legacy, explicit, and VOD delivery", () => {
+  assert.deepEqual(policy.controlLeasePresentation("legacy"), {
+    ownership: "passive",
+    label: "legacy",
+  });
+  assert.deepEqual(policy.controlLeasePresentation("explicit"), {
+    ownership: "demand-owned",
+    label: "explicit",
+  });
+  assert.deepEqual(policy.controlLeasePresentation("vod"), {
+    ownership: "immutable VOD",
+    label: "VOD",
+  });
+});
+
 test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
   const ladder = [
     { height: 1080, total_kbps: 8160, peak_kbps: 12160 },

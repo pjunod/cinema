@@ -1102,7 +1102,7 @@ pub(crate) struct RollingControlOutcome {
 pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
     retired: Arc<AtomicBool>,
-    producer_transition: Arc<std::sync::Mutex<()>>,
+    producer_transition: Arc<std::sync::Mutex<Instant>>,
 }
 
 struct OwnedLocalControlRequest {
@@ -1149,7 +1149,7 @@ struct RollingControlActor {
     retired: bool,
     expiration_claimed: bool,
     retired_fence: Arc<AtomicBool>,
-    producer_transition: Arc<std::sync::Mutex<()>>,
+    producer_transition: Arc<std::sync::Mutex<Instant>>,
 }
 
 impl RollingControlActor {
@@ -1159,7 +1159,7 @@ impl RollingControlActor {
             now,
             initial_kind,
             retired_fence,
-            Arc::new(std::sync::Mutex::new(())),
+            Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
         )
     }
 
@@ -1167,7 +1167,7 @@ impl RollingControlActor {
         now: Instant,
         initial_kind: &'static str,
         retired_fence: Arc<AtomicBool>,
-        producer_transition: Arc<std::sync::Mutex<()>>,
+        producer_transition: Arc<std::sync::Mutex<Instant>>,
     ) -> Self {
         Self {
             control: ControlState::default(),
@@ -1259,7 +1259,10 @@ impl RollingControlActor {
             self.expiration_claimed = true;
             self.retired_fence.store(true, Ordering::Release);
             ROLLING_LEASE_EXPIRATIONS.fetch_add(1, Ordering::Relaxed);
-            RollingExpiryClaim::Claimed(snapshot)
+            // Report the committed transition, not the pre-claim observation.
+            // The claimant may be the reaper, a snapshot reader, or the exact
+            // timer; all of them must see the same terminal facts.
+            RollingExpiryClaim::Claimed(self.snapshot_at(now))
         } else {
             RollingExpiryClaim::Live
         }
@@ -1273,19 +1276,40 @@ impl RollingControlActor {
                 reply,
             } => {
                 let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
+                let mut transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = reply.send(self.renew_at(Instant::now(), kind, source));
+                let renewed = self.renew_at(Instant::now(), kind, source);
+                if renewed {
+                    *transition = self.deadline();
+                }
+                let _ = reply.send(renewed);
             }
             RollingControlCommand::Control { request, reply } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let mut transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let outcome = self.control_at(Instant::now(), *request);
+                if outcome
+                    .as_ref()
+                    .is_ok_and(|outcome| outcome.disposition == ControlDisposition::Accepted)
+                {
+                    *transition = self.deadline();
+                }
+                let _ = reply.send(outcome);
+            }
+            RollingControlCommand::Snapshot { reply } => {
+                // A snapshot is an actor command, not an advisory timestamp
+                // read. If it reaches the mailbox at the exact deadline while
+                // both select branches are ready, it must linearize expiry
+                // before any caller can use the returned state to authorize a
+                // producer signal.
                 let transition = Arc::clone(&self.producer_transition);
                 let _transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = reply.send(self.control_at(Instant::now(), *request));
-            }
-            RollingControlCommand::Snapshot { reply } => {
+                let _ = self.claim_expiry_at(Instant::now());
                 let _ = reply.send(self.snapshot_at(Instant::now()));
             }
             RollingControlCommand::ClaimExpiry { reply } => {
@@ -1310,11 +1334,12 @@ impl RollingControlActor {
             #[cfg(test)]
             RollingControlCommand::SetRenewalForTest { at, kind, reply } => {
                 let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
+                let mut transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 self.last_renewal = at;
                 self.last_renewal_kind = kind;
+                *transition = self.deadline();
                 let _ = reply.send(());
             }
         }
@@ -1356,10 +1381,12 @@ impl RollingControlHandle {
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
-        let producer_transition = Arc::new(std::sync::Mutex::new(()));
+        let now = Instant::now();
+        let producer_transition =
+            Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
         tokio::spawn(
             RollingControlActor::with_producer_transition(
-                Instant::now(),
+                now,
                 initial_kind,
                 Arc::clone(&retired),
                 Arc::clone(&producer_transition),
@@ -1454,10 +1481,31 @@ impl RollingControlHandle {
         self.retired.load(Ordering::Acquire)
     }
 
-    pub(crate) fn lock_producer_transition(&self) -> std::sync::MutexGuard<'_, ()> {
+    pub(crate) fn lock_producer_transition(&self) -> std::sync::MutexGuard<'_, Instant> {
         self.producer_transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Authorize the one physical producer transition guarded by `guard`.
+    ///
+    /// The actor timer and this check share the same mutex and deadline. A
+    /// signal that acquires it before the deadline linearizes before expiry;
+    /// one that acquires it at or after the deadline is denied even if the
+    /// async timer task has not yet published the retired fence.
+    pub(crate) fn producer_transition_is_live(
+        &self,
+        guard: &std::sync::MutexGuard<'_, Instant>,
+    ) -> bool {
+        self.producer_transition_is_live_at(guard, Instant::now())
+    }
+
+    fn producer_transition_is_live_at(
+        &self,
+        guard: &std::sync::MutexGuard<'_, Instant>,
+        now: Instant,
+    ) -> bool {
+        !self.is_retired() && now < **guard
     }
 
     /// A closed mailbox cannot accept another renewal. The repair loop uses
@@ -2105,10 +2153,12 @@ mod tests {
         let retired_fence = Arc::new(AtomicBool::new(false));
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::clone(&retired_fence));
+        let claimed = actor
+            .claim_expiry_at(started + ROLLING_LEGACY_LEASE_TIMEOUT + Duration::from_millis(1));
         assert!(matches!(
-            actor
-                .claim_expiry_at(started + ROLLING_LEGACY_LEASE_TIMEOUT + Duration::from_millis(1)),
-            RollingExpiryClaim::Claimed(_)
+            claimed,
+            RollingExpiryClaim::Claimed(ref lease)
+                if lease.retired && lease.expiration_claimed && !lease.expired()
         ));
         assert!(retired_fence.load(Ordering::Acquire));
         assert!(matches!(
@@ -2244,9 +2294,48 @@ mod tests {
         tokio::time::advance(ROLLING_EXPLICIT_LEASE_TIMEOUT - Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(!explicit.is_retired());
+        {
+            let producer_transition = explicit.lock_producer_transition();
+            let deadline = *producer_transition;
+            assert!(explicit.producer_transition_is_live_at(
+                &producer_transition,
+                deadline - Duration::from_millis(1)
+            ));
+            assert!(
+                !explicit.producer_transition_is_live_at(&producer_transition, deadline),
+                "a producer signal is denied at the exact deadline"
+            );
+        }
         tokio::time::advance(Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(explicit.is_retired(), "explicit deadline is actor-owned");
+
+        let snapshot_race = RollingControlHandle::spawn("session-start");
+        snapshot_race
+            .control(LocalControlRequest {
+                session_id: "unused",
+                generation: &request.generation,
+                owner_node_id: "node-a",
+                owner_epoch: request.control_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                snapshot: PlaybackDemandSnapshot::from(&request),
+            })
+            .await
+            .expect("snapshot race enters explicit mode");
+        snapshot_race
+            .set_renewal_for_test(
+                Instant::now() - ROLLING_EXPLICIT_LEASE_TIMEOUT,
+                "exact-deadline",
+            )
+            .await;
+        // Queue the snapshot without yielding to the already-ready timer
+        // branch. Whichever branch the actor selects first must commit the
+        // same expiry before answering; a zero-remaining live snapshot could
+        // otherwise authorize SIGCONT after the deadline.
+        let deadline_snapshot = snapshot_race.snapshot().await.expect("deadline snapshot");
+        assert!(deadline_snapshot.retired, "snapshot linearizes expiry");
+        assert!(deadline_snapshot.expiration_claimed);
     }
 
     #[tokio::test]

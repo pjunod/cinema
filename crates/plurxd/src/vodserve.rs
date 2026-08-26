@@ -815,6 +815,22 @@ impl VodServe {
             .count()
     }
 
+    /// Renew one immutable session only after its caller has a concrete
+    /// playlist, subtitle, or media response ready. Kept separate from
+    /// lookup so a vanished/tombstoned capability cannot be mistaken for a
+    /// successful rolling-to-VOD fallthrough.
+    pub async fn renew_resolved_media(&self, session_id: &str) -> bool {
+        let sessions = self.shared.sessions.lock().await;
+        let Some(session) = sessions.get(session_id) else {
+            return false;
+        };
+        if session.tombstone.is_some() {
+            return false;
+        }
+        *session.last_touch.lock().expect("touch lock") = Instant::now();
+        true
+    }
+
     /// Immutable playlist bytes: the same bytes for the session's whole life.
     pub async fn playlist(&self, session_id: &str) -> Option<Result<Vec<u8>, VodError>> {
         let rendition = match self.session_rendition(session_id).await? {

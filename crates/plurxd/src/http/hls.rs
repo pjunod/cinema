@@ -1977,6 +1977,21 @@ fn playlist_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
+/// Finalize liveness for a generated rolling resource only after every
+/// authorization and object-resolution step succeeded. The rolling actor or
+/// immutable registry must still own the capability at this commit point.
+async fn renew_generated_live_media(
+    state: &AppState,
+    session: &str,
+    kind: &'static str,
+) -> Result<(), ApiError> {
+    if state.transcode.renew_resolved_media(session, kind).await {
+        Ok(())
+    } else {
+        Err(ApiError::NotFound("transcode session"))
+    }
+}
+
 async fn session_file(
     state: &AppState,
     session: &str,
@@ -2065,6 +2080,7 @@ async fn playlist_local(
         if query.native == Some(1) {
             let (context, file) = session_file(state, session).await?;
             let context = exact_hls_context(state, session, context).await;
+            renew_generated_live_media(state, session, "master-playlist").await?;
             return Ok(playlist_response(
                 master_playlist(&file, query.subtitle, &context).into_bytes(),
             ));
@@ -2076,6 +2092,7 @@ async fn playlist_local(
     }
     let (context, file) = session_file(state, session).await?;
     let context = exact_hls_context(state, session, context).await;
+    renew_generated_live_media(state, session, "master-playlist").await?;
     Ok(playlist_response(
         master_playlist(&file, query.subtitle, &context).into_bytes(),
     ))
@@ -2131,6 +2148,7 @@ async fn master_playlist_response_local(
         );
         return video_playlist_local(state, session).await;
     }
+    renew_generated_live_media(state, session, "master-playlist").await?;
     Ok(playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
             .into_bytes(),
@@ -3557,6 +3575,10 @@ async fn segment_local(
     let content_type = segment_content_type(seg);
     let etag = segment_etag(session, seg, opened.len);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
+        if !opened.renew_for_response("segment-not-modified").await {
+            opened.delivery.finish_without_body();
+            return Err(ApiError::NotFound("segment"));
+        }
         opened.delivery.finish_without_body();
         return Ok((
             StatusCode::NOT_MODIFIED,
@@ -3587,6 +3609,10 @@ async fn segment_local(
         }
     };
     if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+        if !opened.renew_for_response("init-segment").await {
+            opened.delivery.finish_without_body();
+            return Err(ApiError::NotFound("segment"));
+        }
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
@@ -3658,6 +3684,17 @@ async fn segment_local(
             opened.delivery.fail(&error);
             return Err(ApiError::Internal(error.to_string()));
         }
+    }
+    if !opened
+        .renew_for_response(if crate::transcode::is_init_object(seg) {
+            "init-segment"
+        } else {
+            "media-segment"
+        })
+        .await
+    {
+        opened.delivery.finish_without_body();
+        return Err(ApiError::NotFound("segment"));
     }
     let opened_len = end.saturating_sub(start).saturating_add(1);
     let total_len = opened.len;
