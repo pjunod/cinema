@@ -326,6 +326,27 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
+        method: "enqueue_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "submit_fragment_index_analysis",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
         method: "claim_cluster_fragment_index",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -636,7 +657,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 37);
+        assert_eq!(methods.len(), 40);
     }
 
     #[test]
