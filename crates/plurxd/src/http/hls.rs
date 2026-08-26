@@ -1799,7 +1799,7 @@ async fn control_local_inner(
             owner_epoch,
             client_instance_id: &request.client_instance_id,
             sequence: request.sequence,
-            platform: request.capabilities.as_ref().map(|caps| caps.platform),
+            snapshot: crate::playback_control::PlaybackDemandSnapshot::from(&request),
         })
         .await
     {
