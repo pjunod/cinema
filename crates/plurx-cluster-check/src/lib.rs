@@ -4864,7 +4864,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::RedeemJoin {
+            Request::RedeemLearnerJoin {
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
@@ -4905,7 +4905,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::FinalizeJoin {
+            Request::FinalizeLearnerJoin {
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
@@ -6079,7 +6079,13 @@ pub enum Request {
     RedeemJoin {
         request: RedeemJoinRequest,
     },
+    RedeemLearnerJoin {
+        request: RedeemJoinRequest,
+    },
     FinalizeJoin {
+        request: FinalizeJoinRequest,
+    },
+    FinalizeLearnerJoin {
         request: FinalizeJoinRequest,
     },
     MembershipStatus,
@@ -8091,8 +8097,18 @@ async fn handle_request(
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::RedeemLearnerJoin { request } => membership_ref(membership)?
+            .redeem_learner(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
         Request::FinalizeJoin { request } => membership_ref(membership)?
             .finalize(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::FinalizeLearnerJoin { request } => membership_ref(membership)?
+            .finalize_learner(&request)
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
