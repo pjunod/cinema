@@ -1,12 +1,13 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P5 implementation and deterministic acceptance delivered; M4
+**Status:** P0–P7 implementation and deterministic acceptance delivered; M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
-revised after adversarial review (§6.6), with four of its storage guards still
-design intent rather than pinned behavior; P6 delivered across two stacked
+revised after adversarial review (§6.6), with its deterministic and privileged
+storage guards now pinned; P6 delivered across two stacked
 changes — admission/protocol safety first, then useful traffic, readiness,
 promotion, removal, capacity reporting, and full real-process lifecycle
-acceptance (§6.7); P0c/P2f/P5 physical evidence and P7 remain · **Extends:**
+acceptance (§6.7); P7's vendor-neutral proxy/failure evidence is delivered;
+P0c/P2f/P5 named physical evidence remains · **Extends:**
 [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
@@ -623,11 +624,11 @@ restart tests preserve cache/offline content and discard only declared scratch;
 disk-pressure tests on the cache/scratch device do not corrupt or relocate the
 durable target. The chosen read-pool value has a retained benchmark artifact.
 
-Two of those acceptance clauses are not met as written. The disk-pressure clause
-is satisfied by an ENOTDIR proxy rather than by a device that actually fills, and
-a real out-of-space exercise looks privilege-gated wherever it lands; the
-read-pool artifact is deferred with P0c/P2f. Both are stated as such below and
-in [OPERATIONS.md](OPERATIONS.md) rather than quietly counted as delivered.
+The read-pool artifact remains deferred with P0c/P2f. The disk-pressure clause
+now has a separate root-only Linux gate that fills a bounded tmpfs to real
+`ENOSPC`; it remains outside ordinary CI because mounting that filesystem needs
+privilege. Both boundaries are stated below and in
+[OPERATIONS.md](OPERATIONS.md) rather than conflated with deterministic CI.
 
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
@@ -667,21 +668,17 @@ and offline content are never restart cleanup targets. An available shared-cache
 mount is a separately protected persistent root; a missing mount keeps the
 existing node-local fallback and is not created by this preflight.
 
-The delivered coverage is narrower than that contract. Mutation runs found the
-cross-device bound, the depth and entry-count bounds, and the credential-key
-inode protection implemented but unreached by any test, and the only real
-mount-namespace exercises are opt-in and privileged. The follow-up work added
-tests for root repair, the foreign-uid root refusal, permissive-mode and
-foreign-uid children, a faulting readdir, the interrupted pending claim, the
-truncated published marker, the foreign-durable-root marker message, and the
-depth ceiling in the owned-root direction. Three gaps remain, and operator-facing
-text must not restate them as proven: the entry-count ceiling, the cross-device
-bound, and the wiring that makes the credential key one of the protected
-identities cleanup receives — the preflight that honours a protected identity is
-tested, the choice of that identity is not. The mount-point error and the
-bind-source-ancestry refusal now have real exercises, but only under
-`make bind-mount-check` (`PLURX_RUN_BIND_MOUNT_TEST=1`), which needs
-CAP_SYS_ADMIN and is deliberately outside `check` and CI.
+The cleanup coverage now reaches every storage guard mutation identified by the
+P5 review. A reduced-limit unit fixture drives the production entry-count path
+and proves preflight leaves the whole owned tree untouched. A startup-level
+hard-link fixture proves the selected credential-key inode is the protected
+identity passed into scratch cleanup. `make bind-mount-check` reaches the real
+mount-point, bind-source-ancestry, and cross-device refusals, while
+`make storage-pressure-check` fills a bounded tmpfs and proves cache and scratch
+`ENOSPC` cannot relocate or create authority. The last two targets require root
+and CAP_SYS_ADMIN on Linux and remain deliberately outside `check` and ordinary
+CI; the [retained run record](../benchmarks/evidence/p5-storage-pressure-838f20cc.json)
+is physical evidence, not a claim about an unprivileged runner.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the
@@ -942,6 +939,17 @@ lagged-worker runs. Lock absolute SLOs only from those artifacts.
 leader loss recovers inside the accepted election budget, a lagged learner
 leaves rotation, and an HLS session survives one backend loss with the existing
 documented discontinuity behavior.
+
+| Acceptance clause | P7 result |
+|---|---|
+| Product-neutral routing contract | met — `/readyz`, HLS/segment affinity, 2 s connect, 75 s drain, and safe-method-only retry behavior are specified independently of example proxy syntax |
+| Executable local proxy fixture | met — two real local HTTP backends and a proxy prove sticky HLS/segments, backend ejection, one discontinuity, and no replay of a failing `POST` |
+| Three voters and three voters plus learner | met — the same separate-process harness records the three-voter quorum and admitted non-voting replica |
+| Follower loss preserves writes | met — one fixed-cadence 64-write workload continues through process loss, records every attempt/error/latency, and verifies every acknowledged key on equal surviving replicas |
+| Leader loss meets the accepted election budget | met — the first post-loss write continues without a readiness pause, its acknowledgement defines recovery, and the artifact is rejected above 10 seconds |
+| Lagged learner leaves rotation | met — the real learner apply path pauses, commits fall beyond it, `ready_read_workers` reaches zero, and catch-up restores eligibility |
+| HLS survives backend loss | met — a response longer than the connect budget drains during bounded shutdown, the sticky session then moves from the stopped backend to the ready survivor, and its replacement playlist carries exactly one discontinuity |
+| Retained evidence | met — CI uploads `cluster-failure-drills.json`, validated by a closed Draft 2020-12 schema; it makes no named-hardware performance claim |
 
 ## 7. Pull-request sequence — small diffs, explicit dependencies
 

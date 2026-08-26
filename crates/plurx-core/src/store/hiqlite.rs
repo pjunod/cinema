@@ -81,6 +81,8 @@ pub const AUTH_LEARNER_PROTOCOL: i64 = 5;
 const STORE_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
 const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
+const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 3;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 
 const AUTH_SCHEMA: &str = r#"
@@ -708,6 +710,38 @@ where
     unreachable!("the bounded authority-read retry loop always returns")
 }
 
+/// Retry one exact-state mutation only while the client reports its bounded
+/// per-attempt deadline.
+///
+/// A timed-out consensus request is ambiguous: it may still have committed.
+/// Callers must therefore supply an operation whose repeated execution writes
+/// byte-for-byte equivalent durable state. Three three-second attempts plus
+/// the two short delays stay inside the accepted ten-second leader-election
+/// recovery window without relaxing [`STORE_TIMEOUT`] for any other call.
+async fn time_idempotent_write_with_retry<T, F, Fut>(
+    metrics: &'static StoreOperationMetrics,
+    mut operation: F,
+) -> Result<T, StoreError>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, StoreError>>,
+{
+    for attempt in 1..=IDEMPOTENT_WRITE_MAX_ATTEMPTS {
+        let result =
+            time_store_operation(metrics, StoreOperationClass::Write, operation(), |_| true).await;
+        if !is_replicated_store_timeout(&result) || attempt == IDEMPOTENT_WRITE_MAX_ATTEMPTS {
+            return result;
+        }
+        tracing::warn!(
+            attempt,
+            max_attempts = IDEMPOTENT_WRITE_MAX_ATTEMPTS,
+            "idempotent replicated write timed out; retrying exact state"
+        );
+        tokio::time::sleep(IDEMPOTENT_WRITE_RETRY_DELAY).await;
+    }
+    unreachable!("the bounded idempotent-write retry loop always returns")
+}
+
 /// Render fixed-cardinality process metrics for all replicated Store calls.
 ///
 /// SQLite mode leaves these series at zero. Rendering reads only atomics and
@@ -828,6 +862,24 @@ impl TimedClient {
             timeout_store(self.inner().execute(sql, params)),
             |_| true,
         )
+        .await
+    }
+
+    pub(super) async fn execute_idempotent<S>(
+        &self,
+        sql: S,
+        params: hiqlite::Params,
+    ) -> Result<usize, StoreError>
+    where
+        S: Into<Cow<'static, str>>,
+    {
+        let sql = sql.into();
+        validate_sql(&sql)?;
+        time_idempotent_write_with_retry(&STORE_OPERATION_METRICS, || {
+            #[cfg(feature = "cluster-read-cost-validation")]
+            self.operations.write_calls.fetch_add(1, Ordering::Relaxed);
+            timeout_store(self.inner().execute(sql.clone(), params.clone()))
+        })
         .await
     }
 
@@ -1727,6 +1779,15 @@ impl HiqliteAuthStore {
         self.client().execute(sql, params).await
     }
 
+    async fn execute_idempotent(
+        &self,
+        sql: &'static str,
+        params: hiqlite::Params,
+    ) -> Result<usize, StoreError> {
+        validate_sql(sql)?;
+        self.client().execute_idempotent(sql, params).await
+    }
+
     async fn user_optional(
         &self,
         sql: &'static str,
@@ -2024,7 +2085,7 @@ impl SettingsStore for HiqliteAuthStore {
 
     async fn put_setting(&self, key: &str, value: &str) -> Result<(), StoreError> {
         let now = self.now()?;
-        self.execute(
+        self.execute_idempotent(
             "INSERT INTO settings (key, value, updated_at) VALUES ($1, $2, $3) \
              ON CONFLICT(key) DO UPDATE SET \
              value = excluded.value, updated_at = excluded.updated_at",
@@ -3340,6 +3401,76 @@ mod tests {
         .expect_err("non-timeout database errors are terminal");
         assert_eq!(error.to_string(), "database error: bad row");
         assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idempotent_writes_absorb_two_election_deadlines_and_nothing_else() {
+        let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let value = time_idempotent_write_with_retry(metrics, {
+            let attempts = Arc::clone(&attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt < 2 {
+                        Err(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned()))
+                    } else {
+                        Ok(42)
+                    }
+                }
+            }
+        })
+        .await
+        .expect("the third exact-state attempt recovers after election");
+        assert_eq!(value, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(
+            metrics
+                .cell(StoreOperationClass::Write, StoreOperationOutcome::Error)
+                .count
+                .load(Ordering::Relaxed),
+            2,
+            "each timed-out physical attempt remains visible"
+        );
+        assert_eq!(
+            metrics
+                .cell(StoreOperationClass::Write, StoreOperationOutcome::Ok)
+                .count
+                .load(Ordering::Relaxed),
+            1
+        );
+
+        let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = time_idempotent_write_with_retry(metrics, {
+            let attempts = Arc::clone(&permanent_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database("constraint".to_owned())) }
+            }
+        })
+        .await
+        .expect_err("non-timeout write errors are terminal");
+        assert_eq!(error.to_string(), "database error: constraint");
+        assert_eq!(permanent_attempts.load(Ordering::Relaxed), 1);
+
+        let exhausted_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = time_idempotent_write_with_retry(metrics, {
+            let attempts = Arc::clone(&exhausted_attempts);
+            move || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                async { Err::<(), _>(StoreError::Database(REPLICATED_STORE_TIMEOUT.to_owned())) }
+            }
+        })
+        .await
+        .expect_err("the exact-state retry budget remains bounded");
+        assert_eq!(
+            error.to_string(),
+            format!("database error: {REPLICATED_STORE_TIMEOUT}")
+        );
+        assert_eq!(
+            exhausted_attempts.load(Ordering::Relaxed),
+            IDEMPOTENT_WRITE_MAX_ATTEMPTS
+        );
     }
 
     #[test]

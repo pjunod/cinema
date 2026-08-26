@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7ce792ac"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The unit contract permits retries only for an exact-state settings upsert, absorbs two consecutive replicated deadlines, refuses to retry any other error, stops after three attempts, and records every physical attempt in Store metrics. The separate-process P7 leader-loss workload then kills the elected leader without a readiness pause and requires all 64 user-level writes to succeed inside the retained ten-second recovery budget."

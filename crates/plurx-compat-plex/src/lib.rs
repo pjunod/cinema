@@ -12,6 +12,14 @@ pub mod xml;
 
 pub use xml::Element;
 
+/// HTTP framework re-export for executable compatibility fixtures.
+///
+/// This crate owns a production Axum dependency. Reusing that exact version
+/// keeps separate-process validation fixtures on the shipped HTTP stack
+/// without adding another direct dependency edge to the harness.
+#[doc(hidden)]
+pub use axum as validation_axum;
+
 /// A friendly product string advertised to clients.
 pub const PRODUCT: &str = "plurx";
 

@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-storage-physical-v1.json",
+  "title": "plurx privileged Linux storage evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "executed_at_unix_ms",
+    "runner_class",
+    "runner_image",
+    "runner_image_digest",
+    "native_architecture",
+    "machine_fingerprint",
+    "checks"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "privileged_linux_storage" },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "executed_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "runner_class": { "const": "isolated-private-linux-host" },
+    "runner_image": { "const": "docker.io/library/rust:1.97.1-bookworm" },
+    "runner_image_digest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "native_architecture": { "enum": ["amd64", "arm64"] },
+    "machine_fingerprint": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "checks": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "prefixItems": [
+        { "$ref": "#/$defs/mount_check" },
+        { "$ref": "#/$defs/enospc_check" }
+      ],
+      "items": false
+    }
+  },
+  "$defs": {
+    "mount_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "command", "result", "tests_run", "tests_failed"],
+      "properties": {
+        "name": { "const": "mount_bind_and_cross_device" },
+        "command": { "const": "make bind-mount-check" },
+        "result": { "const": "passed" },
+        "tests_run": { "const": 27 },
+        "tests_failed": { "const": 0 }
+      }
+    },
+    "enospc_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "command", "result", "tests_run", "tests_failed"],
+      "properties": {
+        "name": { "const": "real_enospc_storage_pressure" },
+        "command": { "const": "make storage-pressure-check" },
+        "result": { "const": "passed" },
+        "tests_run": { "const": 1 },
+        "tests_failed": { "const": 0 }
+      }
+    }
+  }
+}

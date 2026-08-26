@@ -1022,8 +1022,8 @@ one. Traversal is also bounded by entry count and depth, as a safety device for
 a directory plurx does not already own: exceeding a bound in an owned root
 leaves that scratch untouched for the boot, logs a warning, and lets startup
 continue, and the next boot retries. In an unowned root a bound is a refusal.
-The depth ceiling has a test in the owned-root direction; the entry-count
-ceiling does not, so read that half as design intent.
+Reduced-limit fixtures drive both the depth and entry-count paths and prove an
+oversized owned tree is left whole.
 
 Startup requires scratch, authority, and every resolved persistent-cache child
 to be disjoint in both directions and to have distinct device/inode identities;
@@ -1032,10 +1032,10 @@ and marker descriptors throughout, so a concurrent rename, mount replacement,
 or marker swap aborts startup without touching the replacement.
 Do not mount another filesystem below the scratch root. A mount point inside
 scratch is named in the startup error, and a cross-device child is refused.
-Neither is covered by a default gate: the mount-point error and the
-bind-alias refusal are exercised only by `make bind-mount-check`, which calls
-`mount --bind` and therefore needs a privileged Linux host, and the cross-device
-bound has no test at all. Treat the group as design intent and mount elsewhere.
+None is covered by the default gate: `make bind-mount-check` exercises the
+mount-point error, bind-alias refusal, and cross-device bound on a privileged
+Linux host. It creates temporary bind and tmpfs mounts and therefore needs root
+and CAP_SYS_ADMIN. Mount elsewhere even after that physical gate passes.
 
 An available `cluster.shared_cache_dir` is a fourth persistent root. It must be
 disjoint from authority, the local cache, and scratch; its verified identity is
@@ -1066,10 +1066,10 @@ that exact owner-only file is authoritative and belongs in the same backup and
 move procedure. Its canonical path must remain outside scratch and every
 managed cache root; startup refuses a key inside either. Startup also passes the
 selected key inode into post-lock scratch cleanup as a protected identity, which
-is meant to stop a bind alias erasing it. The cleanup half of that is tested —
-a protected identity found at any depth aborts cleanup with its bytes intact —
-but nothing tests that the credential key is the identity handed in, so place
-the key outside the managed roots rather than relying on the belt. Each voter owns its own Hiqlite storage: sharing that directory
+stops a same-inode alias from being erased. A startup-level hard-link fixture
+proves both halves together: the selected key is the identity handed to cleanup,
+and finding it at depth aborts before either name is touched. Keep the key outside
+every managed root anyway. Each voter owns its own Hiqlite storage: sharing that directory
 between machines defeats Raft's independent failure model.
 
 Create every configured root with the daemon uid/gid and monitor space and
@@ -1080,10 +1080,21 @@ set the new paths, and restart. Require `/readyz`, current applied-index
 catch-up, and the expected cache/offline/artwork inventory before moving the
 next voter. Expect a full cache or scratch device to fail local work without
 causing a database to be created or relocated there: `storage.data_dir` is the
-only root plurx selects a durable target from. That is an operational
-expectation, not a proven property — the deterministic test substitutes an
-ENOTDIR failure for a full device, and any real out-of-space exercise is
-privilege-gated.
+only root plurx selects a durable target from. The deterministic gate retains
+the non-directory device-failure case. Before a storage-layout release, run the
+privileged Linux proofs as root:
+
+```bash
+make bind-mount-check
+make storage-pressure-check
+```
+
+The second target exhausts a bounded tmpfs until the kernel returns `ENOSPC`,
+then proves both cache and scratch startup failures preserve the authority bytes
+and create no database on either failed device. These targets fail when their
+requested mount capability is unavailable; they do not silently count a skip as
+evidence. The P5 implementation run is retained in
+[`benchmarks/evidence/p5-storage-pressure-838f20cc.json`](../benchmarks/evidence/p5-storage-pressure-838f20cc.json).
 
 Setting `storage.cache_dir` migrates nothing. The legacy trees stay where they
 are; the daemon logs a warning while they still hold bytes and starts anyway.
@@ -1331,6 +1342,32 @@ ready backend for cache and session locality. A cookie or source-hash policy is
 fine; stickiness is an optimization, not an availability dependency. If that
 backend becomes unready, the next request may move to a survivor and the
 client-visible recovery contract still applies.
+
+The proxy contract is independent of Caddy, nginx, Traefik, HAProxy, or a
+managed load balancer. Use a 2-second backend connection bound and a 75-second
+maximum connection drain. Retry `GET` and `HEAD` only; never automatically
+replay `POST`, `PUT`, `PATCH`, or `DELETE`, because a lost response does not
+prove the authority mutation was uncommitted. The exact contract and
+ready-to-adapt examples live in
+[`deploy/cluster-routing/`](../deploy/cluster-routing/).
+
+Before rollout, run the product-neutral fixture and inspect its evidence:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- proxy-fixture
+make cluster-check
+jq '{follower_loss,leader_loss,three_voter_plus_learner,hls_backend_loss,accepted_budgets}' \
+  target/validation/cluster-failure-drills.json
+```
+
+The retained semantic artifact records every attempt, error, and latency from a
+fixed-cadence 64-write workload that continues through node loss. It proves
+leader recovery inside the accepted 10-second election transition budget,
+lagged learner rotation, a response longer than the connect budget draining
+inside the 75-second ceiling, HLS takeover from a stopped backend with one
+discontinuity, and zero proxy replays of an unsafe mutation. It is not a
+hardware latency benchmark. Preserve the CI artifact for the build being
+deployed; do not infer a tighter absolute SLO from local stopwatch output.
 
 ### Cluster ingress, drain, and recovery
 

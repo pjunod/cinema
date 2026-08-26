@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-failure-drills-v1.json",
+  "title": "plurx cluster failure-drill semantic evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "evidence_scope",
+    "build_sha",
+    "started_at_unix_ms",
+    "finished_at_unix_ms",
+    "workload",
+    "three_voter_baseline",
+    "three_voter_plus_learner",
+    "follower_loss",
+    "leader_loss",
+    "hls_backend_loss",
+    "accepted_budgets"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "evidence_scope": { "const": "semantic_ci" },
+    "build_sha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "started_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "finished_at_unix_ms": { "type": "integer", "minimum": 0 },
+    "workload": { "$ref": "#/$defs/workload" },
+    "three_voter_baseline": { "$ref": "#/$defs/three_voter" },
+    "three_voter_plus_learner": { "$ref": "#/$defs/learner" },
+    "follower_loss": { "$ref": "#/$defs/loss" },
+    "leader_loss": { "$ref": "#/$defs/loss" },
+    "hls_backend_loss": { "$ref": "#/$defs/proxy" },
+    "accepted_budgets": { "$ref": "#/$defs/budgets" }
+  },
+  "$defs": {
+    "workload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "write_operation", "write_operations", "concurrency", "failure_point"],
+      "properties": {
+        "id": { "const": "split-loss-quorum-write-v1" },
+        "write_operation": { "const": "quorum_acknowledged_put_setting" },
+        "write_operations": { "const": 64 },
+        "concurrency": { "const": 1 },
+        "failure_point": { "const": "after_32_acknowledged_writes" }
+      }
+    },
+    "three_voter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["voting_nodes", "voting_quorum", "voting_failure_tolerance", "write_operations"],
+      "properties": {
+        "voting_nodes": { "const": 3 },
+        "voting_quorum": { "const": 2 },
+        "voting_failure_tolerance": { "const": 1 },
+        "write_operations": { "const": 64 }
+      }
+    },
+    "learner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "voting_nodes",
+        "voting_quorum",
+        "non_voting_replicas",
+        "lagged_learner_left_rotation",
+        "learner_reentered_rotation_after_catchup"
+      ],
+      "properties": {
+        "voting_nodes": { "const": 3 },
+        "voting_quorum": { "const": 2 },
+        "non_voting_replicas": { "const": 1 },
+        "lagged_learner_left_rotation": { "const": true },
+        "learner_reentered_rotation_after_catchup": { "const": true }
+      }
+    },
+    "loss": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "target",
+        "initial_leader",
+        "failed_node",
+        "replacement_leader",
+        "write_operations",
+        "request_attempts",
+        "request_errors",
+        "raw_write_latency_millis",
+        "recovery_millis",
+        "writes_preserved"
+      ],
+      "properties": {
+        "target": { "enum": ["follower", "leader"] },
+        "initial_leader": { "type": "integer", "minimum": 1 },
+        "failed_node": { "type": "integer", "minimum": 1 },
+        "replacement_leader": { "type": "integer", "minimum": 1 },
+        "write_operations": { "const": 64 },
+        "request_attempts": { "const": 64 },
+        "request_errors": { "const": 0 },
+        "raw_write_latency_millis": {
+          "type": "array",
+          "minItems": 64,
+          "maxItems": 64,
+          "items": { "type": "integer", "minimum": 0 }
+        },
+        "recovery_millis": { "type": "integer", "minimum": 0 },
+        "writes_preserved": { "const": true }
+      }
+    },
+    "proxy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "readiness_path",
+        "hls_affinity",
+        "segment_affinity",
+        "hls_session_survived_backend_loss",
+        "discontinuity_tags_after_failover",
+        "unsafe_mutation_attempts",
+        "unsafe_mutation_retries",
+        "connect_timeout_millis",
+        "drain_timeout_millis",
+        "slow_response_millis",
+        "graceful_drain_completed",
+        "graceful_drain_millis"
+      ],
+      "properties": {
+        "readiness_path": { "const": "/readyz" },
+        "hls_affinity": { "const": true },
+        "segment_affinity": { "const": true },
+        "hls_session_survived_backend_loss": { "const": true },
+        "discontinuity_tags_after_failover": { "const": 1 },
+        "unsafe_mutation_attempts": { "const": 1 },
+        "unsafe_mutation_retries": { "const": 0 },
+        "connect_timeout_millis": { "const": 2000 },
+        "drain_timeout_millis": { "const": 75000 },
+        "slow_response_millis": { "type": "integer", "minimum": 2001 },
+        "graceful_drain_completed": { "const": true },
+        "graceful_drain_millis": { "type": "integer", "minimum": 0, "maximum": 75000 }
+      }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "leader_election_recovery_millis",
+        "proxy_connect_timeout_millis",
+        "proxy_drain_timeout_millis",
+        "unsafe_mutation_retries"
+      ],
+      "properties": {
+        "leader_election_recovery_millis": { "const": 10000 },
+        "proxy_connect_timeout_millis": { "const": 2000 },
+        "proxy_drain_timeout_millis": { "const": 75000 },
+        "unsafe_mutation_retries": { "const": 0 }
+      }
+    }
+  }
+}

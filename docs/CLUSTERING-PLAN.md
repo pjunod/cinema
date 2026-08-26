@@ -1026,6 +1026,16 @@ ownership using the session schema's terminal `ended` state, then removes the
 non-voting member without voter-quorum arithmetic. The real-process drill
 restarts the promoted node before allowing protocol deactivation.
 
+P7 closes the proxy and loss-drill portion without blessing one load-balancer
+product. The contract probes `/readyz`, keeps HLS and segments sticky, bounds
+backend connect/drain time, and permits automatic retries only for `GET` and
+`HEAD`. `make cluster-check` now applies the fixed 64-write workload around
+both follower and leader loss, pauses a real learner until it leaves read
+rotation, and runs a two-backend local HTTP fixture that preserves one HLS
+discontinuity while proving a failed `POST` is attempted once. CI retains the
+closed-schema `cluster-failure-drills.json`; its 10-second leader-recovery gate
+is a semantic election budget, not a named-host latency result.
+
 **Acceptance:** `make cluster-check` exercises the failure harness; a fresh
 operator reaches three healthy nodes in under 10 minutes; backup, destroy, and
 restore preserves the content hashes from M2; rolling upgrade never elects an
