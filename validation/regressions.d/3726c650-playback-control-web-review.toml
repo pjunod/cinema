@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3726c650", "69a10673", "55f8ea03", "964dc2c3"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "rust-gate"]
+reason = "The current `tests/playback/web-control.test.js` and web policy checks exercise typed retry and owner reset, stopped/end/replay races, typed observation propagation, event precedence, reversed open-decision and session completions, stale resource release, and attempt-reason isolation. The Rust gate proves bounded, hashed client trigger and accepted contexts remain separately labelled when persisted."

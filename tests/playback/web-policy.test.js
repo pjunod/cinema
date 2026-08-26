@@ -923,13 +923,16 @@ test("every shipped stall report carries the wait's start as its identity", () =
     /noteAutoStall\(p,[^;]*p\.waitAt\)/,
     "the hls.js bufferStalledError report must key on the open wait",
   );
-  for (const caller of ["endWait", "persistentWait"]) {
-    assert.match(
-      shippedSource(caller),
-      /recordWaitStall\(p,kind,ms,runway,[^;]*,began\)/,
-      `${caller} must report the stall against the instant the wait began`,
-    );
-  }
+  assert.match(
+    shippedSource("endWait"),
+    /recordWaitStall\(p,kind,ms,runway,[^;]*,began\)/,
+    "endWait must report the stall against the instant the wait began",
+  );
+  assert.match(
+    shippedSource("persistentWait"),
+    /recordWaitStall\(p,kind,ms,runway,[^;]*,began,controlTrigger\)/,
+    "persistentWait must preserve the wait instant and its exact control trigger",
+  );
 });
 
 // Both automatic rescues open a replacement session and both yield at that
@@ -2386,6 +2389,7 @@ function carryHarness(player) {
     "location",
     "setTimeout",
     "prePlayPreview",
+    "PLAY_OPEN_GATE",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -2414,6 +2418,7 @@ function carryHarness(player) {
     { hash: "#/" },
     () => {},
     () => {},
+    { invalidate() {} },
   );
 }
 
@@ -2738,10 +2743,14 @@ test("a session that lands on a different range repaints the badge", () => {
     "PLAYER",
     "renderPlayerInfo",
     "attachHls",
+    "stopPlaybackControl",
+    "startPlaybackControl",
     [shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };
-  const { attachSession } = build(player, () => { repaints += 1; }, () => {});
+  const { attachSession } = build(
+    player, () => { repaints += 1; }, () => {}, () => {}, () => {},
+  );
 
   attachSession({}, player, {
     start_seconds: 0,

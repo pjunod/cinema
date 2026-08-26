@@ -125,6 +125,13 @@ const PRE_LEARNER_HEARTBEAT_ENV: &str = "PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT"
 const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
+/// A newly admitted learner may need to install the compacted state-machine
+/// snapshot before Hiqlite can report the database healthy. Keep this aligned
+/// with the learner catch-up proof later in the lifecycle scenario.
+const LEARNER_START_TIMEOUT: Duration = Duration::from_secs(120);
+/// Let the voter report its own typed startup timeout before the controller
+/// gives up on the protocol stream at the same instant.
+const START_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
 const COMPACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
 /// The interface every harness listener binds. hiqlite composes each listener
@@ -5420,6 +5427,16 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         );
     }
     let promoted_spec = specs[(PROMOTED - 1) as usize].clone();
+    // A real replacement daemon is configured from the current roster, which
+    // excludes tombstoned node 4. Feeding the removed endpoint to Hiqlite here
+    // makes startup discovery spend its entire bounded wait on a peer the
+    // scenario has already proved cannot return. Keep the durable Raft ids
+    // sparse instead of turning a removed learner into a bootstrap peer.
+    let promoted_specs = specs
+        .iter()
+        .filter(|spec| spec.id != LEARNER)
+        .cloned()
+        .collect::<Vec<_>>();
     cluster
         .request(
             leader,
@@ -5444,7 +5461,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs.clone()).as_learner(),
         )
         .await?;
     cluster
@@ -5540,7 +5557,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs),
         )
         .await?;
     cluster
@@ -6630,6 +6647,14 @@ impl NodeLaunch {
         self.role = ClusterRole::Learner;
         self
     }
+
+    fn startup_timeout(&self) -> Duration {
+        if self.role.is_learner() {
+            LEARNER_START_TIMEOUT
+        } else {
+            START_TIMEOUT
+        }
+    }
 }
 
 fn default_listen_addr() -> String {
@@ -7601,8 +7626,13 @@ impl NodeProcess {
     }
 
     pub async fn wait_ready(&mut self) -> Result<()> {
+        self.wait_ready_with_timeout(START_TIMEOUT + START_RESPONSE_GRACE)
+            .await
+    }
+
+    async fn wait_ready_with_timeout(&mut self, timeout: Duration) -> Result<()> {
         let response = self
-            .read_response(START_TIMEOUT)
+            .read_response(timeout)
             .await
             .with_context(|| format!("voter {} startup response", self.id))?;
         match response {
@@ -7961,8 +7991,9 @@ impl ClusterProcesses {
         if self.nodes[index].is_some() {
             bail!("voter {} is already running", launch.node_id);
         }
+        let response_timeout = launch.startup_timeout() + START_RESPONSE_GRACE;
         let mut process = NodeProcess::spawn(executable, &launch)?;
-        process.wait_ready().await?;
+        process.wait_ready_with_timeout(response_timeout).await?;
         self.nodes[index] = Some(process);
         Ok(())
     }
@@ -8512,33 +8543,44 @@ struct NodeMutableState {
 /// Run one embedded voter: start hiqlite, announce readiness, then serve the
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
-    install_crypto_provider();
-    plurx_core::store::validation_set_store_operation_instrumentation(
-        launch.instrument_store_operations,
-    );
     let node_started = Instant::now();
-    let listeners = voter_listen_addrs(&launch)?;
-    let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
-    let client = match hiqlite::start_node(node_config(&launch)?).await {
-        Ok(client) => client,
-        Err(error) => {
+    let startup_timeout = launch.startup_timeout();
+    let startup = tokio::time::timeout(startup_timeout, async {
+        install_crypto_provider();
+        plurx_core::store::validation_set_store_operation_instrumentation(
+            launch.instrument_store_operations,
+        );
+        let listeners = voter_listen_addrs(&launch)?;
+        let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
+        let client = hiqlite::start_node(node_config(&launch)?)
+            .await
+            .context("start hiqlite voter")?;
+        client.wait_until_healthy_db().await;
+        prove_listeners_bound(&listeners).await?;
+        Ok::<_, anyhow::Error>(client)
+    })
+    .await;
+    let client = match startup {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             write_response(&Response::Error {
-                message: format!("start hiqlite voter: {error}"),
+                message: format!("{error:#}"),
             })
             .await?;
-            return Err(error).context("start hiqlite voter");
+            return Err(error);
+        }
+        Err(_) => {
+            let message = format!(
+                "voter startup timed out after {} seconds",
+                startup_timeout.as_secs()
+            );
+            write_response(&Response::Error {
+                message: message.clone(),
+            })
+            .await?;
+            bail!(message);
         }
     };
-    tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
-        .await
-        .context("voter health timed out")?;
-    if let Err(error) = prove_listeners_bound(&listeners).await {
-        write_response(&Response::Error {
-            message: format!("{error:#}"),
-        })
-        .await?;
-        return Err(error);
-    }
     let replication = ReplicationMonitor::replicated(client.clone());
     let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
     tokio::spawn(replication.clone().passive_metrics_loop(async move {

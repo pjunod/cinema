@@ -463,6 +463,32 @@ pub struct ClientPlaybackSnapshot {
     pub server: Option<ClientServerSnapshot>,
 }
 
+/// Last control snapshot the server accepted before a legacy client recovery.
+/// M2 keeps the legacy recovery authoritative, but preserving this join makes
+/// shadow comparisons possible without inferring client state after the fact.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlSnapshot {
+    pub generation: Option<String>,
+    pub control_epoch: Option<u64>,
+    pub sequence: Option<u64>,
+    pub demand: Option<String>,
+    pub render_state: Option<String>,
+    pub position_ms: Option<i64>,
+    pub buffered_through_ms: Option<i64>,
+    pub observed_download_bps: Option<u64>,
+    pub observation: Option<ClientControlObservation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlObservation {
+    pub dropped_frames: Option<u64>,
+    pub decoder_state: Option<String>,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
@@ -530,6 +556,11 @@ pub struct ClientLog {
     pub session_id: Option<String>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
+    /// Client-reported last accepted protocol state preceding this event.
+    /// It is evidence, not an authoritative server join.
+    pub control: Option<ClientControlSnapshot>,
+    /// Current trigger state sampled immediately before legacy recovery.
+    pub control_trigger: Option<ClientControlSnapshot>,
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -815,6 +846,96 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             None => Some(value.to_owned()),
         }
     }
+    fn control_context(value: &ClientControlSnapshot) -> Option<serde_json::Value> {
+        const MAX_MEDIA_MS: i64 = 366 * 24 * 60 * 60 * 1_000;
+        const MAX_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
+        let mut context = serde_json::Map::new();
+        if let Some(generation) = clipped(&value.generation, 64)
+            .filter(|generation| uuid::Uuid::parse_str(generation).is_ok())
+        {
+            let hash = crate::transcode::session_log_id(&generation);
+            context.insert(
+                "generation".to_owned(),
+                format!("g-{}", hash.trim_start_matches("s-")).into(),
+            );
+        }
+        for (key, number) in [
+            (
+                "control_epoch",
+                value.control_epoch.filter(|number| *number > 0),
+            ),
+            ("sequence", value.sequence.filter(|number| *number > 0)),
+        ] {
+            if let Some(number) = number {
+                context.insert(key.to_owned(), number.into());
+            }
+        }
+        if let Some(demand) = clipped(&value.demand, 16)
+            .filter(|demand| matches!(demand.as_str(), "active" | "hold" | "end"))
+        {
+            context.insert("demand".to_owned(), demand.into());
+        }
+        if let Some(render) = clipped(&value.render_state, 16).filter(|render| {
+            matches!(
+                render.as_str(),
+                "starting" | "rendering" | "waiting" | "stalled" | "seeking" | "ended" | "failed"
+            )
+        }) {
+            context.insert("render_state".to_owned(), render.into());
+        }
+        let position = value
+            .position_ms
+            .filter(|number| (0..=MAX_MEDIA_MS).contains(number));
+        if let Some(number) = position {
+            context.insert("position_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value.buffered_through_ms.filter(|number| {
+            (0..=MAX_MEDIA_MS).contains(number)
+                && position.is_none_or(|position| *number >= position)
+        }) {
+            context.insert("buffered_through_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value
+            .observed_download_bps
+            .filter(|number| *number <= MAX_DOWNLOAD_BPS)
+        {
+            context.insert("observed_download_bps".to_owned(), number.into());
+        }
+        if let Some(value) = value.observation.as_ref() {
+            let mut observation = serde_json::Map::new();
+            if let Some(number) = value
+                .dropped_frames
+                .filter(|number| *number <= 1_000_000_000)
+            {
+                observation.insert("dropped_frames".to_owned(), number.into());
+            }
+            if let Some(state) = clipped(&value.decoder_state, 16).filter(|state| {
+                matches!(state.as_str(), "unknown" | "ready" | "starved" | "failed")
+            }) {
+                observation.insert("decoder_state".to_owned(), state.into());
+            }
+            let error_code = clipped(&value.error_code, 16).filter(|code| {
+                matches!(
+                    code.as_str(),
+                    "network" | "manifest" | "media" | "decoder" | "drm" | "unknown"
+                )
+            });
+            if let Some(code) = error_code {
+                observation.insert("error_code".to_owned(), code.into());
+                if let Some(detail) = clipped(&value.error_detail, 120).filter(|detail| {
+                    !detail
+                        .bytes()
+                        .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+                }) {
+                    observation.insert("error_detail".to_owned(), detail.into());
+                }
+            }
+            if !observation.is_empty() {
+                context.insert("observation".to_owned(), observation.into());
+            }
+        }
+        (!context.is_empty()).then_some(serde_json::Value::Object(context))
+    }
     let mut extra = serde_json::Map::new();
     for (key, value) in [
         ("message", clipped(&Some(ev.message.clone()), 200)),
@@ -937,6 +1058,12 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         if !client.is_empty() {
             extra.insert("client".to_owned(), client.into());
         }
+    }
+    if let Some(control) = ev.control.as_ref().and_then(control_context) {
+        extra.insert("control_accepted_client".to_owned(), control);
+    }
+    if let Some(control) = ev.control_trigger.as_ref().and_then(control_context) {
+        extra.insert("control_trigger_client".to_owned(), control);
     }
     let runway = ev
         .runway
@@ -3488,6 +3615,8 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            control: None,
+            control_trigger: None,
         }
     }
 
@@ -3799,6 +3928,72 @@ mod tests {
         let line = client_log_line(&event, 0);
         assert!(line.contains("runway=0.4s"), "{line}");
         assert!(line.contains("bw=12345kbps"), "{line}");
+    }
+
+    #[test]
+    fn legacy_recovery_keeps_the_preceding_control_snapshot() {
+        let mut event = beacon("stall_recovery", 8_000);
+        event.control = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: Some(23),
+            demand: Some("active".into()),
+            render_state: Some("stalled".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(3),
+                decoder_state: Some("starved".into()),
+                error_code: None,
+                error_detail: None,
+            }),
+        });
+        event.control_trigger = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: None,
+            demand: Some("active".into()),
+            render_state: Some("failed".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(4),
+                decoder_state: Some("failed".into()),
+                error_code: Some("decoder".into()),
+                error_detail: Some("persistent_decode_stall".into()),
+            }),
+        });
+
+        let persisted = client_playback_event(&event, 7);
+        let extra: serde_json::Value =
+            serde_json::from_str(persisted.extra.as_deref().expect("control snapshot JSON"))
+                .expect("valid control snapshot JSON");
+        let accepted = &extra["control_accepted_client"];
+        assert_eq!(accepted["sequence"], 23);
+        assert_eq!(accepted["render_state"], "stalled");
+        assert_eq!(accepted["buffered_through_ms"], 90_400);
+        assert_eq!(accepted["observed_download_bps"], 1_500_000);
+        assert_eq!(accepted["observation"]["decoder_state"], "starved");
+        assert!(accepted["generation"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("g-")));
+        assert!(!persisted
+            .extra
+            .as_deref()
+            .unwrap_or_default()
+            .contains("11111111-1111-4111-8111-111111111111"));
+        assert_eq!(extra["control_trigger_client"]["render_state"], "failed");
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_code"],
+            "decoder"
+        );
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_detail"],
+            "persistent_decode_stall"
+        );
+        assert!(extra["control_trigger_client"].get("sequence").is_none());
     }
 
     #[test]

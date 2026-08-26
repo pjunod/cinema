@@ -355,6 +355,7 @@ ui-golden: ## Rewrite tests/ui-structure.golden after an intended UI change
 .PHONY: web-check
 web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/playback/web-policy.test.js
+	@node tests/playback/web-control.test.js
 	@node tests/web/reader.test.js
 	@node tests/web/page-read-budget.test.js
 	@scripts/js-check

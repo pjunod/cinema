@@ -18,6 +18,9 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 /// Pure playback-routing policy, separated from the player adapter so the
 /// decisions that change bytes or transport can run under Node unit tests.
 const PLAYBACK_POLICY_JS: &str = include_str!("../web/playback-policy.js");
+/// Passive playback-control reporter. It owns exchange sequencing and
+/// coalescing, but deliberately has no authority over playback recovery.
+const PLAYBACK_CONTROL_JS: &str = include_str!("../web/playback-control.js");
 /// EPUB pagination, locator, and sandbox-frame policy. Kept out of the app
 /// shell so native WebViews can reuse the same navigator in M3.
 const READER_JS: &str = include_str!("../web/reader.js");
@@ -60,6 +63,19 @@ pub async fn playback_policy_js() -> Response {
             (header::CACHE_CONTROL, "no-cache"),
         ],
         PLAYBACK_POLICY_JS,
+    )
+        .into_response()
+}
+
+/// Serve the browser's passive playback-control reporter.
+pub async fn playback_control_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        PLAYBACK_CONTROL_JS,
     )
         .into_response()
 }

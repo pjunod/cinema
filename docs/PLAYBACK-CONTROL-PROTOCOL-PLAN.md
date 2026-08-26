@@ -979,6 +979,7 @@ added here before code changes.
 | hls.js fatal-error handlers | Destroy/recreate or compatibility-transcode | Normalize error as proposal; only controller applies returned action |
 | Auto ABR sample/controller | Opens a replacement session | Retain as action proposal using joined control facts; no direct create |
 | automatic fallback claim/budgets | Prevent some recovery collisions | Delete once the server arbiter/action ID is authoritative |
+| `handleEnded` / `endedTries` truncated-stream branch | Treats an early media end as failure and directly reopens up to its retry budget | Send a failed trigger observation now; after action cutover, only the controller may apply the arbiter's successor action |
 
 | Android source symbol | Present mutation | Final disposition |
 |---|---|---|

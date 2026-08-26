@@ -552,6 +552,7 @@ paths = [
   "crates/plurxd/src/http/internal_media_sessions.rs",
   "crates/plurxd/src/http/{hls,network,pgs_overlay,stream}.rs",
   "crates/plurxd/src/web/playback-policy.js",
+  "crates/plurxd/src/web/playback-control.js",
   "docs/PLAYBACK*.md",
   "docs/STUTTER-4K.md",
   "scripts/dv-evidence",
