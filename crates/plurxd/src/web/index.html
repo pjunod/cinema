@@ -53,6 +53,16 @@
   .top .spacer{flex:1}
   .search{max-width:240px}
   .topctl{display:flex;align-items:center;gap:16px}
+  /* Desktop activity can contain a cluster-wide failure sentence. Let that
+     middle status lane surrender width before the primary navigation does:
+     the old auto minimum kept the pill at its full text width, so flexbox
+     shrank the nav and wrapped Settings onto a second row. The text remains
+     intact in the DOM; only its paint is ellipsized when chrome is crowded. */
+  @media(min-width:641px){
+    header.top nav{flex:none;flex-wrap:nowrap}
+    header.top .activity{min-width:0;max-width:min(48vw,860px);overflow:hidden}
+    header.top .activity .activitytext{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  }
   main{padding:22px 20px 60px;max-width:1400px;margin:0 auto}
   /* Phone header: one non-wrapping row overflowed and clipped the profile chip.
      Stack it — logo + controls on row 1, then the nav and search full-width. */
@@ -3524,7 +3534,7 @@ function paintActivity(acts){
   if(a.detail) bits.push(esc(a.detail));
   if(a.percent!=null) bits.push(a.percent+"%");
   const extra=acts.length>1?` &nbsp;+${acts.length-1}`:"";
-  el.innerHTML=`<span class="spin"></span><span>${bits.join(" · ")}${extra}</span>`;
+  el.innerHTML=`<span class="spin"></span><span class="activitytext">${bits.join(" · ")}${extra}</span>`;
   el.style.display="flex";
 }
 async function pollActivity(){
