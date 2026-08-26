@@ -514,12 +514,17 @@ impl VodServe {
                     && artifact.pipeline_sha256 == pipeline
             });
         let Some(artifact) = artifact else {
-            let _ = self
+            let queued = self
                 .shared
                 .store
                 .enqueue_cluster_fragment_index(&repair)
-                .await;
-            return Err("the exact v2 artifact is queued".to_owned());
+                .await
+                .map_err(|error| format!("queueing the exact v2 artifact: {error}"))?;
+            return Err(if queued {
+                "the exact v2 artifact is queued".to_owned()
+            } else {
+                "the exact v2 artifact is awaiting queue admission".to_owned()
+            });
         };
         let index = crate::fragment_index_cluster::hydrate(
             self.shared.store.as_ref(),

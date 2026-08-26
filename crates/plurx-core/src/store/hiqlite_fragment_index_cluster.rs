@@ -18,6 +18,7 @@ const MAX_ACTIVE_JOBS: i64 = 4_096;
 const MAX_ERROR_CODE_BYTES: usize = 64;
 const MAX_LOCAL_EXCLUSIONS: usize = MAX_ACTIVE_JOBS as usize;
 const CLAIM_SCAN_LIMIT: i64 = MAX_ACTIVE_JOBS;
+const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
 
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     validate_sql(CLUSTER_FRAGMENT_INDEX_SCHEMA)?;
@@ -216,6 +217,16 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "invalid cluster fragment-index job".to_owned(),
             ));
         }
+        let eligibility_cutoff = job.created_at_ms.saturating_sub(QUEUE_ELIGIBILITY_MS);
+        self.execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                    not_before_ms = $1, updated_at_ms = $1,
+                    last_error_code = 'queue_expired'
+              WHERE state = 'queued' AND created_at_ms < $2",
+            params!(job.created_at_ms, eligibility_cutoff),
+        )
+        .await?;
         Ok(self
             .execute(
                 "INSERT INTO cluster_fragment_index_jobs
@@ -237,12 +248,19 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                     attempts = CASE
                         WHEN cluster_fragment_index_jobs.state = 'cancelled'
+                          OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                           OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
                         ELSE cluster_fragment_index_jobs.attempts END,
                     not_before_ms = excluded.not_before_ms,
+                    created_at_ms = CASE
+                        WHEN cluster_fragment_index_jobs.last_error_code = 'queue_expired'
+                        THEN excluded.created_at_ms
+                        ELSE cluster_fragment_index_jobs.created_at_ms END,
                     updated_at_ms = excluded.updated_at_ms,
                     last_error_code = NULL
                   WHERE cluster_fragment_index_jobs.state = 'cancelled'
+                     OR (cluster_fragment_index_jobs.state = 'failed'
+                       AND cluster_fragment_index_jobs.last_error_code = 'queue_expired')
                      OR (cluster_fragment_index_jobs.state = 'failed'
                        AND cluster_fragment_index_jobs.attempts < $10
                        AND cluster_fragment_index_jobs.not_before_ms <= excluded.created_at_ms)",
@@ -284,6 +302,15 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .iter()
             .cloned()
             .collect::<std::collections::HashSet<_>>();
+        self.execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                    not_before_ms = $1, updated_at_ms = $1,
+                    last_error_code = 'queue_expired'
+              WHERE state = 'queued' AND created_at_ms < $2",
+            params!(now_ms, now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS)),
+        )
+        .await?;
         for _ in 0..8 {
             let sql = format!(
                 "SELECT {JOB_COLS} FROM cluster_fragment_index_jobs
@@ -348,13 +375,27 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 "invalid cluster fragment-index repair job".to_owned(),
             ));
         }
+        let eligibility_cutoff = replacement
+            .created_at_ms
+            .saturating_sub(QUEUE_ELIGIBILITY_MS);
+        self.execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
+                    not_before_ms = $1, updated_at_ms = $1,
+                    last_error_code = 'queue_expired'
+              WHERE state = 'queued' AND created_at_ms < $2",
+            params!(replacement.created_at_ms, eligibility_cutoff),
+        )
+        .await?;
         Ok(self
             .execute(
                 "UPDATE cluster_fragment_index_jobs
                     SET file_id = $2, source_size = $3, source_mtime = $4,
                         source_sha256 = $5, pipeline_sha256 = $6,
                         state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
-                        attempts = CASE WHEN file_id <> $2 THEN 0 ELSE attempts END,
+                        attempts = CASE
+                          WHEN state = 'ready' OR file_id <> $2 THEN 0
+                          ELSE attempts END,
                         not_before_ms = $7, updated_at_ms = $8,
                         last_error_code = 'holders_unavailable'
                   WHERE cache_key = $1
