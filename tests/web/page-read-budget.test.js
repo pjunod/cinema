@@ -136,6 +136,8 @@ test("Activity suppresses duplicate and overlapping cluster polls", async () => 
   requests[1].resolve([{ label: "Scanning" }]);
   await current;
   assert.equal(activity.style.display, "flex");
+  assert.match(activity.innerHTML, /class="activitytext"/,
+    "the header gives long activity copy its truncation hook");
 
   harness.navigate("#/activity");
   await harness.pollActivity();
