@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f5238856"]
+points = ["core.media"]
+checks = ["rust-gate"]
+reason = "The retained cluster-index queue regressions reopen a same-file ready artifact older than the eligibility window and require its fresh timestamp and retry budget to remain claimable, mix stale queued rows with crashed fifth-attempt owners at the full 4,096-row cap and require later readable admission, and prove a due failed repair cannot bypass that cap until a slot is freed. SQLite executes those behavioral contracts while the shared replicated-store gate compiles and exercises the matching Hiqlite statements."
