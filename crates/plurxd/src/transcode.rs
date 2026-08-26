@@ -12440,17 +12440,28 @@ impl TranscodeManager {
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
                 match session.control.claim_expiry().await {
-                    Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease))
-                    | Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                    Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
                         // The actor publishes the shared process-local fence
-                        // before replying. A dropped claimant is therefore
-                        // rediscovered here as Retired and cannot become an
-                        // unrenewable map/child zombie.
+                        // before replying, so this claim owns ordinary idle
+                        // teardown even if the task is cancelled later.
                         expired.push((
                             id,
                             session,
                             lease.idle_for.as_secs(),
                             lease.last_renewal_kind,
+                            "idle",
+                        ));
+                    }
+                    Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                        // A prior explicit retirement or expiry claimant died
+                        // before process teardown. Preserve that distinction
+                        // instead of inventing a second idle verdict.
+                        expired.push((
+                            id,
+                            session,
+                            lease.idle_for.as_secs(),
+                            lease.last_renewal_kind,
+                            "retired_recovery",
                         ));
                     }
                     Ok(crate::playback_control::RollingExpiryClaim::Live) => {
@@ -12460,11 +12471,17 @@ impl TranscodeManager {
                         // A dead mailbox cannot accept another renewal. Fail
                         // closed instead of leaking an encoder forever.
                         session.control.fence_unavailable();
-                        expired.push((id, session, 0, "control-unavailable"));
+                        expired.push((
+                            id,
+                            session,
+                            0,
+                            "control-unavailable",
+                            "control_unavailable",
+                        ));
                     }
                 }
             }
-            for (id, session, idle_seconds, last_request) in expired {
+            for (id, session, idle_seconds, last_request, cleanup_reason) in expired {
                 // Kills a suspended child too — SIGKILL is not blockable and
                 // does not need the process scheduled to take effect.
                 if !self.retire_session(&id, &session).await {
@@ -12473,7 +12490,7 @@ impl TranscodeManager {
                 let end_reason = if session.failed.load(Relaxed) {
                     "failed"
                 } else {
-                    "idle"
+                    cleanup_reason
                 };
                 self.emit_session_event(
                     &id,
@@ -12489,7 +12506,8 @@ impl TranscodeManager {
                     session = %session_log_id(&id),
                     idle_seconds,
                     last_request,
-                    "reaped idle transcode session"
+                    reason = end_reason,
+                    "reaped transcode session after lease actor verdict"
                 );
             }
             // What this box actually achieves, remembered per class of work.
@@ -13395,22 +13413,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reap_loop_finishes_an_expiry_claim_whose_original_caller_never_tore_down() {
+    async fn reap_loop_finishes_a_dropped_retirement_with_truthful_cause_and_cleanup() {
         let dir = crate::test_tempdir().expect("session dir");
         let session_id = uuid::Uuid::new_v4().to_string();
         let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
-        fixture
-            .session
-            .control
-            .set_renewal_for_test(
-                Instant::now() - Duration::from_secs(SESSION_IDLE_SECS + 1),
-                "before-expiry",
-            )
-            .await;
-        assert!(matches!(
-            fixture.session.control.claim_expiry().await,
-            Ok(crate::playback_control::RollingExpiryClaim::Claimed(_))
-        ));
+        // Model a caller disappearing after the actor committed explicit
+        // retirement but before it entered manager teardown. The actor-level
+        // regression drops the actual oneshot reply; this exercises the real
+        // repair loop that must recover the committed fence.
+        fixture.session.control.retire().await;
         assert!(fixture.session.control.is_retired());
         assert!(!fixture
             .state
@@ -13422,21 +13433,57 @@ mod tests {
         let reaper = tokio::spawn(Arc::clone(&fixture.state.transcode).reap_loop());
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                if !fixture
+                let map_gone = !fixture
                     .state
                     .transcode
                     .sessions
                     .lock()
                     .await
-                    .contains_key(&session_id)
-                {
+                    .contains_key(&session_id);
+                let child_exited = {
+                    let mut child = fixture.session.child.lock().await;
+                    child.as_mut().is_none_or(|child| {
+                        child
+                            .try_wait()
+                            .expect("placeholder child status")
+                            .is_some()
+                    })
+                };
+                let scratch_gone = tokio::fs::metadata(&fixture.session.dir).await.is_err();
+                if map_gone && child_exited && scratch_gone {
                     break;
                 }
-                tokio::task::yield_now().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
         })
         .await
-        .expect("repair loop must rediscover and tear down an already-retired actor");
+        .expect("repair loop must finish map, child, and scratch teardown");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(event) = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: Some("session_end".to_owned()),
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("playback events")
+                    .into_iter()
+                    .find(|event| event.reason.as_deref() == Some("retired_recovery"))
+                {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retired recovery event persisted");
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some(session_log_id(&session_id).as_str())
+        );
         reaper.abort();
         assert!(matches!(reaper.await, Err(error) if error.is_cancelled()));
     }

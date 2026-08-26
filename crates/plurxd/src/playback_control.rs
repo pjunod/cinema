@@ -1527,7 +1527,7 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(&format!(
-        "# HELP plurx_playback_rolling_lease_expirations_total Rolling-session leases atomically claimed after both renewal sources stopped.\n\
+        "# HELP plurx_playback_rolling_lease_expirations_total Rolling-session leases atomically claimed after all renewal sources stopped.\n\
          # TYPE plurx_playback_rolling_lease_expirations_total counter\n\
          plurx_playback_rolling_lease_expirations_total {}\n\
          # HELP plurx_playback_rolling_lease_retirements_total Rolling-session actors retired for non-expiry lifecycle reasons.\n\
