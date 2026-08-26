@@ -1,9 +1,9 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-26
-**Merged baseline:** `origin/main` at `8fca4ab2` (PR #611)
-**Current work:** `codex/playback-control-m3-demand-lease` — M3b, pushed branch,
-draft PR [#612](https://github.com/pjunod/plurx/pull/612), review corrections in progress
+**Merged baseline:** `origin/main` at `bcc5b09a` (PR #613)
+**Current work:** `codex/playback-control-m3-demand-lease` — M3b, ready PR
+[#612](https://github.com/pjunod/plurx/pull/612), rebased review corrections pending push
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
