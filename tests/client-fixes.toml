@@ -535,7 +535,7 @@ test_anchor = "dpadWalksDownThroughTheGroupByPickerAndBackUp"
 
 [[fixes]]
 id = "apple.live-recovery-session-presentation"
-commits = ["39db8672"]
+commits = ["39db8672", "bc872a6c"]
 source = "clients/apple/Sources/PlurxAPI.swift"
 source_anchor = "static func acceptHlsSessionPresentation(_ started: HlsStart) -> HlsStart"
 test = "clients/apple/Tests/AppleClientTests.swift"
