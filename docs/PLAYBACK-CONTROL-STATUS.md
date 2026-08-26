@@ -76,7 +76,7 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Five first-review findings corrected; corrected head pending push/re-review |
+| Implementation | Five first-review findings corrected; corrected head pushed for re-review |
 | Adversarial diff review | **Changes requested** at `cbc8029c`; second review required on the corrected head |
 | Unit/focused tests | Not run — intentionally waits for second-review approval |
 | Full local gate | Not run |

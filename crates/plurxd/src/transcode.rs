@@ -11827,7 +11827,8 @@ impl TranscodeManager {
     /// The rolling actor or immutable registry must still own the capability
     /// when the response authorization linearizes.
     pub(crate) async fn renew_resolved_media(&self, session_id: &str, kind: &'static str) -> bool {
-        if let Some(session) = self.sessions.lock().await.get(session_id).cloned() {
+        let rolling = self.sessions.lock().await.get(session_id).cloned();
+        if let Some(session) = rolling {
             return session.touch_if_active(kind).await;
         }
         self.vod.renew_resolved_media(session_id).await
