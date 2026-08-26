@@ -65,8 +65,11 @@ cancels the stale active generation and the replacement generation can be
 admitted immediately under the same file id. Once hashing proves that a
 replacement file has the same content/pipeline key, it may join the existing
 ready artifact even when scanner file id, size/mtime generation, or path
-changed. A canceled terminal worker row is rebound with a fresh queue age; the
-published artifact remains available throughout.
+changed. An existing active or ready worker row is safe to join by that key. A
+missing, canceled, or retryable failed worker row is queued for holder repair:
+the artifact catalog record alone does not prove that any node still has the
+bytes. The canceled row receives a fresh queue age, and the published catalog
+record remains available throughout repair.
 A force request does not silently replace an ordinary request already in
 flight; it returns conflict and can be made once the first generation
 finishes. Likewise, force does not delete the published artifact. It reopens a

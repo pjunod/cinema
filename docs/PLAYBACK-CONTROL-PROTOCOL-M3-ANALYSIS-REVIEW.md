@@ -81,12 +81,15 @@ correct, then found four narrower gaps:
   canceled rebind, or the v11-to-current migration path.
 
 The follow-up uses the content/pipeline key—not obsolete scanner fields—to join
-active or ready work. A matching retained artifact converts a missing or
-terminal ordinary worker row directly to ready, while force still reopens a
-queued rebuild. Every terminal rebind receives a fresh queue age. Hiqlite now
-checks the inserted request id in any state when its insert succeeds; duplicate
+active or ready work. A matching artifact record is retained, but a missing or
+terminal ordinary worker row is queued for holder repair because catalog
+metadata does not prove the bytes are still available. Force likewise reopens
+a queued rebuild. Every terminal rebind receives a fresh queue age. Hiqlite now
+always checks the caller's request id in any state after insert, including when
+an internal transport retry observes the already-committed conflict; duplicate
 joins still require an active exact generation. Terminal transitions enforce
-the 8,192-row global ceiling synchronously. SQLite and real-Raft contracts cover
-ready replacement, canceled rebind, forced reopen with artifact retention,
-charged retry exhaustion, the foreground stop signal, and both v11 and v12
-migration paths.
+the 8,192-row global ceiling synchronously while preserving the row that just
+became terminal. SQLite and real-Raft contracts cover ready replacement,
+canceled rebind, forced reopen with artifact retention, ambiguous committed
+insert recovery, charged retry exhaustion, the foreground stop signal, and
+both v11 and v12 migration paths.

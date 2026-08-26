@@ -6228,6 +6228,35 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .collect::<Result<Vec<_>, _>>()
         .expect("commit analysis source");
 
+    client
+        .execute(
+            "INSERT INTO analysis_requests
+              (request_id, file_id, source_size, source_mtime, component,
+               force_rebuild, target_node_id, state, fence, attempts,
+               not_before_ms, created_at_ms, updated_at_ms)
+             VALUES ($1, 1, 100, 10, 'fragment_index', 0, 'node-a',
+                     'ready', 1, 1, 1, 1, 1)",
+            hiqlite::params!("ambiguous-request"),
+        )
+        .await
+        .expect("seed a terminal request from an ambiguous committed attempt");
+    let ambiguous = store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: "ambiguous-request".to_owned(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 10,
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 2,
+            created_at_ms: 2,
+        })
+        .await
+        .expect("recover the caller row after a committed insert retry");
+    assert_eq!(ambiguous.request_id, "ambiguous-request");
+    assert_eq!(ambiguous.state, "ready");
+
     store
         .enqueue_analysis_request(&NewAnalysisRequest {
             request_id: "analysis-request".to_owned(),
@@ -6449,7 +6478,7 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .await
         .expect("read rebound worker")
         .expect("rebound worker");
-    assert_eq!(rebound.state, "ready");
+    assert_eq!(rebound.state, "queued");
     assert_eq!(rebound.file_id, 2);
     assert_eq!(rebound.created_at_ms, 51);
     assert!(store

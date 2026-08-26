@@ -138,6 +138,7 @@ BEGIN
      WHERE request_id IN (
        SELECT request_id FROM analysis_requests
         WHERE state IN ('ready', 'failed', 'cancelled')
+          AND request_id <> NEW.request_id
         ORDER BY updated_at_ms, request_id
         LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
                     WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));

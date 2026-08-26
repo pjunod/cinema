@@ -310,17 +310,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                                  WHERE cache_key = ?1
                                    AND state IN ('queued', 'running', 'ready'))
-                        OR (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                    WHERE cache_key = ?1 AND source_sha256 = ?11
-                                      AND pipeline_sha256 = ?12)
-                          AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                            WHERE cache_key = ?1)
-                            OR EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                        WHERE cache_key = ?1
-                                          AND state IN ('failed', 'cancelled'))))
-                        OR (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                        WHERE cache_key = ?1)
-                          AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                        OR ((SELECT COUNT(*) FROM cluster_fragment_index_jobs
                                 WHERE state IN ('queued', 'running')) < ?10
                           AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                                             WHERE cache_key = ?1)
@@ -329,7 +319,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                           state = 'cancelled'
                                           OR (state = 'failed' AND (
                                             last_error_code = 'queue_expired'
-                                            OR (attempts < ?13 AND not_before_ms <= ?2))))))))))",
+                                            OR (attempts < ?11 AND not_before_ms <= ?2)))))))))",
                 params![
                     job.cache_key,
                     now_ms,
@@ -341,8 +331,6 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     job.source_mtime,
                     if request.force_rebuild { 1_i64 } else { 0_i64 },
                     MAX_ACTIVE_JOBS,
-                    job.source_sha256,
-                    job.pipeline_sha256,
                     MAX_ATTEMPTS,
                 ],
             )?;
@@ -355,29 +343,16 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     (cache_key, file_id, source_size, source_mtime, source_sha256,
                      pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
                      attempts, not_before_ms, created_at_ms, updated_at_ms, last_error_code)
-                 SELECT ?1, ?2, ?3, ?4, ?5, ?6,
-                        CASE WHEN ?9 = 0 AND EXISTS (
-                          SELECT 1 FROM cluster_fragment_index_artifacts
-                           WHERE cache_key = ?1 AND source_sha256 = ?5
-                             AND pipeline_sha256 = ?6)
-                        THEN 'ready' ELSE 'queued' END,
-                        NULL, 0, NULL, 0,
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, 'queued', NULL, 0, NULL, 0,
                         ?7, ?8, ?8, NULL
                  ON CONFLICT(cache_key) DO UPDATE SET
                     file_id = excluded.file_id, source_size = excluded.source_size,
                     source_mtime = excluded.source_mtime,
                     source_sha256 = excluded.source_sha256,
                     pipeline_sha256 = excluded.pipeline_sha256,
-                    state = CASE WHEN ?9 = 0 AND EXISTS (
-                      SELECT 1 FROM cluster_fragment_index_artifacts
-                       WHERE cache_key = ?1 AND source_sha256 = ?5
-                         AND pipeline_sha256 = ?6)
-                      THEN 'ready' ELSE 'queued' END,
+                    state = 'queued',
                     owner_node_id = NULL, lease_expires_ms = NULL,
-                    attempts = CASE WHEN ?9 = 1 OR EXISTS (
-                      SELECT 1 FROM cluster_fragment_index_artifacts
-                       WHERE cache_key = ?1 AND source_sha256 = ?5
-                         AND pipeline_sha256 = ?6) THEN 0
+                    attempts = CASE WHEN ?9 = 1 THEN 0
                       WHEN cluster_fragment_index_jobs.state = 'cancelled'
                         OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                         OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
@@ -388,11 +363,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                   WHERE (?9 = 1 AND cluster_fragment_index_jobs.state
                                       IN ('ready', 'failed', 'cancelled'))
                      OR (?9 = 0 AND (
-                       (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                 WHERE cache_key = ?1 AND source_sha256 = ?5
-                                   AND pipeline_sha256 = ?6)
-                         AND cluster_fragment_index_jobs.state IN ('failed', 'cancelled'))
-                       OR cluster_fragment_index_jobs.state = 'cancelled'
+                       cluster_fragment_index_jobs.state = 'cancelled'
                        OR (cluster_fragment_index_jobs.state = 'failed'
                          AND (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                            OR (cluster_fragment_index_jobs.attempts < ?10
@@ -1717,7 +1688,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancelled_content_rebind_resets_queue_age_and_retains_artifact() {
+    async fn cancelled_content_rebind_queues_repair_resets_age_and_retains_artifact() {
         let store = SqliteStore::open_in_memory().expect("store");
         seed_files(&store).await;
         let old = job(1, 10, 1);
@@ -1784,7 +1755,7 @@ mod tests {
             .await
             .expect("read rebound job")
             .expect("rebound job");
-        assert_eq!(job.state, "ready");
+        assert_eq!(job.state, "queued");
         assert_eq!(job.file_id, 2);
         assert_eq!(job.created_at_ms, 30_000_002);
         assert!(store

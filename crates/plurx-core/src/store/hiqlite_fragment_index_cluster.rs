@@ -194,9 +194,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         if !valid_request(request) {
             return Err(StoreError::Task("invalid analysis request".to_owned()));
         }
-        let inserted = self
-            .execute(
-                "INSERT INTO analysis_requests
+        self.execute(
+            "INSERT INTO analysis_requests
                 (request_id, file_id, source_size, source_mtime, component,
                  force_rebuild, target_node_id, state, owner_node_id, fence,
                  lease_expires_ms, attempts, not_before_ms, result_cache_key,
@@ -207,45 +206,39 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 AND (SELECT COUNT(*) FROM analysis_requests
                       WHERE state IN ('queued', 'running', 'submitted')) < $10
              ON CONFLICT DO NOTHING",
+            params!(
+                &request.request_id,
+                request.file_id,
+                request.source_size,
+                request.source_mtime,
+                &request.component,
+                if request.force_rebuild { 1_i64 } else { 0_i64 },
+                &request.target_node_id,
+                request.not_before_ms,
+                request.created_at_ms,
+                MAX_ANALYSIS_REQUESTS
+            ),
+        )
+        .await?;
+        self.client()
+            .query_consistent_map::<RequestRow, _>(
+                format!(
+                    "SELECT {REQUEST_COLS} FROM analysis_requests
+                      WHERE request_id = $1 OR (
+                        file_id = $2 AND source_size = $3 AND source_mtime = $4
+                        AND component = $5 AND target_node_id = $6
+                        AND state IN ('queued', 'running', 'submitted'))
+                      ORDER BY CASE WHEN request_id = $1 THEN 0 ELSE 1 END,
+                        created_at_ms, request_id LIMIT 1"
+                ),
                 params!(
                     &request.request_id,
                     request.file_id,
                     request.source_size,
                     request.source_mtime,
                     &request.component,
-                    if request.force_rebuild { 1_i64 } else { 0_i64 },
-                    &request.target_node_id,
-                    request.not_before_ms,
-                    request.created_at_ms,
-                    MAX_ANALYSIS_REQUESTS
-                ),
-            )
-            .await?
-            == 1;
-        let (predicate, predicate_params) = if inserted {
-            ("request_id = $1".to_owned(), params!(&request.request_id))
-        } else {
-            (
-                "file_id = $1 AND source_size = $2 AND source_mtime = $3
-                   AND component = $4 AND target_node_id = $5
-                   AND state IN ('queued', 'running', 'submitted')"
-                    .to_owned(),
-                params!(
-                    request.file_id,
-                    request.source_size,
-                    request.source_mtime,
-                    &request.component,
                     &request.target_node_id
                 ),
-            )
-        };
-        self.client()
-            .query_consistent_map::<RequestRow, _>(
-                format!(
-                    "SELECT {REQUEST_COLS} FROM analysis_requests WHERE {predicate}
-                          ORDER BY created_at_ms, request_id LIMIT 1"
-                ),
-                predicate_params,
             )
             .await?
             .into_iter()
@@ -389,17 +382,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                             EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                                      WHERE cache_key = $1
                                        AND state IN ('queued', 'running', 'ready'))
-                            OR (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                        WHERE cache_key = $1 AND source_sha256 = $11
-                                          AND pipeline_sha256 = $12)
-                              AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                                WHERE cache_key = $1)
-                                OR EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
-                                            WHERE cache_key = $1
-                                              AND state IN ('failed', 'cancelled'))))
-                            OR (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                            WHERE cache_key = $1)
-                              AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                            OR ((SELECT COUNT(*) FROM cluster_fragment_index_jobs
                                     WHERE state IN ('queued', 'running')) < $10
                               AND (NOT EXISTS (SELECT 1 FROM cluster_fragment_index_jobs
                                                 WHERE cache_key = $1)
@@ -408,7 +391,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                               state = 'cancelled'
                                               OR (state = 'failed' AND (
                                                 last_error_code = 'queue_expired'
-                                                OR (attempts < $13 AND not_before_ms <= $2))))))))))"
+                                                OR (attempts < $11 AND not_before_ms <= $2)))))))))"
                         .to_owned(),
                     params!(
                         &job.cache_key,
@@ -421,8 +404,6 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         job.source_mtime,
                         if request.force_rebuild { 1_i64 } else { 0_i64 },
                         MAX_ACTIVE_JOBS,
-                        &job.source_sha256,
-                        &job.pipeline_sha256,
                         MAX_ATTEMPTS
                     ),
                 ),
@@ -431,13 +412,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         (cache_key, file_id, source_size, source_mtime, source_sha256,
                          pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
                          attempts, not_before_ms, created_at_ms, updated_at_ms, last_error_code)
-                     SELECT $1, $2, $3, $4, $5, $6,
-                            CASE WHEN $11 = 0 AND EXISTS (
-                              SELECT 1 FROM cluster_fragment_index_artifacts
-                               WHERE cache_key = $1 AND source_sha256 = $5
-                                 AND pipeline_sha256 = $6)
-                            THEN 'ready' ELSE 'queued' END,
-                            NULL, 0, NULL, 0,
+                     SELECT $1, $2, $3, $4, $5, $6, 'queued', NULL, 0, NULL, 0,
                             $7, $8, $8, NULL
                       WHERE EXISTS (SELECT 1 FROM analysis_requests
                         WHERE request_id = $9 AND state = 'submitted' AND fence = $10
@@ -448,16 +423,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         source_mtime = excluded.source_mtime,
                         source_sha256 = excluded.source_sha256,
                         pipeline_sha256 = excluded.pipeline_sha256,
-                        state = CASE WHEN $11 = 0 AND EXISTS (
-                          SELECT 1 FROM cluster_fragment_index_artifacts
-                           WHERE cache_key = $1 AND source_sha256 = $5
-                             AND pipeline_sha256 = $6)
-                          THEN 'ready' ELSE 'queued' END,
+                        state = 'queued',
                         owner_node_id = NULL, lease_expires_ms = NULL,
-                        attempts = CASE WHEN $11 = 1 OR EXISTS (
-                          SELECT 1 FROM cluster_fragment_index_artifacts
-                           WHERE cache_key = $1 AND source_sha256 = $5
-                             AND pipeline_sha256 = $6) THEN 0
+                        attempts = CASE WHEN $11 = 1 THEN 0
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
                             OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
@@ -468,11 +436,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE ($11 = 1 AND cluster_fragment_index_jobs.state
                                           IN ('ready', 'failed', 'cancelled'))
                          OR ($11 = 0 AND (
-                           (EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
-                                     WHERE cache_key = $1 AND source_sha256 = $5
-                                       AND pipeline_sha256 = $6)
-                             AND cluster_fragment_index_jobs.state IN ('failed', 'cancelled'))
-                           OR cluster_fragment_index_jobs.state = 'cancelled'
+                           cluster_fragment_index_jobs.state = 'cancelled'
                            OR (cluster_fragment_index_jobs.state = 'failed'
                              AND (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                                OR (cluster_fragment_index_jobs.attempts < $12
