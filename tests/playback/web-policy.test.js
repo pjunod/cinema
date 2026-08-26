@@ -104,6 +104,26 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
+test("Activity renders explicit lease and demand-window instrumentation", () => {
+  const source = shippedSource("activitySessionControlText");
+  const render = new Function(`${source}; return activitySessionControlText;`)();
+  assert.equal(
+    render({
+      lease_mode: "explicit",
+      lease_state: "active",
+      lease_timeout_ms: 30_000,
+      control_demand: "active",
+      reported_position_ms: 12_000,
+      client_runway_ms: 8_000,
+      production_policy: "explicit_demand",
+      production_ahead_seconds: -3,
+      production_target_seconds: 18,
+    }),
+    "explicit lease 30s · demand active · position 12s · client runway 8s · " +
+      "production explicit_demand · production deficit 3s · target 18s",
+  );
+});
+
 test("playback info names the active VOD or live-recovery presentation", () => {
   const stats = shippedSource("updateStats");
   assert.match(stats, /PLAYER\.vod\?"VOD":PLAYER\.sessionId\?"Live recovery"/);
@@ -2821,6 +2841,14 @@ test("HDR10 Auto leaves the cold-start height to the grade-aware server", () => 
 });
 
 test("control lease labels distinguish legacy, explicit, and VOD delivery", () => {
+  assert.equal(policy.controlLeaseMode(null, false, 0), "legacy");
+  assert.equal(policy.controlLeaseMode(null, false, 7), "explicit");
+  assert.equal(policy.controlLeaseMode(null, true, 0), "vod");
+  assert.equal(
+    policy.controlLeaseMode("explicit", true, 0),
+    "explicit",
+    "a server-reported mode wins once health arrives",
+  );
   assert.deepEqual(policy.controlLeasePresentation("legacy"), {
     ownership: "passive",
     label: "legacy",

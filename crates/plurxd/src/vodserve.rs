@@ -31,8 +31,8 @@ use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use plurx_core::domain::MediaFile;
@@ -149,6 +149,7 @@ pub struct VodHlsFacts {
 #[derive(Clone)]
 pub(crate) struct ResponseOwner {
     lifecycle: Arc<Mutex<()>>,
+    incarnation: Arc<()>,
     rendition: Arc<Rendition>,
 }
 
@@ -392,6 +393,9 @@ struct Session {
     /// this session only. Keeping the gate on the session avoids making an
     /// unrelated rolling or VOD control wait behind node-wide Store I/O.
     lifecycle: Arc<Mutex<()>>,
+    /// Unique identity of this attachment while `lifecycle` is deliberately
+    /// stable across same-id idle reap and resurrection.
+    incarnation: Arc<()>,
     last_touch: StdMutex<Instant>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
@@ -407,6 +411,10 @@ struct Shared {
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Per-session-id transition gates survive the remove/reattach gap via a
+    /// weak registry. A reaper holds the strong gate through reader detach;
+    /// resurrection upgrades the same gate before it can attach a successor.
+    session_lifecycles: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
@@ -457,6 +465,7 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                session_lifecycles: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
@@ -730,6 +739,21 @@ impl VodServe {
             })?;
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let lifecycle = self.shared.session_lifecycle(&session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let previous_rendition = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(&session_id)
+            .map(|session| Arc::clone(&session.rendition));
+        if let Some(previous) = previous_rendition
+            .as_ref()
+            .filter(|previous| !Arc::ptr_eq(previous, &rendition))
+        {
+            previous.detach_reader(&session_id).await;
+        }
         rendition.attach_reader(&session_id, start_entry).await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         self.shared.sessions.lock().await.insert(
@@ -747,7 +771,8 @@ impl VodServe {
                 kind: req.kind,
                 supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle,
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -849,6 +874,7 @@ impl VodServe {
                 return false;
             }
             if !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+                || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
                 || !Arc::ptr_eq(&session.rendition, &owner.rendition)
             {
                 return false;
@@ -873,6 +899,7 @@ impl VodServe {
         };
         session.tombstone.is_none()
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
+            && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
             && Arc::ptr_eq(&session.rendition, &owner.rendition)
     }
 
@@ -925,12 +952,15 @@ impl VodServe {
     /// Idempotent — the first call writes the tombstone and detaches, every
     /// later one only confirms ownership.
     pub async fn end(&self, session_id: &str, cause: Terminal) -> bool {
-        let lifecycle = {
+        let (lifecycle, incarnation) = {
             let sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions.get(session_id) else {
                 return false;
             };
-            Arc::clone(&session.lifecycle)
+            (
+                Arc::clone(&session.lifecycle),
+                Arc::clone(&session.incarnation),
+            )
         };
         let _lifecycle = lifecycle.lock().await;
         let (rendition, file_id, height, kind) = {
@@ -938,7 +968,9 @@ impl VodServe {
             let Some(session) = sessions.get_mut(session_id) else {
                 return false;
             };
-            if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
+            if !Arc::ptr_eq(&session.lifecycle, &lifecycle)
+                || !Arc::ptr_eq(&session.incarnation, &incarnation)
+            {
                 return false;
             }
             if session.tombstone.is_some() {
@@ -1350,7 +1382,6 @@ impl VodServe {
                 .map(|(id, session)| (id.clone(), Arc::clone(&session.lifecycle)))
                 .collect()
         };
-        let mut reaped = Vec::new();
         for (id, lifecycle) in expired {
             let _lifecycle = lifecycle.lock().await;
             let rendition = {
@@ -1370,16 +1401,16 @@ impl VodServe {
                 }
             };
             if let Some(rendition) = rendition {
-                reaped.push((id, rendition));
+                // Keep the per-id gate through detach. A resurrection for the
+                // same durable id must attach only after this old reader is
+                // gone, never between registry removal and detach.
+                rendition.detach_reader(&id).await;
+                tracing::info!(
+                    session = %session_log_id(&id),
+                    rendition = %rendition.key,
+                    "vod session idle-reaped (sliding TTL)"
+                );
             }
-        }
-        for (id, rendition) in &reaped {
-            rendition.detach_reader(id).await;
-            tracing::info!(
-                session = %session_log_id(id),
-                rendition = %rendition.key,
-                "vod session idle-reaped (sliding TTL)"
-            );
         }
 
         // Purge un-admitted renditions dormant past their TTL. The collection
@@ -1419,6 +1450,7 @@ impl VodServe {
         for rendition in renditions {
             rendition.kick();
         }
+        self.shared.prune_session_lifecycles();
     }
 
     // ---- serving internals -------------------------------------------------
@@ -1440,6 +1472,7 @@ impl VodServe {
             session.block_budget,
             ResponseOwner {
                 lifecycle: Arc::clone(&session.lifecycle),
+                incarnation: Arc::clone(&session.incarnation),
                 rendition,
             },
         )))
@@ -1638,6 +1671,26 @@ impl VodServe {
 }
 
 impl Shared {
+    fn session_lifecycle(&self, session_id: &str) -> Arc<Mutex<()>> {
+        let mut lifecycles = self
+            .session_lifecycles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(lifecycle) = lifecycles.get(session_id).and_then(Weak::upgrade) {
+            return lifecycle;
+        }
+        let lifecycle = Arc::new(Mutex::new(()));
+        lifecycles.insert(session_id.to_owned(), Arc::downgrade(&lifecycle));
+        lifecycle
+    }
+
+    fn prune_session_lifecycles(&self) {
+        self.session_lifecycles
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, lifecycle| lifecycle.strong_count() > 0);
+    }
+
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
     /// timestamp survives shorter HTTP block deadlines and their 503 retries.
     fn arm_materialize_watchdog(self: &Arc<Self>, rendition: &Arc<Rendition>, index: u32) {
@@ -3245,7 +3298,8 @@ mod tests {
                 kind: request("vod-control", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle(session_id),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -3929,7 +3983,8 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -3999,7 +4054,8 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -4033,7 +4089,8 @@ mod tests {
                 kind: request("play-b", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
@@ -4052,6 +4109,75 @@ mod tests {
                 .expect("touch lock"),
             replacement_touch,
             "an old incarnation cannot renew a new attachment under the same id",
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_reap_and_same_id_resurrection_are_one_reader_transition() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+        let rendition = rendition_of(&serve, "sess-a").await;
+        let (_, stale_owner) = serve
+            .playlist("sess-a")
+            .await
+            .expect("ours")
+            .expect("playlist");
+        *serve.shared.sessions.lock().await["sess-a"]
+            .last_touch
+            .lock()
+            .expect("touch lock") = Instant::now() - SESSION_IDLE_TTL - Duration::from_secs(1);
+
+        // Stop the old reap exactly after registry removal but before reader
+        // detach. Resurrection must wait on the stable per-id lifecycle gate,
+        // not attach a successor that the old reap can then remove.
+        let readers = rendition.readers.lock().await;
+        let maintain = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            async move { serve.maintain().await }
+        });
+        wait_until("idle registry removal", Duration::from_secs(2), || {
+            let serve = Arc::clone(&serve);
+            async move { !serve.shared.sessions.lock().await.contains_key("sess-a") }
+        })
+        .await;
+        let resurrect = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let file = file.clone();
+            async move { create(&serve, &file, "sess-a", "play-b", &settings()).await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !resurrect.is_finished(),
+            "resurrection waits until the old reader detach is complete"
+        );
+
+        drop(readers);
+        maintain.await.expect("maintenance task");
+        resurrect.await.expect("resurrection task");
+        assert!(serve.shared.sessions.lock().await.contains_key("sess-a"));
+        assert_eq!(
+            rendition
+                .readers
+                .lock()
+                .await
+                .get("sess-a")
+                .copied()
+                .expect("replacement reader")
+                .last_served,
+            None,
+            "the replacement reader survives the predecessor's reap"
+        );
+        assert!(
+            !serve
+                .commit_resolved_media("sess-a", &stale_owner, Some(1))
+                .await,
+            "the old response incarnation cannot commit into the replacement"
+        );
+        assert_eq!(
+            rendition.readers.lock().await["sess-a"].last_served,
+            None,
+            "the stale completion did not move the replacement frontier"
         );
     }
 
@@ -4167,7 +4293,8 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_millis(1),
-                lifecycle: Arc::new(Mutex::new(())),
+                lifecycle: serve.shared.session_lifecycle("sess-a"),
+                incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,

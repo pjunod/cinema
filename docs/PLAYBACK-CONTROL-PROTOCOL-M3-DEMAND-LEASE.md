@@ -101,9 +101,20 @@ deadline, so scheduler delay cannot permit a post-expiry signal. The mutex is
 never held across an await. M4 deletes both temporary gates only when child
 transitions themselves are actor messages.
 
-Equal-sequence replays, rejected controls, expired actors, and unavailable
-mailboxes never change demand or signal the producer. A dead mailbox fences
-the session for repair cleanup.
+Equal-sequence replays never change demand or renew the lease, but they do
+request idempotent producer-policy convergence so a response lost after the
+original acceptance cannot defer the retained command until the repair tick.
+Rejected controls never change demand or signal the producer. Expired actors
+and unavailable mailboxes fence the session and wake the same flow worker so
+it can release any response waiter and exit while teardown owns the child.
+
+Actor acceptance and the corresponding flow ticket are one mailbox
+transaction. One detached, coalescing worker per rolling incarnation applies
+those tickets and media-frontier tickets. HTTP cancellation therefore cannot
+cancel an accepted producer transition, while a streamed response can publish
+EOF immediately after committing lease/frontier state instead of waiting
+behind encoder replacement or signal serialization. A successful control
+response waits for its ticket, so it still reports physically converged state.
 
 Every resolved HTTP object carries an opaque engine/incarnation token to its
 final response path. Buffered objects commit only after the complete bounded
@@ -111,8 +122,10 @@ read and response construction succeed. Streamed objects perform a
 non-mutating ownership check before headers, then renew only when the promised
 body reaches EOF; a dropped or failed body never commits. A complete media
 object (or a valid `304` proving the client already has it) may advance the
-download frontier. A completed byte range renews demand but does not claim the
-whole segment. Both rolling and VOD commits revalidate the token against the
+download frontier. A strict subset byte range renews demand but does not claim
+the whole segment; an open-ended or suffix range that resolves to every byte
+is a complete object regardless of its `206` status. Both rolling and VOD
+commits revalidate the token against the
 currently registered attachment, so a tombstone or same-id reattachment
 between resolution and commit cannot mutate the successor.
 
@@ -132,10 +145,13 @@ Live status and Activity detail now expose:
   delivery rate, and producer progress.
 
 The playback overlay names an explicit demand window and distinguishes the
-30-second enforced lease from the bootstrap's compatibility lease. Joined
-client events persist the same server-side fields. Structured hold/resume
-logs include the policy, measured ahead/target, physical bytes, fleet bytes,
-and exact reason without a raw session capability.
+30-second enforced lease from the bootstrap's compatibility lease, including
+before the first health poll by using the VOD flag or accepted control
+sequence. Activity renders the same compact lease, demand, client frontier,
+production policy, ahead/deficit, and target facts. Joined client events
+persist the same server-side fields. Structured hold/resume logs include the
+policy, measured ahead/target, physical bytes, fleet bytes, and exact reason
+without a raw session capability.
 
 Prometheus adds
 `plurx_playback_rolling_producer_transitions_total{transition,reason}` with

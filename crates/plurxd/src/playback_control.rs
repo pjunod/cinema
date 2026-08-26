@@ -1096,6 +1096,76 @@ pub(crate) struct RollingControlOutcome {
     pub action: ControlAction,
     pub platform: ClientPlatform,
     pub lease: RollingLeaseSnapshot,
+    pub flow_ticket: u64,
+}
+
+struct RollingFlowSync {
+    requested: AtomicU64,
+    applied: AtomicU64,
+    request_notify: tokio::sync::Notify,
+    applied_notify: tokio::sync::Notify,
+    #[cfg(test)]
+    wait_after_check: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+}
+
+impl RollingFlowSync {
+    fn new() -> Self {
+        Self {
+            requested: AtomicU64::new(0),
+            applied: AtomicU64::new(0),
+            request_notify: tokio::sync::Notify::new(),
+            applied_notify: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            wait_after_check: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn request(&self) -> u64 {
+        let ticket = self.requested.fetch_add(1, Ordering::AcqRel) + 1;
+        self.request_notify.notify_one();
+        ticket
+    }
+
+    async fn next(&self, handled: u64) -> u64 {
+        loop {
+            let requested = self.requested.load(Ordering::Acquire);
+            if requested > handled {
+                return requested;
+            }
+            self.request_notify.notified().await;
+        }
+    }
+
+    fn complete(&self, ticket: u64) {
+        self.applied.fetch_max(ticket, Ordering::AcqRel);
+        self.applied_notify.notify_waiters();
+    }
+
+    async fn wait_for(&self, ticket: u64) {
+        loop {
+            let notified = self.applied_notify.notified();
+            tokio::pin!(notified);
+            // `notify_waiters` does not retain a permit. Register this waiter
+            // before checking the monotonic generation so completion cannot
+            // land in the check-to-await gap and strand a control response.
+            notified.as_mut().enable();
+            if self.applied.load(Ordering::Acquire) >= ticket {
+                return;
+            }
+            #[cfg(test)]
+            let pause = self
+                .wait_after_check
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            notified.as_mut().await;
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1103,6 +1173,7 @@ pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
     retired: Arc<AtomicBool>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
+    flow_sync: Arc<RollingFlowSync>,
 }
 
 struct OwnedLocalControlRequest {
@@ -1150,6 +1221,7 @@ struct RollingControlActor {
     expiration_claimed: bool,
     retired_fence: Arc<AtomicBool>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
+    flow_sync: Arc<RollingFlowSync>,
 }
 
 impl RollingControlActor {
@@ -1160,6 +1232,7 @@ impl RollingControlActor {
             initial_kind,
             retired_fence,
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
+            Arc::new(RollingFlowSync::new()),
         )
     }
 
@@ -1168,6 +1241,7 @@ impl RollingControlActor {
         initial_kind: &'static str,
         retired_fence: Arc<AtomicBool>,
         producer_transition: Arc<std::sync::Mutex<Instant>>,
+        flow_sync: Arc<RollingFlowSync>,
     ) -> Self {
         Self {
             control: ControlState::default(),
@@ -1179,6 +1253,7 @@ impl RollingControlActor {
             expiration_claimed: false,
             retired_fence,
             producer_transition,
+            flow_sync,
         }
     }
 
@@ -1241,12 +1316,17 @@ impl RollingControlActor {
             self.demand = Some(request.snapshot);
             ROLLING_LEASE_RENEWALS[0].fetch_add(1, Ordering::Relaxed);
         }
+        // Accepted mutation and its producer-policy wake are one actor
+        // transaction. Replays also wake so a response lost after acceptance
+        // can drive the same retained demand without waiting for repair.
+        let flow_ticket = self.flow_sync.request();
         Ok(RollingControlOutcome {
             disposition,
             accepted_sequence,
             action,
             platform,
             lease: self.snapshot_at(now),
+            flow_ticket,
         })
     }
 
@@ -1258,6 +1338,7 @@ impl RollingControlActor {
             self.retired = true;
             self.expiration_claimed = true;
             self.retired_fence.store(true, Ordering::Release);
+            self.flow_sync.request();
             ROLLING_LEASE_EXPIRATIONS.fetch_add(1, Ordering::Relaxed);
             // Report the committed transition, not the pre-claim observation.
             // The claimant may be the reaper, a snapshot reader, or the exact
@@ -1334,6 +1415,7 @@ impl RollingControlActor {
                     ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
                 }
                 self.retired_fence.store(true, Ordering::Release);
+                self.flow_sync.request();
                 let _ = reply.send(());
             }
             #[cfg(test)]
@@ -1389,12 +1471,14 @@ impl RollingControlHandle {
         let now = Instant::now();
         let producer_transition =
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
+        let flow_sync = Arc::new(RollingFlowSync::new());
         tokio::spawn(
             RollingControlActor::with_producer_transition(
                 now,
                 initial_kind,
                 Arc::clone(&retired),
                 Arc::clone(&producer_transition),
+                Arc::clone(&flow_sync),
             )
             .run(receiver),
         );
@@ -1402,6 +1486,7 @@ impl RollingControlHandle {
             sender,
             retired,
             producer_transition,
+            flow_sync,
         }
     }
 
@@ -1516,7 +1601,28 @@ impl RollingControlHandle {
     /// A closed mailbox cannot accept another renewal. The repair loop uses
     /// this fail-closed fence before removing the orphaned session.
     pub(crate) fn fence_unavailable(&self) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.retired.store(true, Ordering::Release);
+        self.flow_sync.request();
+    }
+
+    pub(crate) fn request_flow(&self) -> u64 {
+        self.flow_sync.request()
+    }
+
+    pub(crate) async fn next_flow_request(&self, handled: u64) -> u64 {
+        self.flow_sync.next(handled).await
+    }
+
+    pub(crate) fn complete_flow(&self, ticket: u64) {
+        self.flow_sync.complete(ticket);
+    }
+
+    pub(crate) async fn wait_for_flow(&self, ticket: u64) {
+        self.flow_sync.wait_for(ticket).await;
     }
 
     #[cfg(test)]
@@ -2268,6 +2374,58 @@ mod tests {
         handle.retire().await;
         assert!(!handle.renew_media("segment").await);
         assert!(handle.snapshot().await.is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn flow_completion_between_check_and_await_cannot_be_lost() {
+        let sync = Arc::new(RollingFlowSync::new());
+        let ticket = sync.request();
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *sync
+            .wait_after_check
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let waiter = {
+            let sync = Arc::clone(&sync);
+            tokio::spawn(async move { sync.wait_for(ticket).await })
+        };
+
+        // The waiter has registered but has not awaited the notification.
+        // `notify_waiters` in this exact interval must still release it.
+        pause.wait().await;
+        sync.complete(ticket);
+        pause.wait().await;
+        tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("registered completion wake was retained")
+            .expect("waiter task");
+    }
+
+    #[tokio::test]
+    async fn unavailable_mailbox_fence_orders_after_an_inflight_producer_signal() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let transition = handle.lock_producer_transition();
+        assert!(handle.producer_transition_is_live(&transition));
+        let (fenced, observed) = std::sync::mpsc::channel();
+        let worker = {
+            let handle = handle.clone();
+            std::thread::spawn(move || {
+                handle.fence_unavailable();
+                fenced.send(()).expect("fence observation");
+            })
+        };
+
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "fail-closed retirement cannot publish through the signal gate"
+        );
+        assert!(!handle.is_retired());
+        drop(transition);
+        observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fence follows the signal transition");
+        worker.join().expect("fence thread");
+        assert!(handle.is_retired());
     }
 
     #[tokio::test(start_paused = true)]

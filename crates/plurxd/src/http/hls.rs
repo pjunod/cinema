@@ -1993,6 +1993,9 @@ async fn commit_resolved_media(
         .commit_resolved_media(session, owner, kind, object_name, complete_object)
         .await
     {
+        state
+            .transcode
+            .request_response_flow(session, owner, object_name, complete_object);
         Ok(())
     } else {
         Err(ApiError::NotFound("transcode session"))
@@ -3351,6 +3354,17 @@ fn requested_byte_range(value: Option<&str>, len: u64) -> Result<Option<(u64, u6
     Ok(Some((start, end)))
 }
 
+/// Whether the resolved HTTP range carries every byte of the immutable
+/// object. Open-ended and suffix ranges can cover the full object just as a
+/// range-less 200 does; frontier semantics follow bytes, not status codes.
+fn range_covers_object(range: Option<(u64, u64)>, len: u64) -> bool {
+    match range {
+        None => true,
+        Some((0, end)) => len > 0 && end == len - 1,
+        Some(_) => false,
+    }
+}
+
 fn segment_etag(session: &str, segment: &str, len: u64) -> String {
     format!("\"{session}-{segment}-{len:x}\"")
 }
@@ -3544,7 +3558,7 @@ async fn vod_segment_response(
             &owner,
             "init-segment",
             Some(seg),
-            requested_range.is_none(),
+            range_covers_object(requested_range, ready.len),
         )
         .await?;
         return Ok(response);
@@ -3577,7 +3591,7 @@ async fn vod_segment_response(
             "media-segment"
         },
         seg.to_owned(),
-        requested_range.is_none(),
+        range_covers_object(requested_range, ready.len),
     );
     let stream = futures_util::stream::unfold(
         (Some(reader), Some(completion), 0_u64, len),
@@ -3594,7 +3608,7 @@ async fn vod_segment_response(
                         if let Some((manager, session, owner, kind, object, complete_object)) =
                             completion
                         {
-                            let _ = manager
+                            if manager
                                 .commit_resolved_media(
                                     &session,
                                     &owner,
@@ -3602,7 +3616,15 @@ async fn vod_segment_response(
                                     Some(&object),
                                     complete_object,
                                 )
-                                .await;
+                                .await
+                            {
+                                manager.request_response_flow(
+                                    &session,
+                                    &owner,
+                                    Some(&object),
+                                    complete_object,
+                                );
+                            }
                         }
                     } else {
                         let session = completion
@@ -3800,7 +3822,7 @@ async fn segment_local(
             &response_owner,
             "init-segment",
             Some(seg),
-            requested_range.is_none(),
+            range_covers_object(requested_range, opened.len),
         )
         .await
         .is_err()
@@ -3855,7 +3877,7 @@ async fn segment_local(
             "media-segment"
         },
         seg.to_owned(),
-        requested_range.is_none(),
+        range_covers_object(requested_range, opened.len),
     );
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
@@ -3883,7 +3905,7 @@ async fn segment_local(
                         if let Some((manager, session, owner, kind, object, complete_object)) =
                             completion
                         {
-                            let _ = manager
+                            if manager
                                 .commit_resolved_media(
                                     &session,
                                     &owner,
@@ -3891,7 +3913,15 @@ async fn segment_local(
                                     Some(&object),
                                     complete_object,
                                 )
-                                .await;
+                                .await
+                            {
+                                manager.request_response_flow(
+                                    &session,
+                                    &owner,
+                                    Some(&object),
+                                    complete_object,
+                                );
+                            }
                         }
                     }
                     None
@@ -4077,6 +4107,17 @@ mod tests {
         assert_eq!(requested_byte_range(Some("bytes=10-9"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=0-1,3-4"), 100), Err(()));
+        assert!(range_covers_object(None, 100));
+        assert!(range_covers_object(
+            requested_byte_range(Some("bytes=0-"), 100).expect("open range"),
+            100
+        ));
+        assert!(range_covers_object(
+            requested_byte_range(Some("bytes=-200"), 100).expect("full suffix"),
+            100
+        ));
+        assert!(!range_covers_object(Some((0, 98)), 100));
+        assert!(!range_covers_object(Some((1, 99)), 100));
     }
 
     #[test]
@@ -4173,6 +4214,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_segment_eof_does_not_wait_for_a_blocked_producer_transition() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "nonblocking-eof").await;
+        let body = vec![11_u8; 12 * 1024];
+        tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
+            .await
+            .expect("segment bytes");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("nonblocking-eof".to_owned(), "seg00001.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("segment response");
+
+        // Model an encoder replacement or hold/resume transition that owns
+        // the physical signal gate. EOF may commit lease/frontier state and
+        // queue flow work, but must not hold END_STREAM behind this gate.
+        let transition = fixture.hold_child_transition().await;
+        let delivered = tokio::time::timeout(
+            Duration::from_millis(250),
+            axum::body::to_bytes(response.into_body(), body.len() + 1),
+        )
+        .await
+        .expect("response EOF is independent of producer signaling")
+        .expect("segment body");
+        assert_eq!(delivered.len(), body.len());
+        drop(transition);
+    }
+
+    #[tokio::test]
     async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
@@ -4205,6 +4277,30 @@ mod tests {
             -1,
             "a completed byte range proves demand but not a complete segment"
         );
+
+        let mut full_span = HeaderMap::new();
+        full_span.insert(header::RANGE, "bytes=0-".parse().expect("full range"));
+        let full_span = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            full_span,
+        )
+        .await
+        .expect("full-span range response");
+        assert_eq!(full_span.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(full_span.into_body(), body.len() + 1)
+                .await
+                .expect("full-span body")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.fetched_segment(),
+            4,
+            "a Range response that contains every byte advances the frontier"
+        );
+        let delivered_after_full_span = fixture.delivered_bytes();
 
         let mut conditional = HeaderMap::new();
         conditional.insert(
@@ -4242,7 +4338,7 @@ mod tests {
         .await
         .expect("range response");
         assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert_eq!(fixture.delivered_bytes(), delivered_after_full_span);
         assert_eq!(fixture.last_renewal_kind().await, renewal_before_rejection);
         assert_eq!(fixture.fetched_segment(), frontier_before_rejection);
         assert!(

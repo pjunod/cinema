@@ -1034,7 +1034,10 @@ fn evaluate_flow(
         hold,
         policy: "explicit_demand",
         production_ahead_seconds,
-        production_target_seconds: Some(production_target_seconds),
+        // Zero disables only the time limiter. Reporting `target: 0` for an
+        // active producer says the opposite, so expose no finite target while
+        // still passing zero through to `ahead_hold`'s disabled-limit rule.
+        production_target_seconds: (limits.max_secs > 0).then_some(production_target_seconds),
     }
 }
 
@@ -1734,6 +1737,10 @@ struct Session {
     /// the manager registry lock was released before telemetry can wait.
     #[cfg(test)]
     activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after the control actor has accepted and ticketed a
+    /// command while the HTTP-owned transition guard is still held.
+    #[cfg(test)]
+    control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
@@ -1768,6 +1775,10 @@ struct Session {
     /// binds the full demand snapshot without creating a second liveness
     /// clock.
     control: crate::playback_control::RollingControlHandle,
+    /// One detached, cancellation-safe consumer applies every actor-owned
+    /// producer-policy wake. HTTP response futures may disappear after the
+    /// actor accepts a command; this worker must not disappear with them.
+    flow_worker_started: AtomicBool,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -1987,6 +1998,7 @@ impl Session {
                 crate::playback_control::ClientPlatform,
                 i64,
                 u32,
+                u64,
             ),
             crate::playback_control::ControlStateError,
         >,
@@ -2005,6 +2017,7 @@ impl Session {
             outcome.platform,
             outcome.lease.expires_at_unix_ms(),
             outcome.lease.timeout_ms(),
+            outcome.flow_ticket,
         )))
     }
 
@@ -7031,6 +7044,8 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: true,
             _cache_reader: cache_reader,
@@ -7038,6 +7053,7 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -10295,6 +10311,8 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -10302,6 +10320,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10886,6 +10905,8 @@ impl TranscodeManager {
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
             cached: false,
             _cache_reader: None,
@@ -10893,6 +10914,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("session-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -11395,7 +11417,7 @@ impl TranscodeManager {
     /// accepted sequence renews the selected engine's established activity
     /// clock with the explicit `control` reason; replay and rejection do not.
     pub(crate) async fn hls_session_control(
-        &self,
+        self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
     ) -> Option<
         Result<
@@ -11435,6 +11457,10 @@ impl TranscodeManager {
             return Some(Err(error));
         }
         let session_id = control.session_id.to_owned();
+        // Start the detached consumer before sending the actor command. If
+        // the request future is cancelled after mailbox admission, the actor
+        // can still publish a ticket that this session-owned worker applies.
+        self.ensure_flow_worker(&session_id, Arc::clone(&session));
         let (
             disposition,
             accepted_sequence,
@@ -11442,18 +11468,27 @@ impl TranscodeManager {
             platform,
             lease_expires_at_unix_ms,
             lease_timeout_ms,
+            flow_ticket,
         ) = match session.accept_control(control).await? {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        drop(transition);
-        if disposition == crate::playback_control::ControlDisposition::Accepted {
-            // Re-read the actor snapshot inside flow control. The accepted
-            // demand, expiry/retirement decisions, and producer signal are
-            // ordered by the same child-transition gate, so a newer control
-            // may supersede this one but a stale snapshot can never act later.
-            self.flow_control(&session, &session_id).await;
+        #[cfg(test)]
+        let control_pause = session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        if let Some(pause) = control_pause {
+            pause.wait().await;
+            pause.wait().await;
         }
+        drop(transition);
+        // The actor also tickets replayed sequences. A caller whose first
+        // response was lost can therefore wait for physical convergence
+        // without relying on the periodic repair pass.
+        session.control.wait_for_flow(flow_ticket).await;
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
@@ -11899,7 +11934,6 @@ impl TranscodeManager {
                     if let Some(end) = session.segments.lock().await.end_ms_of(index) {
                         session.fetched_end_ms.fetch_max(end, Relaxed);
                     }
-                    self.flow_control(&session, session_id).await;
                 }
             }
             return true;
@@ -12905,6 +12939,61 @@ impl TranscodeManager {
             })
     }
 
+    /// Ensure this rolling incarnation has exactly one detached consumer for
+    /// actor-owned flow tickets. The task is intentionally rooted in the
+    /// session, not in any HTTP request: accepted control remains effective
+    /// after cancellation, and response-body EOF never waits on a child
+    /// signal before it can publish END_STREAM.
+    fn ensure_flow_worker(self: &Arc<Self>, session_id: &str, session: Arc<Session>) {
+        if session.flow_worker_started.swap(true, AcqRel) {
+            return;
+        }
+        let manager = Arc::clone(self);
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            let mut handled = 0_u64;
+            loop {
+                let ticket = session.control.next_flow_request(handled).await;
+                let is_current = manager
+                    .sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session));
+                if session.control.is_retired() || !is_current {
+                    // Release any response already waiting on this generation;
+                    // it will observe retirement or replacement in status.
+                    session.control.complete_flow(ticket);
+                    break;
+                }
+                manager.flow_control(&session, &session_id).await;
+                handled = ticket;
+                session.control.complete_flow(ticket);
+            }
+            session.flow_worker_started.store(false, Release);
+        });
+    }
+
+    /// Queue policy re-evaluation after a completed rolling media object.
+    /// VOD has no producer to pace, and partial objects do not advance the
+    /// client's download frontier.
+    pub(crate) fn request_response_flow(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        object_name: Option<&str>,
+        complete_object: bool,
+    ) {
+        let MediaResponseOwnerKind::Rolling(session) = &owner.0 else {
+            return;
+        };
+        if !complete_object || object_name.and_then(segment_index).is_none() {
+            return;
+        }
+        self.ensure_flow_worker(session_id, Arc::clone(session));
+        session.control.request_flow();
+    }
+
     /// Re-evaluate one session after a client request refreshes the published
     /// index or advances the download frontier.
     ///
@@ -13586,6 +13675,10 @@ impl HlsDeliveryFixture {
         self.session.high_segment.load(Relaxed)
     }
 
+    pub(crate) async fn hold_child_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.session.child_transition.lock().await
+    }
+
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
@@ -13657,6 +13750,7 @@ fn test_session(dir: PathBuf) -> Session {
         #[cfg(any(test, feature = "live-hls-recovery"))]
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
+        control_applied_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
         cached: false,
@@ -13665,6 +13759,7 @@ fn test_session(dir: PathBuf) -> Session {
         cache_manifest: None,
         cache_location: None,
         control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+        flow_worker_started: AtomicBool::new(false),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -14053,6 +14148,102 @@ mod tests {
         assert_eq!(extra["control_demand"], "hold");
         assert_eq!(extra["production_policy"], "explicit_demand");
         assert_eq!(extra["production_target_seconds"], 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_response_cannot_cancel_an_accepted_producer_transition() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+
+        // The actor has accepted, renewed, retained demand, and issued its
+        // flow ticket, but the request still owns the child transition gate.
+        pause.wait().await;
+        request.abort();
+        assert!(request
+            .await
+            .expect_err("request was cancelled")
+            .is_cancelled());
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.suspended.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached flow worker applied accepted hold after cancellation");
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+        snapshot.playback_rate = 0.0;
+        snapshot.render_state = crate::playback_control::RenderState::Waiting;
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 1,
+                snapshot,
+            })
+            .await
+            .expect("live session")
+            .expect("replayed control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        let HlsSessionInfo::Live(status) = replay.status else {
+            panic!("rolling replay returned VOD status");
+        };
+        assert!(status.suspended);
+        assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
     }
 
     #[tokio::test]
@@ -16824,6 +17015,30 @@ mod tests {
             Some(AheadHoldReason::Bytes),
             "explicit observations cannot bypass the physical scratch bound"
         );
+
+        let unbounded_time = evaluate_flow(
+            Some(Ahead {
+                seconds: 10_000,
+                bytes: 0,
+            }),
+            Some(10_000_000),
+            0,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            0,
+            0,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 2_000,
+                global_max_bytes: 8_000,
+            },
+            false,
+        );
+        assert_eq!(unbounded_time.production_target_seconds, None);
+        assert_eq!(
+            unbounded_time.hold, None,
+            "a zero configured time limit is disabled, not a target of zero"
+        );
     }
 
     #[test]
@@ -18182,6 +18397,7 @@ mod tests {
                 )
                 .await
             );
+            mgr.flow_control(&session, &info.session_id).await;
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
@@ -18813,6 +19029,7 @@ mod tests {
             #[cfg(any(test, feature = "live-hls-recovery"))]
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
+            control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
             cached,
@@ -18821,6 +19038,7 @@ mod tests {
             cache_manifest: None,
             cache_location: None,
             control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+            flow_worker_started: AtomicBool::new(false),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),

@@ -267,11 +267,34 @@ mod tests {
 
     #[test]
     fn both_stats_ledgers_render_the_tested_control_lease_presentation() {
+        assert!(PLAYBACK_POLICY_JS.contains("function controlLeaseMode"));
         assert!(PLAYBACK_POLICY_JS.contains("function controlLeasePresentation"));
+        assert_eq!(
+            INDEX_HTML
+                .matches("PlaybackPolicy.controlLeaseMode(")
+                .count(),
+            2
+        );
         assert!(INDEX_HTML.contains("`${leasePresentation.ownership} · ${leaseState}"));
         assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · accepted #"));
         assert!(INDEX_HTML.contains("`${standardLeasePresentation.ownership} · connecting`"));
         assert!(!INDEX_HTML.contains("`Passive · accepted #"));
+    }
+
+    #[test]
+    fn activity_stream_rows_render_control_and_production_facts() {
+        assert!(INDEX_HTML.contains("function activitySessionControlText"));
+        for label in [
+            "lease_timeout_ms",
+            "control_demand",
+            "reported_position_ms",
+            "client_runway_ms",
+            "production_policy",
+            "production_ahead_seconds",
+            "production_target_seconds",
+        ] {
+            assert!(INDEX_HTML.contains(label), "missing Activity field {label}");
+        }
     }
 
     #[test]

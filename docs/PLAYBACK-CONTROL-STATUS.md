@@ -41,16 +41,17 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch is pushed as draft PR #612. Adversarial review of
-`1d229162` requested changes across response ownership/commit ordering, exact
-snapshot timing, standard-overlay truth, and this ledger. The remediation
-linearizes snapshots and physical signals at the exact actor deadline; carries
-an opaque engine/incarnation token through every response; commits streamed
-lease/frontier state only at successful EOF; distinguishes complete objects
-from byte ranges; and names VOD/rolling ownership correctly. A fresh review of
-the committed remediation still precedes every test command. The slice's acceptance
-boundary is intentionally smaller than the whole actor migration; the exact
-behavior
+The active branch is pushed as draft PR #612. Adversarial review has driven
+remediation across response ownership/commit ordering, same-id VOD
+reattachment, exact snapshot and physical-signal timing, cancellation-safe
+producer convergence, full-object Range semantics, overlay truth, Activity
+instrumentation, and this ledger. The current work carries an opaque
+engine/incarnation token through every response; commits streamed
+lease/frontier state only at successful EOF; queues producer work outside the
+response body; and names VOD/rolling ownership correctly. A fresh review of
+the final committed remediation still precedes every test command. The
+slice's acceptance boundary is intentionally smaller than the whole actor
+migration; the exact behavior
 and timer ledger are in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
 
