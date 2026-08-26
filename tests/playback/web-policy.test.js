@@ -2836,7 +2836,7 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     estimateKbps: 1_000,
     runwaySeconds: 0.5,
   });
-  assert.equal(pressured.height, 360, "starvation reaches the ladder floor");
+  assert.equal(pressured.height, 480, "starvation reaches the available ladder floor");
   assert.equal(pressured.emergency, true);
 });
 
