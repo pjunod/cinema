@@ -19,9 +19,9 @@ feeding an AVR keeps lossless TrueHD instead of a 256 kb/s AAC downmix: the box
 has no TrueHD decoder, the receiver does, and the claim follows the route. It is
 recomputed on every decision, because unplugging HDMI changes the answer.
 
-> Status: **v0.2.7**, build `45` — native viewer parity across phone, foldable,
-> and TV. Build 45 requires immutable VOD for every segmented session and
-> rejects a mixed-version server response that reports `vod:false`. Build 44
+> Status: **v0.2.7**, build `46` — native viewer parity across phone, foldable,
+> and TV. Build 46 accepts the temporary live-HLS recovery presentation while
+> immutable VOD indexes are backfilled. Build 44
 > retries a stalled stream through another cluster node's
 > ingress without moving the account origin or spending the codec-compatibility
 > ladder; only a transport failure moves, and an `https` session will not fall

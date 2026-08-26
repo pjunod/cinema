@@ -1174,6 +1174,9 @@ pub struct SettingsDto {
     /// VOD availability kill switch. On by default; turning it off refuses
     /// HLS session creation and never restores the removed live presentation.
     pub vod_presentation: bool,
+    /// Temporary growing-HLS fallback for typed VOD prerequisite failures.
+    /// On by default while the recovery feature is compiled in.
+    pub vod_live_recovery: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1391,6 +1394,7 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
+        vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1445,6 +1449,7 @@ pub struct UpdateSettings {
     /// absent leaves each as-is. Disabling refuses HLS rather than restoring
     /// the removed live engine. `vod_working_set_bytes` refuses 0.
     pub vod_presentation: Option<bool>,
+    pub vod_live_recovery: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -1617,6 +1622,12 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.vod_live_recovery {
+        state
+            .store
+            .put_setting(keys::VOD_LIVE_RECOVERY, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(raw) = req
@@ -2016,6 +2027,7 @@ struct ActivityNodeStatus {
 #[derive(Serialize)]
 struct ClusterDelivery {
     method: String,
+    presentation: Option<String>,
     user: String,
     file_id: i64,
     item_id: i64,
@@ -2032,6 +2044,7 @@ impl ClusterDelivery {
     fn local(delivery: Delivery, node_id: &str) -> Self {
         Self {
             method: delivery.method.to_owned(),
+            presentation: delivery.presentation.map(str::to_owned),
             user: delivery.user,
             file_id: delivery.file_id,
             item_id: delivery.item_id,
@@ -2048,6 +2061,7 @@ impl ClusterDelivery {
     fn peer(delivery: ActivityDelivery, node_id: String) -> Self {
         Self {
             method: delivery.method,
+            presentation: delivery.presentation,
             user: delivery.user,
             file_id: delivery.file_id,
             item_id: delivery.item_id,
@@ -2460,6 +2474,8 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
 pub struct Delivery {
     /// `direct` · `remux` · `hls-copy` · `transcode`.
     pub method: &'static str,
+    /// Present for HLS: `vod` or `live-recovery`.
+    pub presentation: Option<&'static str>,
     /// Who is watching. Exactly what `sessions[].user_name` has always
     /// carried on this endpoint — see the handler's note on who may look. This
     /// array names no one a `sessions` row would not have named.
@@ -2497,6 +2513,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
         .iter()
         .map(|(s, method)| Delivery {
             method: method.as_str(),
+            presentation: Some(s.presentation),
             user: s.user_name.clone(),
             file_id: s.file_id,
             item_id: s.item_id,
@@ -2516,6 +2533,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     for stream in state.streams.list() {
         out.push(Delivery {
             method: crate::delivery::Method::Remux.as_str(),
+            presentation: None,
             user: stream.user_name,
             file_id: stream.file_id,
             item_id: stream.item_id,
@@ -2532,6 +2550,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     for play in state.direct_plays.list() {
         out.push(Delivery {
             method: crate::delivery::Method::Direct.as_str(),
+            presentation: None,
             user: play.user_name,
             file_id: play.file_id,
             item_id: play.item_id,
@@ -3098,6 +3117,7 @@ mod tests {
     fn test_delivery(method: &'static str, started_unix: i64) -> Delivery {
         Delivery {
             method,
+            presentation: Some("live-recovery"),
             user: "paul".to_owned(),
             file_id: started_unix,
             item_id: started_unix + 100,
@@ -3119,6 +3139,7 @@ mod tests {
                     node_id: "node-b".to_owned(),
                     deliveries: vec![ActivityDelivery {
                         method: "direct".to_owned(),
+                        presentation: None,
                         user: "viewer".to_owned(),
                         file_id: 2,
                         item_id: 102,
@@ -3629,6 +3650,7 @@ mod tests {
         let event = client_playback_event(&beacon, 7);
         let info = crate::transcode::SessionInfo {
             id: "session-a".into(),
+            presentation: "live-recovery",
             file_id: 42,
             item_id: 4,
             item_title: "not persisted".into(),

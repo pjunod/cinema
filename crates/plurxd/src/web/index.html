@@ -4651,10 +4651,17 @@ function specBlock(f){
     : trackFactRow("Subtitles", subs, sd&&sd.selected_index!=null?sd.selected_index:-1,
         (s,on)=>trackChip(subFactLabel(s),on),
         subs.length?preferredLanguageNote("subtitles",sd):"", true);
+  const vodRow=f.vod_index_status==="indexed"
+    ? `<dt>VOD index</dt><dd><span class="stat-good">Indexed</span></dd>`
+    : f.vod_index_status==="pending"
+      ? `<dt>VOD index</dt><dd><span class="stat-warn">Index pending</span> · live recovery will be used for segmented playback</dd>`
+      : f.vod_index_status==="unsupported"
+        ? `<dt>VOD index</dt><dd><span class="muted">Unsupported for this video codec</span></dd>`:"";
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
     ${audRow}
     ${subRow}
+    ${vodRow}
     <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}`;
 }
 // ---- pre-play audio / subtitle selection ----------------------------------
@@ -5721,18 +5728,7 @@ async function openSession(fileId, opts){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
-  const info=await api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
-  if(!info || info.vod!==true){
-    const message="This server returned the removed live HLS presentation. Update every server node before playing this title.";
-    const error=new Error(message);
-    error.status=426;
-    error.code="server_vod_required";
-    error.streamFailure=PlaybackPolicy.parseStreamFailure({status:426,body:JSON.stringify({
-      code:error.code,message
-    })});
-    throw error;
-  }
-  return info;
+  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -8801,7 +8797,8 @@ function updateStats(){
   const baseMethod = PLAYER.method==='direct_play'?'Direct play'
     : PLAYER.method==='transcode'?('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))
     : 'Remux';
-  const method=PLAYER.vod?`${baseMethod} · VOD`:baseMethod;
+  const presentation=PLAYER.vod?"VOD":PLAYER.sessionId?"Live recovery":null;
+  const method=presentation?`${baseMethod} · ${presentation}`:baseMethod;
   // source (from the server probe — the browser never sees these numbers)
   const srcVideo=[ (s.video_codec||'').toUpperCase(), s.bit_depth?`${s.bit_depth}-bit`:null, (s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)) ].filter(Boolean).join(" · ")||'—';
   const srcRes = s.width&&s.height? `${s.width}×${s.height}`:'—';
@@ -9296,6 +9293,7 @@ function updateStats(){
       cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
       cardRow("Subtitles",esc(selectedSub))]},
     {t:"Server",rows:[
+      presentation?cardRow("Presentation",esc(presentation),PLAYER.vod?"good":"warn"):null,
       cardRow("Status",esc(serverState),serverTone),
       (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
       serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
@@ -9520,11 +9518,12 @@ function paintActivityBody(d){
     const flow=!se?'':se.suspended
       ?` · held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
       :se.suspend_count?` · ${se.suspend_count} suspend${se.suspend_count===1?'':'s'} · running`:'';
+    const presentation=de.presentation==="vod"?"VOD":de.presentation==="live-recovery"?"Live recovery":"";
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
       ${attributed?`<td><span class="clid">${esc(de.node_id||"Unknown")}</span></td>`:""}
-      <td>${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${flow}</td>
+      <td>${presentation?`<b>${esc(presentation)}</b> · `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${flow}</td>
       <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
@@ -10077,14 +10076,15 @@ function playbackPanel(settings){
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
       <h2 class="section">Film-addressed VOD</h2>
-      <p class="muted" style="margin-top:0">Every HLS session is one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. An unindexed or unsupported title is refused explicitly and never routed through the removed growing live presentation.</p>
+      <p class="muted" style="margin-top:0">Immutable VOD is preferred for every HLS session. While live recovery is enabled, an unindexed or not-yet-supported VOD request uses the growing-HLS compatibility engine instead of failing playback.</p>
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvlr" ${settings.vod_live_recovery?'checked':''} style="width:auto;margin-right:9px"> Use live HLS when a VOD prerequisite is unavailable</label>
       <div class="row" style="align-items:end">
         <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
-      <div class="hint">Indexing reads each eligible file once and is node-local; 15 minutes is the default. Disabling VOD or pausing indexing can make HLS titles unavailable — neither setting restores live HLS. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
+      <div class="hint">Indexing reads each eligible file once per node; 15 minutes is the default. The item page shows whether this node's current file identity is indexed, and Activity/Playback Stats show VOD versus Live recovery. The fallback is temporary protection for the backfill and can be disabled independently.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets
@@ -10847,6 +10847,7 @@ async function savePlayback(){
       hls_ahead_max_secs:document.getElementById("pha").value,
       hls_typeless_sliding:document.getElementById("phs").checked,
       vod_presentation:document.getElementById("pvod").checked,
+      vod_live_recovery:document.getElementById("pvlr").checked,
       vod_index_mins:Number(document.getElementById("pvi").value),
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",

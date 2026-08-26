@@ -18,31 +18,31 @@
 //! there (docs/STUTTER-4K.md §5.3ter). The cutting is the only part of a copy
 //! that plurx can change, so the cutting is what changes.
 //!
-//! The decision logic is all in [`plurx_core::fmp4`] and is pure. The former
-//! live-session I/O remains compiled only for its historical regression tests;
-//! production reuses the codec classifier and init sanitizer from this module
-//! but never respawns onto the removed live muxer.
+//! The decision logic is all in [`plurx_core::fmp4`] and is pure. The growing
+//! session I/O is retained behind the `live-hls-recovery` feature so an
+//! unavailable VOD prerequisite can use the proven compatibility path while
+//! the cluster finishes its index backfill.
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use std::path::PathBuf;
 
 use plurx_core::fmp4::Init;
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use plurx_core::fmp4::{
     self, FragmentReader, Published, SegmentCounts, Segmenter, TrackKind, Unit,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use plurx_core::transcode::{
     COPY_FIRST_SEGMENT_SECONDS, COPY_PUBLISH_GATE_SECS, COPY_SEGMENT_MAX_BYTES,
     COPY_SEGMENT_MAX_SECS, COPY_SEGMENT_SECONDS,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// How much pipe is read at a time. Big enough that a 12 MB/s copy is not a
 /// syscall storm, small enough that a SIGSTOPped ffmpeg leaves the reader
 /// parked in one `read` rather than holding a large buffer.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const READ_CHUNK: usize = 256 * 1024;
 
 /// A reader holding more than this has stopped making sense: the byte ceiling
@@ -58,7 +58,7 @@ const READ_CHUNK: usize = 256 * 1024;
 /// segment, ~105 MB, and this threshold sits above that on purpose: it is
 /// meant to catch a policy that has stopped cutting, not to complain about
 /// the copy every merge makes.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const MEMORY_WARN_BYTES: usize = 160 * 1024 * 1024;
 
 /// The floor and the two ceilings, as a session sees them.
@@ -66,7 +66,7 @@ const MEMORY_WARN_BYTES: usize = 160 * 1024 * 1024;
 /// A struct rather than three constants read at the point of use, because the
 /// tests need to reach a ceiling without a 4K file: the policy is the thing
 /// under test, and a 48 MB ceiling is not reachable from a 12-second fixture.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Limits {
     pub floor_seconds: u32,
@@ -84,7 +84,7 @@ pub struct Limits {
     pub publish_gate_secs: u32,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl Default for Limits {
     fn default() -> Limits {
         Limits {
@@ -98,7 +98,7 @@ impl Default for Limits {
 }
 
 /// How a segmenter session ended.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
     /// The stream was not one this reader could follow, and no player ever
@@ -137,7 +137,7 @@ pub enum Outcome {
 /// the ahead-window suspend and the GC all read the playlist — and nothing
 /// can be served from them, because a client only learns names from the
 /// playlist too.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct SessionDir {
     dir: PathBuf,
     /// The `#EXTINF`/URI pairs, without the header. The header is regenerated
@@ -156,7 +156,7 @@ struct SessionDir {
     started: bool,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl SessionDir {
     fn new(dir: PathBuf, gate_secs: u32) -> SessionDir {
         SessionDir {
@@ -241,7 +241,7 @@ impl SessionDir {
 /// out of existence. That is a session ending normally, not a fault, and
 /// logging it at ERROR taught the log to cry wolf on the most ordinary event
 /// there is. Observed within an hour of the first deploy.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn session_gone(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound
 }
@@ -251,7 +251,7 @@ fn session_gone(e: &std::io::Error) -> bool {
 /// Generic over the source so the tests can drive a whole session from a byte
 /// slice: everything this does between the pipe and the disk is worth testing,
 /// and none of it needs a real child process to be worth testing.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 pub async fn run<R: AsyncRead + Unpin>(
     mut src: R,
     dir: PathBuf,
@@ -475,7 +475,7 @@ pub(crate) fn sanitize_stale_dolby_brand(init: &mut Init) -> bool {
     changed
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 async fn finish(
     segmenter: Option<Segmenter>,
     out: &mut SessionDir,
@@ -544,7 +544,7 @@ async fn finish(
 /// One line, one session, every number the cut policy produced — including the
 /// ones that are bad news. A ceiling cut still costs the leading picture, and
 /// a residual nobody counts is a residual nobody fixes.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 pub fn summary(counts: &SegmentCounts) -> String {
     format!(
         "copy segmenter: segments {} · clean cuts {} · ceiling cuts {} · \

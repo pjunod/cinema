@@ -314,17 +314,11 @@ struct PlurxAPI {
     /// `playback_id` and a per-attempt `request_id` so a replay recovers the
     /// same session instead.
     func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
-        let started: HlsStart = try await post(
+        try await post(
             "files/\(fileId)/hls/sessions",
             body: body,
             using: Self.playbackPreparationSession
         )
-        guard started.vod == true else {
-            throw APIError.transport(
-                "This server returned the removed live HLS presentation. Update every server node."
-            )
-        }
-        return started
     }
 
     func hlsStatus(sessionId: String) async throws -> PlaybackSessionStatus {

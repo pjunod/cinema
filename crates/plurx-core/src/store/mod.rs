@@ -324,6 +324,10 @@ pub mod keys {
     /// VOD availability kill switch. Absent/on accepts immutable VOD session
     /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
+    /// Temporary availability guard while immutable-VOD prerequisites are
+    /// backfilled. Absent/on lets a typed VOD prerequisite refusal use the
+    /// retained growing-HLS engine; `0` makes the VOD refusal final again.
+    pub const VOD_LIVE_RECOVERY: &str = "playback.vod_live_recovery";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
     /// settings surface: "no working set" and "not configured" are opposite

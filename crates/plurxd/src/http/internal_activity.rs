@@ -41,6 +41,8 @@ pub struct ActivitySnapshot {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ActivityDelivery {
     pub method: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presentation: Option<String>,
     pub user: String,
     pub file_id: i64,
     pub item_id: i64,
@@ -273,6 +275,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                 };
                 deliveries.push(ActivityDelivery {
                     method: method.as_str().to_owned(),
+                    presentation: Some(session.presentation.to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
                     file_id: session.file_id,
                     item_id: session.item_id,
@@ -286,6 +289,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             ActivityCandidate::Vod(session) => {
                 deliveries.push(ActivityDelivery {
                     method: "hls-copy".to_owned(),
+                    presentation: Some("vod".to_owned()),
                     user: bounded_text(session.user_name, MAX_USER_BYTES),
                     file_id: session.file_id,
                     item_id: session.item_id,
@@ -299,6 +303,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             ActivityCandidate::Remux(stream) => {
                 deliveries.push(ActivityDelivery {
                     method: "remux".to_owned(),
+                    presentation: None,
                     user: bounded_text(stream.user_name, MAX_USER_BYTES),
                     file_id: stream.file_id,
                     item_id: stream.item_id,
@@ -315,6 +320,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
             ActivityCandidate::Direct(play) => {
                 deliveries.push(ActivityDelivery {
                     method: "direct".to_owned(),
+                    presentation: None,
                     user: bounded_text(play.user_name, MAX_USER_BYTES),
                     file_id: play.file_id,
                     item_id: play.item_id,
@@ -552,6 +558,7 @@ mod tests {
     fn producer_obeys_the_exact_json_byte_budget_after_escaping() {
         let delivery = ActivityDelivery {
             method: "x".repeat(32),
+            presentation: Some("live-recovery".to_owned()),
             user: "\0".repeat(MAX_USER_BYTES),
             file_id: i64::MAX,
             item_id: i64::MAX,

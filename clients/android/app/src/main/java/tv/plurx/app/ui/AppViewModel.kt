@@ -714,13 +714,8 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
-        val started = api().createHlsSession(fileId, body)
-        check(started.vod) {
-            "This server returned the removed live HLS presentation. Update every server node."
-        }
-        return started
-    }
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart =
+        api().createHlsSession(fileId, body)
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
 

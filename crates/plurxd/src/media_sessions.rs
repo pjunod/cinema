@@ -382,7 +382,9 @@ impl RemoteStartResponse {
                 .encoder
                 .bytes()
                 .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
-            && self.vod
+        // `vod` is presentation telemetry, not structural validity. A
+        // recovery-enabled worker may honestly answer `false` after accepting
+        // a VOD request whose immutable prerequisites are still pending.
     }
 }
 
@@ -1997,13 +1999,13 @@ mod tests {
     }
 
     #[test]
-    fn remote_start_response_is_bound_to_the_session_capability() {
+    fn remote_start_response_is_bound_to_the_session_capability_and_reports_presentation() {
         let response = valid_start_response();
         assert!(response.is_valid());
 
-        let mut removed_presentation = response.clone();
-        removed_presentation.vod = false;
-        assert!(!removed_presentation.is_valid());
+        let mut recovery_presentation = response.clone();
+        recovery_presentation.vod = false;
+        assert!(recovery_presentation.is_valid());
 
         let mut wrong_path = response.clone();
         wrong_path.playlist_url = "/api/v1/hls/somebody-else/index.m3u8".to_owned();

@@ -7,6 +7,11 @@ publish.workspace = true
 repository.workspace = true
 
 [features]
+default = ["live-hls-recovery"]
+# Incident recovery only. VOD remains the preferred segmented presentation;
+# this retains the proven growing-HLS engine so a missing/stale prerequisite
+# never makes an otherwise playable title unavailable.
+live-hls-recovery = []
 # Separate-process daemon tests bind several loopback listeners, launch real
 # voters, and create media with ffmpeg. Keep them out of the ordinary unit lane;
 # validation targets enable them explicitly where those contracts belong.
