@@ -530,6 +530,22 @@
     return "direct";
   }
 
+  // A node-local VOD index is an optimization prerequisite, not evidence that
+  // this browser cannot play the source. MSE browsers already proved the same
+  // remux viable before choosing copy-HLS, so a cold/missing index may fall
+  // back to the progressive pipe. Native HLS cannot: Safari does not accept
+  // the fragmented progressive response, which is why it selected HLS in the
+  // first place.
+  function indexPendingFallback({
+    code = null,
+    method = null,
+    nativeHls = false,
+  } = {}) {
+    return code === "vod_index_pending" && method === "remux" && !nativeHls
+      ? "progressive_remux"
+      : "fail";
+  }
+
   function fallbackAction({
     method,
     alreadyTried = false,
@@ -975,6 +991,7 @@
     hlsTransport,
     copyAudioNeedsTranscode,
     initialRoute,
+    indexPendingFallback,
     fallbackAction,
     stallRecoveryAction,
     stallRecoveryTargetHeight,

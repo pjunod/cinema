@@ -895,20 +895,47 @@ struct ArtworkSweepResult {
     claimed_ids: Vec<i64>,
 }
 
-/// Ceiling on one indexing pass. Small because indexing is never urgent and
-/// the next tick is a minute away: a library converts over hours, which is
-/// exactly the shape D4 wants, since a file without an index simply keeps
-/// today's presentation until it has one.
+/// Ceiling on one indexing pass. Small so a backfill shares the node with
+/// foreground playback instead of trying to drain the whole library at once.
 const INDEX_MAX_PER_PASS: usize = 4;
 /// Files one pass will even look at. An already-indexed library attempts
 /// nothing, so without this the pass would query every file every minute for
 /// the life of the server.
 const INDEX_MAX_EXAMINED_PER_PASS: usize = 200;
-/// Wall clock one pass will spend, whatever it got through.
+/// Stop *starting* new files after this much wall time. A file already in
+/// flight owns its independently bounded budget below.
 const INDEX_WINDOW: std::time::Duration = std::time::Duration::from_secs(120);
-/// Per file, so one pathological NAS read gives the slot back rather than
-/// holding it until the process restarts.
-const INDEX_FILE_BUDGET: std::time::Duration = std::time::Duration::from_secs(90);
+/// Short files retain the original ceiling. Long remuxes need a duration-sized
+/// allowance: indexing is a complete video-bitstream pass, and a measured
+/// 14x Dolby Vision copy on nynuc needs about nine minutes for a two-hour film.
+const INDEX_FILE_BUDGET_FLOOR_SECS: u64 = 90;
+const INDEX_FILE_BUDGET_CEILING_SECS: u64 = 30 * 60;
+const INDEX_EXPECTED_MIN_SPEED: u64 = 8;
+const INDEX_FILE_HEADROOM_SECS: u64 = 30;
+
+fn index_file_budget(duration_ms: Option<i64>) -> Duration {
+    let film_secs = duration_ms
+        .filter(|milliseconds| *milliseconds > 0)
+        .map_or(0, |milliseconds| (milliseconds as u64).div_ceil(1_000));
+    let estimated = film_secs
+        .div_ceil(INDEX_EXPECTED_MIN_SPEED)
+        .saturating_add(INDEX_FILE_HEADROOM_SECS);
+    Duration::from_secs(
+        estimated.clamp(INDEX_FILE_BUDGET_FLOOR_SECS, INDEX_FILE_BUDGET_CEILING_SECS),
+    )
+}
+
+/// Stable, wrapping order for one bounded pass. The cursor is the last file a
+/// prior pass examined, successful or not; starting after it prevents a few
+/// permanently slow/unsupported rows from starving every later title.
+fn ordered_index_paths(mut paths: Vec<(i64, PathBuf)>, cursor: Option<i64>) -> Vec<(i64, PathBuf)> {
+    paths.sort_unstable_by_key(|(file_id, _)| *file_id);
+    let split = cursor.map_or(0, |cursor| {
+        paths.partition_point(|(file_id, _)| *file_id <= cursor)
+    });
+    paths.rotate_left(split);
+    paths
+}
 
 /// Clears [`JobManager::indexing`] however the pass ends, including the ways a
 /// `?` or a panic would leave it set for the life of the process.
@@ -3172,73 +3199,77 @@ impl JobManager {
             }
         };
 
-        let mut built = 0usize;
-        let mut attempted = 0usize;
-        let mut examined = 0usize;
+        let mut paths = Vec::new();
         for library in libraries {
-            let paths = match self.store.library_file_paths(library.id).await {
-                Ok(paths) => paths,
+            match self.store.library_file_paths(library.id).await {
+                Ok(library_paths) => paths.extend(library_paths),
                 Err(error) => {
                     tracing::warn!(library = library.id, error = %error, "listing files to index");
-                    continue;
                 }
+            }
+        }
+        let cursor_key = self.local_job_key(keys::JOB_VOD_INDEX_CURSOR);
+        let cursor = self.job_stamp(&cursor_key).await;
+        let paths = ordered_index_paths(paths, cursor);
+
+        let mut built = 0usize;
+        let mut built_file_ids = Vec::new();
+        let mut attempted = 0usize;
+        let mut last_examined = None;
+        for (examined, (file_id, _path)) in paths.into_iter().enumerate() {
+            // Both bounds stop different runaways: attempts bound whole-file
+            // reads, while examined bounds a fully indexed library's queries.
+            if attempted >= INDEX_MAX_PER_PASS
+                || examined >= INDEX_MAX_EXAMINED_PER_PASS
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            if !transcode.pretranscode_worker_idle() {
+                return;
+            }
+            last_examined = Some(file_id);
+            let Ok(Some(file)) = self.store.get_file(file_id).await else {
+                continue;
             };
-            for (file_id, _path) in paths {
-                // Both bounds, because they stop different runaways: a
-                // library that is already fully indexed attempts nothing and
-                // would otherwise walk every file every minute.
-                if attempted >= INDEX_MAX_PER_PASS
-                    || examined >= INDEX_MAX_EXAMINED_PER_PASS
-                    || std::time::Instant::now() >= deadline
-                {
-                    break;
-                }
-                examined += 1;
-                if !transcode.pretranscode_worker_idle() {
-                    return;
-                }
-                let Ok(Some(file)) = self.store.get_file(file_id).await else {
-                    continue;
-                };
-                if !crate::copyseg::supports(file.video_codec.as_deref()) {
+            if !crate::copyseg::supports(file.video_codec.as_deref()) {
+                continue;
+            }
+            let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+            match self.store.fragment_index(file_id, &identity).await {
+                // Already current for this file and this pipeline.
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(file_id, error = %error, "reading a fragment index");
                     continue;
                 }
-                let identity = crate::fragindex::identity_for(&file, have_dovi, false);
-                match self.store.fragment_index(file_id, &identity).await {
-                    // Already current for this file and this pipeline.
-                    Ok(Some(_)) => continue,
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::warn!(file_id, error = %error, "reading a fragment index");
-                        continue;
+            }
+            attempted += 1;
+            match crate::fragindex::build(
+                &file,
+                have_dovi,
+                false,
+                &runtime_cache,
+                index_file_budget(file.duration_ms),
+            )
+            .await
+            {
+                crate::fragindex::IndexOutcome::Built(index) => {
+                    if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
+                        tracing::warn!(file_id, error = %error, "storing a fragment index");
+                    } else {
+                        built += 1;
+                        built_file_ids.push(file_id);
                     }
                 }
-                attempted += 1;
-                match crate::fragindex::build(
-                    &file,
-                    have_dovi,
-                    false,
-                    &runtime_cache,
-                    INDEX_FILE_BUDGET,
-                )
-                .await
-                {
-                    crate::fragindex::IndexOutcome::Built(index) => {
-                        if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
-                            tracing::warn!(file_id, error = %error, "storing a fragment index");
-                        } else {
-                            built += 1;
-                        }
-                    }
-                    // A short read is not an index — persisting one would put
-                    // every later boundary in the wrong part of the film — so
-                    // the next pass simply tries again.
-                    crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
-                        tracing::debug!(file_id, rows, "fragment index incomplete: {reason}");
-                    }
-                    crate::fragindex::IndexOutcome::Unsupported(reason) => {
-                        tracing::debug!(file_id, "file cannot be indexed: {reason}");
-                    }
+                // These now make an HLS title unavailable, so keep the reason
+                // in the ordinary operator log and move the cursor forward.
+                crate::fragindex::IndexOutcome::Truncated { reason, rows } => {
+                    tracing::warn!(file_id, rows, "fragment index incomplete: {reason}");
+                }
+                crate::fragindex::IndexOutcome::Unsupported(reason) => {
+                    tracing::warn!(file_id, "file cannot be indexed: {reason}");
                 }
             }
         }
@@ -3248,11 +3279,23 @@ impl JobManager {
         // for a full cadence. A pass that examined media is complete even when
         // everything was already current or unsupported; an empty or
         // preempted pass remains due for the next minute tick.
-        if examined > 0 {
+        if let Some(file_id) = last_examined {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &file_id.to_string())
+                .await
+            {
+                tracing::warn!(error = %error, key = cursor_key, "recording VOD index cursor failed");
+            }
             self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
         }
         if attempted > 0 {
-            tracing::info!(attempted, built, "fragment indexing pass finished");
+            tracing::info!(
+                attempted,
+                built,
+                built_files = ?built_file_ids,
+                "fragment indexing pass finished"
+            );
         }
     }
 
@@ -4733,6 +4776,30 @@ mod tests {
             "a boot tick before library creation must stay due for the first scan"
         );
         assert!(!jobs.indexing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn the_vod_index_cursor_wraps_past_failed_low_ids() {
+        let paths = [1, 9, 17, 120, 5910]
+            .into_iter()
+            .map(|file_id| (file_id, PathBuf::from(format!("/{file_id}.mkv"))))
+            .collect();
+        let ordered: Vec<i64> = ordered_index_paths(paths, Some(17))
+            .into_iter()
+            .map(|(file_id, _)| file_id)
+            .collect();
+        assert_eq!(ordered, [120, 5910, 1, 9, 17]);
+    }
+
+    #[test]
+    fn long_remuxes_receive_a_complete_pass_budget() {
+        assert_eq!(
+            index_file_budget(None),
+            Duration::from_secs(INDEX_FILE_BUDGET_FLOOR_SECS)
+        );
+        let steel = index_file_budget(Some(7_095_005));
+        assert!(steel >= Duration::from_secs(15 * 60));
+        assert!(steel <= Duration::from_secs(INDEX_FILE_BUDGET_CEILING_SECS));
     }
 
     #[tokio::test]
