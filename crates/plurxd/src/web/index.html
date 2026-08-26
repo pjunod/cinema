@@ -9413,8 +9413,9 @@ function updateStats(){
   const controlReporter=PLAYER.controlReporter;
   const controlStatus=controlReporter&&controlReporter.status();
   if(controlStatus){
-    const demandOwned=h&&h.lease_mode==='explicit';
-    const leaseState=h&&h.lease_state?h.lease_state:'active';
+    const controlHealth=PLAYER.health||null;
+    const demandOwned=controlHealth&&controlHealth.lease_mode==='explicit';
+    const leaseState=controlHealth&&controlHealth.lease_state?controlHealth.lease_state:'active';
     const phase=controlStatus.stopped?"stopped"
       :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
       :controlStatus.retrying?"retry scheduled"
@@ -9425,8 +9426,8 @@ function updateStats(){
       ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
     srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError||leaseState!=='active'?"warn":"good"),
       v:`${demandOwned?'demand-owned':'passive'} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
-    const enforcedLease=h&&Number.isSafeInteger(h.lease_timeout_ms)
-      ?h.lease_timeout_ms:controlStatus.lease_timeout_ms;
+    const enforcedLease=controlHealth&&Number.isSafeInteger(controlHealth.lease_timeout_ms)
+      ?controlHealth.lease_timeout_ms:controlStatus.lease_timeout_ms;
     srv.push({l:"Control timing",c:"stat-muted",
       v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
         `${Math.round(enforcedLease/1000)} s ${demandOwned?'explicit':'legacy'} lease`});
