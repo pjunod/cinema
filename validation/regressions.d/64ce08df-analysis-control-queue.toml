@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["64ce08df", "0818ef4e", "22aea80c", "44687f7e", "5ce8fde8"]
+points = ["core.media", "cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained SQLite fragment-index queue suite pins fenced request-to-job handoff, bounded retries and history, source-generation replacement, ready content reuse, fresh terminal rebind age, and artifact-preserving holder repair. The three-voter `replicated_analysis_handoff_is_atomic_and_fenced` contract recovers a caller row after an ambiguous committed insert, requires the owner/fence handoff token to be consumed, terminalizes the worker while the request remains submitted, and proves an exact forced replay cannot reopen or rebind it; the same cluster Store lane exercises exact v11/v12-to-v13 migration. Reverting any mapped correction makes the fast SQLite gate or replicated Store gate fail."
