@@ -3,7 +3,8 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `bcc5b09a` (PR #613)
 **Current work:** `codex/playback-control-m3-demand-lease` — M3b, ready PR
-[#612](https://github.com/pjunod/plurx/pull/612), rebased review corrections pending push
+[#612](https://github.com/pjunod/plurx/pull/612); a narrow web-layout runner
+repair is awaiting exact-head review before its test rerun and push
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -41,8 +42,9 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch is prepared locally for ready PR #612; its rebased head is
-awaiting exact review before push. Adversarial review has driven
+The active branch is published as ready PR #612. Its rebased implementation
+head `eee52106` was adversarially approved and passed both local gates.
+Adversarial review has driven
 remediation across response ownership/commit ordering, same-id VOD
 reattachment, exact snapshot and physical-signal timing, cancellation-safe
 producer convergence, full-object Range semantics, overlay truth, Activity
@@ -51,7 +53,13 @@ engine/incarnation token through every response; commits streamed
 lease/frontier state only at successful EOF; queues producer work outside the
 response body; and names VOD/rolling ownership correctly. The first complete
 post-review unit run exposed one actor/timer clock-domain failure after 1,877
-passing tests; the corrected exact head then passed all 1,878 executed tests.
+passing tests; the corrected pre-rebase head then passed all 1,878 executed
+tests. After rebasing over PR #613, the expanded suites were green again
+(`plurx-core`: 783; `plurxd`: 1,034; zero failures). The hosted UI layout sweep
+later lost one disposable Playwright page before `#main` attached, then
+rendered every following page and reported no golden mismatch. Commit
+`fb2128e5` adds one fresh-context retry only for that root-attachment timeout;
+all semantic and golden failures remain immediately fatal.
 The slice's acceptance boundary is intentionally smaller than the whole actor
 migration; the exact behavior
 and timer ledger are in
@@ -81,11 +89,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract |
-| Adversarial diff review | Pre-rebase head approved; exact rebased-head review is pending before tests rerun |
-| Unit/focused tests | Pre-rebase: two exact deadline regressions and `make test` green (1,878 passed, 0 failed, 3 ignored); rebased rerun pending review |
-| Full local gate | Pre-rebase `make validate`: 13 passed, 0 failed, 2 optional Playwright skips; exact rebased-head rerun pending review |
-| Hosted CI | PR is ready; the rebase resolved GitHub's merge conflict and will be pushed after review preparation |
+| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repair `fb2128e5` is local |
+| Adversarial diff review | Exact rebased implementation head `eee52106` approved; changed exact head with the runner repair is pending review before tests |
+| Unit/focused tests | Rebased `make test` green (`plurx-core`: 783; `plurxd`: 1,034; 0 failed); changed exact head pending review and rerun |
+| Full local gate | Rebased `make validate`: 13 passed, 0 failed, 2 optional Playwright skips; changed exact head pending review and rerun |
+| Hosted CI | Exact implementation head passed Rust, WAL, cluster-daemon, and VOD-browser jobs; web-layout exposed one transient root-attachment failure, corrected locally and pending review/push |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger

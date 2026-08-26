@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["fb2128e5"]
+points = ["web.experience", "validation.framework"]
+checks = ["web-layout", "operations-contract"]
+reason = "The retained operations source contract requires the UI baseline to retry only a Playwright route-root attachment timeout (or the separately bounded real-player capture), while every later rendering, accessibility, request-inventory, and structural-golden failure remains immediately fatal. The full web-layout sweep exercises the fresh-context retry against the real disposable server and every registered layout. Reverting the correction restores the observed CI failure mode where one dead disposable renderer loses the entire 60-capture gate even though the following contexts and all semantic assertions are healthy."
