@@ -12,7 +12,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{
@@ -1573,6 +1573,10 @@ struct Session {
     /// media touch can no longer land between its final retired check and the
     /// lease renewal it publishes.
     retirement_activity: Mutex<()>,
+    /// Deterministic cancellation seam: true while a control is waiting to
+    /// acquire the activity clock, before it can mutate sequence state.
+    #[cfg(test)]
+    control_clock_waiting: AtomicBool,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
@@ -1624,7 +1628,7 @@ struct Session {
     /// Owner-local sequence fence for the explicit control protocol. It is
     /// independent of media GET bookkeeping so equal/stale controls cannot
     /// accidentally renew the legacy activity clock.
-    control: Mutex<crate::playback_control::ControlState>,
+    control: StdMutex<crate::playback_control::ControlState>,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -1838,21 +1842,60 @@ impl Session {
         true
     }
 
-    /// Snapshot the active lease, optionally renewing it for a newly accepted
-    /// control sequence, under the same retirement/activity boundary.
-    async fn control_lease_expires_at(&self, renew: bool) -> Option<i64> {
+    /// Acquire every async lock before sequence acceptance, then commit the
+    /// sequence and its activity renewal without another cancellation point.
+    /// A timed-out future therefore commits both facts or neither one.
+    async fn accept_control(
+        &self,
+        request: crate::playback_control::LocalControlRequest<'_>,
+    ) -> Option<
+        Result<
+            (
+                crate::playback_control::ControlDisposition,
+                u64,
+                crate::playback_control::ControlAction,
+                crate::playback_control::ClientPlatform,
+                i64,
+            ),
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        #[cfg(test)]
+        self.control_clock_waiting.store(true, Release);
         let mut last_request = self.last_request.lock().await;
+        #[cfg(test)]
+        self.control_clock_waiting.store(false, Release);
         let _activity = self.retirement_activity.lock().await;
         if self.retired.load(Acquire) {
             return None;
         }
-        if renew {
+        let (disposition, accepted_sequence, action, platform) = match self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accept(
+                request.generation,
+                request.owner_epoch,
+                request.client_instance_id,
+                request.sequence,
+                request.platform,
+            ) {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        if disposition == crate::playback_control::ControlDisposition::Accepted {
             *last_request = LastRequest::now("control");
         }
         let remaining =
             Duration::from_secs(SESSION_IDLE_SECS).saturating_sub(last_request.at.elapsed());
         let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
-        Some(crate::media_sessions::unix_ms().saturating_add(remaining_ms))
+        Some(Ok((
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            crate::media_sessions::unix_ms().saturating_add(remaining_ms),
+        )))
     }
 
     /// Where this generation's session-relative zero sits on the durable
@@ -6750,6 +6793,8 @@ impl TranscodeManager {
             retired: AtomicBool::new(false),
             retirement_activity: Mutex::new(()),
             #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
+            #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_verdict_pause: std::sync::Mutex::new(None),
@@ -6765,7 +6810,7 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             last_request: Mutex::new(LastRequest::now("session-start")),
-            control: Mutex::new(crate::playback_control::ControlState::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -9996,6 +10041,8 @@ impl TranscodeManager {
             retired: AtomicBool::new(false),
             retirement_activity: Mutex::new(()),
             #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
+            #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_verdict_pause: std::sync::Mutex::new(None),
@@ -10011,7 +10058,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
-            control: Mutex::new(crate::playback_control::ControlState::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10574,6 +10621,8 @@ impl TranscodeManager {
             retired: AtomicBool::new(false),
             retirement_activity: Mutex::new(()),
             #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
+            #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             watchdog_verdict_pause: std::sync::Mutex::new(None),
@@ -10589,7 +10638,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
-            control: Mutex::new(crate::playback_control::ControlState::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -11112,25 +11161,11 @@ impl TranscodeManager {
         {
             return Some(Err(error));
         }
-        let (disposition, accepted_sequence, action, platform) =
-            match session.control.lock().await.accept(
-                control.generation,
-                control.owner_epoch,
-                control.client_instance_id,
-                control.sequence,
-                control.platform,
-            ) {
+        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
+            match session.accept_control(control).await? {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
             };
-        if session.retired.load(Acquire) {
-            return None;
-        }
-        let lease_expires_at_unix_ms = session
-            .control_lease_expires_at(
-                disposition == crate::playback_control::ControlDisposition::Accepted,
-            )
-            .await?;
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
@@ -13077,6 +13112,7 @@ fn test_session(dir: PathBuf) -> Session {
         replacing_child: AtomicBool::new(false),
         retired: AtomicBool::new(false),
         retirement_activity: Mutex::new(()),
+        control_clock_waiting: AtomicBool::new(false),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -13092,7 +13128,7 @@ fn test_session(dir: PathBuf) -> Session {
         cache_manifest: None,
         cache_location: None,
         last_request: Mutex::new(LastRequest::now("test-start")),
-        control: Mutex::new(crate::playback_control::ControlState::default()),
+        control: StdMutex::new(crate::playback_control::ControlState::default()),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -13268,16 +13304,86 @@ mod tests {
         ));
         assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
 
-        // Pin the clock lock so the renewal reaches the exact race window;
-        // retirement must linearize first and the late renewal must refuse.
+        // Pin the real activity clock and cancel a manager exchange only after
+        // it reaches that wait. Sequence 2 must remain uncommitted so the
+        // identical retry can still be accepted and renew the clock.
         let clock = fixture.session.last_request.lock().await;
-        let worker = Arc::clone(&fixture.session);
-        let renewal = tokio::spawn(async move { worker.control_lease_expires_at(true).await });
-        tokio::task::yield_now().await;
+        let manager = Arc::clone(&fixture.state.transcode);
+        let cancel_session = session_id.clone();
+        let cancel_generation = generation.clone();
+        let cancel_client = client.clone();
+        let cancelled = tokio::spawn(async move {
+            manager
+                .hls_session_control(crate::playback_control::LocalControlRequest {
+                    session_id: &cancel_session,
+                    generation: &cancel_generation,
+                    owner_node_id: "test-node",
+                    owner_epoch: 1,
+                    client_instance_id: &cancel_client,
+                    sequence: 2,
+                    platform: Some(crate::playback_control::ClientPlatform::Web),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.control_clock_waiting.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager reached the blocked activity clock");
+        cancelled.abort();
+        assert!(matches!(cancelled.await, Err(error) if error.is_cancelled()));
+        drop(clock);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after_cancel = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, 1))
+            .await
+            .expect("local worker")
+            .expect("cancelled sequence remains admissible");
+        assert_eq!(
+            after_cancel.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let after_cancel_touch = fixture.session.last_request.lock().await.at;
+        assert!(after_cancel_touch > accepted_touch);
+
+        // Now force retirement to win the same blocked-clock window through
+        // the real manager. The late sequence and touch must both disappear.
+        let clock = fixture.session.last_request.lock().await;
+        let manager = Arc::clone(&fixture.state.transcode);
+        let fence_session = session_id.clone();
+        let fence_generation = generation.clone();
+        let fence_client = client.clone();
+        let fenced = tokio::spawn(async move {
+            manager
+                .hls_session_control(crate::playback_control::LocalControlRequest {
+                    session_id: &fence_session,
+                    generation: &fence_generation,
+                    owner_node_id: "test-node",
+                    owner_epoch: 1,
+                    client_instance_id: &fence_client,
+                    sequence: 3,
+                    platform: Some(crate::playback_control::ClientPlatform::Web),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.control_clock_waiting.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager reached the retirement race window");
         fixture.session.fence_activity().await;
         drop(clock);
-        assert_eq!(renewal.await.expect("renewal task"), None);
-        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+        assert!(fenced.await.expect("control task").is_none());
+        assert_eq!(
+            fixture.session.last_request.lock().await.at,
+            after_cancel_touch
+        );
     }
 
     #[test]
@@ -17766,6 +17872,7 @@ mod tests {
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
             retirement_activity: Mutex::new(()),
+            control_clock_waiting: AtomicBool::new(false),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -17781,7 +17888,7 @@ mod tests {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("test-start")),
-            control: Mutex::new(crate::playback_control::ControlState::default()),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),
