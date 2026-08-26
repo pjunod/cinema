@@ -780,6 +780,7 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
     event.ahead_seconds = info.ahead_seconds;
     event.suspended = Some(info.suspended);
     event.hold_reason = info.hold_reason.map(|reason| match reason {
+        crate::transcode::AheadHoldReason::Demand => "demand".to_owned(),
         crate::transcode::AheadHoldReason::Time => "time".to_owned(),
         crate::transcode::AheadHoldReason::Bytes => "bytes".to_owned(),
         crate::transcode::AheadHoldReason::Global => "global".to_owned(),
@@ -811,6 +812,16 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
             "first_retained_segment": info.first_retained_segment,
             "playlist_shape": info.playlist_shape,
             "last_request": info.last_request,
+            "lease_mode": info.lease_mode,
+            "lease_state": info.lease_state,
+            "lease_timeout_ms": info.lease_timeout_ms,
+            "control_demand": info.control_demand,
+            "reported_position_ms": info.reported_position_ms,
+            "client_runway_ms": info.client_runway_ms,
+            "render_state": info.render_state,
+            "production_policy": info.production_policy,
+            "production_ahead_seconds": info.production_ahead_seconds,
+            "production_target_seconds": info.production_target_seconds,
             "last_request_idle_ms": i64::try_from(info.idle_seconds)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(1_000)
@@ -3818,10 +3829,15 @@ mod tests {
             idle_seconds: 0,
             last_request: "segment",
             lease_mode: "explicit",
+            lease_state: "active",
+            lease_timeout_ms: Some(30_000),
             control_demand: Some("active"),
             reported_position_ms: Some(9_000),
             client_runway_ms: Some(20_000),
             render_state: Some("stalled"),
+            production_policy: "explicit_demand",
+            production_ahead_seconds: Some(35),
+            production_target_seconds: Some(50),
             producer_state: "held",
             speed: Some(2.0),
             recent_speed: Some(1.7),
@@ -3882,6 +3898,13 @@ mod tests {
         assert_eq!(extra["server"]["fetched_segment"], 4);
         assert_eq!(extra["server"]["playlist_shape"], "sliding");
         assert_eq!(extra["server"]["last_request"], "segment");
+        assert_eq!(extra["server"]["lease_mode"], "explicit");
+        assert_eq!(extra["server"]["lease_state"], "active");
+        assert_eq!(extra["server"]["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["server"]["control_demand"], "active");
+        assert_eq!(extra["server"]["production_policy"], "explicit_demand");
+        assert_eq!(extra["server"]["production_ahead_seconds"], 35);
+        assert_eq!(extra["server"]["production_target_seconds"], 50);
     }
 
     #[test]

@@ -54,10 +54,10 @@ actor retired in one command, so a concurrent segment renewal is ordered
 strictly before or after the claim. Only the winner proceeds to existing
 process teardown.
 
-This slice deliberately retains the rolling 60-second compatibility lifetime.
-The next M3 slice may enable the measured 30-second explicit lease, indefinite
-foreground `hold`, and demand-derived production only after client timer
-jitter and mixed-version behavior are proven.
+This slice deliberately retained the rolling 60-second compatibility lifetime.
+The follow-up that enables the 30-second explicit lease, indefinite foreground
+`hold`, and demand-derived production is specified in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md).
 
 ## Instrumentation
 

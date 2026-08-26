@@ -274,6 +274,11 @@ pub(crate) const HLS_BURST_SECS_DEFAULT: f64 = 90.0;
 /// a low-bitrate stream of the reserve it could afford.
 pub(crate) const HLS_AHEAD_MAX_SECS_DEFAULT: i64 = 180;
 pub(crate) const HLS_AHEAD_MAX_BYTES_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
+/// Extra published media kept beyond the runway an explicit client already
+/// reports. Scale it by playback rate so the reserve represents thirty
+/// seconds of wall-clock protection at every supported rate; the configured
+/// ahead ceiling remains the absolute media-time bound.
+const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
 /// Ceiling on scratch across *all* live sessions. A per-session cap bounds one
 /// runaway; it does nothing about four healthy 4K sessions filling the disk
 /// between them.
@@ -858,6 +863,7 @@ struct AheadLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AheadHoldReason {
+    Demand,
     Time,
     Bytes,
     Global,
@@ -867,6 +873,169 @@ pub enum AheadHoldReason {
 struct AheadHold {
     reason: AheadHoldReason,
     release_value: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowEvaluation {
+    hold: Option<AheadHold>,
+    policy: &'static str,
+    production_ahead_seconds: Option<i64>,
+    production_target_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuspendedAt {
+    since: Instant,
+    hold: AheadHold,
+}
+
+fn flow_event_extra(
+    evaluation: FlowEvaluation,
+    lease: &crate::playback_control::RollingLeaseSnapshot,
+    ahead: Option<Ahead>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    previous_hold_reason: Option<AheadHoldReason>,
+) -> String {
+    let lease_mode = match lease.mode {
+        crate::playback_control::RollingLeaseMode::Legacy => "legacy",
+        crate::playback_control::RollingLeaseMode::Explicit => "explicit",
+    };
+    let lease_state = if lease.expiration_claimed {
+        "expired"
+    } else if lease.retired {
+        "retired"
+    } else {
+        "active"
+    };
+    let demand = lease.demand.as_ref();
+    serde_json::json!({
+        "lease_mode": lease_mode,
+        "lease_state": lease_state,
+        "lease_timeout_ms": lease.timeout_ms(),
+        "control_demand": demand.map(|demand| demand.demand),
+        "reported_position_ms": demand.map(|demand| demand.position_ms),
+        "client_runway_ms": demand.map(|demand| demand.runway_ms()),
+        "production_policy": evaluation.policy,
+        "production_ahead_seconds": evaluation.production_ahead_seconds,
+        "production_target_seconds": evaluation.production_target_seconds,
+        "physical_ahead_seconds": ahead.map(|ahead| ahead.seconds),
+        "physical_ahead_bytes": ahead.map(|ahead| ahead.bytes),
+        "global_live_bytes": global_live_bytes,
+        "global_ahead_bytes": global_ahead_bytes,
+        "previous_hold_reason": previous_hold_reason,
+    })
+    .to_string()
+}
+
+fn explicit_production_target_seconds(
+    demand: &crate::playback_control::PlaybackDemandSnapshot,
+    configured_max_secs: i64,
+) -> i64 {
+    if configured_max_secs <= 0 {
+        return 0;
+    }
+    let runway_seconds = demand.runway_ms().saturating_add(999) / 1_000;
+    let reserve_seconds =
+        (demand.playback_rate * EXPLICIT_PRODUCTION_RESERVE_WALL_SECS).ceil() as i64;
+    runway_seconds
+        .saturating_add(reserve_seconds)
+        .clamp(1, configured_max_secs)
+}
+
+fn evaluate_flow(
+    physical_ahead: Option<Ahead>,
+    published_end_ms: Option<i64>,
+    media_origin_ms: i64,
+    lease_mode: crate::playback_control::RollingLeaseMode,
+    demand: Option<&crate::playback_control::PlaybackDemandSnapshot>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    limits: AheadLimits,
+    currently_suspended: bool,
+) -> FlowEvaluation {
+    if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
+        return FlowEvaluation {
+            hold: physical_ahead.and_then(|ahead| {
+                ahead_hold(
+                    ahead,
+                    global_live_bytes,
+                    global_ahead_bytes,
+                    limits,
+                    currently_suspended,
+                )
+            }),
+            policy: "legacy_fetch_frontier",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    }
+
+    let Some(demand) = demand else {
+        // Explicit mode is entered by the same actor command that stores the
+        // demand snapshot. If that invariant is ever broken, stop production
+        // instead of silently returning to inference.
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_missing_demand",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    };
+
+    if matches!(
+        demand.demand,
+        crate::playback_control::PlaybackDemand::Hold
+            | crate::playback_control::PlaybackDemand::End
+    ) {
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_demand",
+            production_ahead_seconds: published_end_ms.map(|published_end_ms| {
+                media_origin_ms
+                    .saturating_add(published_end_ms)
+                    .saturating_sub(demand.buffer_anchor_ms())
+                    / 1_000
+            }),
+            production_target_seconds: Some(0),
+        };
+    }
+
+    let production_target_seconds = explicit_production_target_seconds(demand, limits.max_secs);
+    let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
+        media_origin_ms
+            .saturating_add(published_end_ms)
+            .saturating_sub(demand.buffer_anchor_ms())
+            / 1_000
+    });
+    let hold = physical_ahead.and_then(|physical_ahead| {
+        let ahead = Ahead {
+            seconds: production_ahead_seconds.unwrap_or(physical_ahead.seconds),
+            bytes: physical_ahead.bytes,
+        };
+        ahead_hold(
+            ahead,
+            global_live_bytes,
+            global_ahead_bytes,
+            AheadLimits {
+                max_secs: production_target_seconds,
+                ..limits
+            },
+            currently_suspended,
+        )
+    });
+    FlowEvaluation {
+        hold,
+        policy: "explicit_demand",
+        production_ahead_seconds,
+        production_target_seconds: Some(production_target_seconds),
+    }
 }
 
 /// Whether a session should be held, given how far ahead it is, how much
@@ -1736,7 +1905,7 @@ struct Session {
     /// suspended encoder makes no progress *on purpose*.
     suspended: AtomicBool,
     /// When the current held interval began, for the resume event's duration.
-    suspended_at: Mutex<Option<(Instant, AheadHoldReason)>>,
+    suspended_at: Mutex<Option<SuspendedAt>>,
     /// Successful running→held transitions during this session. A counter,
     /// rather than only the current boolean, exposes flapping after it has
     /// already resumed.
@@ -1817,6 +1986,7 @@ impl Session {
                 crate::playback_control::ControlAction,
                 crate::playback_control::ClientPlatform,
                 i64,
+                u32,
             ),
             crate::playback_control::ControlStateError,
         >,
@@ -1834,6 +2004,7 @@ impl Session {
             outcome.action,
             outcome.platform,
             outcome.lease.expires_at_unix_ms(),
+            outcome.lease.timeout_ms(),
         )))
     }
 
@@ -2134,6 +2305,12 @@ async fn session_info(
         Some(crate::playback_control::RollingLeaseMode::Legacy) => "legacy",
         None => "unavailable",
     };
+    let lease_state = match lease.as_ref() {
+        Some(lease) if lease.expiration_claimed => "expired",
+        Some(lease) if lease.retired => "retired",
+        Some(_) => "active",
+        None => "unavailable",
+    };
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
     let control_demand = demand.map(|demand| match demand.demand {
         crate::playback_control::PlaybackDemand::Active => "active",
@@ -2150,6 +2327,24 @@ async fn session_info(
         crate::playback_control::RenderState::Failed => "failed",
     });
     let suspended = s.suspended.load(Relaxed);
+    let flow = lease.as_ref().map(|lease| {
+        evaluate_flow(
+            ahead,
+            published_end_ms,
+            (s.media_origin_seconds * 1_000.0).round() as i64,
+            lease.mode,
+            lease.demand.as_ref(),
+            global_live_bytes,
+            global_ahead_bytes,
+            limits,
+            suspended,
+        )
+    });
+    let active_hold = if suspended {
+        (*s.suspended_at.lock().await).map(|held| held.hold)
+    } else {
+        None
+    };
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
     } else if s.cached {
@@ -2160,13 +2355,6 @@ async fn session_info(
         "running"
     } else {
         "complete"
-    };
-    let hold = if suspended {
-        ahead.and_then(|ahead| {
-            ahead_hold(ahead, global_live_bytes, global_ahead_bytes, limits, true)
-        })
-    } else {
-        None
     };
     SessionInfo {
         id: id.to_owned(),
@@ -2181,14 +2369,15 @@ async fn session_info(
         idle_seconds,
         last_request: last_request_kind,
         lease_mode,
+        lease_state,
+        lease_timeout_ms: lease.as_ref().map(|lease| lease.timeout_ms()),
         control_demand,
         reported_position_ms: demand.map(|demand| demand.position_ms),
-        client_runway_ms: demand.map(|demand| {
-            demand
-                .buffered_through_ms
-                .saturating_sub(demand.position_ms)
-        }),
+        client_runway_ms: demand.map(|demand| demand.runway_ms()),
         render_state,
+        production_policy: flow.map_or("unavailable", |flow| flow.policy),
+        production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
+        production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
         producer_state,
         speed: s.progress.speed(),
         recent_speed: s.progress.recent_speed(),
@@ -2206,12 +2395,17 @@ async fn session_info(
             "event"
         },
         ahead_seconds: ahead.map(|a| a.seconds),
-        hold_reason: hold.map(|hold| hold.reason),
-        resume_below_seconds: hold
+        hold_reason: active_hold.map(|hold| hold.reason),
+        resume_below_seconds: active_hold
             .filter(|hold| hold.reason == AheadHoldReason::Time)
             .map(|hold| hold.release_value),
-        resume_below_bytes: hold
-            .filter(|hold| hold.reason != AheadHoldReason::Time)
+        resume_below_bytes: active_hold
+            .filter(|hold| {
+                matches!(
+                    hold.reason,
+                    AheadHoldReason::Bytes | AheadHoldReason::Global
+                )
+            })
             .map(|hold| hold.release_value),
         ahead_bytes: ahead.map(|a| a.bytes),
         delivered_bytes: s.delivery.total_bytes(),
@@ -2237,10 +2431,15 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         idle_seconds: info.idle_seconds,
         last_request: "vod",
         lease_mode: "vod",
+        lease_state: "active",
+        lease_timeout_ms: Some(crate::playback_control::VOD_LEASE_TIMEOUT_MS),
         control_demand: None,
         reported_position_ms: None,
         client_runway_ms: None,
         render_state: None,
+        production_policy: "immutable_vod",
+        production_ahead_seconds: None,
+        production_target_seconds: None,
         producer_state: "vod",
         speed: None,
         recent_speed: None,
@@ -2954,12 +3153,25 @@ pub struct SessionInfo {
     /// begins only after a newly accepted control sequence carries a complete
     /// demand snapshot; media-only viewers remain visible during rollout.
     pub lease_mode: &'static str,
+    /// Actor lifecycle verdict. Expiry may be visible briefly while the repair
+    /// pass performs process and scratch teardown; serving is already fenced.
+    pub lease_state: &'static str,
+    /// The timeout currently enforced by the actor. Legacy viewers retain the
+    /// rollout-compatible lifetime; explicit viewers receive the shorter
+    /// deadline renewed by control or authenticated media consumption.
+    pub lease_timeout_ms: Option<u32>,
     /// Last accepted viewer intent and render facts. These are observations,
     /// not inferred recovery decisions.
     pub control_demand: Option<&'static str>,
     pub reported_position_ms: Option<i64>,
     pub client_runway_ms: Option<i64>,
     pub render_state: Option<&'static str>,
+    /// The pacing authority and its measured high-water coordinates. The
+    /// legacy policy is download-frontier inference; explicit policy is
+    /// actor-owned demand plus reported playhead/runway.
+    pub production_policy: &'static str,
+    pub production_ahead_seconds: Option<i64>,
+    pub production_target_seconds: Option<i64>,
     /// Honest current producer verdict. Additive to the legacy status shape;
     /// control uses it instead of inferring health from suspension alone.
     pub producer_state: &'static str,
@@ -11154,7 +11366,7 @@ impl TranscodeManager {
             .await
             .get(control.session_id)
             .cloned()?;
-        let _transition = session.child_transition.lock().await;
+        let transition = session.child_transition.lock().await;
         if session.control.is_retired()
             || !self
                 .sessions
@@ -11177,11 +11389,25 @@ impl TranscodeManager {
             return Some(Err(error));
         }
         let session_id = control.session_id.to_owned();
-        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
-            match session.accept_control(control).await? {
-                Ok(outcome) => outcome,
-                Err(error) => return Some(Err(error)),
-            };
+        let (
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms,
+        ) = match session.accept_control(control).await? {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        drop(transition);
+        if disposition == crate::playback_control::ControlDisposition::Accepted {
+            // Re-read the actor snapshot inside flow control. The accepted
+            // demand, expiry/retirement decisions, and producer signal are
+            // ordered by the same child-transition gate, so a newer control
+            // may supersede this one but a stale snapshot can never act later.
+            self.flow_control(&session, &session_id).await;
+        }
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
@@ -11197,7 +11423,7 @@ impl TranscodeManager {
             accepted_sequence,
             action,
             lease_expires_at_unix_ms,
-            lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            lease_timeout_ms,
             status: HlsSessionInfo::Live(Box::new(status)),
             platform,
         }))
@@ -11218,16 +11444,13 @@ impl TranscodeManager {
         let hold_reason = if let Some(reason) = fields.hold_reason {
             Some(reason)
         } else if session.suspended.load(Relaxed) {
-            let limits = self.ahead_limits().await;
-            let (global_live, global_ahead) = self.global_flow_bytes().await;
-            session.ahead().await.and_then(|ahead| {
-                ahead_hold(ahead, global_live, global_ahead, limits, true).map(|hold| hold.reason)
-            })
+            (*session.suspended_at.lock().await).map(|held| held.hold.reason)
         } else {
             None
         }
         .map(|reason| {
             match reason {
+                AheadHoldReason::Demand => "demand",
                 AheadHoldReason::Time => "time",
                 AheadHoldReason::Bytes => "bytes",
                 AheadHoldReason::Global => "global",
@@ -12287,19 +12510,84 @@ impl TranscodeManager {
         global_live_bytes: i64,
         global_ahead_bytes: i64,
     ) {
-        let Some(ahead) = session.ahead().await else {
-            return; // nothing published yet — nothing to hold
+        // Control acceptance, expiry, retirement, child replacement, and
+        // producer signals all cross this gate. The actor remains the state
+        // authority; the gate only ensures that a flow decision made from one
+        // actor snapshot cannot signal a child after a newer lifecycle
+        // transition has already won.
+        let transition = session.child_transition.lock().await;
+        if session.control.is_retired() {
+            return;
+        }
+        let Some(lease) = session.control.snapshot().await else {
+            session.control.fence_unavailable();
+            return;
+        };
+        if lease.retired {
+            return;
+        }
+        let (ahead, published_end_ms) = {
+            let index = session.segments.lock().await;
+            (
+                ahead_of(&index, session.fetched_end_ms.load(Relaxed).max(0)),
+                index.produced_playable_end_ms(),
+            )
         };
         let suspended = session.suspended.load(Relaxed);
-        let hold = ahead_hold(
+        let evaluation = evaluate_flow(
             ahead,
+            published_end_ms,
+            (session.media_origin_seconds * 1_000.0).round() as i64,
+            lease.mode,
+            lease.demand.as_ref(),
             global_live_bytes,
             global_ahead_bytes,
             limits,
             suspended,
         );
+        let hold = evaluation.hold;
         let want_suspend = hold.is_some();
         if want_suspend == suspended {
+            if let Some(hold) = hold {
+                let mut suspended_at = session.suspended_at.lock().await;
+                if let Some(previous) = suspended_at.as_mut() {
+                    if previous.hold != hold {
+                        let previous_reason = previous.hold.reason;
+                        previous.hold = hold;
+                        drop(suspended_at);
+                        drop(transition);
+                        tracing::info!(
+                            session = %session_log_id(session_id),
+                            previous_hold_reason = ?previous_reason,
+                            hold_reason = ?hold.reason,
+                            release_value = hold.release_value,
+                            production_policy = evaluation.policy,
+                            production_ahead_seconds = evaluation.production_ahead_seconds,
+                            production_target_seconds = evaluation.production_target_seconds,
+                            "transcode hold authority changed without resuming the producer"
+                        );
+                        self.emit_session_event(
+                            session_id,
+                            session,
+                            "hold_change",
+                            SessionEventFields {
+                                reason: Some("policy_change"),
+                                hold_reason: Some(hold.reason),
+                                extra: Some(flow_event_extra(
+                                    evaluation,
+                                    &lease,
+                                    ahead,
+                                    global_live_bytes,
+                                    global_ahead_bytes,
+                                    Some(previous_reason),
+                                )),
+                                ..SessionEventFields::default()
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
             return;
         }
         let signal = if want_suspend {
@@ -12327,42 +12615,67 @@ impl TranscodeManager {
             // resume, before ffmpeg has emitted a single post-SIGCONT block.
             session.progress.touch();
         }
-        session.suspended.store(want_suspend, Relaxed);
         if want_suspend {
-            let hold_reason = hold
-                .expect("a requested suspension has a hold reason")
-                .reason;
-            *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
+            let hold = hold.expect("a requested suspension has a hold reason");
+            *session.suspended_at.lock().await = Some(SuspendedAt {
+                since: Instant::now(),
+                hold,
+            });
+            session.suspended.store(true, Relaxed);
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
+            crate::playback_control::record_producer_hold(hold.reason);
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count,
-                hold_reason = ?hold.map(|hold| hold.reason),
-                release_value = hold.map(|hold| hold.release_value),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
+                hold_reason = ?hold.reason,
+                release_value = hold.release_value,
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
                 global_live_bytes, global_ahead_bytes,
                 max_secs = limits.max_secs, max_bytes = limits.max_bytes,
-                "suspending transcode: far enough ahead of the client"
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "holding transcode producer"
             );
             self.emit_session_event(
                 session_id,
                 session,
                 "suspend",
                 SessionEventFields {
-                    hold_reason: Some(hold_reason),
+                    hold_reason: Some(hold.reason),
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        None,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
             .await;
         } else {
+            session.suspended.store(false, Relaxed);
             let held = session.suspended_at.lock().await.take();
-            let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
-            let hold_reason = held.map(|(_, reason)| reason);
+            let held_ms =
+                held.map(|held| held.since.elapsed().as_millis().min(i64::MAX as u128) as i64);
+            let hold_reason = held.map(|held| held.hold.reason);
+            if let Some(hold_reason) = hold_reason {
+                crate::playback_control::record_producer_resume(hold_reason);
+            }
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
-                "resuming transcode: the client caught up"
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "resuming transcode producer"
             );
             self.emit_session_event(
                 session_id,
@@ -12371,6 +12684,14 @@ impl TranscodeManager {
                 SessionEventFields {
                     hold_reason,
                     ms: held_ms,
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        hold_reason,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
@@ -12476,7 +12797,14 @@ impl TranscodeManager {
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
-                match session.control.claim_expiry().await {
+                // Serialize the actor's expiry fence with every producer
+                // signal and child transition. After a claim wins, no stale
+                // flow snapshot can resume the child before teardown takes
+                // this gate again.
+                let transition = session.child_transition.lock().await;
+                let claim = session.control.claim_expiry().await;
+                drop(transition);
+                match claim {
                     Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
                         // The actor publishes the shared process-local fence
                         // before replying, so this claim owns ordinary idle
@@ -12493,12 +12821,17 @@ impl TranscodeManager {
                         // A prior explicit retirement or expiry claimant died
                         // before process teardown. Preserve that distinction
                         // instead of inventing a second idle verdict.
+                        let reason = if lease.expiration_claimed {
+                            "idle"
+                        } else {
+                            "retired_recovery"
+                        };
                         expired.push((
                             id,
                             session,
                             lease.idle_for.as_secs(),
                             lease.last_renewal_kind,
-                            "retired_recovery",
+                            reason,
                         ));
                     }
                     Ok(crate::playback_control::RollingExpiryClaim::Live) => {
@@ -13315,15 +13648,25 @@ mod tests {
             accepted.disposition,
             crate::playback_control::ControlDisposition::Accepted
         );
+        assert_eq!(
+            accepted.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
         let assert_explicit_status = |status: &HlsSessionInfo| {
             let HlsSessionInfo::Live(status) = status else {
                 panic!("rolling control returned VOD status");
             };
             assert_eq!(status.lease_mode, "explicit");
+            assert_eq!(status.lease_state, "active");
+            assert_eq!(
+                status.lease_timeout_ms,
+                Some(crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS)
+            );
             assert_eq!(status.control_demand, Some("active"));
             assert_eq!(status.reported_position_ms, Some(10_000));
             assert_eq!(status.client_runway_ms, Some(15_000));
             assert_eq!(status.render_state, Some("rendering"));
+            assert_eq!(status.production_policy, "explicit_demand");
         };
         assert_explicit_status(&accepted.status);
         let live_status = fixture
@@ -13447,6 +13790,116 @@ mod tests {
             .snapshot()
             .await
             .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn accepted_hold_and_active_control_signal_the_real_producer_immediately() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, demand| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = demand;
+            if demand != crate::playback_control::PlaybackDemand::Active {
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+            }
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+
+        let hold = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, crate::playback_control::PlaybackDemand::Hold))
+            .await
+            .expect("local worker")
+            .expect("hold accepted");
+        assert_eq!(
+            hold.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
+        let HlsSessionInfo::Live(hold_status) = hold.status else {
+            panic!("rolling hold returned VOD status");
+        };
+        assert!(hold_status.suspended);
+        assert_eq!(hold_status.control_demand, Some("hold"));
+        assert_eq!(hold_status.hold_reason, Some(AheadHoldReason::Demand));
+        assert_eq!(hold_status.production_target_seconds, Some(0));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let active = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, crate::playback_control::PlaybackDemand::Active))
+            .await
+            .expect("local worker")
+            .expect("active accepted");
+        let HlsSessionInfo::Live(active_status) = active.status else {
+            panic!("rolling active returned VOD status");
+        };
+        assert!(!active_status.suspended);
+        assert_eq!(active_status.control_demand, Some("active"));
+        assert_eq!(active_status.hold_reason, None);
+        assert_eq!(active_status.production_policy, "explicit_demand");
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: None,
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("flow events");
+                if events.iter().any(|event| event.event == "suspend")
+                    && events.iter().any(|event| event.event == "resume")
+                {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("demand hold/resume events persisted");
+        let suspend = events
+            .iter()
+            .find(|event| event.event == "suspend")
+            .expect("demand suspend event");
+        assert_eq!(suspend.hold_reason.as_deref(), Some("demand"));
+        let extra: serde_json::Value = serde_json::from_str(
+            suspend
+                .extra
+                .as_deref()
+                .expect("demand suspend policy snapshot"),
+        )
+        .expect("valid demand suspend policy snapshot");
+        assert_eq!(extra["lease_mode"], "explicit");
+        assert_eq!(extra["lease_state"], "active");
+        assert_eq!(extra["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["control_demand"], "hold");
+        assert_eq!(extra["production_policy"], "explicit_demand");
+        assert_eq!(extra["production_target_seconds"], 0);
     }
 
     #[tokio::test]
@@ -16124,6 +16577,150 @@ mod tests {
         assert_eq!((a.seconds, a.bytes), (0, 0));
         // Nothing published is not "zero ahead" — it is "don't know".
         assert_eq!(ahead_of(&SegmentIndex::default(), 0), None);
+    }
+
+    #[test]
+    fn explicit_flow_uses_reported_runway_and_preserves_capacity_bounds() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        demand.position_ms = 120_000;
+        demand.buffered_through_ms = 140_000;
+        demand.playback_rate = 1.0;
+        let physical = Ahead {
+            seconds: 5,
+            bytes: 1_000,
+        };
+
+        let active = evaluate_flow(
+            Some(physical),
+            Some(80_000),
+            100_000,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            1_000,
+            1_000,
+            limits,
+            false,
+        );
+        assert_eq!(active.policy, "explicit_demand");
+        assert_eq!(active.production_ahead_seconds, Some(60));
+        assert_eq!(active.production_target_seconds, Some(50));
+        assert_eq!(
+            active.hold,
+            Some(AheadHold {
+                reason: AheadHoldReason::Time,
+                release_value: 50,
+            })
+        );
+
+        demand.playback_rate = 2.0;
+        let faster = evaluate_flow(
+            Some(physical),
+            Some(80_000),
+            100_000,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            1_000,
+            1_000,
+            limits,
+            false,
+        );
+        assert_eq!(
+            faster.production_target_seconds,
+            Some(80),
+            "thirty seconds of wall-clock reserve becomes sixty media seconds at 2x"
+        );
+        assert_eq!(faster.hold, None);
+
+        demand.buffered_through_ms = 1_000_000;
+        assert_eq!(
+            explicit_production_target_seconds(&demand, limits.max_secs),
+            limits.max_secs,
+            "untrusted client runway cannot raise the configured time ceiling"
+        );
+
+        demand.buffered_through_ms = 140_000;
+        let capacity = evaluate_flow(
+            Some(Ahead {
+                seconds: 0,
+                bytes: 2_001,
+            }),
+            Some(120_000),
+            100_000,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            1_000,
+            1_000,
+            limits,
+            false,
+        );
+        assert_eq!(
+            capacity.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Bytes),
+            "explicit observations cannot bypass the physical scratch bound"
+        );
+    }
+
+    #[test]
+    fn explicit_hold_stops_even_before_publication_and_seek_uses_its_target() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        demand.demand = crate::playback_control::PlaybackDemand::Hold;
+        let holding = evaluate_flow(
+            None,
+            None,
+            0,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            0,
+            0,
+            limits,
+            false,
+        );
+        assert_eq!(
+            holding.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Demand)
+        );
+        assert_eq!(holding.production_target_seconds, Some(0));
+
+        demand.demand = crate::playback_control::PlaybackDemand::Active;
+        demand.position_ms = 10_000;
+        demand.seek_target_ms = Some(100_000);
+        demand.buffered_through_ms = 130_000;
+        demand.playback_rate = 1.0;
+        let seeking = evaluate_flow(
+            Some(Ahead {
+                seconds: 10,
+                bytes: 0,
+            }),
+            Some(65_000),
+            100_000,
+            crate::playback_control::RollingLeaseMode::Explicit,
+            Some(&demand),
+            0,
+            0,
+            limits,
+            false,
+        );
+        assert_eq!(seeking.production_ahead_seconds, Some(65));
+        assert_eq!(seeking.production_target_seconds, Some(60));
+        assert_eq!(
+            seeking.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Time),
+            "the old pre-seek playhead must not inflate demand by ninety seconds"
+        );
     }
 
     #[test]

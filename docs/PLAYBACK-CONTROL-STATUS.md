@@ -2,7 +2,8 @@
 
 **Updated:** 2026-08-26  
 **Merged baseline:** `origin/main` at `8fca4ab2` (PR #611)  
-**Current work:** `codex/playback-control-m3-demand-lease` — M3b, not yet in a PR  
+**Current work:** `codex/playback-control-m3-demand-lease` — M3b, pushed branch,
+pre-review
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -40,8 +41,10 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch has not been pushed or reviewed yet. Its acceptance boundary
-is intentionally smaller than the whole actor migration:
+The active branch is pushed but has not been adversarially reviewed yet. Its
+acceptance boundary is intentionally smaller than the whole actor migration;
+the exact behavior and timer ledger are in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
 
 - explicit rolling sessions use a 30-second lease while legacy media-only
   sessions retain the 60-second compatibility lease;
@@ -61,7 +64,7 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | In progress |
+| Implementation | Initial diff complete; pre-review inspection in progress |
 | Adversarial diff review | Not run |
 | Unit/focused tests | Not run — intentionally waits for adversarial review |
 | Full local gate | Not run |
