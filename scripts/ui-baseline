@@ -492,6 +492,10 @@ class Fail(Exception):
     """A route did not render. Collected, reported, and turned into exit 1."""
 
 
+class RetryableRootAttach(Fail):
+    """A fresh page never attached its route root before the bounded deadline."""
+
+
 # ---- environment ----------------------------------------------------------
 
 
@@ -1182,6 +1186,8 @@ def stress_classic_header(page, name, layout_id):
 
 
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     page = pw_context.new_page()
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
@@ -1222,7 +1228,16 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             raise Fail(f"{name}: document responded 404")
 
         container = route.get("container", "#main")
-        page.wait_for_selector(container, state="attached", timeout=args.timeout)
+        try:
+            page.wait_for_selector(container, state="attached", timeout=args.timeout)
+        except PlaywrightTimeoutError as error:
+            # A persistent missing root is still a product failure. One fresh
+            # context retry covers a renderer/connection that died during
+            # navigation without weakening any later DOM, accessibility,
+            # request-inventory, or golden assertion.
+            raise RetryableRootAttach(
+                f"{name}: {container} did not attach before the route deadline"
+            ) from error
         # The layout the app actually resolved, not the one localStorage asked
         # for. `layoutId()` falls back to classic on a surface a layout does not
         # declare, and the sweep already skipped those pairs — so a mismatch
@@ -1589,14 +1604,12 @@ def run_capture(base_url, token, routes, args, out_dir):
             for layout_id, vp, name, route in triples:
                 key = f"{layout_id}|{name}@{vp_key(vp)}"
                 shot = out_dir / layout_id / f"{name}@{vp_key(vp)}.png"
-                # The player is the only capture that waits on a real media
-                # decision and decoder. A loaded one-voter fixture can lose one
-                # authority read even though the next request is healthy (CI
-                # observed exactly one miss between five successful plays).
-                # Retry the whole capture in a fresh browser context, never an
-                # individual assertion: a persistent product, accessibility,
-                # request-inventory, or frame failure still fails unchanged.
-                attempts = 2 if route.get("player") else 1
+                # The player waits on a real media decision and decoder, so it
+                # retains one whole-capture retry. Any route also gets one
+                # fresh-context retry when Chromium never attaches its root;
+                # no later product, accessibility, request-inventory, or
+                # golden failure is retryable.
+                attempts = 2
                 for attempt in range(attempts):
                     if attempt:
                         time.sleep(0.5)
@@ -1608,11 +1621,13 @@ def run_capture(base_url, token, routes, args, out_dir):
                         print(f"OK      {key}", flush=True)
                         break
                     except Exception as e:  # noqa: BLE001 — every failure is a gate failure
-                        if attempt + 1 < attempts:
+                        retryable = route.get("player") or isinstance(e, RetryableRootAttach)
+                        if attempt + 1 < attempts and retryable:
                             print(f"RETRY   {key}: {e}", flush=True)
                             continue
                         failures.append(f"{key}: {e}")
                         print(f"FAIL    {key}: {e}", flush=True)
+                        break
                     finally:
                         context.close()
         finally:

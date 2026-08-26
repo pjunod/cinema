@@ -69,7 +69,7 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertLess(pinned, libraries)
 
-    def test_ui_baseline_releases_and_retries_real_player_captures(self):
+    def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
         script = read("scripts/ui-baseline")
 
         self.assertIn("releaseSession(PLAYER.sessionId);", script)
@@ -81,8 +81,15 @@ class OperationsContractCase(unittest.TestCase):
             "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
         )
         self.assertNotIn("closePlayer();", script[cleanup : cleanup + 500])
-        self.assertIn('attempts = 2 if route.get("player") else 1', script)
+        self.assertIn("class RetryableRootAttach(Fail):", script)
+        self.assertIn("except PlaywrightTimeoutError as error:", script)
+        self.assertIn("attempts = 2", script)
+        self.assertIn(
+            'retryable = route.get("player") or isinstance(e, RetryableRootAttach)',
+            script,
+        )
         self.assertIn('print(f"RETRY   {key}: {e}"', script)
+        self.assertIn('print(f"FAIL    {key}: {e}"', script)
         self.assertLess(
             cleanup,
             script.index("page.close()", script.index("def capture_route")),
