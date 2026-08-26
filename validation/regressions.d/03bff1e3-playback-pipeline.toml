@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["03bff1e3"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The follow-up adversarial review showed that probe metadata could miss a partial out-of-band hvcC. Retained core tests distinguish hvc1/dvh1, which require complete VPS/SPS/PPS in hvcC, from hev1/dvhe, which may carry them in band. VOD-index and live-HLS tests now corrupt an emitted hvc1 without supplying any probe hint and prove it is refused before publication; the live outcome is terminal so the legacy muxer cannot publish the same invalid decoder configuration."
