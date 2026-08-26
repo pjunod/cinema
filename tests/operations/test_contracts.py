@@ -311,6 +311,11 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
         self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
+        vod_web = workflow.split("\n  vod_web:", 1)[1].split(
+            "\n  web_layout:", 1
+        )[0]
+        self.assertIn("--case suspend-resume", vod_web)
+        self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
