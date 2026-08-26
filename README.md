@@ -1,8 +1,8 @@
 # plurx
 
-[![ci](https://github.com/pjunod/plurx/actions/workflows/ci.yml/badge.svg)](https://github.com/pjunod/plurx/actions/workflows/ci.yml)
+[![ci](https://github.com/pjunod/plurx/actions/workflows/ci.yml/badge.svg?branch=main&event=push)](https://github.com/pjunod/plurx/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 [![lint](https://github.com/pjunod/plurx/actions/workflows/lint.yml/badge.svg)](https://github.com/pjunod/plurx/actions/workflows/lint.yml)
-[![coverage](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/pjunod/plurx/badges/coverage.json)](https://github.com/pjunod/plurx/actions/workflows/ci.yml)
+[![unit coverage](https://github.com/pjunod/plurx/blob/badges/coverage.svg?raw=true)](https://github.com/pjunod/plurx/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush)
 
 A self-hosted media server and player in the spirit of **old-school Plex** —
 before the streaming tiles, live TV, ads, and cloud accounts. Your media, your

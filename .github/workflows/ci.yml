@@ -523,17 +523,19 @@ jobs:
 
   coverage:
     name: coverage
-    # Same suite as `check`, so the same pinned ffmpeg. See
-    # .github/actions/ffmpeg.
+    # Same fast unit and SQLite-contract suite as `check`, so the same pinned
+    # ffmpeg. See .github/actions/ffmpeg.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
     needs: check
     timeout-minutes: 30
     # PR coverage was a second run of the Rust suite whose result was discarded;
     # the badge is published only from the merged main branch.
     if: github.ref == 'refs/heads/main'
-    # Self-hosted coverage badge — no codecov.io account or token. Measure line
-    # coverage, write a shields.io endpoint JSON, and (on main only) force-push it
-    # to an orphan `badges` branch that shields renders from raw.githubusercontent.
+    # Private-repository coverage badge — no codecov.io account or token.
+    # Measure the runner-neutral fast lane and force-push both the endpoint JSON
+    # and a directly renderable SVG to an orphan `badges` branch. The README
+    # loads the SVG through github.com so authorized private-repo viewers work;
+    # shields.io cannot read a private raw.githubusercontent.com branch.
     permissions:
       contents: write
     steps:
@@ -552,19 +554,31 @@ jobs:
         # Tests intentionally terminate helper processes. A helper can leave one
         # truncated .profraw behind even though the suite and every other profile
         # completed; merge the valid profiles, but still fail if none are valid.
-        run: cargo llvm-cov --workspace --summary-only --json --output-path cov.json --failure-mode all
-      - name: Build the shields.io badge JSON
+        run: >-
+          cargo llvm-cov --workspace --locked --exclude plurx-cluster-check
+          --summary-only --json --output-path cov.json --failure-mode all
+      - name: Build the unit coverage badges
         run: |
           pct=$(jq -r '.data[0].totals.lines.percent' cov.json)
           msg=$(printf '%.1f' "$pct"); int=${msg%.*}
-          if   [ "$int" -ge 90 ]; then color=brightgreen
-          elif [ "$int" -ge 75 ]; then color=green
-          elif [ "$int" -ge 55 ]; then color=yellowgreen
-          elif [ "$int" -ge 40 ]; then color=yellow
-          elif [ "$int" -ge 20 ]; then color=orange
-          else color=red; fi
+          if   [ "$int" -ge 90 ]; then color=brightgreen; fill='#4c1'
+          elif [ "$int" -ge 75 ]; then color=green;       fill='#97ca00'
+          elif [ "$int" -ge 55 ]; then color=yellowgreen; fill='#a4a61d'
+          elif [ "$int" -ge 40 ]; then color=yellow;      fill='#dfb317'
+          elif [ "$int" -ge 20 ]; then color=orange;      fill='#fe7d37'
+          else color=red; fill='#e05d44'; fi
           mkdir -p badge
-          printf '{"schemaVersion":1,"label":"coverage","message":"%s%%","color":"%s"}\n' "$msg" "$color" | tee badge/coverage.json
+          printf '{"schemaVersion":1,"label":"unit coverage","message":"%s%%","color":"%s"}\n' "$msg" "$color" > badge/coverage.json
+          cat > badge/coverage.svg <<SVG
+          <svg xmlns="http://www.w3.org/2000/svg" width="142" height="20" role="img" aria-label="unit coverage: ${msg}%">
+            <title>unit coverage: ${msg}%</title>
+            <linearGradient id="s" x2="0" y2="100%"><stop offset="0" stop-color="#bbb" stop-opacity=".1"/><stop offset="1" stop-opacity=".1"/></linearGradient>
+            <clipPath id="r"><rect width="142" height="20" rx="3" fill="#fff"/></clipPath>
+            <g clip-path="url(#r)"><rect width="91" height="20" fill="#555"/><rect x="91" width="51" height="20" fill="$fill"/><rect width="142" height="20" fill="url(#s)"/></g>
+            <g fill="#fff" text-anchor="middle" font-family="Verdana,Geneva,DejaVu Sans,sans-serif" font-size="11"><text x="45.5" y="15" fill="#010101" fill-opacity=".3">unit coverage</text><text x="45.5" y="14">unit coverage</text><text x="116.5" y="15" fill="#010101" fill-opacity=".3">${msg}%</text><text x="116.5" y="14">${msg}%</text></g>
+          </svg>
+          SVG
+          cat badge/coverage.json
       - name: Publish badge to the `badges` branch
         if: github.ref == 'refs/heads/main'
         continue-on-error: true
@@ -576,7 +590,7 @@ jobs:
           git checkout -q -b badges
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add coverage.json
+          git add coverage.json coverage.svg
           git commit -q -m "coverage badge"
           git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" badges
 
