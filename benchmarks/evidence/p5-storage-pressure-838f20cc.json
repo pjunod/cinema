@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "evidence_scope": "privileged_linux_storage",
+  "build_sha": "838f20cc64d7111af274f20d35a840f66138542c",
+  "executed_at_unix_ms": 1787688407000,
+  "runner_class": "isolated-private-linux-host",
+  "runner_image": "docker.io/library/rust:1.97.1-bookworm",
+  "runner_image_digest": "sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97",
+  "native_architecture": "amd64",
+  "machine_fingerprint": "7c42714623f7ea1f1ad05e4d5de2eb3b0290db7f80f97e54e192547d869b5adc",
+  "checks": [
+    {
+      "name": "mount_bind_and_cross_device",
+      "command": "make bind-mount-check",
+      "result": "passed",
+      "tests_run": 27,
+      "tests_failed": 0
+    },
+    {
+      "name": "real_enospc_storage_pressure",
+      "command": "make storage-pressure-check",
+      "result": "passed",
+      "tests_run": 1,
+      "tests_failed": 0
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["8a704bc0"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained P7 proxy fixture imports Axum only through the compatibility crate that owns the shipped HTTP dependency and the full cluster check compiles and executes that fixture. Reintroducing the test-only core re-export or a direct harness dependency breaks the workspace gate or restores a second HTTP stack outside the production dependency boundary."

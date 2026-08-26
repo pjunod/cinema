@@ -307,14 +307,16 @@ in its own 2,000-line process-local ring. Those events do not consume the
 general Settings → System log ring; cluster warnings and errors still reach
 stdout/journald so a startup failure remains visible without the web UI.
 
-**Add a node** mints one token through `POST /api/v1/cluster/join-tokens` and
-displays it exactly once, with a lifetime you pick between 10 minutes and 1
-hour. plurx keeps only its digest, so the browser is the only copy: the panel
-never writes it to browser storage, a URL, or a log, and it is dropped when you
-leave the tab. Everything after that — the owner-only file, `join_token_file`,
-the fresh data directory — is the terminal procedure below, unchanged. Treat the
-displayed token exactly as the runbook treats the `curl` response: anyone
-holding it can join a node to this cluster until it is redeemed or expires.
+**Add a node** mints one token through the role's distinct endpoint: voters use
+`POST /api/v1/cluster/join-tokens`, while read workers use
+`POST /api/v1/cluster/learner-join-tokens`. The panel displays it exactly once,
+with a lifetime you pick between 10 minutes and 1 hour. plurx keeps only its
+digest, so the browser is the only copy: the panel never writes it to browser
+storage, a URL, or a log, and it is dropped when you leave the tab. Everything
+after that — the owner-only file, `join_token_file`, the fresh data directory —
+is the terminal procedure below, unchanged. Treat the displayed token exactly
+as the runbook treats the `curl` response: anyone holding it can join a node to
+this cluster until it is redeemed or expires.
 
 **Remove** calls the removal endpoint and renders its refusal as a sentence with
 a next step rather than a code. `node_owns_offline_work` tells you to let active
@@ -551,15 +553,11 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
   https://plurx.example.net/api/v1/cluster/protocol/learner/deactivate
 ```
 
-**Once a learner is admitted, rollback is unavailable, and this release has no
-way to make it available again.** Deactivation is refused with
-`learner_protocol_in_use` naming the member it would strand, and learner removal
-is not implemented — `DELETE /api/v1/cluster/nodes/{node_id}` refuses a node
-that carries no vote with `cluster_non_voter_removal_unsupported`, naming it,
-rather than answering `cluster_node_not_found` for a node the roster plainly
-lists. Plan for this before admitting the first learner, not after: the forward
-fix (upgrade the lagging node) is the only route out from that point, and there
-is no rehearsal that gets it back.
+**Once a learner is admitted, rollback is unavailable until that learner is
+removed or promoted.** Deactivation is refused with `learner_protocol_in_use`
+and names the member it would strand. Remove the learner with the ordinary
+node DELETE, or wait for both readiness proofs and promote it; then confirm the
+roster reports `non_voting_replicas: 0` before deactivating protocol 5.
 
 `learner_protocol_in_use` carries two labelled rosters, and they answer
 different questions. *Admitted as learners* comes from the durable role column
@@ -572,40 +570,57 @@ finish and retry.
 
 An admission interrupted after redemption — a port conflict, a crash, a `^C`
 — leaves a `role='learner'` row and **continues to block rollback regardless of
-age**. Age is not proof that the authorized process cannot resume. This release
-has no learner-removal transaction that can cancel and tombstone that admission
-atomically, so the safe recovery is forward: restart the joiner or upgrade/fix
-it. Plan as though copying a learner token into place and reaching redemption
-makes protocol 5 permanent for this release.
+age**. Age is not proof that the authorized process cannot resume. Restart the
+joiner to finish admission, or explicitly remove that node id; learner removal
+can fence and tombstone an unreachable target without changing voter quorum.
 
 The refusal is decided twice — once as a read that names what is in the way, and
 again inside the committing statement — so a learner admitted between the two
 still stops the rollback rather than being stranded by it.
 
-### Admitting a learner
+### Admitting and using a learner
 
-A learner receives replication and nothing else. It never becomes leader, never
-counts toward quorum, and runs none of the cluster's leader-singleton work — no
-scheduler, no schema migration, no provider or scan pass. Quorum size is
-unchanged by admitting one: three voters plus a learner still needs two voters
-to commit. Eligibility for that work is re-derived from committed Raft
-membership on every decision, not from the role the process booted with.
+A learner receives replication and can become a readiness-gated read/media
+worker. It never becomes leader or counts toward quorum while its committed
+role is non-voting, and it runs none of the cluster's leader-singleton work —
+no scheduler, schema migration, provider, scan, or membership-control job.
+Quorum size is unchanged by admitting one: three voters plus a learner still
+needs two voters to commit and still tolerates one voter failure. Eligibility
+for singleton work is re-derived from committed Raft membership on every
+decision, not from the role the process booted with.
 
-#### What a learner is not, yet
+#### Eligibility and readiness
 
-This release admits a learner and makes it harmless. It does not yet make it
-useful, and the three things an operator would reasonably expect next do not
-exist:
+The learner route matrix is fail-closed. A route not listed here returns `503
+learner_route_ineligible` before its handler runs.
 
-| Not yet | What that means today |
+| Surface | Learner behavior |
 |---|---|
-| Eligible traffic | Nothing routes reads, playback, or transcode work to a learner. It replicates and answers its own local API; it takes no share of the cluster's load. Admitting one changes what the cluster costs, not what it can serve. |
-| Promotion | There is no operation that turns a learner into a voter. The role is durable, and no code path moves it. |
-| Removal | There is no operation that removes a learner. The voter removal endpoint does not resolve one, and its presence permanently blocks the protocol rollback above. |
+| Liveness, readiness, metrics, app assets, and `GET /api/v1/cluster/nodes` | Allowed. `/readyz` still returns 503 whenever the serving fence has no fresh quorum proof. |
+| Native catalogue | GET libraries, library items, item detail, hubs, and home previews only; each bounded read still enforces its quorum/apply watermark. |
+| Plex catalogue | GET sections, section contents, and metadata shapes only, under the same bounded-read policy. |
+| Node-local media | Exact method-and-route shapes only: GET media bytes/status/playlists/images/subtitles, POST the declared HLS/publication and authenticated internal session starts, and DELETE those node-local sessions. The serving fence and peer proof remain mandatory. PUT audio offsets and every offline-package create/delete/lease/complete mutation are refused. |
+| Self leave | `POST /api/v1/cluster/leave`, with the body bound to this backend's `local_node_id`. |
+| Authority and mutations | Refused: settings, searches outside the bounded inventory, library/user/API-key mutations, providers, scans, Trakt, scheduler and repair jobs, protocol changes, token issuance, promotion, and remote-node removal. |
 
-Admit a learner in this release only to stage a machine you intend to keep, on a
-cluster you will not need to roll back. Adding a learner for capacity is PR-2's
-subject and is not delivered here.
+`GET /api/v1/cluster/nodes` exposes the proof instead of making an operator
+infer it from a green heartbeat:
+
+- `bounded_read_ready` is true only when the target's own passive quorum sample
+  is current and its local applied index has zero gap;
+- `apply_lag_entries` is that target-local gap;
+- `voter_storage_ready` combines a periodically refreshed durable
+  create/fsync/remove/directory-fsync probe with at least 512 MiB of current
+  filesystem headroom. The probe runs on the blocking pool, publishes its own
+  observation time, and expires after 30 seconds;
+- `storage_headroom_bytes` is the current unreserved filesystem capacity; and
+- `capacity` reports voter count, quorum, voter failure tolerance, non-voting
+  replicas, and ready read workers separately.
+
+A stale progress heartbeat immediately clears read-worker readiness and removes
+the node from media placement. Learner lag is per-node capacity state; it does
+not change the voter replication-health summary or claim that quorum redundancy
+is degraded.
 
 Admission is a separate protocol, not a flag on the voter join, and it is
 available only after the activation above:
@@ -640,9 +655,55 @@ version 1 and stays readable by the previous release, so rolling a voter back
 remains possible.
 
 Once a learner exists, `.../protocol/learner/deactivate` is refused with
-`learner_protocol_in_use` and names it. Removing a learner is not yet
-implemented; do not admit one to a cluster you may need to roll back. See
-*Rolling the learner protocol back* above.
+`learner_protocol_in_use` and names it until it is removed or promoted. See
+*Promoting or removing a learner* below and *Rolling the learner protocol back*
+above.
+
+#### Promoting or removing a learner
+
+Promotion is deliberate and admin-only. Wait until the roster shows both
+`bounded_read_ready: true` and `voter_storage_ready: true`, then use Settings →
+Cluster → **Promote to voter**, or call:
+
+```bash
+curl -fsS -X POST \
+  "$PLURX/api/v1/cluster/nodes/$NODE_ID/promote" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | jq .
+```
+
+The coordinator records a durable intent, obtains a quorum-confirmed commit
+barrier, and waits for a later heartbeat from the target to prove its own
+applied index crossed that barrier. It then asks Hiqlite for the voter
+transition and reconciles ambiguous HTTP outcomes from a quorum of membership
+observations. A retry whose outcome is not already committed records a **new**
+barrier and requires a new target heartbeat; an old progress row can never
+promote an offline learner. After the vote commits, the target atomically
+rewrites and fsyncs `membership.json` and `hiqlite/activation.json` as voter
+records. Only then does the coordinator publish role `voter` and clear the
+intent. A crash between those two local writes resumes the second write on
+startup, and the final version-1 membership record remains readable by the
+previous release. The process may take singleton work immediately and retains
+that authority after restart. Promotion refuses
+with `learner_not_ready` for a stale/non-zero-lag proof and
+`voter_storage_preflight_failed` when the durability probe or 512 MiB headroom
+threshold is not satisfied.
+
+To remove a learner, use the same DELETE as a follower voter:
+
+```bash
+curl -fsS -X DELETE \
+  "$PLURX/api/v1/cluster/nodes/$NODE_ID" \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" | jq .
+```
+
+Learner removal does not apply the voter-quorum-size rule. It first commits a
+route/placement/job-owner fence, supersedes active media ownership, waits for a
+reachable target to apply that fence, settles node-local work, removes the
+non-voting member, and leaves the durable node tombstone. An unreachable learner
+can still be removed because it has no vote. A running removed process may
+answer liveness and metrics while it drains, but every application route is
+refused with `node_removal_fenced`; discard its old data directory before
+joining that machine again with a fresh token.
 
 #### A learner is inside the trust boundary
 
@@ -677,13 +738,19 @@ as for a voter join. Splitting membership mutation onto its own credential is a
 separate milestone, designed in
 [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
 
-Refusals specific to admission:
+Refusals specific to learner admission and lifecycle:
 
 | Code | HTTP | Meaning |
 |---|---|---|
 | `learner_protocol_inactive` | 409 | The cluster has not activated protocol 5. Activate it first. |
 | `join_incompatible` | 400 | The joining binary does not implement the cluster's whole active protocol range. |
 | `join_token_invalid` | 400 | Including a token framing this build does not implement — an older build reads `plxjoin:v2` this way, and refuses before it writes any cluster secret to disk. |
+| `learner_not_ready` | 409 | The learner's own heartbeat is stale, behind the quorum commit index, or has not yet published a local apply proof. |
+| `voter_storage_preflight_failed` | 409 | The durable-write probe failed or current filesystem headroom is below 512 MiB. |
+| `learner_lifecycle_pending` | 409 | A prior promotion/removal may have reached Raft; retry the same operation so the durable intent can reconcile it. |
+| `promotion_requires_learner` | 409 | The target is absent, fenced, or already an ordinary voter rather than an admitted learner. |
+| `learner_route_ineligible` | 503 | A learner received a route outside the published bounded-read/media matrix. Send it to a voter. |
+| `node_removal_fenced` | 503 | The local node is draining or removed; only liveness and metrics remain available. |
 
 On the joining node's own console the first of those reads `the cluster refused
 this join: learner_protocol_inactive: …`. It is deliberately not prefixed
@@ -955,8 +1022,8 @@ one. Traversal is also bounded by entry count and depth, as a safety device for
 a directory plurx does not already own: exceeding a bound in an owned root
 leaves that scratch untouched for the boot, logs a warning, and lets startup
 continue, and the next boot retries. In an unowned root a bound is a refusal.
-The depth ceiling has a test in the owned-root direction; the entry-count
-ceiling does not, so read that half as design intent.
+Reduced-limit fixtures drive both the depth and entry-count paths and prove an
+oversized owned tree is left whole.
 
 Startup requires scratch, authority, and every resolved persistent-cache child
 to be disjoint in both directions and to have distinct device/inode identities;
@@ -965,10 +1032,10 @@ and marker descriptors throughout, so a concurrent rename, mount replacement,
 or marker swap aborts startup without touching the replacement.
 Do not mount another filesystem below the scratch root. A mount point inside
 scratch is named in the startup error, and a cross-device child is refused.
-Neither is covered by a default gate: the mount-point error and the
-bind-alias refusal are exercised only by `make bind-mount-check`, which calls
-`mount --bind` and therefore needs a privileged Linux host, and the cross-device
-bound has no test at all. Treat the group as design intent and mount elsewhere.
+None is covered by the default gate: `make bind-mount-check` exercises the
+mount-point error, bind-alias refusal, and cross-device bound on a privileged
+Linux host. It creates temporary bind and tmpfs mounts and therefore needs root
+and CAP_SYS_ADMIN. Mount elsewhere even after that physical gate passes.
 
 An available `cluster.shared_cache_dir` is a fourth persistent root. It must be
 disjoint from authority, the local cache, and scratch; its verified identity is
@@ -999,10 +1066,10 @@ that exact owner-only file is authoritative and belongs in the same backup and
 move procedure. Its canonical path must remain outside scratch and every
 managed cache root; startup refuses a key inside either. Startup also passes the
 selected key inode into post-lock scratch cleanup as a protected identity, which
-is meant to stop a bind alias erasing it. The cleanup half of that is tested —
-a protected identity found at any depth aborts cleanup with its bytes intact —
-but nothing tests that the credential key is the identity handed in, so place
-the key outside the managed roots rather than relying on the belt. Each voter owns its own Hiqlite storage: sharing that directory
+stops a same-inode alias from being erased. A startup-level hard-link fixture
+proves both halves together: the selected key is the identity handed to cleanup,
+and finding it at depth aborts before either name is touched. Keep the key outside
+every managed root anyway. Each voter owns its own Hiqlite storage: sharing that directory
 between machines defeats Raft's independent failure model.
 
 Create every configured root with the daemon uid/gid and monitor space and
@@ -1013,10 +1080,21 @@ set the new paths, and restart. Require `/readyz`, current applied-index
 catch-up, and the expected cache/offline/artwork inventory before moving the
 next voter. Expect a full cache or scratch device to fail local work without
 causing a database to be created or relocated there: `storage.data_dir` is the
-only root plurx selects a durable target from. That is an operational
-expectation, not a proven property — the deterministic test substitutes an
-ENOTDIR failure for a full device, and any real out-of-space exercise is
-privilege-gated.
+only root plurx selects a durable target from. The deterministic gate retains
+the non-directory device-failure case. Before a storage-layout release, run the
+privileged Linux proofs as root:
+
+```bash
+make bind-mount-check
+make storage-pressure-check
+```
+
+The second target exhausts a bounded tmpfs until the kernel returns `ENOSPC`,
+then proves both cache and scratch startup failures preserve the authority bytes
+and create no database on either failed device. These targets fail when their
+requested mount capability is unavailable; they do not silently count a skip as
+evidence. The P5 implementation run is retained in
+[`benchmarks/evidence/p5-storage-pressure-838f20cc.json`](../benchmarks/evidence/p5-storage-pressure-838f20cc.json).
 
 Setting `storage.cache_dir` migrates nothing. The legacy trees stay where they
 are; the daemon logs a warning while they still hold bytes and starts anyway.
@@ -1264,6 +1342,32 @@ ready backend for cache and session locality. A cookie or source-hash policy is
 fine; stickiness is an optimization, not an availability dependency. If that
 backend becomes unready, the next request may move to a survivor and the
 client-visible recovery contract still applies.
+
+The proxy contract is independent of Caddy, nginx, Traefik, HAProxy, or a
+managed load balancer. Use a 2-second backend connection bound and a 75-second
+maximum connection drain. Retry `GET` and `HEAD` only; never automatically
+replay `POST`, `PUT`, `PATCH`, or `DELETE`, because a lost response does not
+prove the authority mutation was uncommitted. The exact contract and
+ready-to-adapt examples live in
+[`deploy/cluster-routing/`](../deploy/cluster-routing/).
+
+Before rollout, run the product-neutral fixture and inspect its evidence:
+
+```bash
+cargo run --locked -p plurx-cluster-check -- proxy-fixture
+make cluster-check
+jq '{follower_loss,leader_loss,three_voter_plus_learner,hls_backend_loss,accepted_budgets}' \
+  target/validation/cluster-failure-drills.json
+```
+
+The retained semantic artifact records every attempt, error, and latency from a
+fixed-cadence 64-write workload that continues through node loss. It proves
+leader recovery inside the accepted 10-second election transition budget,
+lagged learner rotation, a response longer than the connect budget draining
+inside the 75-second ceiling, HLS takeover from a stopped backend with one
+discontinuity, and zero proxy replays of an unsafe mutation. It is not a
+hardware latency benchmark. Preserve the CI artifact for the build being
+deployed; do not infer a tighter absolute SLO from local stopwatch output.
 
 ### Cluster ingress, drain, and recovery
 

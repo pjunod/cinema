@@ -1,12 +1,14 @@
 # Cluster performance — turn replicated correctness into useful capacity
 
-**Status:** P0–P5 implementation and deterministic acceptance delivered; M4
+**Status:** P0–P7 implementation and deterministic acceptance delivered; M4
 singleton and serving-partition proofs delivered; P5 storage-pressure behavior
-revised after adversarial review (§6.6), with four of its storage guards still
-design intent rather than pinned behavior; P6 PR-1 delivered — a learner is
-admitted, harmless, and proven on real processes, with eligible traffic,
-promotion, and removal left to PR-2 (§6.7); P0c/P2f/P5 physical evidence and
-P7 remain · **Extends:** [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
+revised after adversarial review (§6.6), with its deterministic and privileged
+storage guards now pinned; P6 delivered across two stacked
+changes — admission/protocol safety first, then useful traffic, readiness,
+promotion, removal, capacity reporting, and full real-process lifecycle
+acceptance (§6.7); P7's vendor-neutral proxy/failure evidence is delivered;
+P0c/P2f/P5 named physical evidence remains · **Extends:**
+[CLUSTERING-PLAN.md](CLUSTERING-PLAN.md)
 after functional multi-voter membership · **Written:** 2026-08-21 against
 `main` @ `aee2cbe0`
 
@@ -622,11 +624,11 @@ restart tests preserve cache/offline content and discard only declared scratch;
 disk-pressure tests on the cache/scratch device do not corrupt or relocate the
 durable target. The chosen read-pool value has a retained benchmark artifact.
 
-Two of those acceptance clauses are not met as written. The disk-pressure clause
-is satisfied by an ENOTDIR proxy rather than by a device that actually fills, and
-a real out-of-space exercise looks privilege-gated wherever it lands; the
-read-pool artifact is deferred with P0c/P2f. Both are stated as such below and
-in [OPERATIONS.md](OPERATIONS.md) rather than quietly counted as delivered.
+The read-pool artifact remains deferred with P0c/P2f. The disk-pressure clause
+now has a separate root-only Linux gate that fills a bounded tmpfs to real
+`ENOSPC`; it remains outside ordinary CI because mounting that filesystem needs
+privilege. Both boundaries are stated below and in
+[OPERATIONS.md](OPERATIONS.md) rather than conflated with deterministic CI.
 
 The delivered path contract keeps `storage.data_dir` authoritative for the
 Hiqlite database and every durable migration marker. `storage.cache_dir` moves
@@ -666,21 +668,17 @@ and offline content are never restart cleanup targets. An available shared-cache
 mount is a separately protected persistent root; a missing mount keeps the
 existing node-local fallback and is not created by this preflight.
 
-The delivered coverage is narrower than that contract. Mutation runs found the
-cross-device bound, the depth and entry-count bounds, and the credential-key
-inode protection implemented but unreached by any test, and the only real
-mount-namespace exercises are opt-in and privileged. The follow-up work added
-tests for root repair, the foreign-uid root refusal, permissive-mode and
-foreign-uid children, a faulting readdir, the interrupted pending claim, the
-truncated published marker, the foreign-durable-root marker message, and the
-depth ceiling in the owned-root direction. Three gaps remain, and operator-facing
-text must not restate them as proven: the entry-count ceiling, the cross-device
-bound, and the wiring that makes the credential key one of the protected
-identities cleanup receives — the preflight that honours a protected identity is
-tested, the choice of that identity is not. The mount-point error and the
-bind-source-ancestry refusal now have real exercises, but only under
-`make bind-mount-check` (`PLURX_RUN_BIND_MOUNT_TEST=1`), which needs
-CAP_SYS_ADMIN and is deliberately outside `check` and CI.
+The cleanup coverage now reaches every storage guard mutation identified by the
+P5 review. A reduced-limit unit fixture drives the production entry-count path
+and proves preflight leaves the whole owned tree untouched. A startup-level
+hard-link fixture proves the selected credential-key inode is the protected
+identity passed into scratch cleanup. `make bind-mount-check` reaches the real
+mount-point, bind-source-ancestry, and cross-device refusals, while
+`make storage-pressure-check` fills a bounded tmpfs and proves cache and scratch
+`ENOSPC` cannot relocate or create authority. The last two targets require root
+and CAP_SYS_ADMIN on Linux and remain deliberately outside `check` and ordinary
+CI; the [retained run record](../benchmarks/evidence/p5-storage-pressure-838f20cc.json)
+is physical evidence, not a claim about an unprivileged runner.
 
 `cluster.read_pool_size` is now an explicit bounded `1..=16` node-local
 setting with the previous value, `4`, as its default, and it now reaches the
@@ -858,35 +856,67 @@ learner is a committed member with a durable role, holds no vote, changes no
 quorum, runs no leader-singleton work, survives its own restart, and cannot be
 rolled back away. The trust boundary is stated rather than moved.
 
-**Remaining for PR-2.** Everything that makes a learner *useful* or *reversible*:
-the route and job eligibility matrix; learner readiness and readiness-gated
-bounded local reads; separate reporting of voter replication health and learner
-catch-up; promotion, with its watermark/apply catch-up proof, replication
-barrier, and voter-grade storage preflight; learner removal with routing
-ejection, admission fence, drain, node-local settlement, durable removal fence,
-and data-directory tombstone; and the fuller capacity-versus-redundancy UI. The
-acceptance clauses below that PR-1 does not meet are named in §7.3.
+**Delivered by PR-2 as a whole.** A learner publishes its own term, applied
+index, quorum-committed index, apply gap, read readiness, durable-write result,
+and storage headroom in the same transaction as its heartbeat. Stale or
+non-zero-lag proofs immediately remove it from read-worker readiness and media
+placement. Voter replication status ignores learner matched-index lag; the
+roster reports that lag per node instead and exposes voter count, quorum,
+failure tolerance, non-voting replicas, and ready read workers as separate
+numbers.
+
+One server-side route matrix admits only bounded native/Plex catalogue reads,
+declared node-local media routes, health/assets, the local roster, and the
+self-bound leave operation on a learner. Every authority mutation, scheduler,
+provider, scan, migration, membership-control, and other singleton surface is
+refused. Existing serving fences remain authoritative on media routes, and the
+cluster job gate re-derives the live committed role on every acquisition so a
+promotion takes effect without restarting the daemon.
+
+Promotion creates a durable intent, checks a fresh zero-lag target-local proof
+and a 512 MiB durable voter-filesystem headroom preflight. The durability probe
+runs periodically off the async executor and carries its own bounded-age
+timestamp; a stale startup-time success is not promotion evidence. The
+coordinator records a quorum-confirmed barrier and waits for a later target
+heartbeat to prove that barrier applied before asking Hiqlite for the voter
+transition. An ambiguous retry reconciles first and, if the vote did not
+commit, records a new barrier that requires a new target heartbeat. After the
+vote commits, the target rewrites and fsyncs both local boot-role records as a
+downgrade-readable voter before the replicated admission role changes or the
+operation succeeds. Learner removal reuses the reference-owned
+durable removal fence, ejects routing and placement, expires job ownership,
+supersedes active media ownership, waits for a reachable target to apply the
+route fence, settles owned work, removes only the non-voting member, and leaves
+the same tombstone/restart refusal as voter removal. Neither path changes
+quorum arithmetic until promotion actually commits a vote.
+
+The web UI now labels read-worker readiness separately from non-voting replica
+capacity and voter redundancy, offers learner issuance explicitly, enables
+promotion only after both readiness and storage proof, and renders typed
+refusals without describing a learner as a transient join state.
 
 **Acceptance:** a real separate-process three-voter-plus-learner cluster
-preserves quorum size three, distributes only bounded reads to the learner,
-refuses learner leadership and singleton work, catches up after restart and
-snapshot install, removes/drains safely, and promotes only after catch-up and
-storage preflight. Mixed-version tests prove an old voter blocks activation and
-cannot reinterpret v2 admission as a voter. The UI and operations text
+preserves quorum size three, refuses learner leadership and singleton work,
+catches up after restart and snapshot install, removes/drains safely, and
+promotes only after catch-up and storage preflight. Production server route
+tests separately pin the exact method-and-shape learner matrix, including the
+authority mutations it must refuse. Mixed-version tests prove an old voter
+blocks activation, cannot reinterpret v2 admission as a voter, and can parse a
+promoted node's rewritten version-1 voter record. The UI and operations text
 distinguish compute/read capacity, a non-quorum replicated copy, and voting
 redundancy.
 
-| Acceptance clause | PR-1 |
+| Acceptance clause | P6 result |
 |---|---|
 | Real separate-process three-voter-plus-learner cluster preserves quorum size three | met |
-| Refuses learner leadership and singleton work | met for singleton work, through the production `acquire_cluster_job`; leadership is refused only by `learner_only` plus the absence of a vote, which the scenario asserts rather than attacks |
-| Catches up after restart | met for process restart; **snapshot install is not exercised** |
-| Distributes only bounded reads to the learner | not met — no traffic is routed to a learner at all |
-| Removes/drains safely | not met — learner removal does not exist |
-| Promotes only after catch-up and storage preflight | not met — promotion does not exist |
+| Refuses learner leadership and singleton work | met through committed non-voter membership, the production `learner_only` startup hint, and plurxd's production `acquire_cluster_job` path |
+| Catches up after restart and snapshot install | met — the harness stops the learner, commits state, compacts and purges past its last log, restarts it, and reads the snapshot-only marker locally |
+| Distributes only eligible work to the learner | met — media peer selection includes only a fresh ready member; the production server's method-and-route matrix admits bounded catalogue reads plus declared node-local media and explicitly refuses replicated audio-offset and offline-package mutations |
+| Removes/drains safely | met — the real learner applies its durable fence, ends seeded active media ownership, is tombstoned, leaves committed membership, and does not change the three-voter quorum |
+| Promotes only after catch-up and storage preflight | met — a fresh replacement publishes fresh proofs, crosses a new barrier, becomes the fourth voter, acquires a previously refused singleton job live, restarts as a voter, and takes another singleton job |
 | Mixed-version: an old voter blocks activation | met, against a second real process |
 | Mixed-version: an old joiner cannot reinterpret v2 admission as a voter | met, against a transcription of the shipped v1 decoder rather than a v1 binary |
-| UI and operations text distinguish the three shapes | partly — the UI and docs no longer call a learner a join state and name what it is not, but the capacity-versus-redundancy presentation is PR-2's |
+| UI and operations text distinguish compute/read capacity, non-voting copies, and voter redundancy | met |
 
 ### 6.8 P7 — close the loop with load-balancer and failure drills
 
@@ -909,6 +939,17 @@ lagged-worker runs. Lock absolute SLOs only from those artifacts.
 leader loss recovers inside the accepted election budget, a lagged learner
 leaves rotation, and an HLS session survives one backend loss with the existing
 documented discontinuity behavior.
+
+| Acceptance clause | P7 result |
+|---|---|
+| Product-neutral routing contract | met — `/readyz`, HLS/segment affinity, 2 s connect, 75 s drain, and safe-method-only retry behavior are specified independently of example proxy syntax |
+| Executable local proxy fixture | met — two real local HTTP backends and a proxy prove sticky HLS/segments, backend ejection, one discontinuity, and no replay of a failing `POST` |
+| Three voters and three voters plus learner | met — the same separate-process harness records the three-voter quorum and admitted non-voting replica |
+| Follower loss preserves writes | met — one fixed-cadence 64-write workload continues through process loss, records every attempt/error/latency, and verifies every acknowledged key on equal surviving replicas |
+| Leader loss meets the accepted election budget | met — the first post-loss write continues without a readiness pause, its acknowledgement defines recovery, and the artifact is rejected above 10 seconds |
+| Lagged learner leaves rotation | met — the real learner apply path pauses, commits fall beyond it, `ready_read_workers` reaches zero, and catch-up restores eligibility |
+| HLS survives backend loss | met — a response longer than the connect budget drains during bounded shutdown, the sticky session then moves from the stopped backend to the ready survivor, and its replacement playlist carries exactly one discontinuity |
+| Retained evidence | met — CI uploads `cluster-failure-drills.json`, validated by a closed Draft 2020-12 schema; it makes no named-hardware performance claim |
 
 ## 7. Pull-request sequence — small diffs, explicit dependencies
 
@@ -957,7 +998,7 @@ the `CLUSTERING-PLAN.md` M6 mixed-version fixture:
 | P1-P2 | no schema/wire change; old nodes remain correct but do not coalesce or export new metrics | non-leader nodes, then current leader | unrestricted after disabling dashboards that require the new series |
 | P3 | bounded reads stay off unless the serving node and quorum-confirmed watermark source advertise the same protocol feature; old nodes use `Authority` | upgrade all voters, verify feature advertisements, then enable per-node traffic | force the authority-read kill switch cluster-wide before installing an old binary |
 | P5 | new paths are node-local config; an omitted field preserves the old root exactly, but a *set* `[storage]` field is not ignored by an older binary — see below | move one non-leader only after its reverse path is proven | move bytes back, then delete `storage.cache_dir` and `storage.transcode_dir` from every config file before installing an older binary |
-| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote the `learner_protocol_v5` capability in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role. Built and proven against a second real process in `plurx-cluster-check`: a live voter that heartbeats without the capability blocks activation and is named, and restarting it on a capability-writing binary clears it | upgrade all voters, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, activate protocol, add a learner. PR-1 stops there — there is no eligible learner traffic to enable. **An empty `learner_protocol_pending` is not on its own permission to activate.** That roster is a staleness rule — it names a node whose capability row is older than its own `last_seen_at`, which is what catches a rollback — and a node that proved the capability and *then* stopped freezes both timestamps together, so it never appears there. Activation refuses separately for any member that has not heartbeated in over two minutes (`learner_protocol_node_absent`: start it or remove it) and for any member that has redeemed a join token and not yet heartbeated (`join_in_flight`: wait). See [OPERATIONS.md](OPERATIONS.md) | PR-1 delivers only the no-learner rollback: deactivation is refused, by its own committing statement, while any committed member holds no vote, and **learner removal does not exist**, so admitting a learner makes rollback permanently unavailable on this release. Plan for that before the first learner; the forward fix is then the only route |
+| P6 | binaries implement `[4,5]` and `cluster_meta` stays `4..=4` until an admin activation proves every active node's *running* binary wrote both the admission and lifecycle capabilities in its own heartbeat transaction; after `5..5` a `[4,4]` binary is refused at boot, join, and preflight, and old joiners reject rather than ignore the role. The real-process harness proves the old-voter refusal, snapshot recovery, removal, and promotion | upgrade all voters, wait for every active node to heartbeat, confirm `learner_protocol_pending` is empty on `GET /cluster/nodes`, then activate protocol and admit learners. **An empty pending roster is not on its own permission to activate:** a silent member is refused separately with `learner_protocol_node_absent`, and an unfinalized redemption with `join_in_flight`. Do not promote until the roster shows both read readiness and voter-storage readiness | remove every remaining learner or promote it after readiness/storage preflight, confirm `non_voting_replicas` is zero, then deactivate protocol 5. Deactivation is commit-time guarded and returns to `4..=4`; only then install a protocol-4 binary |
 | P7 | proxy behavior keys only on stable readiness/HTTP contracts | upgrade backends before enabling new routing policy | restore the prior routing policy before backend downgrade |
 
 Each PR pins `protocol_min`/`protocol_max` expectations, old-binary startup or

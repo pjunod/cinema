@@ -1867,6 +1867,17 @@ pub async fn restore_child_noreplace(
 const SCRATCH_CLEANUP_MAX_ENTRIES: usize = 120_100;
 const SCRATCH_CLEANUP_MAX_DEPTH: usize = 16;
 
+#[derive(Clone, Copy)]
+struct ScratchCleanupLimits {
+    max_entries: usize,
+    max_depth: usize,
+}
+
+const SCRATCH_CLEANUP_LIMITS: ScratchCleanupLimits = ScratchCleanupLimits {
+    max_entries: SCRATCH_CLEANUP_MAX_ENTRIES,
+    max_depth: SCRATCH_CLEANUP_MAX_DEPTH,
+};
+
 /// What a well-formed (regular, daemon-owned, 0600) ownership marker holds.
 ///
 /// The three non-matching shapes are deliberately distinct, because they call
@@ -2056,15 +2067,15 @@ fn scratch_has_only_preserved(directory: &File, preserved: &[&CStr]) -> io::Resu
 /// Which cleanup ceiling an oversized scratch tree hit.
 #[derive(Clone, Copy)]
 enum ScratchBound {
-    Entries,
-    Depth,
+    Entries(usize),
+    Depth(usize),
 }
 
 impl ScratchBound {
     fn describe(self) -> String {
         match self {
-            Self::Entries => format!("entry ceiling of {SCRATCH_CLEANUP_MAX_ENTRIES} entries"),
-            Self::Depth => format!("depth ceiling of {SCRATCH_CLEANUP_MAX_DEPTH} levels"),
+            Self::Entries(limit) => format!("entry ceiling of {limit} entries"),
+            Self::Depth(limit) => format!("depth ceiling of {limit} levels"),
         }
     }
 }
@@ -2083,6 +2094,7 @@ fn count_scratch_capability(
     depth: usize,
     root_device: u64,
     protected: &[FileIdentity],
+    limits: ScratchCleanupLimits,
 ) -> io::Result<Option<ScratchBound>> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
@@ -2095,8 +2107,8 @@ fn count_scratch_capability(
                 continue;
             }
             *counted = counted.saturating_add(1);
-            if *counted > SCRATCH_CLEANUP_MAX_ENTRIES {
-                return Ok(Some(ScratchBound::Entries));
+            if *counted > limits.max_entries {
+                return Ok(Some(ScratchBound::Entries(limits.max_entries)));
             }
             let mut stat = std::mem::MaybeUninit::<libc::stat>::uninit();
             if unsafe {
@@ -2132,8 +2144,8 @@ fn count_scratch_capability(
                 ));
             }
             if validate_scratch_entry(&stat)? {
-                if depth >= SCRATCH_CLEANUP_MAX_DEPTH {
-                    return Ok(Some(ScratchBound::Depth));
+                if depth >= limits.max_depth {
+                    return Ok(Some(ScratchBound::Depth(limits.max_depth)));
                 }
                 let name = CString::new(child.to_bytes())
                     .map_err(|_| invalid_path("scratch child contains NUL"))?;
@@ -2158,6 +2170,7 @@ fn count_scratch_capability(
                     depth + 1,
                     root_device,
                     protected,
+                    limits,
                 )? {
                     return Ok(Some(bound));
                 }
@@ -2176,6 +2189,7 @@ fn clear_scratch_capability(
     removed: &mut usize,
     root_device: u64,
     protected: &[FileIdentity],
+    limits: ScratchCleanupLimits,
 ) -> io::Result<()> {
     let entries = independent_directory_stream(directory)?;
     let result = (|| {
@@ -2188,7 +2202,7 @@ fn clear_scratch_capability(
                 continue;
             }
             *removed = removed.saturating_add(1);
-            if *removed > SCRATCH_CLEANUP_MAX_ENTRIES {
+            if *removed > limits.max_entries {
                 return Err(io::Error::other(
                     "scratch tree exceeded its cleanup entry bound",
                 ));
@@ -2271,7 +2285,7 @@ fn clear_scratch_capability(
                 ));
             }
             if is_directory {
-                if depth >= SCRATCH_CLEANUP_MAX_DEPTH {
+                if depth >= limits.max_depth {
                     return Err(io::Error::other(
                         "scratch tree exceeded its cleanup depth bound",
                     ));
@@ -2297,6 +2311,7 @@ fn clear_scratch_capability(
                     removed,
                     root_device,
                     protected,
+                    limits,
                 )?;
                 if !scratch_child_identity(directory, &quarantine)?.same_inode(quarantined) {
                     return Err(io::Error::other(
@@ -2429,6 +2444,24 @@ fn claim_and_clear_scratch_inner(
     expected_marker: &[u8],
     protected: &[FileIdentity],
     hook: Option<&dyn Fn(ScratchHookPhase)>,
+) -> io::Result<()> {
+    claim_and_clear_scratch_inner_with_limits(
+        path,
+        marker_name,
+        expected_marker,
+        protected,
+        hook,
+        SCRATCH_CLEANUP_LIMITS,
+    )
+}
+
+fn claim_and_clear_scratch_inner_with_limits(
+    path: &Path,
+    marker_name: Option<&str>,
+    expected_marker: &[u8],
+    protected: &[FileIdentity],
+    hook: Option<&dyn Fn(ScratchHookPhase)>,
+    limits: ScratchCleanupLimits,
 ) -> io::Result<()> {
     let directory = open_directory_nofollow_blocking(path)?;
     let root_identity = file_identity(&directory)?;
@@ -2619,6 +2652,7 @@ fn claim_and_clear_scratch_inner(
         0,
         root_identity.device,
         protected,
+        limits,
     )? {
         tracing::warn!(
             scratch = %path.display(),
@@ -2637,6 +2671,7 @@ fn claim_and_clear_scratch_inner(
         &mut removed,
         root_identity.device,
         protected,
+        limits,
     )?;
     scratch_hook(hook, ScratchHookPhase::AfterCleanup)?;
     let only_preserved = match marker.as_deref() {
@@ -3403,6 +3438,42 @@ mod tests {
         assert!(scratch.join(".owner").exists());
     }
 
+    #[test]
+    fn an_over_entry_count_owned_scratch_is_left_whole_for_the_next_boot() {
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = claimed_scratch(root.path());
+        let entries = [
+            scratch.join("segment-000.m4s"),
+            scratch.join("segment-001.m4s"),
+            scratch.join("segment-002.m4s"),
+        ];
+        for entry in &entries {
+            std::fs::write(entry, b"partial segment").expect("stale segment");
+        }
+
+        claim_and_clear_scratch_inner_with_limits(
+            &scratch,
+            Some(".owner"),
+            b"exact-owner\n",
+            &[],
+            None,
+            ScratchCleanupLimits {
+                max_entries: 2,
+                max_depth: SCRATCH_CLEANUP_MAX_DEPTH,
+            },
+        )
+        .expect("an over-entry-count owned scratch must not fail the boot");
+
+        for entry in &entries {
+            assert!(
+                entry.exists(),
+                "entry-count preflight must not partially clear {}",
+                entry.display()
+            );
+        }
+        assert!(scratch.join(".owner").exists());
+    }
+
     /// Opt-in real mount-namespace regression for privileged Linux validation:
     /// `PLURX_RUN_BIND_MOUNT_TEST=1 cargo test -p plurx-core mount_point_inside`.
     #[cfg(target_os = "linux")]
@@ -3438,5 +3509,58 @@ mod tests {
         let error = error.to_string();
         assert!(error.contains("mount point"), "{error}");
         assert!(error.contains("mounted-child"), "{error}");
+    }
+
+    /// Opt-in privileged proof that the device-number guard is reached before
+    /// cleanup, rather than relying on the later `EBUSY` mount-point refusal.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_cross_device_child_is_refused_before_any_scratch_entry_is_removed() {
+        if std::env::var_os("PLURX_RUN_BIND_MOUNT_TEST").is_none() {
+            return;
+        }
+        assert_eq!(
+            unsafe { libc::geteuid() },
+            0,
+            "the opt-in cross-device scratch test must run as root"
+        );
+        struct Mounted(PathBuf);
+        impl Drop for Mounted {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("umount").arg(&self.0).status();
+            }
+        }
+
+        let root = tempfile::tempdir().expect("scratch root");
+        let scratch = claimed_scratch(root.path());
+        let ordinary = scratch.join("ordinary-segment.m4s");
+        std::fs::write(&ordinary, b"must survive preflight").expect("ordinary segment");
+        let target = scratch.join("other-device");
+        std::fs::create_dir(&target).expect("tmpfs mount target");
+        let status = std::process::Command::new("mount")
+            .args(["-t", "tmpfs", "-o", "size=64k,nr_inodes=32", "tmpfs"])
+            .arg(&target)
+            .status()
+            .expect("run tmpfs mount");
+        assert!(status.success(), "opt-in tmpfs setup failed: {status}");
+        let _mounted = Mounted(target.clone());
+        let mounted_bytes = target.join("partial-segment.m4s");
+        std::fs::write(&mounted_bytes, b"other filesystem").expect("mounted segment");
+
+        let error = claim_and_clear_owned_scratch_blocking(&scratch, ".owner", b"exact-owner\n")
+            .expect_err("a cross-device child must fail closed")
+            .to_string();
+        assert!(
+            error.contains("crosses a filesystem mount boundary"),
+            "{error}"
+        );
+        assert!(
+            ordinary.exists(),
+            "preflight must preserve ordinary siblings"
+        );
+        assert!(
+            mounted_bytes.exists(),
+            "preflight must preserve mounted bytes"
+        );
     }
 }

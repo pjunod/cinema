@@ -9,8 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 #[cfg(unix)]
 use std::ffi::CStr;
 use std::future::Future;
+use std::io::Write;
 use std::net::IpAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -94,6 +96,21 @@ const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
 /// the same reason as [`REMOVAL_ATTEMPT_CAPABILITY`]: activation must be
 /// decided on what each voter is running *now*, not on what it once ran.
 const LEARNER_PROTOCOL_CAPABILITY: &str = "learner_protocol_v5";
+/// Proof that every active member understands readiness-gated routing and the
+/// promotion/removal intent rows introduced by the complete worker lifecycle.
+const LEARNER_LIFECYCLE_CAPABILITY: &str = "learner_lifecycle_v1";
+/// Minimum unreserved capacity required before a learner may be promoted.
+/// This is deliberately independent of media-cache headroom: a voter must
+/// always retain room for Raft WAL growth, a received snapshot, and SQLite's
+/// replacement database even when every disposable cache is full.
+const MIN_VOTER_STORAGE_HEADROOM_BYTES: u64 = 512 * 1024 * 1024;
+/// A promotion barrier waits for the target's own heartbeat to prove that its
+/// local state machine applied through the quorum-confirmed barrier index.
+const PROMOTION_BARRIER_WAIT: Duration = Duration::from_secs(20);
+/// Re-probe durable voter storage at least once inside the readiness window.
+/// The fsync work runs on Tokio's blocking pool, never on an async worker.
+const STORAGE_DURABILITY_PROBE_INTERVAL: Duration = Duration::from_secs(20);
+const STORAGE_DURABILITY_PROBE_MAX_AGE_MS: i64 = NODE_REACHABLE_WINDOW_MS;
 
 /// Whether this process must heartbeat the way a binary that predates the
 /// learner protocol does: it advances `cluster_nodes.last_seen_at` like any
@@ -132,6 +149,37 @@ pub enum ClusterRole {
     Voter,
     /// Receives replication and nothing else.
     Learner,
+}
+
+/// Effective local HTTP capacity role from committed membership plus the
+/// durable removal fence. This is intentionally not the boot/admission role:
+/// promotion takes effect without restarting the daemon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LocalServingRole {
+    Unclustered,
+    Voter,
+    Learner,
+    Fenced,
+}
+
+impl LocalServingRole {
+    const fn encoded(self) -> u8 {
+        match self {
+            Self::Unclustered => 0,
+            Self::Voter => 1,
+            Self::Learner => 2,
+            Self::Fenced => 3,
+        }
+    }
+
+    fn from_encoded(value: u8) -> Self {
+        match value {
+            0 => Self::Unclustered,
+            1 => Self::Voter,
+            2 => Self::Learner,
+            _ => Self::Fenced,
+        }
+    }
 }
 
 impl ClusterRole {
@@ -266,6 +314,28 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          capability TEXT NOT NULL, \
          last_seen_at INTEGER NOT NULL, \
          PRIMARY KEY(node_id, capability)) STRICT",
+    // One node's local Raft/apply and durable-storage proof, sampled before
+    // and committed with its ordinary heartbeat. The coordinator never
+    // infers learner readiness from its own local metrics.
+    "CREATE TABLE IF NOT EXISTS cluster_node_progress (\
+         node_id TEXT PRIMARY KEY, \
+         current_term INTEGER NOT NULL CHECK (current_term >= 0), \
+         last_applied_index INTEGER, \
+         quorum_committed_index INTEGER, \
+         apply_lag_entries INTEGER, \
+         bounded_read_ready INTEGER NOT NULL CHECK (bounded_read_ready IN (0, 1)), \
+         voter_storage_ready INTEGER NOT NULL CHECK (voter_storage_ready IN (0, 1)), \
+         storage_headroom_bytes INTEGER, \
+         storage_probe_observed_at INTEGER, \
+         voter_role_persisted INTEGER NOT NULL CHECK (voter_role_persisted IN (0, 1)), \
+         observed_at INTEGER NOT NULL) STRICT",
+    // A durable, retryable audit record for the interval between the blocking
+    // apply barrier and Hiqlite's joint/uniform voter-set transition.
+    "CREATE TABLE IF NOT EXISTS cluster_node_promotions (\
+         node_id TEXT PRIMARY KEY, \
+         attempt_id TEXT NOT NULL, \
+         barrier_index INTEGER, \
+         started_at INTEGER NOT NULL) STRICT",
     // A transaction-local marker lets replicated triggers distinguish this
     // binary's heartbeat from an older statement without trusting wall-clock
     // uniqueness. Every new heartbeat creates and consumes its marker in one
@@ -474,6 +544,21 @@ pub enum MembershipError {
          be shut down and its data directory discarded"
     )]
     NonVoterRemovalUnsupported(String),
+    #[error("node {0} is not a non-voting learner that can be promoted")]
+    PromotionRequiresLearner(String),
+    #[error(
+        "learner {0} has not published a fresh zero-lag quorum/apply proof; wait for catch-up and retry"
+    )]
+    LearnerNotReady(String),
+    #[error(
+        "learner {node_id} failed voter storage preflight: at least {required_bytes} bytes of durable headroom are required"
+    )]
+    VoterStoragePreflight {
+        node_id: String,
+        required_bytes: u64,
+    },
+    #[error("learner lifecycle operation for {0} is already pending; retry the same operation")]
+    LearnerLifecyclePending(String),
     #[error("the current Raft leader cannot be removed; retry after leadership moves")]
     LeaderRemoval,
     #[error("the local voter must use the graceful leave operation")]
@@ -540,6 +625,10 @@ impl MembershipError {
             Self::RemovalPending(_) => "membership_removal_pending",
             Self::NodeNotFound => "cluster_node_not_found",
             Self::NonVoterRemovalUnsupported(_) => "cluster_non_voter_removal_unsupported",
+            Self::PromotionRequiresLearner(_) => "promotion_requires_learner",
+            Self::LearnerNotReady(_) => "learner_not_ready",
+            Self::VoterStoragePreflight { .. } => "voter_storage_preflight_failed",
+            Self::LearnerLifecyclePending(_) => "learner_lifecycle_pending",
             Self::LeaderRemoval => "cluster_leader_removal_refused",
             Self::SelfRemovalRequiresLeave => "self_removal_requires_leave",
             Self::LeaveNodeMismatch => "leave_node_mismatch",
@@ -829,6 +918,33 @@ pub struct ClusterNodeRecord {
     /// current heartbeat. False here is exactly what blocks activation.
     #[serde(default)]
     pub learner_protocol_ready: bool,
+    /// Fresh local quorum/apply proof published by this node. A learner is a
+    /// read worker only while this is true; losing the proof removes it from
+    /// readiness and placement without changing voter redundancy.
+    #[serde(default)]
+    pub bounded_read_ready: bool,
+    /// Quorum-commit to local-apply gap from this node's own heartbeat.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub apply_lag_entries: Option<u64>,
+    /// Current unreserved bytes on the authoritative voter filesystem.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub storage_headroom_bytes: Option<u64>,
+    /// Durable-write probe plus the voter headroom threshold. Promotion
+    /// refuses unless this node reports true in a fresh heartbeat.
+    #[serde(default)]
+    pub voter_storage_ready: bool,
+}
+
+/// Capacity and quorum are deliberately separate arithmetic. A replicated
+/// learner adds one recoverable copy and possibly one ready read/media worker;
+/// it does not increase the number of failures the voter set tolerates.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterCapacityStatus {
+    pub voting_nodes: usize,
+    pub voting_quorum: usize,
+    pub voting_failure_tolerance: usize,
+    pub non_voting_replicas: usize,
+    pub ready_read_workers: usize,
 }
 
 /// What protocol range the cluster is on, what this binary can do, and — when
@@ -966,6 +1082,9 @@ pub struct MembershipStatus {
     pub nodes: Vec<ClusterNodeRecord>,
     /// The one canonical lag answer introduced by #233.
     pub replication: ReplicationStatus,
+    /// Explicit capacity-versus-redundancy arithmetic for clients that should
+    /// not infer either quantity from the length of `nodes`.
+    pub capacity: ClusterCapacityStatus,
     /// The cluster's active protocol range and this binary's support for it.
     pub protocol: ClusterProtocolStatus,
 }
@@ -1111,6 +1230,11 @@ const BEGIN_REMOVAL_JOB_FENCE_SQL: &str = "UPDATE job_leases SET \
      WHERE owner_node_id = $2 AND EXISTS (\
        SELECT 1 FROM cluster_node_removal_attempts \
        WHERE node_id = $2 AND attempt_id = $3)";
+const BEGIN_REMOVAL_MEDIA_FENCE_SQL: &str = "UPDATE media_sessions SET \
+       state = 'ended', lease_expires_at_ms = $1, updated_at_ms = $1 \
+     WHERE owner_node_id = $2 AND state = 'active' AND EXISTS (\
+       SELECT 1 FROM cluster_node_removal_attempts \
+       WHERE node_id = $2 AND attempt_id = $3)";
 const PROTECT_REMOVAL_FENCE_DELETE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_attempt_delete_guard \
      BEFORE DELETE ON cluster_node_removals \
@@ -1247,8 +1371,7 @@ fn is_duplicate_column_error(error: &hiqlite::Error) -> bool {
 /// A staging row and an old timestamp are not proof of abandonment. The
 /// authorized process may be paused after redemption and resume later, so the
 /// durable learner row blocks rollback until an explicit removal protocol can
-/// tombstone it. PR-1 deliberately chooses a forward-only recovery over
-/// stranding a process that already holds cluster credentials.
+/// tombstone it or a completed promotion changes its durable role.
 fn no_admitted_learner_predicate() -> &'static str {
     "NOT EXISTS (SELECT 1 FROM cluster_nodes AS learner \
        WHERE learner.role = 'learner' AND learner.removed_at IS NULL)"
@@ -1406,14 +1529,21 @@ fn non_voting_members(voters: &BTreeSet<u64>, members: impl Iterator<Item = u64>
     non_voters
 }
 
-fn begin_removal_attempt_sql() -> String {
+fn begin_removal_attempt_sql(drain_media: bool) -> String {
     let ready = capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY);
+    let active_media_guard = if drain_media {
+        String::new()
+    } else {
+        " AND NOT EXISTS (SELECT 1 FROM media_sessions \
+             WHERE owner_node_id = $1 AND state = 'active' \
+               AND lease_expires_at_ms > $3)"
+            .to_owned()
+    };
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
          SELECT $1, $2 WHERE {ready} \
-           AND NOT EXISTS (SELECT 1 FROM media_sessions \
-             WHERE owner_node_id = $1 AND state = 'active' \
-               AND lease_expires_at_ms > $3)"
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions WHERE node_id = $1)\
+           {active_media_guard}"
     )
 }
 
@@ -1534,6 +1664,7 @@ impl ArtworkRepairClaim {
 
 struct ReplicatedMembership {
     client: Client,
+    local_metrics: hiqlite::LocalDbRaftMetrics,
     store: Arc<dyn Store>,
     identity: ClusterIdentity,
     /// What this process was *admitted* as. Used for the two things a boot
@@ -1541,6 +1672,9 @@ struct ReplicatedMembership {
     /// and what role a freshly created membership row carries — and for
     /// nothing that decides leadership or singleton work.
     role: ClusterRole,
+    storage_root: PathBuf,
+    voter_storage_probe: tokio::sync::Mutex<StorageDurabilityObservation>,
+    local_voter_role_persisted: AtomicBool,
     local: ClusterPeer,
     local_hostname: String,
     bootstrap_http: String,
@@ -1560,10 +1694,22 @@ struct ReplicatedMembership {
     replication: ReplicationMonitor,
     membership_metrics: PassiveMembershipMetrics,
     heartbeat_writes: HeartbeatWriteGate,
+    /// Fast request-path projection of committed role plus the local route
+    /// fence. Heartbeats refresh it from local applied SQL and Raft metrics
+    /// before publishing progress, so removal cannot cross its barrier while
+    /// the target still admits work. HTTP requests read only this atomic.
+    local_serving_role: AtomicU8,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
     artwork_claim_observed_at: Mutex<BTreeMap<i64, (i64, i64, Instant)>>,
+}
+
+#[derive(Clone, Copy)]
+struct StorageDurabilityObservation {
+    successful: bool,
+    observed_at: i64,
+    checked_at: tokio::time::Instant,
 }
 
 #[derive(Default)]
@@ -1597,6 +1743,10 @@ fn reachable_after(now: i64) -> i64 {
 
 fn node_is_reachable(now: i64, last_seen_at: i64) -> bool {
     now.saturating_sub(last_seen_at) <= NODE_REACHABLE_WINDOW_MS
+}
+
+fn counts_as_ready_read_worker(role: &NodeRole, is_voter: bool, ready: bool) -> bool {
+    *role == NodeRole::Learner && !is_voter && ready
 }
 
 struct ActivityAuthAdmission {
@@ -1890,6 +2040,7 @@ impl MembershipManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn replicated(
         client: Client,
+        replication: ReplicationMonitor,
         store: Arc<dyn Store>,
         identity: ClusterIdentity,
         local: ClusterPeer,
@@ -1899,8 +2050,16 @@ impl MembershipManager {
         activity_signing_key: ActivitySigningKey,
         activation_marker: ActivationMarker,
         role: ClusterRole,
+        storage_root: PathBuf,
     ) -> Result<Self, MembershipError> {
-        let replication = ReplicationMonitor::replicated(client.clone());
+        let local_metrics = client
+            .local_db_raft_metrics()
+            .map_err(MembershipError::from)?;
+        let voter_storage_probe = StorageDurabilityObservation {
+            successful: voter_storage_durability_probe(&storage_root),
+            observed_at: unix_ms()?,
+            checked_at: tokio::time::Instant::now(),
+        };
         let local_hostname = membership_hostname(
             system_short_hostname().as_deref().unwrap_or_default(),
             &local.api_address,
@@ -1909,9 +2068,13 @@ impl MembershipManager {
         let manager = Self {
             inner: Some(Arc::new(ReplicatedMembership {
                 client,
+                local_metrics,
                 store,
                 identity,
                 role,
+                storage_root,
+                voter_storage_probe: tokio::sync::Mutex::new(voter_storage_probe),
+                local_voter_role_persisted: AtomicBool::new(!role.is_learner()),
                 local,
                 local_hostname,
                 bootstrap_http,
@@ -1940,6 +2103,7 @@ impl MembershipManager {
                 replication,
                 membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
+                local_serving_role: AtomicU8::new(LocalServingRole::Fenced.encoded()),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
@@ -2858,7 +3022,31 @@ impl MembershipManager {
     }
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
+        // This local read is also the removal protocol's target-side route
+        // barrier. It happens before sampling and publishing last_applied, so
+        // a coordinator that observes the barrier knows this process has
+        // already fenced its HTTP request path.
+        let serving_role = self.refresh_local_route_admission(inner).await?;
+        if serving_role == LocalServingRole::Voter && inner.role.is_learner() {
+            self.persist_local_promoted_voter_role(inner).await?;
+        }
         let now = unix_ms()?;
+        let local = inner.local_metrics.snapshot();
+        let passive = inner.replication.metrics_handle().snapshot();
+        let watermark = passive.watermark;
+        let bounded_read_ready = passive.local_source
+            && passive.watermark_valid
+            && passive.watermark_local_reads_supported
+            && watermark.is_some_and(|sample| sample.apply_lag_entries == Some(0));
+        let storage_headroom = available_storage_headroom_bytes(&inner.storage_root);
+        let storage_probe = self.refresh_voter_storage_probe(inner).await?;
+        let storage_probe_fresh =
+            now.saturating_sub(storage_probe.observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS;
+        let voter_storage_ready = storage_probe.successful
+            && storage_probe_fresh
+            && storage_headroom.is_some_and(|bytes| bytes >= MIN_VOTER_STORAGE_HEADROOM_BYTES);
+        let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
+        let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
@@ -2886,6 +3074,41 @@ impl MembershipManager {
                     inner.local.api_address.as_str(),
                     now,
                     inner.role.as_str()
+                ),
+            ),
+            (
+                "INSERT INTO cluster_node_progress \
+                     (node_id, current_term, last_applied_index, quorum_committed_index, \
+                      apply_lag_entries, bounded_read_ready, voter_storage_ready, \
+                      storage_headroom_bytes, storage_probe_observed_at, \
+                      voter_role_persisted, observed_at) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) \
+                     ON CONFLICT(node_id) DO UPDATE SET \
+                       current_term = excluded.current_term, \
+                       last_applied_index = excluded.last_applied_index, \
+                       quorum_committed_index = excluded.quorum_committed_index, \
+                       apply_lag_entries = excluded.apply_lag_entries, \
+                       bounded_read_ready = excluded.bounded_read_ready, \
+                       voter_storage_ready = excluded.voter_storage_ready, \
+                       storage_headroom_bytes = excluded.storage_headroom_bytes, \
+                       storage_probe_observed_at = excluded.storage_probe_observed_at, \
+                       voter_role_persisted = excluded.voter_role_persisted, \
+                       observed_at = excluded.observed_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    to_sql(local.current_term),
+                    local.last_applied_index.map(to_sql),
+                    watermark.map(|sample| to_sql(sample.committed_index)),
+                    watermark
+                        .and_then(|sample| sample.apply_lag_entries)
+                        .map(to_sql),
+                    bounded_read_ready,
+                    voter_storage_ready,
+                    storage_headroom.map(to_sql),
+                    storage_probe.observed_at,
+                    voter_role_persisted,
+                    now
                 ),
             ),
             (
@@ -2921,6 +3144,18 @@ impl MembershipManager {
                     now
                 ),
             ));
+            statements.push((
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    LEARNER_LIFECYCLE_CAPABILITY,
+                    now
+                ),
+            ));
         }
         statements.push((
             "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
@@ -2938,6 +3173,102 @@ impl MembershipManager {
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
+        // Initial bootstrap may create the active node row in this very
+        // transaction. Refresh once more so HTTP starts with an authoritative
+        // answer instead of waiting one heartbeat interval.
+        self.refresh_local_route_admission(inner).await.map(|_| ())
+    }
+
+    async fn refresh_local_route_admission(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<LocalServingRole, MembershipError> {
+        // Fail closed before touching the database. If the local read fails,
+        // the request path stays fenced until a later heartbeat succeeds.
+        inner
+            .local_serving_role
+            .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
+        let active = inner
+            .client
+            .query_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_nodes \
+                 WHERE node_id = $1 AND removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals \
+                     WHERE node_id = $1)",
+                params!(inner.identity.node_id.as_str()),
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row.count == 1);
+        let role = if !active || !inner.local_metrics.snapshot().running {
+            LocalServingRole::Fenced
+        } else {
+            let metrics = inner.client.metrics_db().await?;
+            let is_member = metrics
+                .membership_config
+                .nodes()
+                .any(|(raft_id, _)| *raft_id == inner.identity.raft_id);
+            let is_voter = metrics
+                .membership_config
+                .voter_ids()
+                .any(|raft_id| raft_id == inner.identity.raft_id);
+            match (is_member, is_voter) {
+                (true, true) => LocalServingRole::Voter,
+                (true, false) => LocalServingRole::Learner,
+                _ => LocalServingRole::Fenced,
+            }
+        };
+        let published_role = if role == LocalServingRole::Voter
+            && inner.role.is_learner()
+            && !inner.local_voter_role_persisted.load(Ordering::Acquire)
+        {
+            LocalServingRole::Fenced
+        } else {
+            role
+        };
+        inner
+            .local_serving_role
+            .store(published_role.encoded(), Ordering::Release);
+        Ok(role)
+    }
+
+    async fn refresh_voter_storage_probe(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<StorageDurabilityObservation, MembershipError> {
+        let mut observation = inner.voter_storage_probe.lock().await;
+        if observation.checked_at.elapsed() >= STORAGE_DURABILITY_PROBE_INTERVAL {
+            let root = inner.storage_root.clone();
+            let successful =
+                tokio::task::spawn_blocking(move || voter_storage_durability_probe(&root))
+                    .await
+                    .map_err(|error| MembershipError::Internal(error.to_string()))?;
+            *observation = StorageDurabilityObservation {
+                successful,
+                observed_at: unix_ms()?,
+                checked_at: tokio::time::Instant::now(),
+            };
+        }
+        Ok(*observation)
+    }
+
+    async fn persist_local_promoted_voter_role(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<(), MembershipError> {
+        if inner.local_voter_role_persisted.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let data_dir = inner.storage_root.clone();
+        tokio::task::spawn_blocking(move || {
+            super::migration::persist_promoted_voter_role(&data_dir)
+        })
+        .await
+        .map_err(|error| MembershipError::Internal(error.to_string()))?
+        .map_err(|error| MembershipError::Internal(error.to_string()))?;
+        inner
+            .local_voter_role_persisted
+            .store(true, Ordering::Release);
         Ok(())
     }
 
@@ -3380,6 +3711,18 @@ impl MembershipManager {
         Ok(is_member)
     }
 
+    /// Effective role for request admission from the heartbeat-refreshed
+    /// atomic projection. Membership metrics, local SQL, and promotion-role
+    /// persistence all happen before publication, never on the HTTP path.
+    pub async fn local_serving_role(&self) -> Result<LocalServingRole, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(LocalServingRole::Unclustered);
+        };
+        Ok(LocalServingRole::from_encoded(
+            inner.local_serving_role.load(Ordering::Acquire),
+        ))
+    }
+
     /// Retire one completed or timed-out provider repair generation. The
     /// conditional increment is itself a Raft command submitted after the
     /// repair work, so an earlier command either lands before retirement or
@@ -3529,6 +3872,60 @@ impl MembershipManager {
         Ok(rows
             .into_iter()
             .filter(|row| voters.contains(&row.raft_id))
+            .take(MAX_ACTIVITY_PEERS)
+            .map(|row| ActivityPeer {
+                http_base: row.http_base,
+                node_id: row.node_id,
+                reachable: node_is_reachable(now, row.last_seen_at),
+            })
+            .collect())
+    }
+
+    /// Ready media-capacity targets, including committed learners.
+    ///
+    /// Activity aggregation and rollout unanimity deliberately remain
+    /// voter-only. Placement is different: a learner is useful precisely as a
+    /// non-voting node-local worker. The replicated removal fence ejects it
+    /// from this directory before owned work is settled, and the progress row
+    /// keeps a lagged learner out even while its heartbeat is fresh.
+    pub async fn media_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let now = unix_ms()?;
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .take(MAX_ACTIVITY_PEERS.saturating_add(1))
+            .collect::<BTreeSet<_>>();
+        let rows = inner
+            .client
+            .query_map::<MediaPeerRow, _>(
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                        http.public_http_url, \
+                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+                        progress.observed_at \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_ACTIVITY_PEERS as i64),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| members.contains(&row.raft_id))
+            .filter(|row| {
+                row.bounded_read_ready
+                    && node_is_reachable(now, row.observed_at.unwrap_or_default())
+            })
             .take(MAX_ACTIVITY_PEERS)
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
@@ -4131,10 +4528,17 @@ impl MembershipManager {
             .query_map::<MembershipNodeRow, _>(
                 "SELECT n.node_id, n.raft_id, n.api_address, n.last_seen_at, n.role, \
                         COALESCE(h.hostname, '') AS hostname, \
+                        progress.apply_lag_entries, \
+                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+                        progress.storage_headroom_bytes, \
+                        progress.storage_probe_observed_at, \
+                        progress.observed_at AS progress_observed_at, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
                  FROM cluster_nodes n \
                  LEFT JOIN cluster_node_hostnames h ON h.node_id = n.node_id \
+                 LEFT JOIN cluster_node_progress progress ON progress.node_id = n.node_id \
                  WHERE n.removed_at IS NULL ORDER BY n.raft_id",
                 params!(),
             )
@@ -4166,6 +4570,20 @@ impl MembershipManager {
                     reachable: node_is_reachable(now, row.last_seen_at),
                     last_seen_at: row.last_seen_at,
                     removal_pending: row.removal_pending,
+                    bounded_read_ready: row.bounded_read_ready
+                        && node_is_reachable(now, row.progress_observed_at.unwrap_or_default())
+                        && !row.removal_pending,
+                    apply_lag_entries: row
+                        .apply_lag_entries
+                        .and_then(|value| u64::try_from(value).ok()),
+                    storage_headroom_bytes: row
+                        .storage_headroom_bytes
+                        .and_then(|value| u64::try_from(value).ok()),
+                    voter_storage_ready: row.voter_storage_ready
+                        && node_is_reachable(
+                            now,
+                            row.storage_probe_observed_at.unwrap_or_default(),
+                        ),
                 })
             })
             .collect::<Result<Vec<_>, MembershipError>>()?;
@@ -4174,13 +4592,569 @@ impl MembershipManager {
             2 => ClusterAvailability::DegradedReconfiguration,
             _ => ClusterAvailability::HighAvailability,
         };
+        let voting_quorum = voters.len() / 2 + 1;
+        let non_voting_replicas = nodes
+            .iter()
+            .filter(|node| node.role == NodeRole::Learner && !node.is_voter)
+            .count();
+        let ready_read_workers = nodes
+            .iter()
+            .filter(|node| {
+                counts_as_ready_read_worker(&node.role, node.is_voter, node.bounded_read_ready)
+            })
+            .count();
         Ok(MembershipStatus {
             local_node_id: inner.identity.node_id.clone(),
             availability,
             nodes,
             replication: inner.replication.status().await,
+            capacity: ClusterCapacityStatus {
+                voting_nodes: voters.len(),
+                voting_quorum,
+                voting_failure_tolerance: voters.len().saturating_sub(voting_quorum),
+                non_voting_replicas,
+                ready_read_workers,
+            },
             protocol,
         })
+    }
+
+    /// Promote one ready learner into the committed voter set.
+    ///
+    /// Readiness is the target's own fresh zero-lag heartbeat, followed by a
+    /// new quorum-confirmed barrier that the same target must apply. The
+    /// lifecycle intent blocks removal across the otherwise unavoidably
+    /// separate SQL and OpenRaft membership operations. Ambiguous transport
+    /// results retain that intent until a retry reconciles the voter set.
+    pub async fn promote_learner(
+        &self,
+        node_id: &str,
+    ) -> Result<MembershipStatus, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_learner_lifecycle_capability().await?;
+        let initial_metrics = inner.client.metrics_db().await?;
+        let target = self.promotion_target(node_id).await?;
+        let target_raft_id = u64::try_from(target.raft_id)
+            .map_err(|_| MembershipError::PromotionRequiresLearner(node_id.to_owned()))?;
+        let already_voter = initial_metrics
+            .membership_config
+            .voter_ids()
+            .any(|raft_id| raft_id == target_raft_id);
+        let admitted_role = ClusterRole::from_stored(target.admitted_role.as_deref())?;
+        if already_voter {
+            // Idempotence is only for a learner whose Raft promotion committed
+            // before the SQL role/intent transaction returned. An arbitrary
+            // existing voter is not a successful learner promotion request.
+            if admitted_role != ClusterRole::Learner {
+                return Err(MembershipError::PromotionRequiresLearner(
+                    node_id.to_owned(),
+                ));
+            }
+            self.wait_for_promoted_voter_reconciliation(node_id).await?;
+            self.finish_learner_promotion(node_id).await?;
+            return self.status().await;
+        }
+        if !initial_metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == target_raft_id)
+            || admitted_role != ClusterRole::Learner
+            || target.removal_pending
+        {
+            return Err(MembershipError::PromotionRequiresLearner(
+                node_id.to_owned(),
+            ));
+        }
+        self.require_ready_promotion_target(node_id, &target)?;
+
+        let existing = inner
+            .client
+            .query_consistent_map::<PromotionAttemptRow, _>(
+                "SELECT attempt_id \
+                 FROM cluster_node_promotions WHERE node_id = $1",
+                params!(node_id),
+            )
+            .await?
+            .into_iter()
+            .next();
+        if existing.is_some() {
+            let membership_nodes = initial_metrics
+                .membership_config
+                .membership()
+                .nodes()
+                .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+                .collect::<Vec<_>>();
+            match reconcile_promotion_change(&inner.secrets.api, target_raft_id, &membership_nodes)
+                .await
+            {
+                MembershipChangeOutcome::Promoted => {
+                    self.wait_for_promoted_voter_reconciliation(node_id).await?;
+                    self.finish_learner_promotion(node_id).await?;
+                    return self.status().await;
+                }
+                MembershipChangeOutcome::Removed => {
+                    return Err(MembershipError::PromotionRequiresLearner(
+                        node_id.to_owned(),
+                    ));
+                }
+                MembershipChangeOutcome::Indeterminate => {}
+            }
+        }
+        let (attempt_id, new_attempt) = if let Some(existing) = existing {
+            (existing.attempt_id, false)
+        } else {
+            let attempt_id = uuid::Uuid::new_v4().to_string();
+            let started_at = unix_ms()?;
+            let inserted = inner
+                .client
+                .execute(
+                    "INSERT INTO cluster_node_promotions \
+                 (node_id, attempt_id, barrier_index, started_at) \
+                 SELECT $1, $2, NULL, $3 \
+                 WHERE NOT EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1) \
+                 ON CONFLICT(node_id) DO NOTHING",
+                    params!(node_id, attempt_id.as_str(), started_at),
+                )
+                .await?;
+            if inserted != 1 {
+                return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
+            }
+            (attempt_id, true)
+        };
+        // Every submission, including an ambiguous retry, crosses a new
+        // target-local barrier. Reusing the first request's watermark would
+        // let a learner go offline and still be added to the voter set from a
+        // stale progress row during the freshness window.
+        let barrier = match inner.client.db_quorum_watermark().await {
+            Ok(watermark) => watermark.committed_index,
+            Err(error) => {
+                if new_attempt {
+                    self.clear_learner_promotion(node_id, &attempt_id).await;
+                }
+                return Err(error.into());
+            }
+        };
+        inner
+            .client
+            .execute(
+                "UPDATE cluster_node_promotions SET barrier_index = $1 \
+                     WHERE node_id = $2 AND attempt_id = $3",
+                params!(
+                    i64::try_from(barrier).unwrap_or(i64::MAX),
+                    node_id,
+                    attempt_id.as_str()
+                ),
+            )
+            .await?;
+        if let Err(error) = self.wait_for_promotion_barrier(node_id, barrier).await {
+            if new_attempt {
+                self.clear_learner_promotion(node_id, &attempt_id).await;
+            }
+            return Err(error);
+        }
+
+        let metrics = inner.client.metrics_db().await?;
+        let leader_id = metrics
+            .current_leader
+            .ok_or(MembershipError::LeaderUnavailable)?;
+        let leader = metrics
+            .membership_config
+            .membership()
+            .get_node(&leader_id)
+            .ok_or_else(|| MembershipError::Internal("leader has no node record".to_owned()))?;
+        let target_node = metrics
+            .membership_config
+            .membership()
+            .get_node(&target_raft_id)
+            .cloned()
+            .ok_or_else(|| MembershipError::PromotionRequiresLearner(node_id.to_owned()))?;
+        let membership_nodes = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+            .collect::<Vec<_>>();
+        match request_learner_promotion(&leader.addr_api, &inner.secrets.api, &target_node).await {
+            Ok(()) => {}
+            Err(MembershipChangeFailure::Rejected(error)) => {
+                if new_attempt {
+                    self.clear_learner_promotion(node_id, &attempt_id).await;
+                    return Err(error);
+                }
+                return Err(MembershipError::LearnerLifecyclePending(format!(
+                    "{node_id}: retry was rejected after an earlier ambiguous attempt: {error}"
+                )));
+            }
+            Err(MembershipChangeFailure::Ambiguous(error)) => {
+                match reconcile_promotion_change(
+                    &inner.secrets.api,
+                    target_raft_id,
+                    &membership_nodes,
+                )
+                .await
+                {
+                    MembershipChangeOutcome::Promoted => {
+                        tracing::warn!(%error, %node_id, "learner promotion committed after an ambiguous HTTP result");
+                    }
+                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Removed => {
+                        return Err(MembershipError::LearnerLifecyclePending(format!(
+                            "{node_id}: promotion outcome is indeterminate after {error}"
+                        )));
+                    }
+                }
+            }
+        }
+        self.wait_for_promoted_voter_reconciliation(node_id).await?;
+        self.finish_learner_promotion(node_id).await?;
+        self.status().await
+    }
+
+    async fn promotion_target(&self, node_id: &str) -> Result<PromotionTargetRow, MembershipError> {
+        let inner = self.replicated_inner()?;
+        inner
+            .client
+            .query_consistent_map::<PromotionTargetRow, _>(
+                "SELECT node.raft_id, node.role, node.last_seen_at, \
+                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                          WHERE removal.node_id = node.node_id) AS removal_pending, \
+                        progress.last_applied_index, progress.apply_lag_entries, \
+                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+                        progress.observed_at \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+                 WHERE node.node_id = $1 AND node.removed_at IS NULL",
+                params!(node_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(MembershipError::NodeNotFound)
+    }
+
+    fn require_ready_promotion_target(
+        &self,
+        node_id: &str,
+        target: &PromotionTargetRow,
+    ) -> Result<(), MembershipError> {
+        let now = unix_ms()?;
+        if !node_is_reachable(now, target.last_seen_at)
+            || !node_is_reachable(now, target.observed_at.unwrap_or_default())
+            || !target.bounded_read_ready
+            || target.apply_lag_entries != Some(0)
+            || target.last_applied_index.is_none()
+        {
+            return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
+        }
+        if !target.voter_storage_ready
+            || !target.storage_probe_observed_at.is_some_and(|observed_at| {
+                now.saturating_sub(observed_at) <= STORAGE_DURABILITY_PROBE_MAX_AGE_MS
+            })
+            || target.storage_headroom_bytes.unwrap_or_default()
+                < i64::try_from(MIN_VOTER_STORAGE_HEADROOM_BYTES).unwrap_or(i64::MAX)
+        {
+            return Err(MembershipError::VoterStoragePreflight {
+                node_id: node_id.to_owned(),
+                required_bytes: MIN_VOTER_STORAGE_HEADROOM_BYTES,
+            });
+        }
+        Ok(())
+    }
+
+    async fn wait_for_promotion_barrier(
+        &self,
+        node_id: &str,
+        barrier: u64,
+    ) -> Result<(), MembershipError> {
+        let deadline = tokio::time::Instant::now() + PROMOTION_BARRIER_WAIT;
+        loop {
+            let target = self.promotion_target(node_id).await?;
+            self.require_ready_promotion_target(node_id, &target)?;
+            // The progress row is written by a heartbeat transaction. A
+            // target-local applied index at or beyond the promotion-intent
+            // barrier proves this heartbeat happened after that barrier,
+            // without comparing wall clocks from two different machines.
+            if target
+                .last_applied_index
+                .and_then(|index| u64::try_from(index).ok())
+                .is_some_and(|index| index >= barrier)
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MembershipError::LearnerNotReady(node_id.to_owned()));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn wait_for_promoted_voter_reconciliation(
+        &self,
+        node_id: &str,
+    ) -> Result<(), MembershipError> {
+        let deadline = tokio::time::Instant::now() + PROMOTION_BARRIER_WAIT;
+        loop {
+            let target = self.promotion_target(node_id).await?;
+            let now = unix_ms()?;
+            if target.voter_role_persisted
+                && node_is_reachable(now, target.last_seen_at)
+                && node_is_reachable(now, target.observed_at.unwrap_or_default())
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MembershipError::LearnerLifecyclePending(format!(
+                    "{node_id}: committed voter has not persisted its restart role"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn finish_learner_promotion(&self, node_id: &str) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        inner
+            .client
+            .txn(vec![
+                (
+                    "UPDATE cluster_nodes SET role = 'voter' \
+                     WHERE node_id = $1 AND removed_at IS NULL"
+                        .to_owned(),
+                    params!(node_id),
+                ),
+                (
+                    "DELETE FROM cluster_node_promotions WHERE node_id = $1".to_owned(),
+                    params!(node_id),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(())
+    }
+
+    async fn clear_learner_promotion(&self, node_id: &str, attempt_id: &str) {
+        let Ok(inner) = self.replicated_inner() else {
+            return;
+        };
+        if let Err(error) = inner
+            .client
+            .execute(
+                "DELETE FROM cluster_node_promotions WHERE node_id = $1 AND attempt_id = $2",
+                params!(node_id, attempt_id),
+            )
+            .await
+        {
+            tracing::warn!(%error, %node_id, "could not clear rejected learner promotion intent");
+        }
+    }
+
+    /// Remove either a voter or an admitted learner. The two paths share the
+    /// durable admission fence and owned-work settlement, but only voter
+    /// removal enforces the reconfiguration quorum-size rule.
+    pub async fn remove_node(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
+        let inner = self.replicated_inner()?;
+        if node_id == inner.identity.node_id {
+            return Err(MembershipError::SelfRemovalRequiresLeave);
+        }
+        let metrics = inner.client.metrics_db().await?;
+        let target = inner
+            .client
+            .query_consistent_map::<PromotionTargetRow, _>(
+                "SELECT node.raft_id, node.role, node.last_seen_at, \
+                        EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                          WHERE removal.node_id = node.node_id) AS removal_pending, \
+                        progress.last_applied_index, progress.apply_lag_entries, \
+                        COALESCE(progress.bounded_read_ready, 0) AS bounded_read_ready, \
+                        COALESCE(progress.voter_storage_ready, 0) AS voter_storage_ready, \
+                        progress.storage_headroom_bytes, progress.storage_probe_observed_at, \
+                        COALESCE(progress.voter_role_persisted, 0) AS voter_role_persisted, \
+                        progress.observed_at \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+                 WHERE node.node_id = $1",
+                params!(node_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(MembershipError::NodeNotFound)?;
+        let target_raft_id = u64::try_from(target.raft_id).unwrap_or_default();
+        if metrics
+            .membership_config
+            .voter_ids()
+            .any(|raft_id| raft_id == target_raft_id)
+        {
+            self.remove_voter(node_id).await
+        } else if metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == target_raft_id)
+            && ClusterRole::from_stored(target.admitted_role.as_deref())? == ClusterRole::Learner
+        {
+            self.remove_learner_impl(node_id).await?;
+            self.status().await
+        } else if self.node_is_tombstoned(node_id).await? {
+            self.fence_removed_job_owner(node_id).await?;
+            self.finalize_node_removal(node_id).await;
+            self.status().await
+        } else {
+            Err(MembershipError::NodeNotFound)
+        }
+    }
+
+    async fn remove_learner_impl(&self, node_id: &str) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_learner_lifecycle_capability().await?;
+        self.require_removal_capability().await?;
+        let metrics = inner.client.metrics_db().await?;
+        let target = self.promotion_target(node_id).await?;
+        let target_raft_id = u64::try_from(target.raft_id)
+            .map_err(|_| MembershipError::PromotionRequiresLearner(node_id.to_owned()))?;
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        let members = metrics
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .collect::<BTreeSet<_>>();
+        if voters.contains(&target_raft_id)
+            || !members.contains(&target_raft_id)
+            || ClusterRole::from_stored(target.admitted_role.as_deref())? != ClusterRole::Learner
+        {
+            return Err(MembershipError::PromotionRequiresLearner(
+                node_id.to_owned(),
+            ));
+        }
+        let mut resolved = self.settle_offline_work(node_id).await?;
+        let leader_id = metrics
+            .current_leader
+            .ok_or(MembershipError::LeaderUnavailable)?;
+        let leader = metrics
+            .membership_config
+            .membership()
+            .get_node(&leader_id)
+            .ok_or_else(|| {
+                MembershipError::Internal("cluster leader has no node record".to_owned())
+            })?;
+        let membership_nodes = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+            .collect::<Vec<_>>();
+        // Learner removal is the draining variant: the reference-counted
+        // fence first ejects placement, supersedes active media ownership,
+        // expires job ownership, and blocks every later route admission.
+        let (removal_attempt, new_attempt) = if target.removal_pending {
+            (self.existing_removal_attempt(node_id).await?, false)
+        } else {
+            (self.begin_node_removal(node_id, true).await?, true)
+        };
+        let fence_barrier = inner.client.db_quorum_watermark().await?.committed_index;
+        self.wait_for_removal_fence(node_id, fence_barrier).await?;
+        match self.settle_offline_work(node_id).await {
+            Ok(report) => {
+                resolved.requeued += report.requeued;
+                resolved.failed += report.failed;
+            }
+            Err(error) => {
+                if new_attempt {
+                    return Err(self
+                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                        .await);
+                }
+                return Err(MembershipError::RemovalPending(error.to_string()));
+            }
+        }
+        match request_learner_removal(&leader.addr_api, &inner.secrets.api, target_raft_id).await {
+            Ok(()) => {}
+            Err(MembershipChangeFailure::Rejected(error)) => {
+                if new_attempt {
+                    return Err(self
+                        .rollback_node_removal_after_failure(node_id, &removal_attempt, error)
+                        .await);
+                }
+                return Err(MembershipError::RemovalPending(error.to_string()));
+            }
+            Err(MembershipChangeFailure::Ambiguous(error)) => {
+                match reconcile_member_removal(
+                    &inner.secrets.api,
+                    target_raft_id,
+                    &membership_nodes,
+                )
+                .await
+                {
+                    MembershipChangeOutcome::Removed => {
+                        tracing::warn!(%error, %node_id, "learner removal committed after an ambiguous HTTP result");
+                    }
+                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
+                        return Err(MembershipError::RemovalPending(format!(
+                            "learner removal outcome is indeterminate after {error}"
+                        )));
+                    }
+                }
+            }
+        }
+        self.finalize_node_removal(node_id).await;
+        tracing::info!(
+            %node_id,
+            requeued = resolved.requeued,
+            failed = resolved.failed,
+            "removed non-voting learner"
+        );
+        Ok(())
+    }
+
+    async fn existing_removal_attempt(&self, node_id: &str) -> Result<String, MembershipError> {
+        let inner = self.replicated_inner()?;
+        inner
+            .client
+            .query_consistent_map::<RemovalAttemptRow, _>(
+                "SELECT attempt_id FROM cluster_node_removal_attempts \
+                 WHERE node_id = $1 ORDER BY attempt_id LIMIT 1",
+                params!(node_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.attempt_id)
+            .ok_or_else(|| {
+                MembershipError::RemovalPending(format!(
+                    "{node_id} has a removal fence without an attempt reference"
+                ))
+            })
+    }
+
+    async fn wait_for_removal_fence(
+        &self,
+        node_id: &str,
+        barrier: u64,
+    ) -> Result<(), MembershipError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            let target = self.promotion_target(node_id).await?;
+            if !node_is_reachable(unix_ms()?, target.last_seen_at) {
+                return Ok(());
+            }
+            if target
+                .last_applied_index
+                .and_then(|index| u64::try_from(index).ok())
+                .is_some_and(|index| index >= barrier)
+            {
+                return Ok(());
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(MembershipError::RemovalPending(format!(
+                    "{node_id} has not applied its durable route fence"
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
     }
 
     pub async fn remove_voter(&self, node_id: &str) -> Result<MembershipStatus, MembershipError> {
@@ -4212,8 +5186,9 @@ impl MembershipManager {
             }
             // A committed member that is not a voter is not "not found" — the
             // roster lists it, and answering 404 for a node an operator can
-            // see is the least useful thing this could say. PR-1 ships voter
-            // removal only, so name the gap instead of disguising it.
+            // see is the least useful thing this could say. This low-level
+            // compatibility method remains voter-only; `remove_node` chooses
+            // the learner lifecycle before reaching it.
             if metrics
                 .membership_config
                 .nodes()
@@ -4251,7 +5226,7 @@ impl MembershipManager {
             .nodes()
             .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
             .collect::<Vec<_>>();
-        let removal_attempt = self.begin_node_removal(node_id).await?;
+        let removal_attempt = self.begin_node_removal(node_id, false).await?;
         // Close the final admission race only after the durable removal fence
         // exists. Package creation checks that fence atomically, so this is the
         // last work that can still be owned by the departing node. Reusing the
@@ -4287,7 +5262,7 @@ impl MembershipManager {
                     MembershipChangeOutcome::Removed => {
                         tracing::warn!(%removal_error, %node_id, "voter removal committed after an ambiguous HTTP result");
                     }
-                    MembershipChangeOutcome::Indeterminate => {
+                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
                         return Err(MembershipError::Internal(format!(
                         "voter removal outcome is indeterminate after {removal_error}; the target remains fenced"
                     )));
@@ -4304,6 +5279,31 @@ impl MembershipManager {
             );
         }
         self.status().await
+    }
+
+    /// Remove this process using the lifecycle appropriate to its effective
+    /// committed role. A learner leave never changes quorum arithmetic.
+    pub async fn leave_node(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        if metrics
+            .membership_config
+            .voter_ids()
+            .any(|raft_id| raft_id == inner.identity.raft_id)
+        {
+            self.leave_voter().await
+        } else if metrics
+            .membership_config
+            .nodes()
+            .any(|(raft_id, _)| *raft_id == inner.identity.raft_id)
+        {
+            self.remove_learner_impl(&inner.identity.node_id).await
+        } else if self.node_is_tombstoned(&inner.identity.node_id).await? {
+            self.finalize_node_removal(&inner.identity.node_id).await;
+            Ok(())
+        } else {
+            Err(MembershipError::NodeNotFound)
+        }
     }
 
     /// Remove this process's own voter, including when it is the leader.
@@ -4412,7 +5412,7 @@ impl MembershipManager {
         // Fence while this voter is still inside the old quorum. The separate
         // pending row survives a crash and keeps the operation retryable while
         // OpenRaft is in a joint or otherwise indeterminate configuration.
-        let removal_attempt = self.begin_node_removal(&node_id).await?;
+        let removal_attempt = self.begin_node_removal(&node_id, false).await?;
         // The fence prevents any later local ownership admission. Settle work
         // that raced with the earlier pass before proposing removal, preserving
         // the active-transfer refusal. A definite failure rolls the fence back
@@ -4453,7 +5453,7 @@ impl MembershipManager {
                     MembershipChangeOutcome::Removed => {
                         tracing::warn!(%removal_error, %node_id, "self-removal committed after an ambiguous HTTP result");
                     }
-                    MembershipChangeOutcome::Indeterminate => {
+                    MembershipChangeOutcome::Indeterminate | MembershipChangeOutcome::Promoted => {
                         return Err(MembershipError::Internal(format!(
                         "self-removal outcome is indeterminate after {removal_error}; this voter remains fenced"
                     )));
@@ -4482,61 +5482,87 @@ impl MembershipManager {
         Ok(())
     }
 
-    async fn begin_node_removal(&self, node_id: &str) -> Result<String, MembershipError> {
+    async fn begin_node_removal(
+        &self,
+        node_id: &str,
+        drain_media: bool,
+    ) -> Result<String, MembershipError> {
         let inner = self.replicated_inner()?;
         let now = unix_ms()?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let owner_fence_key = removed_job_owner_key(node_id);
-        let results = inner
-            .client
-            .txn(vec![
-                // Preserve a fence written by a binary that predates attempt
-                // references. It may protect an ambiguous proposal and must
-                // never become owned by this newer retry.
-                (
-                    "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
+        let attempt_params = if drain_media {
+            params!(node_id, attempt_id.as_str())
+        } else {
+            params!(node_id, attempt_id.as_str(), now)
+        };
+        let mut statements = vec![
+            // Preserve a fence written by a binary that predates attempt
+            // references. It may protect an ambiguous proposal and must
+            // never become owned by this newer retry.
+            (
+                "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
                      SELECT $1, 'internal.preexisting' \
                      WHERE EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1) \
                        AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts \
                          WHERE node_id = $1) \
                      ON CONFLICT(node_id, attempt_id) DO NOTHING"
-                        .to_owned(),
-                    params!(node_id),
+                    .to_owned(),
+                params!(node_id),
+            ),
+            (begin_removal_attempt_sql(drain_media), attempt_params),
+            (
+                BEGIN_REMOVAL_INTENT_SQL.to_owned(),
+                params!(node_id, attempt_id.as_str()),
+            ),
+            (
+                BEGIN_REMOVAL_FENCE_SQL.to_owned(),
+                params!(node_id, now, attempt_id.as_str()),
+            ),
+            (
+                BEGIN_REMOVAL_OWNER_FENCE_SQL.to_owned(),
+                params!(
+                    owner_fence_key.as_str(),
+                    now / 1_000,
+                    node_id,
+                    attempt_id.as_str()
                 ),
+            ),
+            (
+                BEGIN_REMOVAL_JOB_FENCE_SQL.to_owned(),
+                params!(now, node_id, attempt_id.as_str()),
+            ),
+            (
+                CLEAR_REMOVAL_INTENT_SQL.to_owned(),
+                params!(node_id, attempt_id.as_str()),
+            ),
+        ];
+        if drain_media {
+            statements.insert(
+                statements.len() - 1,
                 (
-                    begin_removal_attempt_sql(),
-                    params!(node_id, attempt_id.as_str(), now),
-                ),
-                (
-                    BEGIN_REMOVAL_INTENT_SQL.to_owned(),
-                    params!(node_id, attempt_id.as_str()),
-                ),
-                (
-                    BEGIN_REMOVAL_FENCE_SQL.to_owned(),
-                    params!(node_id, now, attempt_id.as_str()),
-                ),
-                (
-                    BEGIN_REMOVAL_OWNER_FENCE_SQL.to_owned(),
-                    params!(
-                        owner_fence_key.as_str(),
-                        now / 1_000,
-                        node_id,
-                        attempt_id.as_str()
-                    ),
-                ),
-                (
-                    BEGIN_REMOVAL_JOB_FENCE_SQL.to_owned(),
+                    BEGIN_REMOVAL_MEDIA_FENCE_SQL.to_owned(),
                     params!(now, node_id, attempt_id.as_str()),
                 ),
-                (
-                    CLEAR_REMOVAL_INTENT_SQL.to_owned(),
-                    params!(node_id, attempt_id.as_str()),
-                ),
-            ])
+            );
+        }
+        let results = inner
+            .client
+            .txn(statements)
             .await?
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         if results.get(1).copied() != Some(1) {
+            let promotions = inner
+                .client
+                .query_consistent_map::<CountRow, _>(
+                    "SELECT COUNT(*) AS count FROM cluster_node_promotions WHERE node_id = $1",
+                    params!(node_id),
+                )
+                .await?;
+            if promotions.first().is_some_and(|row| row.count > 0) {
+                return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
+            }
             let active_sessions = inner
                 .client
                 .query_consistent_map::<CountRow, _>(
@@ -4546,7 +5572,7 @@ impl MembershipManager {
                     params!(node_id, now),
                 )
                 .await?;
-            if active_sessions.first().is_some_and(|row| row.count > 0) {
+            if !drain_media && active_sessions.first().is_some_and(|row| row.count > 0) {
                 return Err(MembershipError::ActiveMediaSessions);
             }
             return Err(MembershipError::MembershipUpgradeRequired);
@@ -4571,6 +5597,25 @@ impl MembershipManager {
                 format!(
                     "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
                     capability_ready_predicate(REMOVAL_ATTEMPT_CAPABILITY)
+                ),
+                params!(),
+            )
+            .await?;
+        if rows.first().is_some_and(|row| row.count == 1) {
+            Ok(())
+        } else {
+            Err(MembershipError::MembershipUpgradeRequired)
+        }
+    }
+
+    async fn require_learner_lifecycle_capability(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                    capability_ready_predicate(LEARNER_LIFECYCLE_CAPABILITY)
                 ),
                 params!(),
             )
@@ -5561,6 +6606,7 @@ fn is_join_token_digest(value: &str) -> bool {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MembershipChangeOutcome {
     Removed,
+    Promoted,
     Indeterminate,
 }
 
@@ -5576,6 +6622,19 @@ enum MembershipChangeFailure {
 #[derive(Serialize)]
 struct RemoveVoterRequest {
     remove_voter: u64,
+}
+
+#[derive(Serialize)]
+struct PromoteLearnerRequest<'a> {
+    node_id: u64,
+    addr_api: &'a str,
+    addr_raft: &'a str,
+}
+
+#[derive(Serialize)]
+struct RemoveLearnerRequest {
+    node_id: u64,
+    stay_as_learner: bool,
 }
 
 /// Resolve an ambiguous membership HTTP result from independent survivor
@@ -5635,6 +6694,108 @@ async fn reconcile_membership_change(
     MembershipChangeOutcome::Indeterminate
 }
 
+async fn reconcile_promotion_change(
+    api_secret: &str,
+    promoted: u64,
+    membership_nodes: &[(u64, String)],
+) -> MembershipChangeOutcome {
+    let Ok(client) = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(1))
+        .build()
+    else {
+        return MembershipChangeOutcome::Indeterminate;
+    };
+    let mut stable_rounds = 0_u8;
+    for _ in 0..40 {
+        let observations =
+            futures_util::future::join_all(membership_nodes.iter().map(|(raft_id, api)| {
+                let client = client.clone();
+                let raft_id = *raft_id;
+                async move {
+                    let response = client
+                        .get(format!("https://{api}/cluster/metrics/sqlite"))
+                        .header("X-API-SECRET", api_secret)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .send()
+                        .await;
+                    let voters = match response {
+                        Ok(response) => response
+                            .json::<RemoteMembershipMetrics>()
+                            .await
+                            .ok()
+                            .and_then(RemoteMembershipMetrics::uniform_voters),
+                        Err(_) => None,
+                    };
+                    (raft_id, voters)
+                }
+            }))
+            .await;
+        if quorum_confirms_promotion(promoted, &observations) {
+            stable_rounds += 1;
+        } else {
+            stable_rounds = 0;
+        }
+        if stable_rounds >= 3 {
+            return MembershipChangeOutcome::Promoted;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    MembershipChangeOutcome::Indeterminate
+}
+
+async fn reconcile_member_removal(
+    api_secret: &str,
+    removed: u64,
+    membership_nodes: &[(u64, String)],
+) -> MembershipChangeOutcome {
+    let Ok(client) = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(1))
+        .build()
+    else {
+        return MembershipChangeOutcome::Indeterminate;
+    };
+    let mut stable_rounds = 0_u8;
+    for _ in 0..40 {
+        let observations =
+            futures_util::future::join_all(membership_nodes.iter().map(|(raft_id, api)| {
+                let client = client.clone();
+                let raft_id = *raft_id;
+                async move {
+                    let membership = match client
+                        .get(format!("https://{api}/cluster/metrics/sqlite"))
+                        .header("X-API-SECRET", api_secret)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .send()
+                        .await
+                    {
+                        Ok(response) => response
+                            .json::<RemoteMembershipMetrics>()
+                            .await
+                            .ok()
+                            .and_then(RemoteMembershipMetrics::uniform_membership),
+                        Err(_) => None,
+                    };
+                    (raft_id, membership)
+                }
+            }))
+            .await;
+        if quorum_confirms_member_removal(removed, &observations) {
+            stable_rounds += 1;
+        } else {
+            stable_rounds = 0;
+        }
+        if stable_rounds >= 3 {
+            return MembershipChangeOutcome::Removed;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    MembershipChangeOutcome::Indeterminate
+}
+
 fn quorum_confirms_removal(departed: u64, observations: &[(u64, Option<BTreeSet<u64>>)]) -> bool {
     let mut confirmations = BTreeMap::<&BTreeSet<u64>, usize>::new();
     for (observer, observed) in observations {
@@ -5649,6 +6810,42 @@ fn quorum_confirms_removal(departed: u64, observations: &[(u64, Option<BTreeSet<
     confirmations
         .into_iter()
         .any(|(voters, count)| count > voters.len() / 2)
+}
+
+fn quorum_confirms_promotion(promoted: u64, observations: &[(u64, Option<BTreeSet<u64>>)]) -> bool {
+    let mut confirmations = BTreeMap::<&BTreeSet<u64>, usize>::new();
+    for (observer, observed) in observations {
+        let Some(voters) = observed else {
+            continue;
+        };
+        if !voters.contains(&promoted) || !voters.contains(observer) {
+            continue;
+        }
+        *confirmations.entry(voters).or_default() += 1;
+    }
+    confirmations
+        .into_iter()
+        .any(|(voters, count)| count > voters.len() / 2)
+}
+
+type MemberSetObservation = (u64, Option<(BTreeSet<u64>, BTreeSet<u64>)>);
+
+fn quorum_confirms_member_removal(removed: u64, observations: &[MemberSetObservation]) -> bool {
+    let mut confirmations = BTreeMap::<(BTreeSet<u64>, BTreeSet<u64>), usize>::new();
+    for (observer, observed) in observations {
+        let Some((voters, members)) = observed else {
+            continue;
+        };
+        if members.contains(&removed) || !voters.contains(observer) {
+            continue;
+        }
+        *confirmations
+            .entry((voters.clone(), members.clone()))
+            .or_default() += 1;
+    }
+    confirmations
+        .into_iter()
+        .any(|((voters, _), count)| count > voters.len() / 2)
 }
 
 async fn request_voter_removal(
@@ -5669,6 +6866,71 @@ async fn request_voter_removal(
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&RemoveVoterRequest { remove_voter })
+        .send()
+        .await
+        .map_err(|error| {
+            MembershipChangeFailure::Ambiguous(MembershipError::Internal(error.to_string()))
+        })?;
+    if !response.status().is_success() {
+        return Err(membership_response_failure(response.status()));
+    }
+    Ok(())
+}
+
+async fn request_learner_promotion(
+    leader_api: &str,
+    api_secret: &str,
+    node: &Node,
+) -> Result<(), MembershipChangeFailure> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| {
+            MembershipChangeFailure::Rejected(MembershipError::Internal(error.to_string()))
+        })?;
+    let response = client
+        .post(format!("https://{leader_api}/cluster/become_member/sqlite"))
+        .header("X-API-SECRET", api_secret)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&PromoteLearnerRequest {
+            node_id: node.id,
+            addr_api: &node.addr_api,
+            addr_raft: &node.addr_raft,
+        })
+        .send()
+        .await
+        .map_err(|error| {
+            MembershipChangeFailure::Ambiguous(MembershipError::Internal(error.to_string()))
+        })?;
+    if !response.status().is_success() {
+        return Err(membership_response_failure(response.status()));
+    }
+    Ok(())
+}
+
+async fn request_learner_removal(
+    leader_api: &str,
+    api_secret: &str,
+    node_id: u64,
+) -> Result<(), MembershipChangeFailure> {
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true)
+        .connect_timeout(Duration::from_millis(500))
+        .timeout(Duration::from_secs(5))
+        .build()
+        .map_err(|error| {
+            MembershipChangeFailure::Rejected(MembershipError::Internal(error.to_string()))
+        })?;
+    let response = client
+        .delete(format!("https://{leader_api}/cluster/membership/sqlite"))
+        .header("X-API-SECRET", api_secret)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .json(&RemoveLearnerRequest {
+            node_id,
+            stay_as_learner: false,
+        })
         .send()
         .await
         .map_err(|error| {
@@ -5725,6 +6987,65 @@ fn unix_seconds() -> Result<i64, MembershipError> {
         .map_err(|error| MembershipError::Internal(error.to_string()))?
         .as_secs();
     i64::try_from(seconds).map_err(|_| MembershipError::Internal("clock overflow".to_owned()))
+}
+
+/// Prove that the authoritative root can durably publish and remove a file.
+/// A learner may replicate on storage that is merely writable; promotion is
+/// the point where that machine becomes part of the quorum's durability
+/// promise, so the proof is retained separately from current free space.
+fn voter_storage_durability_probe(root: &Path) -> bool {
+    let name = format!(".plurx-voter-preflight-{}", uuid::Uuid::new_v4());
+    let path = root.join(name);
+    let result = (|| -> std::io::Result<()> {
+        std::fs::create_dir_all(root)?;
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)?;
+        file.write_all(b"plurx voter durability preflight\n")?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::remove_file(&path)?;
+        std::fs::File::open(root)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        let _ = std::fs::remove_file(&path);
+        tracing::warn!(%error, root = %root.display(), "voter storage durability preflight failed");
+        false
+    } else {
+        true
+    }
+}
+
+#[cfg(unix)]
+fn available_storage_headroom_bytes(root: &Path) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::ffi::CString::new(root.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    // Safety: the CString remains live through the call and a successful
+    // statvfs initializes the complete output structure.
+    if unsafe { libc::statvfs(path.as_ptr(), stats.as_mut_ptr()) } != 0 {
+        return None;
+    }
+    // Safety: guarded by the successful return above.
+    let stats = unsafe { stats.assume_init() };
+    let fragment = if stats.f_frsize == 0 {
+        stats.f_bsize
+    } else {
+        stats.f_frsize
+    } as u128;
+    Some(
+        (stats.f_bavail as u128)
+            .saturating_mul(fragment)
+            .min(u64::MAX as u128) as u64,
+    )
+}
+
+#[cfg(not(unix))]
+fn available_storage_headroom_bytes(_root: &Path) -> Option<u64> {
+    None
 }
 
 struct MembershipSchemaRow {
@@ -5803,6 +7124,29 @@ struct TargetNodeRow {
     raft_id: i64,
 }
 
+struct PromotionTargetRow {
+    raft_id: i64,
+    admitted_role: Option<String>,
+    last_seen_at: i64,
+    removal_pending: bool,
+    last_applied_index: Option<i64>,
+    apply_lag_entries: Option<i64>,
+    bounded_read_ready: bool,
+    voter_storage_ready: bool,
+    storage_headroom_bytes: Option<i64>,
+    storage_probe_observed_at: Option<i64>,
+    voter_role_persisted: bool,
+    observed_at: Option<i64>,
+}
+
+struct RemovalAttemptRow {
+    attempt_id: String,
+}
+
+struct PromotionAttemptRow {
+    attempt_id: String,
+}
+
 struct MembershipNodeRow {
     node_id: String,
     raft_id: i64,
@@ -5811,6 +7155,12 @@ struct MembershipNodeRow {
     admitted_role: Option<String>,
     last_seen_at: i64,
     removal_pending: bool,
+    apply_lag_entries: Option<i64>,
+    bounded_read_ready: bool,
+    voter_storage_ready: bool,
+    storage_headroom_bytes: Option<i64>,
+    storage_probe_observed_at: Option<i64>,
+    progress_observed_at: Option<i64>,
 }
 
 struct MembershipMetricsRow {
@@ -5824,6 +7174,29 @@ struct ActivityPeerRow {
     raft_id: u64,
     last_seen_at: i64,
     http_base: Option<String>,
+}
+
+struct MediaPeerRow {
+    node_id: String,
+    raft_id: u64,
+    last_seen_at: i64,
+    http_base: Option<String>,
+    bounded_read_ready: bool,
+    observed_at: Option<i64>,
+}
+
+impl From<&mut Row<'_>> for MediaPeerRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let raft_id: i64 = row.get("raft_id");
+        Self {
+            node_id: row.get("node_id"),
+            raft_id: u64::try_from(raft_id).unwrap_or_default(),
+            last_seen_at: row.get("last_seen_at"),
+            http_base: row.get("public_http_url"),
+            bounded_read_ready: row.get("bounded_read_ready"),
+            observed_at: row.get("observed_at"),
+        }
+    }
 }
 
 impl From<&mut Row<'_>> for ActivityPeerRow {
@@ -5925,12 +7298,26 @@ struct RemoteStoredMembership {
 #[derive(Deserialize)]
 struct RemoteMembership {
     configs: Vec<BTreeSet<u64>>,
+    nodes: BTreeMap<u64, serde_json::Value>,
 }
 
 impl RemoteMembershipMetrics {
     fn uniform_voters(mut self) -> Option<BTreeSet<u64>> {
         (self.membership_config.membership.configs.len() == 1)
             .then(|| self.membership_config.membership.configs.remove(0))
+    }
+
+    fn uniform_membership(mut self) -> Option<(BTreeSet<u64>, BTreeSet<u64>)> {
+        (self.membership_config.membership.configs.len() == 1).then(|| {
+            (
+                self.membership_config.membership.configs.remove(0),
+                self.membership_config
+                    .membership
+                    .nodes
+                    .into_keys()
+                    .collect(),
+            )
+        })
     }
 }
 
@@ -6015,6 +7402,41 @@ impl From<&mut Row<'_>> for TargetNodeRow {
     }
 }
 
+impl From<&mut Row<'_>> for PromotionTargetRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            raft_id: row.get("raft_id"),
+            admitted_role: row.get("role"),
+            last_seen_at: row.get("last_seen_at"),
+            removal_pending: row.get("removal_pending"),
+            last_applied_index: row.get("last_applied_index"),
+            apply_lag_entries: row.get("apply_lag_entries"),
+            bounded_read_ready: row.get("bounded_read_ready"),
+            voter_storage_ready: row.get("voter_storage_ready"),
+            storage_headroom_bytes: row.get("storage_headroom_bytes"),
+            storage_probe_observed_at: row.get("storage_probe_observed_at"),
+            voter_role_persisted: row.get("voter_role_persisted"),
+            observed_at: row.get("observed_at"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for RemovalAttemptRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            attempt_id: row.get("attempt_id"),
+        }
+    }
+}
+
+impl From<&mut Row<'_>> for PromotionAttemptRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            attempt_id: row.get("attempt_id"),
+        }
+    }
+}
+
 impl From<&mut Row<'_>> for MembershipNodeRow {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -6025,6 +7447,12 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             admitted_role: row.get("role"),
             last_seen_at: row.get("last_seen_at"),
             removal_pending: row.get("removal_pending"),
+            apply_lag_entries: row.get("apply_lag_entries"),
+            bounded_read_ready: row.get("bounded_read_ready"),
+            voter_storage_ready: row.get("voter_storage_ready"),
+            storage_headroom_bytes: row.get("storage_headroom_bytes"),
+            storage_probe_observed_at: row.get("storage_probe_observed_at"),
+            progress_observed_at: row.get("progress_observed_at"),
         }
     }
 }
@@ -7028,15 +8456,12 @@ mod tests {
     ///
     /// `redeem` commits `role = 'learner'` before the joiner has joined Raft
     /// at all, so a redemption that then failed — port conflict, crash,
-    /// operator ^C — leaves a row for a node that was never a member. PR-1
-    /// ships no learner removal, so that phantom row used to pin the cluster
-    /// on protocol 5 permanently, with a refusal naming a node that does not
-    /// exist.
+    /// operator ^C — leaves a row for an authorized node that may resume.
     ///
     /// A staging row plus age is not proof of abandonment: the authorized
     /// process may be paused after redemption and resume after any wall-clock
-    /// cutoff. Until learner removal can atomically cancel the admission,
-    /// rollback must fail closed.
+    /// cutoff. Until an explicit learner removal atomically cancels and
+    /// tombstones the admission, rollback must fail closed.
     #[test]
     fn a_staged_learner_redemption_blocks_rollback_regardless_of_age() {
         let connection = protocol_fixture(&["node-a", "node-b", "node-c"]);
@@ -7251,6 +8676,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_transient_joining_voter_is_not_reported_as_read_worker_capacity() {
+        assert!(counts_as_ready_read_worker(&NodeRole::Learner, false, true));
+        assert!(
+            !counts_as_ready_read_worker(&NodeRole::Voter, false, true),
+            "a voter-token join is only transiently non-voting"
+        );
+        assert!(!counts_as_ready_read_worker(&NodeRole::Learner, true, true));
+    }
+
     /// The learner operations act on the learner protocol, named as itself.
     ///
     /// `AUTH_PROTOCOL_MAX` and `AUTH_LEARNER_PROTOCOL` are the same number
@@ -7313,14 +8748,31 @@ mod tests {
     ///
     /// `DELETE /cluster/nodes/{id}` used to fall through to `NodeNotFound` and
     /// answer 404 for a node the roster lists — which reads as "you typed the
-    /// wrong id" for a node the operator is looking straight at. PR-1 ships
-    /// voter removal only; the refusal has to say so.
+    /// wrong id" for a node the operator is looking straight at. The
+    /// voter-only compatibility method keeps a typed refusal; the public
+    /// `remove_node` dispatcher now selects learner removal instead.
     #[test]
     fn removing_a_member_with_no_vote_is_refused_by_name_rather_than_as_not_found() {
         let refusal = MembershipError::NonVoterRemovalUnsupported("node-learner".to_owned());
         assert_eq!(refusal.code(), "cluster_non_voter_removal_unsupported");
         assert_ne!(refusal.code(), MembershipError::NodeNotFound.code());
         assert!(refusal.to_string().contains("node-learner"), "{refusal}");
+    }
+
+    #[test]
+    fn learner_removal_uses_the_shipped_hiqlite_delete_route() {
+        let request = production_source()
+            .split_once("async fn request_learner_removal(")
+            .expect("learner removal request")
+            .1
+            .split_once("fn membership_response_failure(")
+            .expect("end of learner removal request")
+            .0
+            .to_owned();
+
+        assert!(request
+            .contains(".delete(format!(\"https://{leader_api}/cluster/membership/sqlite\"))"));
+        assert!(!request.contains("/cluster/leave/"));
     }
 
     /// A join refused by the cluster's own rules is not a migration failure.
@@ -7349,8 +8801,8 @@ mod tests {
     /// between that read and the admitting transaction —
     /// `deactivate_learner_protocol` can narrow the range to `4..=4` in that
     /// window and have the learner row commit anyway. That learner is admitted
-    /// into a cluster that has just rolled back: it cannot restart, and PR-1
-    /// ships nothing that can remove it. The code's own comment beside
+    /// into a cluster that has just rolled back and cannot restart until an
+    /// explicit removal. The code's own comment beside
     /// `narrow_protocol_range_sql` states this principle; the join did not
     /// apply it.
     ///
@@ -7551,7 +9003,7 @@ mod tests {
 
         let status = between(
             "pub async fn status(&self)",
-            "\n    pub async fn remove_voter",
+            "\n    /// Promote one ready learner",
         );
         assert!(
             !status.contains("query_consistent_map"),
@@ -7850,6 +9302,7 @@ mod tests {
                    node_id TEXT, capability TEXT, last_seen_at INTEGER, \
                    PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
                    lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
@@ -7862,7 +9315,7 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    &begin_removal_attempt_sql(),
+                    &begin_removal_attempt_sql(false),
                     rusqlite::params!["node-a", "blocked-attempt", 50],
                 )
                 .expect("refuse removal while media is active"),
@@ -7877,10 +9330,28 @@ mod tests {
         assert_eq!(
             connection
                 .execute(
-                    &begin_removal_attempt_sql(),
+                    &begin_removal_attempt_sql(false),
                     rusqlite::params!["node-a", "admitted-attempt", 50],
                 )
                 .expect("admit removal after media drains"),
+            1
+        );
+        connection
+            .execute("DELETE FROM cluster_node_removal_attempts", [])
+            .expect("reset removal attempt");
+        connection
+            .execute(
+                "UPDATE media_sessions SET state = 'active' WHERE owner_node_id = 'node-a'",
+                [],
+            )
+            .expect("restore active media owner");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(true),
+                    rusqlite::params!["node-a", "draining-attempt"],
+                )
+                .expect("draining removal binds only the placeholders it emits"),
             1
         );
     }
@@ -7925,6 +9396,7 @@ mod tests {
                  CREATE TABLE cluster_node_heartbeat_intents (\
                    node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
@@ -7971,7 +9443,7 @@ mod tests {
         assert_eq!(
             transaction
                 .execute(
-                    &begin_removal_attempt_sql(),
+                    &begin_removal_attempt_sql(false),
                     rusqlite::params!["blocked", "blocked-attempt", 0],
                 )
                 .expect("gate mixed-version begin"),

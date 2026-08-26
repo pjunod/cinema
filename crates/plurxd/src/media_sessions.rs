@@ -689,7 +689,7 @@ impl MediaSessionCoordinator {
         node_id: &str,
         deadline: tokio::time::Instant,
     ) -> Result<String, PeerTransportError> {
-        tokio::time::timeout_at(deadline, self.membership.activity_peers())
+        tokio::time::timeout_at(deadline, self.membership.media_peers())
             .await
             .map_err(|_| PeerTransportError::TimedOut)?
             .map_err(|_| PeerTransportError::Unreachable)?

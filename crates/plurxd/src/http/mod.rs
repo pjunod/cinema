@@ -58,13 +58,14 @@ mod web;
 
 use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
-use axum::http::{header, HeaderValue, Request, StatusCode, Uri};
+use axum::http::{header, HeaderValue, Method, Request, StatusCode, Uri};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::Router;
 
 use crate::state::AppState;
+use plurx_core::cluster::membership::LocalServingRole;
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -108,6 +109,10 @@ pub fn router(state: AppState) -> Router {
             post(cluster::issue_learner_join_token),
         )
         .route("/cluster/nodes", get(cluster::nodes))
+        .route(
+            "/cluster/nodes/{node_id}/promote",
+            post(cluster::promote_node),
+        )
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         .route(
@@ -376,7 +381,160 @@ pub fn router(state: AppState) -> Router {
                 )
             }),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            cluster_capacity_gate,
+        ))
         .with_state(state)
+}
+
+const LEARNER_ROUTE_INELIGIBLE_JSON: &str = r#"{"code":"learner_route_ineligible","message":"this non-voting learner serves only bounded catalogue reads and declared node-local media routes"}"#;
+const NODE_REMOVAL_FENCED_JSON: &str = r#"{"code":"node_removal_fenced","message":"this cluster node is draining or has been removed"}"#;
+
+/// One published route matrix for the non-voting capacity role.
+///
+/// The native catalogue shapes and their Plex equivalents are the exact
+/// handlers inventoried by `bounded_catalogue_handler_inventory...`; every
+/// other application route retains Authority/voter semantics. Media paths are
+/// admitted only through the existing serving fence, so a learner also needs
+/// a fresh quorum/apply proof before any node-local work starts.
+fn learner_route_eligible(method: &Method, path: &str) -> bool {
+    if method == Method::GET
+        && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
+            || path.starts_with("/assets/")
+            || path.starts_with("/icons/")
+            || matches!(
+                path,
+                "/manifest.webmanifest" | "/connect.svg" | "/identity" | "/library"
+            ))
+    {
+        return true;
+    }
+    if method == Method::GET && path == "/api/v1/cluster/nodes" {
+        return true;
+    }
+    if method == Method::POST && path == "/api/v1/cluster/leave" {
+        // The body is bound to this backend's node id; this is the only
+        // membership mutation a learner may originate locally.
+        return true;
+    }
+    if (method == Method::GET && path == crate::media_pool::SNAPSHOT_PATH)
+        || (method == Method::POST
+            && matches!(
+                path,
+                crate::media_pool::OFFERS_PATH
+                    | crate::shared_cache::CANARY_PATH
+                    | crate::media_sessions::START_PATH
+                    | crate::media_sessions::ABORT_PATH
+                    | crate::media_sessions::RELAY_PATH
+            ))
+    {
+        return true;
+    }
+    if method == Method::GET {
+        let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
+        let bounded_native = path == "/api/v1/libraries"
+            || path == "/api/v1/hubs"
+            || path == "/api/v1/home/previews"
+            || (segments.len() == 4 && segments[0..2] == ["api", "v1"] && segments[2] == "items")
+            || (segments.len() == 5
+                && segments[0..2] == ["api", "v1"]
+                && segments[2] == "libraries"
+                && segments[4] == "items");
+        let bounded_plex = path == "/library/sections"
+            || (segments.len() == 4
+                && segments[0] == "library"
+                && segments[1] == "sections"
+                && segments[3] == "all")
+            || (segments.len() >= 3 && segments[0] == "library" && segments[1] == "metadata");
+        if bounded_native || bounded_plex {
+            return true;
+        }
+    }
+    let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let node_local_get = method == Method::GET
+        && (matches!(
+            segments.as_slice(),
+            [
+                "api",
+                "v1",
+                "files",
+                _,
+                "decision" | "offline-options" | "direct" | "content" | "stream.mp4" | "photo"
+            ] | ["api", "v1", "stream", _, "status"]
+                | ["api", "v1", "offline", "packages", _]
+                | ["api", "v1", "images", _]
+                | ["api", "v1", "items", _, "photo"]
+                | ["library", "parts", _, _, _]
+                | ["photo", ":", "transcode"]
+        ) || matches!(
+            segments.as_slice(),
+            ["api", "v1", "files", _, "subs", _]
+                | ["api", "v1", "files", _, "subs", _, "overlay.json"]
+                | [
+                    "api",
+                    "v1",
+                    "files",
+                    _,
+                    "subs",
+                    _,
+                    "overlay",
+                    _,
+                    "objects",
+                    _
+                ]
+                | ["api", "v1", "files", _, "hls", "start"]
+                | ["api", "v1", "hls", _, _]
+                | ["api", "v1", "hls", _, "subs", _, _]
+                | ["api", "v1", "offline", "media", _, _]
+                | ["api", "v1", "offline", "media", _, _, _]
+                | ["api", "v1", "offline", "media", _, "subs", _, _]
+                | ["api", "v1", "publication", _, _]
+        ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
+    let node_local_create = method == Method::POST
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "files", _, "hls", "sessions"] | ["api", "v1", "files", _, "publication"]
+        );
+    let node_local_close = method == Method::DELETE
+        && matches!(
+            segments.as_slice(),
+            ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+        );
+    node_local_get || node_local_create || node_local_close
+}
+
+async fn cluster_capacity_gate(
+    State(state): State<AppState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    let method = request.method();
+    match state.membership.local_serving_role().await {
+        Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
+        Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
+            next.run(request).await
+        }
+        Ok(LocalServingRole::Learner) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::CONTENT_TYPE, "application/json")],
+            LEARNER_ROUTE_INELIGIBLE_JSON,
+        )
+            .into_response(),
+        Ok(LocalServingRole::Fenced) if matches!(path, "/healthz" | "/metrics") => {
+            next.run(request).await
+        }
+        Ok(LocalServingRole::Fenced) | Err(_) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::RETRY_AFTER, "1"),
+            ],
+            NODE_REMOVAL_FENCED_JSON,
+        )
+            .into_response(),
+    }
 }
 
 fn safe_trace_target(uri: &Uri) -> String {
@@ -483,6 +641,54 @@ mod tests {
     use zip::{CompressionMethod, ZipWriter};
 
     use super::*;
+
+    #[test]
+    fn learner_route_matrix_admits_only_bounded_reads_and_node_local_media() {
+        for path in [
+            "/api/v1/libraries",
+            "/api/v1/libraries/7/items",
+            "/api/v1/items/9",
+            "/api/v1/hubs",
+            "/api/v1/home/previews",
+            "/library/sections",
+            "/identity",
+            "/library",
+            "/library/sections/2/all",
+            "/library/metadata/8",
+            "/api/v1/files/8/decision",
+            "/api/v1/files/8/hls/start",
+            "/api/v1/hls/session/index.m3u8",
+            crate::media_pool::SNAPSHOT_PATH,
+        ] {
+            assert!(learner_route_eligible(&Method::GET, path), "{path}");
+        }
+        for (method, path) in [
+            (Method::GET, "/api/v1/search"),
+            (Method::GET, "/api/v1/settings"),
+            (Method::POST, "/api/v1/libraries"),
+            (Method::POST, "/api/v1/cluster/join-tokens"),
+            (Method::POST, "/api/v1/cluster/learner-join-tokens"),
+            (Method::POST, "/api/v1/cluster/nodes/node-b/promote"),
+            (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
+            (Method::POST, "/api/v1/trakt/sync"),
+            (Method::POST, "/api/v1/system/search-index/rebuild"),
+            (Method::PUT, "/api/v1/files/8/audio-offset"),
+            (Method::POST, "/api/v1/files/8/offline-packages"),
+            (Method::DELETE, "/api/v1/offline/packages/pkg-8"),
+            (Method::PUT, "/api/v1/offline/packages/pkg-8/lease"),
+            (Method::POST, "/api/v1/offline/packages/pkg-8/complete"),
+        ] {
+            assert!(!learner_route_eligible(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::DELETE, "/api/v1/hls/session-8"),
+            (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ABORT_PATH),
+        ] {
+            assert!(learner_route_eligible(&method, path), "{method} {path}");
+        }
+    }
 
     #[test]
     fn trace_targets_omit_queries_and_redact_capability_paths() {
@@ -3152,6 +3358,24 @@ mod tests {
         let (status, body) = call(
             &app,
             post("/api/v1/cluster/leave", Some(&admin), leave_body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "membership_unavailable");
+
+        let (status, _) = call(
+            &app,
+            post("/api/v1/cluster/nodes/node-b/promote", None, json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(
+            &app,
+            post(
+                "/api/v1/cluster/nodes/node-b/promote",
+                Some(&admin),
+                json!({}),
+            ),
         )
         .await;
         assert_eq!(status, StatusCode::CONFLICT);
