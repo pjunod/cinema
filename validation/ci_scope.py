@@ -31,23 +31,20 @@ SCOPE_KEYS = (
     "docs_only",
 )
 
-# A selector or aggregate-workflow edit can change which evidence appears at
-# all. It must exercise every routed surface instead of trusting the routing it
-# is in the middle of changing. `runner.py` owns diff resolution, glob
-# matching, and point selection, so it is selector code exactly like this file.
-#
-# A composite action under `.github/actions/**` is here for the neighbouring
-# reason: it does not choose which surfaces run, it chooses what they run
-# against. `.github/actions/ffmpeg` decides the ffmpeg every playback assertion
-# in the gate spawns, and a diff to it touches no crate, so nothing else would
-# select the suites it can break.
-FULL_CI_PATHS = (
-    ".github/actions/**",
+# Selector and aggregate-workflow edits can suppress evidence, so exercise the
+# four Rust lanes that pin routing and cluster behavior. Static preflight pins
+# the workflow structure itself; unrelated clients, containers, and cross
+# builds still receive their full proof on merge_group and nightly runs.
+CI_ROUTING_PATHS = (
     ".github/workflows/ci.yml",
+    ".github/workflows/lint.yml",
     "validation/ci_scope.py",
     "validation/points.toml",
     "validation/runner.py",
 )
+
+FFMPEG_ACTION_PATHS = (".github/actions/ffmpeg/**",)
+PLAYWRIGHT_ACTION_PATHS = (".github/actions/playwright/**",)
 
 # Documentation can still be executable evidence: validation unit tests pin
 # inventories and links between docs and source anchors. The regression map is
@@ -130,7 +127,6 @@ ANDROID_DEVICE_PATHS = (
 RELEASE_BUILD_PATHS = (
     "Cargo.lock",
     "Cargo.toml",
-    "crates/**",
     "rust-toolchain.toml",
 )
 
@@ -141,7 +137,6 @@ CONTAINER_PATHS = (
     "Cargo.lock",
     "Cargo.toml",
     "Dockerfile",
-    "crates/**",
     "deploy/**",
     "plurx.example.toml",
     "rust-toolchain.toml",
@@ -187,15 +182,12 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
 
     if is_docs_only(paths):
         return {key: key == "docs_only" for key in SCOPE_KEYS}
-    if any(matches(path, FULL_CI_PATHS) for path in paths):
-        return all_scope()
-
     selection = select_points(catalog, paths)
     check_ids = {
         check.id for check in selected_checks(catalog, selection, profile="ci")
     }
     point_ids = set(selection.point_ids)
-    return {
+    scope = {
         "rust": needs_rust_gate(paths),
         "apple": any(matches(path, APPLE_PATHS) for path in paths),
         "android_jvm": any(matches(path, ANDROID_JVM_PATHS) for path in paths),
@@ -208,6 +200,17 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
         "cluster_auth": bool({"cluster.auth", "cluster.page-reads"} & point_ids),
         "docs_only": False,
     }
+    if any(matches(path, CI_ROUTING_PATHS) for path in paths):
+        scope["rust"] = True
+        scope["cluster_auth"] = True
+    if any(matches(path, FFMPEG_ACTION_PATHS) for path in paths):
+        scope["rust"] = True
+        scope["cluster_auth"] = True
+        scope["web_layout"] = True
+    if any(matches(path, PLAYWRIGHT_ACTION_PATHS) for path in paths):
+        scope["rust"] = True
+        scope["web_layout"] = True
+    return scope
 
 
 def resolve_scope(event: str, base: str | None) -> dict[str, bool]:
