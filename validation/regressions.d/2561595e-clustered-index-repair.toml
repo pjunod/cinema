@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["3d664be8"]
+commits = ["2561595e"]
 points = ["playback.pipeline", "persistence.upgrades", "cluster.auth"]
 checks = ["rust-gate", "cluster-auth"]
 reason = "The retained cluster-index regressions publish through one file and repair the immutable digest through a duplicate with different provenance, require a claim to pass more than 128 unreadable head jobs, prove v2 blob bytes ignore legacy file metadata, and prove peer response streams retain both concurrency permits until body drop. The orphan sweep regression requires a cursor to advance beyond a full legitimate head page, while the replicated retention statements re-evaluate recent holders inside the deletion transaction."

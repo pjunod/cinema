@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["cc41f20f"]
+commits = ["6dee9505"]
 points = ["playback.pipeline", "persistence.upgrades", "cluster.auth"]
 checks = ["rust-gate", "cluster-auth"]
 reason = "The retained clustered fragment-index contracts require cancelled duplicate-content work to rebind to a surviving file, node-local exclusions to skip an unreadable head row, and retention to preserve recently verified holders while pruning stale terminal artifacts. The FFmpeg object-replacement test withdraws the attested engine identity after an executable swap, and the VOD materialization tests exercise descriptor-bound source fencing and the legacy per-key rollout fallback. Replicated-store validation covers the deterministic schema and the fenced Hiqlite queue/catalog transactions."

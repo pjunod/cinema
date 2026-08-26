@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["3bb53e31", "6925cccb"]
-points = ["persistence.upgrades"]
-checks = ["rust-gate", "cluster-auth"]
-reason = "The retained history mapping and schema sentinel corrections are exercised by the history audit, the SQLite migration rebuild contract, the replicated transaction-site inventory, and the three-voter SQLite import parity contract. Those checks require the new v30 migration, its three transaction sites, and all four imported cluster-index tables to remain explicit."

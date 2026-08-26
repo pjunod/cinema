@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cd86092d"]
+points = ["persistence.upgrades"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The SQLite migration rebuild contract, replicated transaction-site inventory, and three-voter SQLite import parity contract require the new v30 migration, its three transaction sites, and all four imported cluster-index tables to remain explicit."
