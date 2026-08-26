@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e70a2ffd"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The evidence catalogue remaps the learner lifecycle and compaction fixes to their cherry-picked commit identities on the P6 worker branch. The history audit proves those identities remain covered and that the catalogue continues to name the runtime checks on the underlying fixes."

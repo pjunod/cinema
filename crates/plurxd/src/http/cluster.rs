@@ -142,10 +142,22 @@ pub async fn remove_node(
     State(state): State<AppState>,
     Path(node_id): Path<String>,
 ) -> Result<Json<MembershipStatus>, ApiError> {
-    require_no_owned_media_sessions(&state, &node_id).await?;
     state
         .membership
-        .remove_voter(&node_id)
+        .remove_node(&node_id)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+pub async fn promote_node(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<MembershipStatus>, ApiError> {
+    state
+        .membership
+        .promote_learner(&node_id)
         .await
         .map(Json)
         .map_err(api_error)
@@ -162,8 +174,7 @@ pub async fn leave(
     if request.node_id != state.node_id {
         return Err(api_error(MembershipError::LeaveNodeMismatch));
     }
-    require_no_owned_media_sessions(&state, &state.node_id).await?;
-    state.membership.leave_voter().await.map_err(api_error)?;
+    state.membership.leave_node().await.map_err(api_error)?;
     state.shutdown.cancel();
     Ok(Json(serde_json::json!({
         "leaving": true,
@@ -171,6 +182,7 @@ pub async fn leave(
     })))
 }
 
+#[cfg(test)]
 async fn require_no_owned_media_sessions(state: &AppState, node_id: &str) -> Result<(), ApiError> {
     let now_ms = crate::media_sessions::unix_ms();
     state.store.maintain_media_sessions(now_ms).await?;
@@ -270,6 +282,10 @@ fn api_error(error: MembershipError) -> ApiError {
         // The node is real and the roster lists it; this release has no
         // removal path for a member with no vote. Not a 404.
         | MembershipError::NonVoterRemovalUnsupported(_)
+        | MembershipError::PromotionRequiresLearner(_)
+        | MembershipError::LearnerNotReady(_)
+        | MembershipError::VoterStoragePreflight { .. }
+        | MembershipError::LearnerLifecyclePending(_)
         // The cluster is fine and the request is well formed; the protocol
         // that admits a learner has simply not been activated yet.
         | MembershipError::LearnerProtocolInactive

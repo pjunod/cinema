@@ -2,12 +2,14 @@
 
 **Status:** executing — M0 through M3 are complete; M4's production fences,
 real-process singleton pause/takeover proof, and distinct serving-process
-partition proof are staged; a non-voting learner role is admitted but not yet
-useful (see [CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7),
-while the later client failover milestones remain
+partition proof are staged; the non-voting learner role now has readiness,
+bounded read/media eligibility, promotion, removal, capacity reporting, and a
+real-process lifecycle proof (see
+[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7), while the
+later client failover milestones remain
 · **Executes:** Phase 4 from [ROADMAP.md](ROADMAP.md) and REQ-HA-1–6 from
 [REQUIREMENTS.md](REQUIREMENTS.md) · **Written:** 2026-08-06 · **Revised:**
-2026-08-22
+2026-08-25
 
 Companion to [PHASE3-SPIKE.md](PHASE3-SPIKE.md), which chose hiqlite and
 proved restart-at-boundary media behavior; [PERF-PLAN.md](PERF-PLAN.md) §7,
@@ -968,11 +970,12 @@ non-owner requests first; add web node-list retry after the server corpus is
 green. Update `validation/points.toml` and the operations contract whenever
 new ports or daemon files enter governed surfaces.
 
-M5's node lists and retry budgets are voter lists. A learner is a member and is
-not an address a client may fail over to: PR-1 routes no eligible traffic to
-one, and the eligibility matrix that would change that belongs to
-[CLUSTER-PERFORMANCE-PLAN.md](CLUSTER-PERFORMANCE-PLAN.md) §6.7 PR-2. Until
-then, a learner must never appear in a discovery response.
+M5's client node lists and retry budgets remain voter lists. P6 gives a learner
+an explicit server-side bounded-read/media matrix and lets internal media
+placement use a fresh ready learner, but it does not advertise that learner as
+an unrestricted client failover origin. P7 owns proxy routing against those
+stable readiness contracts. A learner must never be counted as voter
+redundancy or used for an authority mutation before explicit promotion.
 
 **Acceptance:** kill the serving node during direct, copy-remux, and transcode,
 including mid-segment response. Resume within 10 seconds with one
@@ -1009,8 +1012,19 @@ capability and then stopped keeps both timestamps frozen and equal and reads as
 proven forever. Activation therefore refuses separately for any member silent
 for over two minutes — start it or remove it — rather than leaving it to the
 unproven-binary roster, which would activate straight past it. Second, once a
-learner is admitted the protocol rollback is unavailable because learner
-removal does not exist yet.
+learner is admitted the protocol rollback is unavailable until every learner is
+either safely removed or promoted after readiness/storage preflight; only a
+zero-non-voter roster may deactivate protocol 5.
+
+P6's complete lifecycle makes those two verbs crash-safe. Promotion refreshes
+the durability probe periodically, crosses a new target-local apply barrier on
+every indeterminate retry, and does not change the replicated admission role
+until the promoted target has fsynced downgrade-readable voter records in both
+`membership.json` and `hiqlite/activation.json`. Learner removal applies the
+same route/placement/job-owner fence as voter removal, ends active media
+ownership using the session schema's terminal `ended` state, then removes the
+non-voting member without voter-quorum arithmetic. The real-process drill
+restarts the promoted node before allowing protocol deactivation.
 
 **Acceptance:** `make cluster-check` exercises the failure harness; a fresh
 operator reaches three healthy nodes in under 10 minutes; backup, destroy, and
@@ -1050,10 +1064,11 @@ mode without lowering quality or losing selected tracks.
    `become_member`, which honours nothing else. Every plurx-side refusal is
    defence in depth. Splitting the credential is
    [MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md](MEMBERSHIP-CREDENTIAL-SPLIT-PLAN.md).
-8. **Do not treat a learner as a spare voter.** It never becomes one: PR-1
-   implements no promotion and no removal, so a learner adds a replica, never
-   failure tolerance, and non-goal 2 still governs — two voters plus a learner
-   is two voters.
+8. **Do not treat a learner as a spare voter.** Before explicit promotion it
+   adds a replicated copy and possibly read/media capacity, never failure
+   tolerance. Promotion is a planned membership change after catch-up,
+   barrier, and storage proof; it is not automatic failover. Non-goal 2 still
+   governs — two voters plus a learner is two voters.
 
 ## 8. Handoff checkpoint — M3 owns the complete membership surface
 

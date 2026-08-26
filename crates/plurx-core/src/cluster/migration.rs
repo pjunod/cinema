@@ -580,6 +580,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     );
     let membership_manager = MembershipManager::replicated(
         client.clone(),
+        replication.clone(),
         Arc::clone(&store),
         identity.clone(),
         local,
@@ -595,6 +596,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
         activation_marker,
         role,
+        config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -1367,6 +1369,19 @@ async fn open_active_store_with_key(
     require_real_directory(&active)?;
     let mut marker = read_activation_marker(&active)?;
     let mut local_membership = read_local_membership(&config.storage.data_dir)?;
+    // A runtime promotion fsyncs membership.json before activation.json. If
+    // power fails between them, the voter record is the durable proof that a
+    // live process already observed its committed vote; finish the second
+    // half before enforcing the ordinary exact-match rule.
+    if local_membership
+        .as_ref()
+        .is_some_and(|membership| membership.role == ClusterRole::Voter)
+        && marker.admitted_role == Some(ClusterRole::Learner)
+    {
+        persist_promoted_voter_role(&config.storage.data_dir)?;
+        marker = read_activation_marker(&active)?;
+        local_membership = read_local_membership(&config.storage.data_dir)?;
+    }
     let role = active_store_role(&marker, local_membership.as_ref(), &config.storage.data_dir)?;
     let mut identity = super::initialize_identity(&config.storage.data_dir, &marker.cluster_id)?;
     if let Some(membership) = &local_membership {
@@ -1472,6 +1487,7 @@ async fn open_active_store_with_key(
         read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
     let membership = MembershipManager::replicated(
         client.clone(),
+        replication.clone(),
         Arc::clone(&store),
         identity.clone(),
         membership_file.local,
@@ -1485,6 +1501,7 @@ async fn open_active_store_with_key(
         load_or_create_activity_signing_key(&config.storage.data_dir)?,
         marker,
         role,
+        config.storage.data_dir.clone(),
     )
     .await
     .map_err(|error| StoreError::Database(error.to_string()))?;
@@ -1937,6 +1954,60 @@ async fn start_voter(
             return Err(StoreError::Identity(format!(
                 "node {} {reason} in cluster {}",
                 identity.node_id, identity.cluster_id
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Membership admission proves that Raft recognizes this node; it does not
+    // prove that the local state machine has installed a snapshot needed to
+    // reach the cluster's current database image. Capture one quorum-confirmed
+    // watermark and keep Store construction/listener startup behind the
+    // target-local applied watch. The deadline allows an abandoned in-flight
+    // snapshot RPC to reach its configured soft cancellation point, reconnect,
+    // and complete one clean transfer.
+    let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
+        .saturating_add(HIQLITE_START_TIMEOUT);
+    let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
+    let catchup_target = loop {
+        match client.db_quorum_watermark().await {
+            Ok(watermark) => break watermark.committed_index,
+            Err(error) if tokio::time::Instant::now() < catchup_deadline => {
+                tracing::debug!(%error, "waiting for startup quorum watermark");
+            }
+            Err(error) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: {error}",
+                    identity.node_id
+                )));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let local_metrics = match client.local_db_raft_metrics() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            let _ = shutdown_voter(&client, active_transport).await;
+            return Err(StoreError::Database(format!(
+                "reading target-local startup progress: {error}"
+            )));
+        }
+    };
+    loop {
+        let applied = local_metrics
+            .snapshot()
+            .last_applied_index
+            .unwrap_or_default();
+        if applied >= catchup_target {
+            break;
+        }
+        if tokio::time::Instant::now() >= catchup_deadline {
+            let _ = shutdown_voter(&client, active_transport).await;
+            return Err(StoreError::Database(format!(
+                "node {} applied only {applied} of startup quorum watermark {catchup_target} \
+                 within {catchup_timeout:?}",
+                identity.node_id
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2599,6 +2670,60 @@ fn write_local_membership(data_dir: &Path, membership: &LocalMembership) -> Resu
     })?;
     bytes.push(b'\n');
     write_atomic_private(data_dir, LOCAL_MEMBERSHIP_FILENAME, &bytes)
+}
+
+/// Persist the target-local half of a committed learner promotion.
+///
+/// The caller may invoke this only after local Raft metrics contain this
+/// node's vote. membership.json is written and fsynced first; activation.json
+/// follows. A crash before the first rename leaves an ordinary learner, while
+/// a crash between the two is completed by `open_active_store_with_key`
+/// before the normal role-match check. Once both are voter/version 1, the
+/// previous release's parser can open the directory again.
+#[cfg(feature = "hiqlite-store")]
+pub(crate) fn persist_promoted_voter_role(data_dir: &Path) -> Result<(), StoreError> {
+    let active = data_dir.join(HIQLITE_ACTIVE_DIRNAME);
+    #[cfg(feature = "cluster-validation")]
+    if !active.join(ACTIVATION_MARKER_FILENAME).exists() {
+        // The separate-process Raft harness constructs MembershipManager
+        // directly and deliberately has no daemon activation directory. Its
+        // production-file contract is pinned by the migration tests beside
+        // this helper; let the harness continue proving live membership.
+        return Ok(());
+    }
+    let mut marker = read_activation_marker(&active)?;
+    let mut membership = read_local_membership(data_dir)?.ok_or_else(|| {
+        StoreError::Identity(format!(
+            "cannot persist promoted voter role because {} is missing",
+            data_dir.join(LOCAL_MEMBERSHIP_FILENAME).display()
+        ))
+    })?;
+    if marker.cluster_id != membership.cluster_id {
+        return Err(StoreError::Identity(
+            "membership.json does not match activation.json during voter promotion".to_owned(),
+        ));
+    }
+    match (membership.role, marker.admitted_role) {
+        (ClusterRole::Voter, Some(ClusterRole::Voter)) => return Ok(()),
+        (ClusterRole::Learner, Some(ClusterRole::Learner))
+        | (ClusterRole::Voter, Some(ClusterRole::Learner)) => {}
+        _ => {
+            return Err(StoreError::Identity(
+                "local cluster role records are not a resumable learner promotion".to_owned(),
+            ));
+        }
+    }
+
+    if membership.role == ClusterRole::Learner {
+        membership.role = ClusterRole::Voter;
+        membership.version = local_membership_version(ClusterRole::Voter);
+        write_local_membership(data_dir, &membership)?;
+        sync_directory(data_dir)?;
+    }
+    marker.admitted_role = Some(ClusterRole::Voter);
+    write_activation_marker(&active, &marker)?;
+    sync_directory(&active)?;
+    sync_directory(data_dir)
 }
 
 #[cfg(feature = "hiqlite-store")]
@@ -4735,6 +4860,76 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "hiqlite-store")]
+    #[test]
+    fn a_promoted_learner_persists_a_crash_safe_downgrade_readable_voter_role() {
+        let dir = tempfile::tempdir().expect("promoted data dir");
+        let active = dir.path().join(HIQLITE_ACTIVE_DIRNAME);
+        std::fs::create_dir_all(&active).expect("active target");
+        let peer = ClusterPeer {
+            raft_id: 4,
+            raft_address: "localhost:33401".to_owned(),
+            api_address: "localhost:33402".to_owned(),
+        };
+        let mut membership = LocalMembership {
+            version: local_membership_version(ClusterRole::Learner),
+            cluster_id: "11111111-1111-4111-8111-111111111111".to_owned(),
+            node_id: "44444444-4444-4444-8444-444444444444".to_owned(),
+            raft_id: 4,
+            local: peer.clone(),
+            bootstrap: vec![peer],
+            join_token_digest: Some("a".repeat(64)),
+            role: ClusterRole::Learner,
+        };
+        let mut marker = ActivationMarker {
+            marker_version: ACTIVATION_MARKER_VERSION,
+            cluster_id: membership.cluster_id.clone(),
+            source_backup_sha256: "0".repeat(64),
+            source_schema_version: AUTH_SCHEMA_VERSION,
+            replicated_schema_version: AUTH_SCHEMA_VERSION,
+            imported_rows: 0,
+            table_hashes: vec![SqliteImportTableDigest {
+                table: "settings".to_owned(),
+                row_count: 0,
+                sha256: "0".repeat(64),
+            }],
+            admitted_role: Some(ClusterRole::Learner),
+        };
+        write_local_membership(dir.path(), &membership).expect("learner membership");
+        write_activation_marker(&active, &marker).expect("learner activation marker");
+
+        persist_promoted_voter_role(dir.path()).expect("persist promoted role");
+        let promoted = read_local_membership(dir.path())
+            .expect("read promoted membership")
+            .expect("membership exists");
+        assert_eq!(promoted.role, ClusterRole::Voter);
+        assert_eq!(promoted.version, 1);
+        assert!(the_previous_release_accepts(&promoted));
+        assert_eq!(
+            read_activation_marker(&active)
+                .expect("read promoted marker")
+                .admitted_role,
+            Some(ClusterRole::Voter)
+        );
+
+        // Recreate the only crash interval: membership was fsynced as voter,
+        // activation.json still says learner. The next boot's reconciliation
+        // completes the marker and remains idempotent.
+        membership.role = ClusterRole::Voter;
+        membership.version = local_membership_version(ClusterRole::Voter);
+        marker.admitted_role = Some(ClusterRole::Learner);
+        write_local_membership(dir.path(), &membership).expect("interrupted voter record");
+        write_activation_marker(&active, &marker).expect("stale learner marker");
+        persist_promoted_voter_role(dir.path()).expect("resume interrupted promotion");
+        persist_promoted_voter_role(dir.path()).expect("idempotent retry");
+        assert_eq!(
+            read_activation_marker(&active)
+                .expect("read resumed marker")
+                .admitted_role,
+            Some(ClusterRole::Voter)
+        );
+    }
+
     /// The admitted-role record grants cluster-wide job authority to a process
     /// that cannot read committed membership, so a *missing* record must not
     /// be read as "voter" on a clustered directory.
@@ -5426,6 +5621,7 @@ pub mod status {
     //! M3; this module only turns the backend and Raft metrics the daemon already
     //! has into an honest answer about watch-state convergence.
 
+    use std::collections::BTreeSet;
     use std::future::Future;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -6440,17 +6636,27 @@ pub mod status {
                 .expect("replicated monitor must carry a client");
             let status = match client.metrics_db().await {
                 Ok(metrics) => {
+                    let voter_ids = metrics
+                        .membership_config
+                        .voter_ids()
+                        .collect::<BTreeSet<_>>();
                     let peer_matched_indexes = metrics.replication.as_ref().map(|replication| {
                         replication
                             .iter()
-                            .filter(|(node_id, _)| **node_id != metrics.id)
+                            // Learner catch-up is reported per node by the
+                            // membership projection. It must never make the
+                            // voter replication status claim that quorum
+                            // redundancy is degraded.
+                            .filter(|(node_id, _)| {
+                                **node_id != metrics.id && voter_ids.contains(node_id)
+                            })
                             .map(|(_, applied)| applied.as_ref().map(|log| log.index))
                             .collect()
                     });
                     let observation = ReplicationObservation {
                         running: metrics.running_state.is_ok(),
                         leader_known: metrics.current_leader.is_some(),
-                        voter_count: metrics.membership_config.voter_ids().count(),
+                        voter_count: voter_ids.len(),
                         last_log_index: metrics.last_log_index,
                         last_applied_term: metrics
                             .last_applied

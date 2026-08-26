@@ -545,7 +545,11 @@ CREATE TABLE IF NOT EXISTS _metadata
                         "main",
                         path,
                         Some(|p: Progress| {
-                            println!("Database restore remaining: {}", p.remaining);
+                            debug!(
+                                remaining_pages = p.remaining,
+                                page_count = p.pagecount,
+                                "database snapshot restore progress"
+                            );
                         }),
                     );
 
