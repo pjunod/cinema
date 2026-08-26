@@ -81,6 +81,9 @@ impl Daemon {
         let errors = output.try_clone().expect("clone daemon log");
         let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
             .args(["--config", config.to_str().expect("config path"), "run"])
+            // The index-completion wait reads structured fields from this
+            // file. ANSI styling splits `built=1` into control-coded pieces.
+            .env("NO_COLOR", "1")
             .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))

@@ -1413,6 +1413,14 @@ function completedFragmentIndexPass(logs) {
   }) || null;
 }
 
+function fragmentIndexPassBuiltFile(entry, fileId) {
+  const message = String(entry?.message || "");
+  if (!message.includes("fragment indexing pass finished")) return false;
+  const builtFiles = message.match(/\bbuilt_files=\[([^\]]*)\]/);
+  if (!builtFiles) return false;
+  return builtFiles[1].split(",").some((value) => value.trim() === String(fileId));
+}
+
 async function startServer(options, fixtureDirectory) {
   const port = await freePort();
   const runtime = await fsp.mkdtemp(path.join(os.tmpdir(), "plurx-playback-lab-"));
@@ -1490,8 +1498,19 @@ async function startServer(options, fixtureDirectory) {
         vod_materialize_budget_secs: "30",
       },
     });
+    const requested = options.vod_filenames || [];
+    const targets = requested.map((filename) => {
+      const file = files.get(filename);
+      if (!file) throw new Error(`scan missed VOD fixture ${filename}`);
+      return file;
+    });
     await waitFor(async () => {
       const logs = await api(baseUrl, "/system/logs?level=debug&limit=500", { token });
+      if (targets.length) {
+        return targets.every((file) => logs.some((entry) =>
+          fragmentIndexPassBuiltFile(entry, file.id),
+        ));
+      }
       return completedFragmentIndexPass(logs);
     }, 180_000, "VOD fragment indexing pass", 1_000);
   }
@@ -2823,7 +2842,12 @@ async function runSuite(manifest, options, dependencies = {}) {
   // miss the suite's cliff-relative recovery deadline.
   const serverOptions = {
     ...options,
-    ...(requiresVod ? { enable_vod: true } : {}),
+    ...(requiresVod ? {
+      enable_vod: true,
+      vod_filenames: manifest.fixtures
+        .filter((fixture) => wanted.has(fixture.id))
+        .map((fixture) => fixture.filename),
+    } : {}),
     ...(shapedCases.length ? { enable_auto_abr: true } : {}),
   };
   const server = await (dependencies.startServer || startServer)(serverOptions, corpus.directory);
@@ -3310,6 +3334,7 @@ module.exports = {
   deviceProxyCommand,
   executeRun,
   expandCases,
+  fragmentIndexPassBuiltFile,
   fixturesForBuild,
   isMediaPath,
   loadArtifact,
