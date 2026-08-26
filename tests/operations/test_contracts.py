@@ -247,7 +247,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
-        self.assertIn("name: replicated storage contracts", workflow)
+        self.assertIn("name: replicated store and topology contracts", workflow)
+        self.assertIn("name: replicated WAL recovery contracts", workflow)
+        self.assertIn("name: cluster daemon contracts", workflow)
         self.assertIn("if: needs.scope.outputs.rust == 'true'", workflow)
         self.assertIn("needs: [scope, preflight]", workflow)
         self.assertIn("PREFLIGHT_RESULT: ${{ needs.preflight.result }}", workflow)
@@ -256,9 +258,15 @@ class OperationsContractCase(unittest.TestCase):
             workflow,
         )
         self.assertIn("CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}", workflow)
+        self.assertIn("CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}", workflow)
+        self.assertIn(
+            "CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}", workflow
+        )
         pr_gate = workflow.split("  pr_gate:", 1)[1]
         self.assertIn("      - mobile_version", pr_gate)
         self.assertIn("      - cluster_auth", pr_gate)
+        self.assertIn("      - cluster_wal", pr_gate)
+        self.assertIn("      - cluster_daemon", pr_gate)
         self.assertNotIn("      - hiqlite_spike", pr_gate)
         self.assertIn("needs: scope", workflow)
         self.assertNotIn("github.event_name == 'pull_request' && github.ref == 'refs/heads/main'", workflow)
@@ -351,12 +359,14 @@ class OperationsContractCase(unittest.TestCase):
         )
 
         # The CI Rust gate splits, not shrinks: clippy stays in lint.yml, and
-        # the excluded cluster member keeps its own dedicated job in ci.yml.
+        # each expensive replicated surface keeps a dedicated job in ci.yml.
         gate = makefile.split(".PHONY: ci-rust-gate", 1)[1].split(".PHONY:", 1)[0]
         self.assertIn("--workspace --locked --exclude plurx-cluster-check", gate)
         self.assertIn("ci-rust-gate: fmt-check", gate)
         self.assertIn("make fmt-check lint", lint)
-        self.assertIn("run: make cluster-check", workflow)
+        self.assertIn("run: make cluster-store-check cluster-harness-check", workflow)
+        self.assertIn("run: make cluster-wal-check", workflow)
+        self.assertIn("run: make cluster-daemon-check", workflow)
 
     def test_ci_caches_are_keyed_to_what_they_cache(self):
         workflow = read(".github/workflows/ci.yml")
@@ -394,13 +404,21 @@ class OperationsContractCase(unittest.TestCase):
         # The semantic proof reuses the cluster job's root target instead of
         # compiling the same Hiqlite/OpenRaft dependency graph a second time.
         cluster = workflow.split("  cluster_auth:", 1)[1].split(
+            "\n  cluster_wal:", 1
+        )[0]
+        wal = workflow.split("  cluster_wal:", 1)[1].split(
+            "\n  cluster_daemon:", 1
+        )[0]
+        daemon = workflow.split("  cluster_daemon:", 1)[1].split(
             "\n  web_layout:", 1
         )[0]
         self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", cluster)
-        self.assertIn("run: make cluster-check", cluster)
-        self.assertIn("name: Verify the cluster fixture generator", cluster)
-        self.assertIn("command -v ffmpeg", cluster)
+        self.assertIn("run: make cluster-store-check cluster-harness-check", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
+        self.assertIn("run: make cluster-wal-check", wal)
+        self.assertIn("run: make cluster-daemon-check", daemon)
+        self.assertIn("name: Verify the cluster fixture generator", daemon)
+        self.assertIn("command -v ffmpeg", daemon)
         self.assertNotIn("spikes/hiqlite-m0/target", workflow)
         self.assertIn("name: cluster-topology-semantic", cluster)
         self.assertIn(
@@ -522,6 +540,7 @@ class OperationsContractCase(unittest.TestCase):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
                     "check",
+                    "cluster_daemon",
                     "vod_web",
                     "coverage",
                 }:
@@ -530,6 +549,7 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ffmpeg6
                 elif path == ".github/workflows/ci.yml" and name in {
                     "cluster_auth",
+                    "cluster_wal",
                     "docker",
                 }:
                     expected = high_cpu
