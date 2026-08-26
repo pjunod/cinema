@@ -1149,6 +1149,18 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         if got != layout_id:
             raise Fail(f"{name}: asked for layout {layout_id!r}, the app resolved {got!r} "
                        "— its `surfaces` and this viewport disagree")
+        # Home, Activity and Settings expose an explicit settled phase. Start
+        # the polling observation window from that phase, not merely from the
+        # document's network-idle event: under a loaded runner the route's
+        # async render can finish after page.goto() returns, shortening the
+        # window enough to observe only one of Settings' two 2s ticks. That made
+        # an unchanged request inventory alternate between 2 and 3
+        # /scan/status calls. The phase is product state, so synchronizing on it
+        # preserves the request-count contract without baking a count or an
+        # endpoint into this harness.
+        if name in {"home", "activity", "settings"}:
+            page.wait_for_selector(
+                f'{container}[data-phase="settled"]', timeout=args.timeout)
         # The app polls activity every 4s and the activity page re-renders every
         # 3s. Rather than stubbing either — the baseline has to be of the real
         # app — the capture waits out more than one full period, so it always

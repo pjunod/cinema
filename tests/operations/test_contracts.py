@@ -36,6 +36,16 @@ class OperationsContractCase(unittest.TestCase):
                 self.assertIn('"--mute-audio"', script)
                 self.assertIn("HardwareMediaKeyHandling", script)
 
+    def test_ui_baseline_starts_poll_observation_after_route_settles(self):
+        script = read("scripts/ui-baseline")
+
+        self.assertIn('if name in {"home", "activity", "settings"}:', script)
+        self.assertIn('[data-phase="settled"]', script)
+        self.assertLess(
+            script.index('[data-phase="settled"]'),
+            script.index("page.wait_for_timeout(args.settle_ms)"),
+        )
+
     def test_rust_test_artifacts_omit_replicated_debug_information(self):
         cargo = read("Cargo.toml")
         profile = cargo.split("[profile.test]", 1)[1].split("[", 1)[0]
@@ -394,8 +404,14 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("name: Cache the AVD snapshot", workflow)
         self.assertIn("force-avd-creation: true", workflow)
         self.assertIn("-no-snapshot-save", workflow)
+        self.assertIn("target: android-tv", workflow)
+        self.assertIn("profile: tv_1080p", workflow)
+        self.assertNotIn("clients/android/**/*.gradle*", workflow)
+        self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
+        self.assertIn("target/validation/android-instrumentation.txt", makefile)
+        self.assertIn("Android instrumentation did not report a passing suite", makefile)
 
         # The semantic proof reuses the cluster job's root target instead of
         # compiling the same Hiqlite/OpenRaft dependency graph a second time.

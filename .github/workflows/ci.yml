@@ -354,7 +354,7 @@ jobs:
           path: |
             clients/android/.gradle-validation/caches
             clients/android/.gradle-validation/wrapper
-          key: gradle-${{ hashFiles('clients/android/**/*.gradle*', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Run unit tests and lint in the pinned Android toolchain
         run: |
@@ -475,7 +475,7 @@ jobs:
           path: |
             clients/android/.gradle-validation/caches
             clients/android/.gradle-validation/wrapper
-          key: gradle-${{ hashFiles('clients/android/**/*.gradle*', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Build app and instrumentation APKs in the pinned toolchain
         run: make android-instrumentation-build
@@ -483,9 +483,9 @@ jobs:
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
-          target: google_apis
+          target: android-tv
           arch: x86_64
-          profile: pixel_7_pro
+          profile: tv_1080p
           force-avd-creation: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
@@ -498,6 +498,7 @@ jobs:
           path: |
             clients/android/app/build/reports/androidTests
             clients/android/app/build/outputs/androidTest-results
+            target/validation/android-instrumentation.txt
           if-no-files-found: warn
           retention-days: 1
 
