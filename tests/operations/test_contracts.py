@@ -560,6 +560,18 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("cache-from: type=gha", docker)
         self.assertIn("cache-to: type=gha,mode=min", docker)
 
+    def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
+        management = read("vendor/hiqlite/src/client/mgmt.rs")
+        signal_handler = read("vendor/hiqlite/src/client/shutdown_handle.rs")
+
+        self.assertIn(
+            "RAFT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30)",
+            management,
+        )
+        self.assertIn("tokio::time::timeout(\n                RAFT_SHUTDOWN_TIMEOUT", management)
+        self.assertIn("use super::mgmt::RAFT_SHUTDOWN_TIMEOUT", signal_handler)
+        self.assertIn("time::timeout(\n            RAFT_SHUTDOWN_TIMEOUT", signal_handler)
+
     def test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries(self):
         workflow = read(".github/workflows/ci.yml")
 
