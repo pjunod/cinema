@@ -100,7 +100,7 @@ forced replay to reopen a terminal worker. The replicated transaction now
 retains the fenced owner only as a one-use, transaction-local handoff token:
 the worker mutation requires it and a final statement consumes it. Atomic
 commit means no observer sees the temporary owner, and an exact transaction or
-caller replay finds no token and cannot mutate the worker. The real-Raft
-contract finishes a rebound worker, replays the earlier accepted forced
-submission, and requires the ready state, rebound file identity, and timestamp
-to remain unchanged.
+caller replay finds no token and cannot mutate the worker. While the request is
+still `submitted`, the real-Raft contract verifies the token is consumed,
+finishes its forced worker, replays that accepted submission, and requires the
+ready state, file identity, and timestamp to remain unchanged.
