@@ -9367,7 +9367,9 @@ function updateStats(){
     }
     if(h.production_policy==='explicit_demand'){
       const produced=h.production_ahead_seconds==null?'waiting for publication'
-        :`${Math.max(0,h.production_ahead_seconds)} s produced ahead`;
+        :h.production_ahead_seconds<0
+          ?`${Math.abs(h.production_ahead_seconds)} s production deficit`
+          :`${h.production_ahead_seconds} s produced ahead`;
       const target=h.production_target_seconds==null?'':` · target ${Math.max(0,h.production_target_seconds)} s`;
       const demand=h.control_demand?` · ${h.control_demand}`:'';
       const held=h.suspended?` · held (${esc(h.hold_reason||'policy')})`:'';
