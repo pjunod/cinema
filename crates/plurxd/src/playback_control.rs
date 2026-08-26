@@ -1174,7 +1174,6 @@ pub(crate) struct RollingControlHandle {
     retired: Arc<AtomicBool>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
-    last_flow_ticket: u64,
 }
 
 struct OwnedLocalControlRequest {
@@ -1223,6 +1222,7 @@ struct RollingControlActor {
     retired_fence: Arc<AtomicBool>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    last_flow_ticket: u64,
 }
 
 impl RollingControlActor {
