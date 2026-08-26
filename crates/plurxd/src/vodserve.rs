@@ -153,6 +153,16 @@ pub(crate) struct ResponseOwner {
     rendition: Arc<Rendition>,
 }
 
+impl std::fmt::Debug for ResponseOwner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ResponseOwner")
+            .field("incarnation", &Arc::as_ptr(&self.incarnation))
+            .field("rendition_key", &self.rendition.key)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Live diagnostics for one VOD session. This is intentionally not the live
 /// transcode [`SessionInfo`](crate::transcode::SessionInfo): an immutable VOD
 /// playlist has no encode speed or sliding publish gate, and inventing those
@@ -546,7 +556,7 @@ impl VodServe {
                 },
                 supersession_user: "[\"user_id\",1]".to_owned(),
                 block_budget: Duration::from_secs(1),
-                lifecycle,
+                lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
@@ -899,7 +909,7 @@ impl VodServe {
                 kind: req.kind,
                 supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
-                lifecycle,
+                lifecycle: Arc::clone(&lifecycle),
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),

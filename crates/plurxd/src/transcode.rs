@@ -14287,10 +14287,11 @@ mod tests {
         // flow ticket, but the request still owns the child transition gate.
         pause.wait().await;
         request.abort();
-        assert!(request
-            .await
-            .expect_err("request was cancelled")
-            .is_cancelled());
+        let request_error = match request.await {
+            Ok(_) => panic!("request unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert!(request_error.is_cancelled());
 
         tokio::time::timeout(Duration::from_secs(1), async {
             while !fixture.session.suspended.load(Acquire) {
