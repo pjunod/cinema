@@ -6207,18 +6207,19 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
     client
         .txn([
             (
-                "INSERT INTO libraries (id, name, kind, paths) \
-                 VALUES (1, 'Films', 'movies', '[]')",
+                "INSERT INTO libraries (id, name, kind, paths, created_at) \
+                 VALUES (1, 'Films', 'movies', '[]', 1)",
                 hiqlite::params!(),
             ),
             (
-                "INSERT INTO items (id, library_id, kind, title, sort_title) \
-                 VALUES (1, 1, 'movie', 'One', 'one')",
+                "INSERT INTO items
+                   (id, library_id, kind, title, sort_title, added_at, updated_at) \
+                 VALUES (1, 1, 'movie', 'One', 'one', 1, 1)",
                 hiqlite::params!(),
             ),
             (
-                "INSERT INTO files (id, item_id, path, size, mtime) \
-                 VALUES (1, 1, '/one.mkv', 100, 10)",
+                "INSERT INTO files (id, item_id, path, size, mtime, scanned_at) \
+                 VALUES (1, 1, '/one.mkv', 100, 10, 1)",
                 hiqlite::params!(),
             ),
         ])
@@ -6474,8 +6475,8 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .txn([
             ("DELETE FROM files WHERE id = 1", hiqlite::params!()),
             (
-                "INSERT INTO files (id, item_id, path, size, mtime) \
-                 VALUES (2, 1, '/replacement.mkv', 100, 30)",
+                "INSERT INTO files (id, item_id, path, size, mtime, scanned_at) \
+                 VALUES (2, 1, '/replacement.mkv', 100, 30, 50)",
                 hiqlite::params!(),
             ),
         ])

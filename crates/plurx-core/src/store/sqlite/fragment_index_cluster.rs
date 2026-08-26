@@ -319,7 +319,7 @@ impl ClusterFragmentIndexStore for SqliteStore {
                                           state = 'cancelled'
                                           OR (state = 'failed' AND (
                                             last_error_code = 'queue_expired'
-                                            OR (attempts < ?11 AND not_before_ms <= ?2)))))))))",
+                                            OR (attempts < ?11 AND not_before_ms <= ?2))))))))))",
                 params![
                     job.cache_key,
                     now_ms,

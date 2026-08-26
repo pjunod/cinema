@@ -391,7 +391,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                                               state = 'cancelled'
                                               OR (state = 'failed' AND (
                                                 last_error_code = 'queue_expired'
-                                                OR (attempts < $11 AND not_before_ms <= $2)))))))))"
+                                                OR (attempts < $11 AND not_before_ms <= $2))))))))))"
                         .to_owned(),
                     params!(
                         &job.cache_key,
@@ -418,7 +418,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         WHERE request_id = $9 AND state = 'submitted' AND fence = $10
                           AND file_id = $2 AND source_size = $3 AND source_mtime = $4
                           AND result_cache_key = $1 AND updated_at_ms = $8
-                          AND owner_node_id = $13)
+                          AND owner_node_id = $11)
                      ON CONFLICT(cache_key) DO UPDATE SET
                         file_id = excluded.file_id, source_size = excluded.source_size,
                         source_mtime = excluded.source_mtime,
@@ -426,7 +426,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         pipeline_sha256 = excluded.pipeline_sha256,
                         state = 'queued',
                         owner_node_id = NULL, lease_expires_ms = NULL,
-                        attempts = CASE WHEN $11 = 1 THEN 0
+                        attempts = CASE WHEN $12 = 1 THEN 0
                           WHEN cluster_fragment_index_jobs.state = 'cancelled'
                             OR cluster_fragment_index_jobs.last_error_code = 'queue_expired'
                             OR cluster_fragment_index_jobs.file_id <> excluded.file_id THEN 0
@@ -434,13 +434,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         not_before_ms = excluded.not_before_ms,
                         created_at_ms = excluded.created_at_ms,
                         updated_at_ms = excluded.updated_at_ms, last_error_code = NULL
-                      WHERE ($11 = 1 AND cluster_fragment_index_jobs.state
+                      WHERE ($12 = 1 AND cluster_fragment_index_jobs.state
                                           IN ('ready', 'failed', 'cancelled'))
-                         OR ($11 = 0 AND (
+                         OR ($12 = 0 AND (
                            cluster_fragment_index_jobs.state = 'cancelled'
                            OR (cluster_fragment_index_jobs.state = 'failed'
                              AND (cluster_fragment_index_jobs.last_error_code = 'queue_expired'
-                               OR (cluster_fragment_index_jobs.attempts < $12
+                               OR (cluster_fragment_index_jobs.attempts < $13
                                  AND cluster_fragment_index_jobs.not_before_ms <= $8)))))"
                         .to_owned(),
                     params!(
@@ -454,9 +454,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         now_ms,
                         &request.request_id,
                         request.fence,
+                        &request.owner_node_id,
                         if request.force_rebuild { 1_i64 } else { 0_i64 },
-                        MAX_ATTEMPTS,
-                        &request.owner_node_id
+                        MAX_ATTEMPTS
                     ),
                 ),
                 (
