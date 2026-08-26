@@ -546,8 +546,11 @@ pub struct ClientLog {
     pub session_id: Option<String>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
-    /// Accepted protocol state immediately preceding this legacy event.
+    /// Client-reported last accepted protocol state preceding this event.
+    /// It is evidence, not an authoritative server join.
     pub control: Option<ClientControlSnapshot>,
+    /// Current trigger state sampled immediately before legacy recovery.
+    pub control_trigger: Option<ClientControlSnapshot>,
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -833,6 +836,63 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             None => Some(value.to_owned()),
         }
     }
+    fn control_context(value: &ClientControlSnapshot) -> Option<serde_json::Value> {
+        const MAX_MEDIA_MS: i64 = 366 * 24 * 60 * 60 * 1_000;
+        const MAX_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
+        let mut context = serde_json::Map::new();
+        if let Some(generation) = clipped(&value.generation, 64)
+            .filter(|generation| uuid::Uuid::parse_str(generation).is_ok())
+        {
+            let hash = crate::transcode::session_log_id(&generation);
+            context.insert(
+                "generation".to_owned(),
+                format!("g-{}", hash.trim_start_matches("s-")).into(),
+            );
+        }
+        for (key, number) in [
+            (
+                "control_epoch",
+                value.control_epoch.filter(|number| *number > 0),
+            ),
+            ("sequence", value.sequence.filter(|number| *number > 0)),
+        ] {
+            if let Some(number) = number {
+                context.insert(key.to_owned(), number.into());
+            }
+        }
+        if let Some(demand) = clipped(&value.demand, 16)
+            .filter(|demand| matches!(demand.as_str(), "active" | "hold" | "end"))
+        {
+            context.insert("demand".to_owned(), demand.into());
+        }
+        if let Some(render) = clipped(&value.render_state, 16).filter(|render| {
+            matches!(
+                render.as_str(),
+                "starting" | "rendering" | "waiting" | "stalled" | "seeking" | "ended" | "failed"
+            )
+        }) {
+            context.insert("render_state".to_owned(), render.into());
+        }
+        let position = value
+            .position_ms
+            .filter(|number| (0..=MAX_MEDIA_MS).contains(number));
+        if let Some(number) = position {
+            context.insert("position_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value.buffered_through_ms.filter(|number| {
+            (0..=MAX_MEDIA_MS).contains(number)
+                && position.is_none_or(|position| *number >= position)
+        }) {
+            context.insert("buffered_through_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value
+            .observed_download_bps
+            .filter(|number| *number <= MAX_DOWNLOAD_BPS)
+        {
+            context.insert("observed_download_bps".to_owned(), number.into());
+        }
+        (!context.is_empty()).then(|| serde_json::Value::Object(context))
+    }
     let mut extra = serde_json::Map::new();
     for (key, value) in [
         ("message", clipped(&Some(ev.message.clone()), 200)),
@@ -956,20 +1016,11 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             extra.insert("client".to_owned(), client.into());
         }
     }
-    if let Some(control) = ev.control.as_ref() {
-        extra.insert(
-            "control".to_owned(),
-            serde_json::json!({
-                "generation": clipped(&control.generation, 64),
-                "control_epoch": control.control_epoch,
-                "sequence": control.sequence,
-                "demand": clipped(&control.demand, 16),
-                "render_state": clipped(&control.render_state, 16),
-                "position_ms": control.position_ms,
-                "buffered_through_ms": control.buffered_through_ms,
-                "observed_download_bps": control.observed_download_bps,
-            }),
-        );
+    if let Some(control) = ev.control.as_ref().and_then(control_context) {
+        extra.insert("control_accepted_client".to_owned(), control);
+    }
+    if let Some(control) = ev.control_trigger.as_ref().and_then(control_context) {
+        extra.insert("control_trigger_client".to_owned(), control);
     }
     let runway = ev
         .runway
@@ -3510,6 +3561,7 @@ mod tests {
             session_id: None,
             snapshot: None,
             control: None,
+            control_trigger: None,
         }
     }
 
@@ -3836,15 +3888,36 @@ mod tests {
             buffered_through_ms: Some(90_400),
             observed_download_bps: Some(1_500_000),
         });
+        event.control_trigger = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: None,
+            demand: Some("active".into()),
+            render_state: Some("failed".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+        });
 
         let persisted = client_playback_event(&event, 7);
         let extra: serde_json::Value =
             serde_json::from_str(persisted.extra.as_deref().expect("control snapshot JSON"))
                 .expect("valid control snapshot JSON");
-        assert_eq!(extra["control"]["sequence"], 23);
-        assert_eq!(extra["control"]["render_state"], "stalled");
-        assert_eq!(extra["control"]["buffered_through_ms"], 90_400);
-        assert_eq!(extra["control"]["observed_download_bps"], 1_500_000);
+        let accepted = &extra["control_accepted_client"];
+        assert_eq!(accepted["sequence"], 23);
+        assert_eq!(accepted["render_state"], "stalled");
+        assert_eq!(accepted["buffered_through_ms"], 90_400);
+        assert_eq!(accepted["observed_download_bps"], 1_500_000);
+        assert!(accepted["generation"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("g-")));
+        assert!(!persisted
+            .extra
+            .as_deref()
+            .unwrap_or_default()
+            .contains("11111111-1111-4111-8111-111111111111"));
+        assert_eq!(extra["control_trigger_client"]["render_state"], "failed");
+        assert!(extra["control_trigger_client"].get("sequence").is_none());
     }
 
     #[test]

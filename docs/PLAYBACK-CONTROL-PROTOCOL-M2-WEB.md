@@ -33,7 +33,11 @@ instead of allocating more requests, and the reporter enforces the server's
 250 ms admission floor before sending the newest state. Sequences are assigned
 only when an exchange starts. A transport failure retries the exact
 unacknowledged sequence and body; a newer player snapshot stays queued for the
-next sequence. Terminal authorization/stale-session errors and a response that
+next sequence. Typed `425 owner_transition`, `429 control_rate_limited`, and
+`503 control_unavailable` responses preserve the exact request and honor the
+bounded server retry hint. A fenced `409 owner_changed` response abandons the
+old request, adopts the returned generation/epoch, and sends a fresh sequence
+one snapshot. Terminal authorization/stale-session errors and a response that
 violates the passive protocol stop visibly instead of retrying forever.
 Closing or replacing the player cancels its
 request without turning cancellation into a playback failure.
@@ -63,11 +67,16 @@ logged once when the next exchange is accepted. These events state explicitly
 that legacy playback recovery remained authoritative.
 
 Every existing web `stall`, `stall_recovery`, `quality_switch`, stream rescue,
-and failure beacon now carries the last accepted control generation, epoch,
+and failure beacon carries the last client-reported accepted control epoch,
 sequence, demand, render state, position, runway endpoint, and observed
-download rate. The server stores that bounded object beside the legacy event.
+download rate. Persistent wait, startup stall, hls.js fatal, media failure, and
+truncated-stream recovery also carry the exact current trigger snapshot because
+legacy recovery cannot wait for that asynchronous exchange to be accepted.
+The server validates bounds and enums, hashes the generation, and labels these
+two objects `control_accepted_client` and `control_trigger_client`; they remain
+client assertions unless a later authoritative server join confirms them.
 This provides the shadow comparison required before any recovery owner is
-removed; it does not add raw identifiers to metric labels.
+removed without persisting a raw generation identifier.
 
 M1's fixed-cardinality server metrics remain the fleet view:
 `plurx_playback_control_exchanges_total`,
@@ -88,6 +97,7 @@ turn the preview into a less reliable fallback instead of measuring it.
 | `maybeDecodeRescue` and the automatic fallback claim | Detect a non-rendering decode path and open one compatibility transcode | Decoder evidence is reported, but there is no server arbiter yet |
 | `autoControllerTick`, ABR state, and `switchAutoRung` | Poll server/client evidence and directly reopen at another rung | Prepared, idempotent protocol handoff is M5.5/M6; M2 cannot switch transparently |
 | `pollSessionHealth` | Reads `/status` for the stats panel and legacy ABR decisions | M2 response facts are not yet the authority for ABR, and direct/progressive transports do not report control |
+| `handleEnded` truncated-stream branch and `endedTries` | Treats media ending before title runtime as failure and directly reopens up to its retry budget | The protocol reports the failed trigger, but `action: none` cannot yet authorize the required successor |
 | server live-session idle/startup/progress/wait watchers | Reap inactive sessions and recover or fail stuck producers | They move into the M3 actor and M4 producer deadline only after passive equivalence is measured |
 
 The reporter's cadence timer is not a playback watchdog: it only sends a

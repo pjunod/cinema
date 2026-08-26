@@ -3121,14 +3121,15 @@ function noteAutoStall(p,kind,episodeAtMs){
   });
   abr.lastStallAtMs=now;
 }
-function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs){
+function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
   p.stalls=(p.stalls||0)+1;
   p.stallsByKind=p.stallsByKind||{supply:0,decode:0};
   p.stallsByKind[kind]++;
   noteAutoStall(p,kind,episodeAtMs);
   const ctx=playbackContext();
   clientLog(Object.assign({level:"warn",event:"stall",detail:detail||kind,ms,
-    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${runway==null?"?":runway}s buffered`},
+    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${runway==null?"?":runway}s buffered`,
+    control_trigger:controlTrigger||null},
     ctx, {runway}));
 }
 // Called when playback resumes (or is abandoned). Decides, in retrospect,
@@ -3157,7 +3158,11 @@ function persistentWait(v,p,began,generation){
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
   p.waitReported=true;
-  recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began);
+  // This exact transition owns the legacy reopen. Cadence alone is too late:
+  // the replacement normally stops this reporter before its next scheduled
+  // exchange, leaving the server with only the earlier `waiting` fact.
+  const controlTrigger=notifyPlaybackControl("stalled");
+  recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
   const action=PlaybackPolicy.stallRecoveryAction({
     method:p.method, quality:playQuality(),
@@ -3185,7 +3190,8 @@ function persistentWait(v,p,began,generation){
   p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
     targetHeight:recoveryHeight};
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
-    message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`},
+    message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`,
+    control_trigger:controlTrigger},
     playbackContext()));
   const position=p.recoveringStall.position;
   endWait(false);
@@ -5628,7 +5634,9 @@ function attachHls(video, playlistUrl, startAt){
         return;
       }
       console.warn("[cinema] hls.js fatal",d.type,d.details);
-      clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details}, playbackContext()));
+      const controlTrigger=notifyPlaybackControl("failed");
+      clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
+        control_trigger:controlTrigger}, playbackContext()));
       if(finishStallRecovery("failed",String(d.details||d.type||"hls.js fatal error"))){
         showStallRecoveryFailure("hls.js could not resume the stream ("+d.details+").");
         return;
@@ -5663,7 +5671,8 @@ function attachHls(video, playlistUrl, startAt){
       if(fallback==='transcode'){
         PLAYER.triedFallback=true;
         clientLog(Object.assign({level:"warn",event:"stream_rejected",detail:d.type,
-          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding"},
+          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding",
+          control_trigger:controlTrigger},
           playbackContext()));
         setLoading(true,"Stream rejected — switching to transcode…",
           "this browser's decoder refused the copied stream ("+d.details+"); re-encoding instead");
@@ -5683,7 +5692,7 @@ function attachHls(video, playlistUrl, startAt){
       if(explained){
         clientLog(Object.assign({level:"error",event:"stream_refused",
           detail:STREAM_FAILURE.code||String(STREAM_FAILURE.status),
-          message:explained.detail}, playbackContext()));
+          message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
         setLoading(true,explained.title,explained.detail);
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
@@ -5843,10 +5852,16 @@ function playbackControlSnapshot(v,p){
   if(duration>0) positionMs=Math.min(positionMs,duration);
   const range=hinted!=null?{from:null,through:positionMs}
     :playbackControlBufferedRange(v,p,positionMs);
-  const demand=(v.ended?"end":v.paused?"hold":"active");
+  // `ended` means the end of the bytes the browser received, not necessarily
+  // the title. The legacy early-end handler reopens a truncated stream, so it
+  // is active failed demand until it is actually within the completion slack.
+  const terminalEnded=!!v.ended && (!(duration>0)
+    || positionMs>=Math.max(0,duration-ENDED_SLACK_SEC*1000));
+  const demand=(terminalEnded?"end":v.ended?"active":v.paused?"hold":"active");
   let render="rendering";
   if(v.error) render="failed";
-  else if(v.ended) render="ended";
+  else if(v.ended) render=terminalEnded?"ended":"failed";
+  else if(p.controlRenderOverride) render=p.controlRenderOverride;
   else if(seeking) render="seeking";
   else if(!p.started) render="starting";
   else if(p.waitAt && performance.now()-p.waitAt>=PERSISTENT_STALL_MS) render="stalled";
@@ -5875,22 +5890,34 @@ async function sendPlaybackControl(url,body,signal){
     headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
     body:JSON.stringify(body)});
   if(!response.ok){
-    let code=null;
-    try{ const failure=await response.json(); code=failure&&failure.code; }catch(e){}
+    let failure=null;
+    try{ failure=await response.json(); }catch(e){}
+    const code=failure&&typeof failure.code==="string"?failure.code:null;
     const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
-    error.status=response.status; error.code=code; throw error;
+    error.status=response.status; error.code=code;
+    if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
+    if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;
+    if(failure&&Number.isSafeInteger(failure.retry_after_ms)) error.retryAfterMs=failure.retry_after_ms;
+    throw error;
   }
   return response.json();
 }
 function stopPlaybackControl(p){
   if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
 }
-function notifyPlaybackControl(){
+function notifyPlaybackControl(renderOverride){
   const p=PLAYER;
-  if(p&&p.controlReporter) p.controlReporter.notify();
+  if(!p) return null;
+  if(["stalled","failed"].includes(renderOverride)) p.controlRenderOverride=renderOverride;
+  return p.controlReporter?p.controlReporter.notify():null;
 }
 function startPlaybackControl(v,p,bootstrap){
   stopPlaybackControl(p);
+  p.controlLastRequest=null;
+  p.controlLastResponse=null;
+  p.controlLastExchangeAt=null;
+  p.controlLastError=null;
+  p.controlLastFailureLogAt=null;
   if(!bootstrap || !window.PlurxPlaybackControl) return null;
   try{
     const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
@@ -5898,7 +5925,7 @@ function startPlaybackControl(v,p,bootstrap){
       snapshot:()=>PLAYER===p?playbackControlSnapshot(v,p):null,
       send:sendPlaybackControl,
       onExchange:({request,response,error})=>{
-        if(PLAYER!==p) return;
+        if(PLAYER!==p||p.controlReporter!==reporter) return;
         p.controlLastRequest=request;
         if(response){
           const recovered=p.controlLastError;
@@ -5948,6 +5975,7 @@ async function openSession(fileId, opts){
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
   stopPlaybackControl(t);
+  t.controlRenderOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
@@ -7855,6 +7883,7 @@ async function stallDiagnose(){
   if(!PLAYER || PLAYER.started) return;
   const from=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:0;
   if(pbPosSec()>from+0.35) return;   // it actually started moving — never mind
+  const controlTrigger=notifyPlaybackControl("stalled");
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
   const url=PLAYER.probeUrl;
   let verdict="Playback hasn't started.", detail="Open Settings → Logs and read the last plurxd::stream / transcode line.";
@@ -7885,7 +7914,8 @@ async function stallDiagnose(){
   console.warn("[cinema] playback stall diagnosis",{method:PLAYER.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
   if(PLAYER.started) return;   // raced with a late start
   finishStallRecovery("failed",verdict);
-  clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,detail:detail});
+  clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
+    detail:detail,control_trigger:controlTrigger});
   setLoading(true, verdict, detail,
     `<button onclick="retryPlayback()">Try again</button>`+
     (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
@@ -8095,7 +8125,7 @@ function wirePlayer(){
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
   ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>p.addEventListener(ev,playerActivity));
-  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
+  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled
@@ -8126,11 +8156,11 @@ function wirePlayer(){
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
   v.addEventListener("error",()=>{
-    notifyPlaybackControl();
     // Detaching the source on purpose (the reset a remux seek does before
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
     if(!v.getAttribute("src")&&!v.currentSrc) return;
+    const controlTrigger=notifyPlaybackControl("failed");
     clearStall();
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const src=(v.currentSrc||"").split("?")[0];
@@ -8157,14 +8187,16 @@ function wirePlayer(){
     if(fallback==='transcode'){
       PLAYER.triedFallback=true;
       clientLog({level:"warn",event:"stream_rejected",code,src,
-        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding"});
+        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding",
+        control_trigger:controlTrigger});
       setLoading(true,"Stream rejected — switching to transcode…","the browser refused the "+PLAYER.method.replace('_',' ')+" stream (code "+code+"); re-encoding instead");
       startTranscodeFallback("stream-rejected",
         "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+(names[code]||("error "+code))+(msg?": "+msg:"")+") — re-encoded instead");
       return;
     }
     clientLog({level:"error",event:"playback_failed",code,src,
-      message:(names[code]||("error "+code))+(msg?" ("+msg+")":"")});
+      message:(names[code]||("error "+code))+(msg?" ("+msg+")":""),
+      control_trigger:controlTrigger});
     setLoading(true,"Playback failed: "+(names[code]||("error "+code))+".",(msg?msg+" — ":"")+"see Settings → Logs for the server side");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
@@ -8421,9 +8453,11 @@ async function handleEnded(fileId){
   // making progress and keeps its budget.
   PLAYER.endedTries=(prev!=null&&Math.abs(pos-prev)<1)?(PLAYER.endedTries||0)+1:1;
   const hopeless = PLAYER.method==='direct_play' || PLAYER.endedTries>3;
+  const controlTrigger=notifyPlaybackControl("failed");
   clientLog({level:"warn",event:"truncated_stream",
     message:`stream ended at ${Math.round(pos)}s of ${Math.round(total)}s`,
-    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}${hopeless?" giving-up":" resuming"}`});
+    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}${hopeless?" giving-up":" resuming"}`,
+    control_trigger:controlTrigger});
   if(hopeless){
     return setLoading(true,"The stream stopped before the end.",
       "It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved, so resuming picks up here.",

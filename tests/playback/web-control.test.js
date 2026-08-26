@@ -1,7 +1,24 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const control = require("../../crates/plurxd/src/web/playback-control.js");
+
+const SHIPPED_UI = fs.readFileSync(
+  path.join(__dirname, "../../crates/plurxd/src/web/index.html"),
+  "utf8",
+);
+const DECLARATIONS = ["\nfunction ", "\nasync function "];
+const TERMINATORS = DECLARATIONS.concat(["\nconst ", "\nlet ", "\nwindow.", "\ndocument."]);
+function shippedSource(name) {
+  const start = DECLARATIONS.map((kind) => SHIPPED_UI.indexOf(`${kind}${name}(`))
+    .find((at) => at !== -1);
+  assert.notEqual(start, undefined, `index.html no longer declares ${name}`);
+  const rest = SHIPPED_UI.slice(start + 1);
+  const ends = TERMINATORS.map((kind) => rest.indexOf(kind, 1)).filter((at) => at !== -1);
+  return (ends.length ? rest.slice(0, Math.min(...ends)) : rest).trimEnd();
+}
 
 function bootstrap() {
   return {
@@ -52,6 +69,12 @@ function response(request) {
     accepted_sequence: request.sequence,
     action: { type: "none" },
   };
+}
+
+function controlError(status, code, fields = {}) {
+  const error = new Error(code);
+  Object.assign(error, { status, code }, fields);
+  return error;
 }
 
 function deferred() {
@@ -227,6 +250,154 @@ async function main() {
   assert.equal(deadlineFailures,1);
   assert.equal(timedOut.status().retrying,true);
   timedOut.stop();
+
+  for (const temporary of [
+    { status:425, code:"owner_transition", delay:700 },
+    { status:429, code:"control_rate_limited", delay:900 },
+    { status:503, code:"control_unavailable", delay:500 },
+  ]) {
+    const temporaryTimers=[];
+    const temporaryCalls=[];
+    let temporaryNow=0;
+    const temporaryReporter=new control.Reporter({
+      bootstrap:bootstrap(),
+      clientInstanceId:"77777777-7777-4777-8777-777777777777",
+      snapshot:()=>snapshot(8_000),
+      send:async (_url,request)=>{
+        temporaryCalls.push(request);
+        if(temporaryCalls.length===1) throw controlError(temporary.status,temporary.code,
+          {retryAfterMs:temporary.delay});
+        return response(request);
+      },
+      setTimer:(run,ms)=>{ temporaryTimers.push({run,ms}); return temporaryTimers.length; },
+      clearTimer:()=>{},
+      now:()=>temporaryNow,
+    }).start();
+    await flush();
+    assert.equal(temporaryReporter.status().retrying,true);
+    const retryTimer=temporaryTimers.find(timer=>timer.ms===temporary.delay);
+    assert.ok(retryTimer,`${temporary.code} honors the server retry hint`);
+    temporaryNow=temporary.delay;
+    retryTimer.run();
+    await flush();
+    assert.deepEqual(temporaryCalls[1],temporaryCalls[0],
+      `${temporary.code} retries the exact unacknowledged request`);
+    assert.equal(temporaryReporter.status().accepted_sequence,1);
+    temporaryReporter.stop();
+  }
+
+  const ownerTimers=[];
+  const ownerCalls=[];
+  let ownerNow=0;
+  const newGeneration="99999999-9999-4999-8999-999999999999";
+  const ownerReporter=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"88888888-8888-4888-8888-888888888888",
+    snapshot:()=>snapshot(9_000),
+    send:async (_url,request)=>{
+      ownerCalls.push(request);
+      if(ownerCalls.length===1) throw controlError(409,"owner_changed",
+        {generation:newGeneration,controlEpoch:8});
+      return response(request);
+    },
+    setTimer:(run,ms)=>{ ownerTimers.push({run,ms}); return ownerTimers.length; },
+    clearTimer:()=>{},
+    now:()=>ownerNow,
+  }).start();
+  await flush();
+  const ownerFence=ownerTimers.find(timer=>timer.ms===250);
+  assert.ok(ownerFence,"owner change starts a fresh sequence behind the admission floor");
+  ownerNow=250;
+  ownerFence.run();
+  await flush();
+  assert.equal(ownerCalls[1].sequence,1);
+  assert.equal(ownerCalls[1].generation,newGeneration);
+  assert.equal(ownerCalls[1].control_epoch,8);
+  assert.equal(ownerCalls[1].capabilities.platform,"web");
+  ownerReporter.stop();
+
+  const late=deferred();
+  let lateCompletions=0;
+  const predecessor=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    snapshot:()=>snapshot(),
+    send:async ()=>late.promise,
+    onExchange:()=>{ lateCompletions+=1; },
+  }).start();
+  predecessor.stop();
+  late.resolve(response({generation:bootstrap().generation,control_epoch:7,sequence:1}));
+  await flush();
+  assert.equal(lateCompletions,0,"a stopped predecessor discards a late success");
+  assert.equal(predecessor.status().accepted_sequence,0);
+
+  const endTimers=[];
+  const endingSnapshot=snapshot(60_000,"ended");
+  endingSnapshot.demand="end";
+  const ending=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+    snapshot:()=>endingSnapshot,
+    send:async (_url,request)=>response(request),
+    setTimer:(run,ms)=>{ endTimers.push({run,ms}); return endTimers.length; },
+    clearTimer:()=>{},
+  }).start();
+  await flush();
+  assert.equal(ending.status().stopped,true,"accepted end is terminal for this controller");
+  assert.equal(endTimers.some(timer=>timer.ms===5_000),false,
+    "accepted end never arms another cadence exchange");
+
+  const adapter = new Function(
+    "PLAY_CAPS", "screen", "window", "playQuality", "selectedAudioIndex",
+    "PERSISTENT_STALL_MS", "ENDED_SLACK_SEC",
+    [
+      shippedSource("playbackControlCapabilities"),
+      shippedSource("playbackControlSelection"),
+      shippedSource("playbackControlBufferedRange"),
+      shippedSource("playbackControlSnapshot"),
+      "return {playbackControlSnapshot};",
+    ].join("\n"),
+  )(
+    {vcodec:"h264,hevc",maxheight:2160,hdr10t:1,dv:0},
+    {height:1080},
+    {innerHeight:720,devicePixelRatio:1},
+    ()=>"auto",
+    ()=>0,
+    8_000,
+    15,
+  );
+  const video={
+    currentTime:10,paused:false,ended:false,seeking:false,readyState:4,playbackRate:1,error:null,
+    buffered:{length:1,start:()=>8,end:()=>24},
+    getVideoPlaybackQuality:()=>({droppedVideoFrames:2}),
+  };
+  const player={offset:5,bookOffset:0,durMs:60_000,knownDur:60_000,started:true,
+    waitAt:null,_seekPreview:null,source:{height:1080},curSub:-1,burnedSub:null,aoffset:0,hls:null};
+  assert.equal(adapter.playbackControlSnapshot(video,player).position_ms,15_000);
+  video.paused=true;
+  assert.equal(adapter.playbackControlSnapshot(video,player).demand,"hold");
+  video.paused=false; video.seeking=true; player._seekPreview=20;
+  const seeking=adapter.playbackControlSnapshot(video,player);
+  assert.equal(seeking.render_state,"seeking");
+  assert.equal(seeking.seek_target_ms,20_000);
+  video.seeking=false; player._seekPreview=null;
+  player.waitAt=performance.now()-9_000;
+  assert.equal(adapter.playbackControlSnapshot(video,player).render_state,"stalled");
+  player.waitAt=null; video.ended=true; video.paused=true; video.currentTime=20;
+  const truncated=adapter.playbackControlSnapshot(video,player);
+  assert.equal(truncated.demand,"active");
+  assert.equal(truncated.render_state,"failed");
+  video.currentTime=60;
+  const complete=adapter.playbackControlSnapshot(video,player);
+  assert.equal(complete.demand,"end");
+  assert.equal(complete.render_state,"ended");
+
+  assert.match(shippedSource("wirePlayer"),/visibilitychange[^\n]*notifyPlaybackControl/);
+  assert.match(shippedSource("persistentWait"),/notifyPlaybackControl\("stalled"\)/);
+  assert.match(shippedSource("attachHls"),/notifyPlaybackControl\("failed"\)/);
+  assert.match(shippedSource("stallDiagnose"),/notifyPlaybackControl\("stalled"\)/);
+  assert.match(shippedSource("handleEnded"),/control_trigger:controlTrigger/);
+  assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
 
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");

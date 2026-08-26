@@ -9,6 +9,21 @@
   const MIN_EXCHANGE_MS = 250;
   const MAX_EXCHANGE_MS = 60_000;
   const EXCHANGE_DEADLINE_MS = 6_000;
+  const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+  function defaultNow() {
+    if (typeof performance === "object" && typeof performance.now === "function") {
+      return performance.now();
+    }
+    return Date.now();
+  }
+
+  function retryDelay(error, fallback) {
+    const value = Number(error && error.retryAfterMs);
+    return Number.isSafeInteger(value) && value >= 0 && value <= MAX_EXCHANGE_MS
+      ? Math.max(MIN_EXCHANGE_MS, value)
+      : fallback;
+  }
 
   function validBootstrap(value) {
     return !!value
@@ -16,7 +31,7 @@
       && typeof value.url === "string"
       && /^\/api\/v1\/hls\/[^/]+\/control$/.test(value.url)
       && typeof value.generation === "string"
-      && value.generation.length > 0
+      && UUID_RE.test(value.generation)
       && Number.isSafeInteger(value.control_epoch)
       && value.control_epoch > 0
       && Number.isSafeInteger(value.next_exchange_ms)
@@ -69,7 +84,7 @@
     constructor(options) {
       const value = options || {};
       if (!validBootstrap(value.bootstrap)) throw new TypeError("invalid playback-control bootstrap");
-      if (typeof value.clientInstanceId !== "string" || value.clientInstanceId.length === 0) {
+      if (typeof value.clientInstanceId !== "string" || !UUID_RE.test(value.clientInstanceId)) {
         throw new TypeError("invalid playback-control client identity");
       }
       if (typeof value.snapshot !== "function" || typeof value.send !== "function") {
@@ -81,7 +96,7 @@
       this.send = value.send;
       this.setTimer = value.setTimer || setTimeout;
       this.clearTimer = value.clearTimer || clearTimeout;
-      this.now = value.now || Date.now;
+      this.now = value.now || defaultNow;
       this.onExchange = typeof value.onExchange === "function" ? value.onExchange : function () {};
       this.sequence = 0;
       this.acceptedSequence = 0;
@@ -96,6 +111,7 @@
       this.lastStartedAt = null;
       this.retryRequest = null;
       this.acceptedCapabilitiesKey = null;
+      this.nextAllowedAt = 0;
     }
 
     start() {
@@ -104,39 +120,44 @@
     }
 
     notify(snapshot) {
-      if (this.stopped) return;
+      if (this.stopped) return null;
       const newest = snapshot || this.snapshot();
-      if (!validSnapshot(newest)) return;
+      if (!validSnapshot(newest)) return null;
       this.pending = newest;
       if (this.timer !== null) {
         this.clearTimer(this.timer);
         this.timer = null;
       }
       this.drain();
+      return this.contextFor(newest);
     }
 
     schedule() {
       if (this.stopped || this.inFlight || this.pending || this.timer !== null) return;
+      const retrying = this.retryRequest !== null;
+      const delay = retrying
+        ? Math.max(0, this.nextAllowedAt - this.now())
+        : this.bootstrap.next_exchange_ms;
       this.timer = this.setTimer(() => {
         this.timer = null;
         this.notify();
-      }, this.bootstrap.next_exchange_ms);
+      }, delay);
     }
 
     async drain() {
       if (this.stopped || this.inFlight || !this.pending) return;
       const now = this.now();
-      if (this.lastStartedAt !== null) {
-        const elapsed = Math.max(0, now - this.lastStartedAt);
-        if (elapsed < MIN_EXCHANGE_MS) {
-          if (this.timer === null) {
-            this.timer = this.setTimer(() => {
-              this.timer = null;
-              this.drain();
-            }, MIN_EXCHANGE_MS - elapsed);
-          }
-          return;
+      const rateAllowedAt = this.lastStartedAt === null
+        ? 0 : this.lastStartedAt + MIN_EXCHANGE_MS;
+      const allowedAt = Math.max(rateAllowedAt, this.nextAllowedAt);
+      if (now < allowedAt) {
+        if (this.timer === null) {
+          this.timer = this.setTimer(() => {
+            this.timer = null;
+            this.drain();
+          }, allowedAt - now);
         }
+        return;
       }
       let request = this.retryRequest;
       if (!request) {
@@ -154,6 +175,7 @@
           delete request.capabilities;
         }
       }
+      this.nextAllowedAt = 0;
       this.lastStartedAt = now;
       this.inFlight = true;
       this.abortController = typeof AbortController === "function" ? new AbortController() : null;
@@ -170,6 +192,7 @@
           request,
           this.abortController ? this.abortController.signal : undefined,
         );
+        if (this.stopped) return;
         if (!validResponse(this.bootstrap, request, response)) {
           const error = new Error("invalid playback-control response");
           error.name = "PlaybackControlProtocolError";
@@ -192,6 +215,7 @@
             ? null : request.observed_download_bps,
         };
         this.onExchange({ request, response, error: null });
+        if (request.demand === "end") this.stop();
       } catch (error) {
         const canceled = error && error.name === "AbortError" && !this.deadlineExceeded;
         if (!this.stopped && !canceled) {
@@ -204,9 +228,21 @@
           const status = Number(reportedError && reportedError.status);
           const terminalProtocolError = reportedError
             && reportedError.name === "PlaybackControlProtocolError";
-          const terminalHttp = status >= 400 && status < 500 && status !== 408 && status !== 429;
-          if (terminalProtocolError || terminalHttp) this.stop();
-          else this.retryRequest = request;
+          const ownerChanged = status === 409 && reportedError.code === "owner_changed"
+            && this.resetForOwner(reportedError);
+          const retryableControl = (status === 425 && reportedError.code === "owner_transition")
+            || (status === 429 && reportedError.code === "control_rate_limited")
+            || (status === 503 && reportedError.code === "control_unavailable");
+          const retryableTransport = status === 408 || status === 0 || !Number.isFinite(status);
+          if (ownerChanged) {
+            this.nextAllowedAt = this.now() + retryDelay(reportedError, MIN_EXCHANGE_MS);
+          } else if (!terminalProtocolError && (retryableControl || retryableTransport)) {
+            this.retryRequest = request;
+            const fallback = retryableControl ? 500 : this.bootstrap.next_exchange_ms;
+            this.nextAllowedAt = this.now() + retryDelay(reportedError, fallback);
+          } else {
+            this.stop();
+          }
         }
       } finally {
         if (this.exchangeTimer !== null) this.clearTimer(this.exchangeTimer);
@@ -222,6 +258,45 @@
 
     legacyContext() {
       return this.lastAccepted ? Object.assign({}, this.lastAccepted) : null;
+    }
+
+    contextFor(snapshot) {
+      if (!validSnapshot(snapshot)) return null;
+      return {
+        generation: this.bootstrap.generation,
+        control_epoch: this.bootstrap.control_epoch,
+        sequence: null,
+        demand: snapshot.demand,
+        render_state: snapshot.render_state,
+        position_ms: snapshot.position_ms,
+        buffered_through_ms: snapshot.buffered_through_ms,
+        observed_download_bps: snapshot.observed_download_bps == null
+          ? null : snapshot.observed_download_bps,
+      };
+    }
+
+    resetForOwner(error) {
+      const generation = error && error.generation;
+      const epoch = Number(error && error.controlEpoch);
+      const generationChanged = typeof generation === "string"
+        && UUID_RE.test(generation) && generation !== this.bootstrap.generation;
+      const epochChanged = Number.isSafeInteger(epoch) && epoch > this.bootstrap.control_epoch;
+      if (!generationChanged && !epochChanged) return false;
+      if (typeof generation !== "string" || !UUID_RE.test(generation)
+          || !Number.isSafeInteger(epoch) || epoch <= 0) return false;
+      let newest = null;
+      try { newest = this.snapshot(); } catch (_) {}
+      if (!validSnapshot(newest)) return false;
+      this.bootstrap.generation = generation;
+      this.bootstrap.control_epoch = epoch;
+      this.sequence = 0;
+      this.acceptedSequence = 0;
+      this.retryRequest = null;
+      this.acceptedCapabilitiesKey = null;
+      this.lastAccepted = null;
+      this.lastStartedAt = null;
+      this.pending = newest;
+      return true;
     }
 
     status() {
@@ -242,6 +317,7 @@
       this.stopped = true;
       this.pending = null;
       this.retryRequest = null;
+      this.nextAllowedAt = 0;
       if (this.timer !== null) this.clearTimer(this.timer);
       this.timer = null;
       if (this.exchangeTimer !== null) this.clearTimer(this.exchangeTimer);
