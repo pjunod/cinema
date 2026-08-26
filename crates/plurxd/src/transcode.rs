@@ -10484,6 +10484,18 @@ impl TranscodeManager {
         // left the DV configuration in every remux, and had Chrome refuse the
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
+        let video_options = transcode::CopyVideoOptions::from_probe(
+            &file,
+            probe_json.as_deref(),
+            have_dovi,
+            options.preserve_dolby_vision,
+        );
+        if video_options.promotes_parameter_sets() && takeover.is_some() {
+            return Err(
+                "this HEVC source requires GOP-aware init promotion and cannot use the legacy takeover muxer"
+                    .to_owned(),
+            );
+        }
         let pacing = self.pacing(true).await;
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
@@ -10532,8 +10544,7 @@ impl TranscodeManager {
                 audio_index,
                 options.transcode_audio,
                 pacing,
-                have_dovi,
-                options.preserve_dolby_vision,
+                video_options,
             );
             tracing::info!(
                 session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
@@ -10549,6 +10560,11 @@ impl TranscodeManager {
             ) {
                 Ok((child, stdout)) => (child, Some(stdout)),
                 Err(e) => {
+                    if video_options.promotes_parameter_sets() {
+                        return Err(format!(
+                            "the GOP-aware copy path required for this HEVC source could not start: {e}"
+                        ));
+                    }
                     // Spawning failed before any of this was decided, so there
                     // is nothing to unwind: start the legacy path here.
                     tracing::warn!(
@@ -10704,6 +10720,17 @@ impl TranscodeManager {
                         );
                     }
                     copyseg::Outcome::Unsupported(reason) => {
+                        if video_options.promotes_parameter_sets() {
+                            tracing::error!(
+                                session = %session_log_id(&sid),
+                                "the required HEVC init-promotion path failed: {reason}"
+                            );
+                            session.fail(PlaylistError::SessionFailed(
+                                "the HEVC source's decoder configuration could not be promoted"
+                                    .into(),
+                            ));
+                            return;
+                        }
                         // Is this session still one anybody is watching?
                         //
                         // The reader task holds its own `Arc<Session>`, so the

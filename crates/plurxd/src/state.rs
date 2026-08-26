@@ -12,8 +12,8 @@ use plurx_core::cluster::coordination::{ClusterJobAuthority, StoreCoordinator};
 #[cfg(test)]
 use plurx_core::domain::ArtworkAttempt;
 use plurx_core::domain::{
-    BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MetadataPatch,
-    NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
+    BookMetadataPatch, BookMetadataSource, Item, ItemKind, Library, LibraryKind, MediaFile,
+    MetadataPatch, NewPretranscodeJob, OfflinePackageStats, PlaybackEvent, PretranscodeJob,
     PretranscodeRequirements,
 };
 use plurx_core::error::StoreError;
@@ -1188,6 +1188,20 @@ pub(crate) fn clock_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
         .unwrap_or(i64::MAX)
+}
+
+async fn fragment_index_video_options(
+    store: &dyn Store,
+    file: &MediaFile,
+    have_dovi: bool,
+) -> Result<plurx_core::transcode::CopyVideoOptions, StoreError> {
+    let probe_json = store.get_file_probe_json(file.id).await?;
+    Ok(plurx_core::transcode::CopyVideoOptions::from_probe(
+        file,
+        probe_json.as_deref(),
+        have_dovi,
+        false,
+    ))
 }
 
 /// Heartbeat and self-fence for one distributed queue row.
@@ -3401,7 +3415,15 @@ impl JobManager {
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
                 continue;
             }
-            let identity = crate::fragindex::identity_for(&file, have_dovi, false);
+            let video =
+                match fragment_index_video_options(self.store.as_ref(), &file, have_dovi).await {
+                    Ok(video) => video,
+                    Err(error) => {
+                        tracing::warn!(file_id, %error, "reading probe for fragment index");
+                        continue;
+                    }
+                };
+            let identity = crate::fragindex::identity_for(&file, video);
             match self.store.fragment_index(file_id, &identity).await {
                 // Already current for this file and this pipeline.
                 Ok(Some(_)) => continue,
@@ -3414,8 +3436,7 @@ impl JobManager {
             attempted += 1;
             match crate::fragindex::build(
                 &file,
-                have_dovi,
-                false,
+                video,
                 &runtime_cache,
                 index_file_budget(file.duration_ms),
             )
@@ -3584,6 +3605,14 @@ impl JobManager {
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
                 continue;
             }
+            let video =
+                match fragment_index_video_options(self.store.as_ref(), &file, have_dovi).await {
+                    Ok(video) => video,
+                    Err(error) => {
+                        tracing::warn!(file_id, %error, "reading probe for cluster fragment index");
+                        continue;
+                    }
+                };
             attempted += 1;
             let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
                 Ok(version) => version,
@@ -3632,7 +3661,7 @@ impl JobManager {
                 continue;
             }
             let pipeline_sha256 =
-                crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, have_dovi);
+                crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, video);
             let Some(cache_key) =
                 cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
             else {
@@ -3666,7 +3695,7 @@ impl JobManager {
                         // The content-addressed v2 blob deliberately carries a
                         // neutral source identity. The v1 bridge is file keyed,
                         // so bind only this local copy to the consuming file.
-                        index.source = crate::fragindex::identity_for(&file, have_dovi, false);
+                        index.source = crate::fragindex::identity_for(&file, video);
                         if let Err(error) = self.store.put_fragment_index(file_id, &index).await {
                             tracing::warn!(file_id, %error, "installing hydrated fragment index");
                         } else {
@@ -3965,6 +3994,13 @@ impl JobManager {
                 })
             }
         };
+        let video = fragment_index_video_options(self.store.as_ref(), &file, have_dovi)
+            .await
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                delay_ms: 10_000,
+                charge_attempt: true,
+            })?;
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
@@ -4026,7 +4062,7 @@ impl JobManager {
                 charge_attempt: true,
             })?;
         let pipeline_sha256 =
-            crate::fragment_index_cluster::pipeline_digest(&file, engine_sha256, have_dovi);
+            crate::fragment_index_cluster::pipeline_digest(&file, engine_sha256, video);
         let cache_key =
             cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
                 .ok_or(AnalysisResolutionError::Terminal("invalid_cache_identity"))?;
@@ -4257,6 +4293,26 @@ impl JobManager {
                 return false;
             }
         };
+        let video = match fragment_index_video_options(self.store.as_ref(), &file, have_dovi).await
+        {
+            Ok(video) => video,
+            Err(error) => {
+                tracing::warn!(file_id = file.id, %error, "reading probe for claimed fragment index");
+                let now = clock_ms();
+                let _ = self
+                    .store
+                    .yield_cluster_fragment_index(
+                        &job.cache_key,
+                        &node_id,
+                        job.fence,
+                        now,
+                        now.saturating_add(RETRY_MS),
+                    )
+                    .await;
+                finish_heartbeat(stop, heartbeat).await;
+                return false;
+            }
+        };
         let object_version = match crate::fragment_index_cluster::inspect_source(&file).await {
             Ok(version) => version,
             Err(error) => {
@@ -4331,7 +4387,7 @@ impl JobManager {
             .store
             .record_fragment_index_source(&attested.observation)
             .await;
-        if crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, have_dovi)
+        if crate::fragment_index_cluster::pipeline_digest(&file, &engine_sha256, video)
             != job.pipeline_sha256
         {
             let now = clock_ms();
@@ -4354,8 +4410,7 @@ impl JobManager {
             outcome = crate::fragindex::build_from_attested_file(
                 &file,
                 &attested.handle,
-                have_dovi,
-                false,
+                video,
                 transcode.runtime_cache_dir(),
                 index_file_budget(file.duration_ms),
             ) => (Some(outcome), false),

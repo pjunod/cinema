@@ -1130,11 +1130,14 @@ pub async fn decision(
         requested_audio,
         container_default_audio,
     );
-    let vod_identity = crate::fragindex::identity_for(
+    let probe_json = state.store.get_file_probe_json(id).await?;
+    let vod_video = plurx_core::transcode::CopyVideoOptions::from_probe(
         &file,
+        probe_json.as_deref(),
         crate::ffmpeg::has_dovi_rpu().await,
         decision.preserve_dolby_vision,
     );
+    let vod_identity = crate::fragindex::identity_for(&file, vod_video);
     let vod_indexed = state
         .store
         .fragment_index(id, &vod_identity)
@@ -1528,6 +1531,9 @@ pub async fn stream_mp4(
     let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
     set_selected_audio_default(&mut file.audio_streams, Some(audio));
     let decision = q.caps().decide(&file, dv_strippable(&state));
+    let probe_json = state.store.get_file_probe_json(id).await?;
+    let promote_hevc_parameter_sets =
+        plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
     // Copy HEVC gets an `hvc1` tag so Safari's <video> accepts the fMP4 (an
     // `hev1`-tagged MKV copy otherwise plays audio-only / black in Safari).
     let hevc = matches!(file.video_codec.as_deref(), Some("hevc" | "h265"));
@@ -1579,6 +1585,7 @@ pub async fn stream_mp4(
         // line parsed a second time somewhere else.
         have_dovi_bsf: state.system.dovi_rpu,
         preserve_dolby_vision: decision.preserve_dolby_vision,
+        promote_hevc_parameter_sets,
         readrate,
         tracked,
         serving: state.serving.subscribe(),
@@ -1752,6 +1759,10 @@ struct RemuxSpec<'a> {
     /// Preserve a client-supported Dolby Vision profile instead of stripping
     /// its configuration and RPU metadata to the compatible HDR base.
     preserve_dolby_vision: bool,
+    /// The source hvcC has no parameter-set arrays. Progressive MP4 cannot
+    /// rewrite the init after muxing, so retain the in-band sets and use the
+    /// `hev1` sample entry that permits them.
+    promote_hevc_parameter_sets: bool,
     readrate: f64,
     /// Telemetry handle and its registration, when the client asked to be able
     /// to watch this stream's health.
@@ -1829,6 +1840,7 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
         hdr,
         have_dovi_bsf,
         preserve_dolby_vision,
+        promote_hevc_parameter_sets,
         readrate,
         tracked,
         mut serving,
@@ -1901,16 +1913,31 @@ async fn remux(spec: RemuxSpec<'_>) -> Result<Response, ApiError> {
     if hevc {
         cmd.args([
             "-tag:v",
-            plurx_core::transcode::hevc_copy_tag(hdr.as_deref(), preserve_dolby_vision),
+            if promote_hevc_parameter_sets {
+                "hev1"
+            } else {
+                plurx_core::transcode::hevc_copy_tag(hdr.as_deref(), preserve_dolby_vision)
+            },
         ]);
-        cmd.args([
-            "-bsf:v",
-            &plurx_core::transcode::hevc_copy_bsf_for_client(
-                hdr.as_deref(),
-                have_dovi_bsf,
-                preserve_dolby_vision,
-            ),
-        ]);
+        if !promote_hevc_parameter_sets {
+            cmd.args([
+                "-bsf:v",
+                &plurx_core::transcode::hevc_copy_bsf_for_client(
+                    hdr.as_deref(),
+                    have_dovi_bsf,
+                    preserve_dolby_vision,
+                ),
+            ]);
+        } else if hdr.as_deref() == Some("dolby_vision") && !preserve_dolby_vision {
+            cmd.args([
+                "-bsf:v",
+                if have_dovi_bsf {
+                    "dovi_rpu=strip=1,filter_units=remove_types=62-63"
+                } else {
+                    "filter_units=remove_types=62-63"
+                },
+            ]);
+        }
     }
     if transcode_audio {
         if let Some(af) = plurx_core::transcode::audio_offset_filter(audio_offset_ms) {

@@ -237,19 +237,11 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
 }
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
-pub fn identity_for(
-    file: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
-) -> SourceIdentity {
+pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> SourceIdentity {
     SourceIdentity::new(
         file.size.max(0) as u64,
         file.mtime,
-        plurx_core::segplan::argv_fingerprint(&transcode::copy_video_args(
-            file,
-            have_dovi_bsf,
-            preserve_dolby_vision,
-        )),
+        plurx_core::segplan::argv_fingerprint(&transcode::copy_video_args(file, video)),
     )
 }
 
@@ -260,22 +252,12 @@ pub fn identity_for(
 /// until the process restarts.
 pub async fn build(
     file: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let args = transcode::copy_index_pipe_args(file, have_dovi_bsf, preserve_dolby_vision);
-    build_with_args(
-        file,
-        args,
-        None,
-        have_dovi_bsf,
-        preserve_dolby_vision,
-        runtime_cache,
-        budget,
-    )
-    .await
+    let args = transcode::copy_index_pipe_args(file, video);
+    build_with_args(file, args, None, video, runtime_cache, budget).await
 }
 
 /// Build from the exact file descriptor whose complete digest was observed.
@@ -284,25 +266,18 @@ pub async fn build(
 pub async fn build_from_attested_file(
     file: &MediaFile,
     source: &std::fs::File,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
     use std::os::fd::AsRawFd;
 
-    let args = transcode::copy_index_pipe_args_with_input(
-        file,
-        "/dev/fd/3",
-        have_dovi_bsf,
-        preserve_dolby_vision,
-    );
+    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
     build_with_args(
         file,
         args,
         Some(source.as_raw_fd()),
-        have_dovi_bsf,
-        preserve_dolby_vision,
+        video,
         runtime_cache,
         budget,
     )
@@ -313,19 +288,11 @@ pub async fn build_from_attested_file(
 pub async fn build_from_attested_file(
     file: &MediaFile,
     _source: &std::fs::File,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    build(
-        file,
-        have_dovi_bsf,
-        preserve_dolby_vision,
-        runtime_cache,
-        budget,
-    )
-    .await
+    build(file, video, runtime_cache, budget).await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -333,12 +300,11 @@ async fn build_with_args(
     file: &MediaFile,
     args: Vec<String>,
     source_fd: Option<SourceFd>,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let identity = identity_for(file, have_dovi_bsf, preserve_dolby_vision);
+    let identity = identity_for(file, video);
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
     // reader, because the timescale is not known until the moov arrives.
