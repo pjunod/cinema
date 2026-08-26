@@ -101,9 +101,10 @@ deadline, so scheduler delay cannot permit a post-expiry signal. The mutex is
 never held across an await. M4 deletes both temporary gates only when child
 transitions themselves are actor messages.
 
-Equal-sequence replays never change demand or renew the lease, but they do
-request idempotent producer-policy convergence so a response lost after the
-original acceptance cannot defer the retained command until the repair tick.
+Equal-sequence replays never change demand, renew the lease, or enqueue new
+producer work. They return and wait on the original accepted flow ticket, so a
+response lost after acceptance still converges without making unthrottled
+replay traffic a producer-policy work source.
 Rejected controls never change demand or signal the producer. Expired actors
 and unavailable mailboxes fence the session and wake the same flow worker so
 it can release any response waiter and exit while teardown owns the child.

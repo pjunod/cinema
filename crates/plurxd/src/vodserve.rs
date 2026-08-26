@@ -434,6 +434,130 @@ impl VodServe {
         Self::new_configured(base, store, None, None, None)
     }
 
+    /// Publish a producer-less VOD attachment for HTTP response-finalization
+    /// tests. The fixture uses the real session/reader/incarnation machinery;
+    /// only materialization and the producer driver are bypassed.
+    #[cfg(test)]
+    pub(crate) async fn install_http_test_session(
+        &self,
+        session_id: &str,
+        file: MediaFile,
+        base: &Path,
+    ) {
+        use plurx_core::fmp4::CutClass;
+        use plurx_core::segplan::IndexRow;
+
+        let mut rows = Vec::new();
+        let mut dts = 0_u64;
+        for index in 0..240 {
+            let duration = if index % 2 == 0 { 28_016 } else { 28_032 };
+            rows.push(IndexRow {
+                dts,
+                duration,
+                bytes: 100_000,
+                video_bytes: 99_400,
+                class: CutClass::CleanIdr,
+            });
+            dts += duration;
+        }
+        let source_identity = SourceIdentity::new(file.size, file.mtime, "http-test");
+        let index = FragmentIndex::new(16_000, rows, "http-test", source_identity);
+        let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
+        let duration_ms = index_video_ms(&index);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &policy,
+            &TrackDurations {
+                video_ms: duration_ms,
+                audio_ms: duration_ms,
+                audio_bits_per_second: 256_000,
+            },
+        );
+        let dir = RenditionDir::new(base.join(format!("http-test-{}", uuid::Uuid::new_v4())));
+        dir.create().await.expect("create HTTP VOD test rendition");
+        let rendition = Arc::new(Rendition {
+            key: format!("http-test-{}", uuid::Uuid::new_v4()),
+            dir,
+            recipe: Recipe {
+                file: file.clone(),
+                audio_index: None,
+                aac: true,
+                preserve_dolby_vision: false,
+                have_dovi: false,
+                source_object_version: None,
+                cluster_cache_key: None,
+            },
+            source: None,
+            playlist: plan.playlist().into_bytes(),
+            timescale: plan.timescale,
+            seconds_per_segment: plan.duration_ticks() as f64
+                / f64::from(plan.timescale)
+                / plan.len() as f64,
+            index,
+            policy,
+            working_set_budget: 8 << 30,
+            completed_cache_budget: 50 << 30,
+            materialize_budget: Duration::from_secs(30),
+            manifest: Mutex::new(Manifest::new(plan.clone())),
+            plan,
+            identity: Mutex::new(IdentityState::default()),
+            slot: ProducerSlot::new(),
+            readers: Mutex::new(HashMap::new()),
+            failed: StdMutex::new(None),
+            init_notify: Notify::new(),
+            wake: Notify::new(),
+            gen_epoch: AtomicU64::new(0),
+            last_child_pid: AtomicU32::new(0),
+            dormant_since: StdMutex::new(None),
+            closed: AtomicBool::new(false),
+            warned_admission: AtomicBool::new(false),
+            demand_since: StdMutex::new(HashMap::new()),
+        });
+
+        let lifecycle = self.shared.session_lifecycle(session_id);
+        let _lifecycle = lifecycle.lock().await;
+        let previous = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .map(|session| Arc::clone(&session.rendition));
+        if let Some(previous) = previous {
+            previous.detach_reader(session_id).await;
+        }
+        rendition.attach_reader(session_id, 0).await;
+        self.shared.sessions.lock().await.insert(
+            session_id.to_owned(),
+            Session {
+                rendition,
+                playback_id: "http-vod-test".to_owned(),
+                user_name: "test".to_owned(),
+                item_title: "HTTP VOD fixture".to_owned(),
+                started_unix: 1,
+                target_height: file.height.unwrap_or(0),
+                kind: SessionKind::Copy {
+                    aac: true,
+                    preserve_dolby_vision: false,
+                },
+                supersession_user: "[\"user_id\",1]".to_owned(),
+                block_budget: Duration::from_secs(1),
+                lifecycle,
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                tombstone: None,
+            },
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
+        let sessions = self.shared.sessions.lock().await;
+        let touch = sessions.get(session_id)?.last_touch.lock().ok()?;
+        Some(*touch)
+    }
+
     pub(crate) fn new_cluster(
         base: PathBuf,
         store: Arc<dyn Store>,

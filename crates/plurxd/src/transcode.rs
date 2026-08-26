@@ -12917,6 +12917,29 @@ impl TranscodeManager {
             .insert(session_id.to_owned(), session);
     }
 
+    #[cfg(test)]
+    pub(crate) async fn install_vod_http_test_session(
+        &self,
+        session_id: &str,
+        file_id: i64,
+        base: &std::path::Path,
+    ) {
+        let file = self
+            .store
+            .get_file(file_id)
+            .await
+            .expect("HTTP VOD fixture file lookup")
+            .expect("HTTP VOD fixture file");
+        self.vod
+            .install_http_test_session(session_id, file, base)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn vod_last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
+        self.vod.last_touch_for_test(session_id).await
+    }
+
     /// Both byte views across every live session, from their cached figures —
     /// summing these must not cost a directory walk per session, or the flow
     /// controller could not run on every segment fetch.
@@ -13660,6 +13683,10 @@ impl HlsDeliveryFixture {
     /// `delivered_bps` in status and in every playback event.
     pub(crate) fn delivered_bytes(&self) -> i64 {
         self.session.delivery.total_bytes()
+    }
+
+    pub(crate) fn file_id(&self) -> i64 {
+        self.session.file_id
     }
 
     pub(crate) async fn last_renewal_kind(&self) -> &'static str {

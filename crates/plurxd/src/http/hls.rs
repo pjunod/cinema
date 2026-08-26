@@ -18,7 +18,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
@@ -4242,6 +4242,293 @@ mod tests {
         .expect("segment body");
         assert_eq!(delivered.len(), body.len());
         drop(transition);
+    }
+
+    async fn install_vod_http_session(
+        fixture: &HlsDeliveryFixture,
+        base: &std::path::Path,
+        session_id: &str,
+    ) -> crate::transcode::MediaResponseOwner {
+        fixture
+            .state
+            .transcode
+            .install_vod_http_test_session(session_id, fixture.file_id(), base)
+            .await;
+        fixture
+            .state
+            .transcode
+            .vod_playlist(session_id)
+            .await
+            .expect("VOD fixture ownership")
+            .expect("VOD fixture playlist")
+            .1
+    }
+
+    async fn vod_ready(
+        path: &std::path::Path,
+        advertised_len: u64,
+    ) -> crate::vodserve::SegmentReady {
+        crate::vodserve::SegmentReady {
+            file: tokio::fs::File::open(path)
+                .await
+                .expect("open VOD response object"),
+            len: advertised_len,
+            etag: format!("http-test-{advertised_len}"),
+        }
+    }
+
+    async fn vod_fetched_segment(fixture: &HlsDeliveryFixture, session_id: &str) -> Option<i64> {
+        let crate::transcode::HlsSessionInfo::Vod(status) = fixture
+            .state
+            .transcode
+            .hls_session_status(session_id)
+            .await
+            .expect("VOD fixture status")
+        else {
+            panic!("fixture was not VOD");
+        };
+        status.fetched_segment
+    }
+
+    #[tokio::test]
+    async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
+        use futures_util::StreamExt;
+
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+
+        // Exact EOF: lease and the segment frontier both commit.
+        let full_id = "vod-full";
+        let full_owner = install_vod_http_session(&fixture, dir.path(), full_id).await;
+        let full_path = dir.path().join("full.m4s");
+        let full_bytes = vec![1_u8; 24 * 1024];
+        tokio::fs::write(&full_path, &full_bytes)
+            .await
+            .expect("full VOD object");
+        let full = vod_segment_response(
+            &fixture.state,
+            full_id,
+            "seg00003.m4s",
+            &headers,
+            vod_ready(&full_path, full_bytes.len() as u64).await,
+            full_owner,
+        )
+        .await
+        .expect("full VOD response");
+        assert_eq!(
+            axum::body::to_bytes(full.into_body(), full_bytes.len() + 1)
+                .await
+                .expect("full VOD body")
+                .len(),
+            full_bytes.len()
+        );
+        assert_eq!(vod_fetched_segment(&fixture, full_id).await, Some(3));
+
+        // A strict subset Range proves demand and renews the lease, but does
+        // not claim that the client owns the complete immutable segment.
+        let range_id = "vod-range";
+        let range_owner = install_vod_http_session(&fixture, dir.path(), range_id).await;
+        let range_path = dir.path().join("range.m4s");
+        let range_bytes = vec![2_u8; 16 * 1024];
+        tokio::fs::write(&range_path, &range_bytes)
+            .await
+            .expect("range VOD object");
+        let touched_before = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(range_id)
+            .await
+            .expect("range touch before");
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let range_headers = RelayHeaders {
+            range: Some("bytes=1024-2047".to_owned()),
+            ..RelayHeaders::default()
+        };
+        let range = vod_segment_response(
+            &fixture.state,
+            range_id,
+            "seg00004.m4s",
+            &range_headers,
+            vod_ready(&range_path, range_bytes.len() as u64).await,
+            range_owner,
+        )
+        .await
+        .expect("range VOD response");
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(range.into_body(), 2_048)
+                .await
+                .expect("range VOD body")
+                .len(),
+            1_024
+        );
+        assert!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(range_id)
+                .await
+                .expect("range touch after")
+                > touched_before
+        );
+        assert_eq!(vod_fetched_segment(&fixture, range_id).await, None);
+
+        // Dropping the body before EOF cannot renew or move the frontier.
+        let drop_id = "vod-drop";
+        let drop_owner = install_vod_http_session(&fixture, dir.path(), drop_id).await;
+        let drop_path = dir.path().join("drop.m4s");
+        let drop_bytes = vec![3_u8; 64 * 1024];
+        tokio::fs::write(&drop_path, &drop_bytes)
+            .await
+            .expect("drop VOD object");
+        let drop_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(drop_id)
+            .await
+            .expect("drop touch");
+        let dropped = vod_segment_response(
+            &fixture.state,
+            drop_id,
+            "seg00005.m4s",
+            &headers,
+            vod_ready(&drop_path, drop_bytes.len() as u64).await,
+            drop_owner,
+        )
+        .await
+        .expect("droppable VOD response");
+        let mut dropped = dropped.into_body().into_data_stream();
+        assert!(dropped.next().await.is_some_and(|chunk| chunk.is_ok()));
+        drop(dropped);
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(drop_id)
+                .await,
+            Some(drop_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, drop_id).await, None);
+
+        // A short object reaches storage EOF but not the promised response
+        // length, so it is not successful media delivery.
+        let short_id = "vod-short";
+        let short_owner = install_vod_http_session(&fixture, dir.path(), short_id).await;
+        let short_path = dir.path().join("short.m4s");
+        tokio::fs::write(&short_path, vec![4_u8; 1_024])
+            .await
+            .expect("short VOD object");
+        let short_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(short_id)
+            .await
+            .expect("short touch");
+        let short = vod_segment_response(
+            &fixture.state,
+            short_id,
+            "seg00006.m4s",
+            &headers,
+            vod_ready(&short_path, 2_048).await,
+            short_owner,
+        )
+        .await
+        .expect("short VOD response");
+        assert_eq!(
+            axum::body::to_bytes(short.into_body(), 2_049)
+                .await
+                .expect("short VOD body")
+                .len(),
+            1_024
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(short_id)
+                .await,
+            Some(short_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, short_id).await, None);
+
+        // A storage error terminates the body and discards the completion.
+        let error_id = "vod-error";
+        let error_owner = install_vod_http_session(&fixture, dir.path(), error_id).await;
+        let error_path = dir.path().join("unreadable-vod.m4s");
+        tokio::fs::create_dir(&error_path)
+            .await
+            .expect("unreadable VOD object");
+        let error_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(error_id)
+            .await
+            .expect("error touch");
+        let error = vod_segment_response(
+            &fixture.state,
+            error_id,
+            "seg00007.m4s",
+            &headers,
+            vod_ready(&error_path, 1).await,
+            error_owner,
+        )
+        .await
+        .expect("error VOD response");
+        let mut error = error.into_body().into_data_stream();
+        assert!(error.next().await.is_some_and(|chunk| chunk.is_err()));
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(error_id)
+                .await,
+            Some(error_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, error_id).await, None);
+
+        // Resolution before same-id reattachment carries the old incarnation;
+        // even exact EOF cannot touch the successor or its reader frontier.
+        let replaced_id = "vod-replaced";
+        let stale_owner = install_vod_http_session(&fixture, dir.path(), replaced_id).await;
+        let replaced_path = dir.path().join("replaced.m4s");
+        let replaced_bytes = vec![5_u8; 8 * 1024];
+        tokio::fs::write(&replaced_path, &replaced_bytes)
+            .await
+            .expect("replaced VOD object");
+        let stale_response = vod_segment_response(
+            &fixture.state,
+            replaced_id,
+            "seg00008.m4s",
+            &headers,
+            vod_ready(&replaced_path, replaced_bytes.len() as u64).await,
+            stale_owner,
+        )
+        .await
+        .expect("stale VOD response");
+        let _successor_owner = install_vod_http_session(&fixture, dir.path(), replaced_id).await;
+        let successor_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(replaced_id)
+            .await
+            .expect("successor touch");
+        assert_eq!(
+            axum::body::to_bytes(stale_response.into_body(), replaced_bytes.len() + 1)
+                .await
+                .expect("stale body remains readable")
+                .len(),
+            replaced_bytes.len()
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(replaced_id)
+                .await,
+            Some(successor_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, replaced_id).await, None);
     }
 
     #[tokio::test]

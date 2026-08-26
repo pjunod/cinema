@@ -1174,6 +1174,7 @@ pub(crate) struct RollingControlHandle {
     retired: Arc<AtomicBool>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    last_flow_ticket: u64,
 }
 
 struct OwnedLocalControlRequest {
@@ -1254,6 +1255,7 @@ impl RollingControlActor {
             retired_fence,
             producer_transition,
             flow_sync,
+            last_flow_ticket: 0,
         }
     }
 
@@ -1317,9 +1319,17 @@ impl RollingControlActor {
             ROLLING_LEASE_RENEWALS[0].fetch_add(1, Ordering::Relaxed);
         }
         // Accepted mutation and its producer-policy wake are one actor
-        // transaction. Replays also wake so a response lost after acceptance
-        // can drive the same retained demand without waiting for repair.
-        let flow_ticket = self.flow_sync.request();
+        // transaction. A replay returns the SAME ticket: the detached worker
+        // survives a lost response, and minting new work for an unthrottled
+        // equal sequence would turn replay into a flow-control DoS surface.
+        let flow_ticket = if disposition == ControlDisposition::Accepted {
+            let ticket = self.flow_sync.request();
+            self.last_flow_ticket = ticket;
+            ticket
+        } else {
+            debug_assert!(self.last_flow_ticket > 0);
+            self.last_flow_ticket
+        };
         Ok(RollingControlOutcome {
             disposition,
             accepted_sequence,
@@ -2213,6 +2223,7 @@ mod tests {
             .expect("first control accepted");
         assert_eq!(accepted.disposition, ControlDisposition::Accepted);
         assert_eq!(accepted.lease.mode, RollingLeaseMode::Explicit);
+        let accepted_flow_ticket = accepted.flow_ticket;
         let demand = accepted.lease.demand.expect("demand snapshot");
         assert_eq!(demand.position_ms, request.position_ms);
         assert_eq!(demand.buffered_from_ms, request.buffered_from_ms);
@@ -2229,6 +2240,18 @@ mod tests {
         assert_eq!(replay.lease.remaining, Duration::from_secs(20));
         assert_eq!(replay.lease.timeout_ms(), ROLLING_EXPLICIT_LEASE_TIMEOUT_MS);
         assert_eq!(replay.lease.last_renewal_kind, "control");
+        assert_eq!(replay.flow_ticket, accepted_flow_ticket);
+        for _ in 0..100 {
+            let replay = actor
+                .control_at(started + Duration::from_secs(11), owned_control(&request))
+                .expect("repeated equal sequence is replayed");
+            assert_eq!(replay.flow_ticket, accepted_flow_ticket);
+        }
+        assert_eq!(
+            actor.flow_sync.requested.load(Ordering::Acquire),
+            accepted_flow_ticket,
+            "replay waits on accepted convergence without scheduling new flow work"
+        );
 
         let mut stale = request;
         stale.sequence = 0;
