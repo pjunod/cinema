@@ -259,19 +259,25 @@ async fn wait_for_two_voters(
     }
 }
 
-async fn wait_for_fragment_index(daemon: &mut Daemon) {
+async fn wait_for_fragment_index(first: &mut Daemon, second: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
-        daemon.assert_running("waiting for the fragment index");
-        let diagnostics = daemon.diagnostics();
-        if diagnostics.lines().any(|line| {
-            line.contains("fragment indexing pass finished") && line.contains("built=1")
-        }) {
+        first.assert_running("waiting for the fragment index on the first voter");
+        second.assert_running("waiting for the fragment index on the second voter");
+        let first_diagnostics = first.diagnostics();
+        let second_diagnostics = second.diagnostics();
+        let pass_finished = |diagnostics: &str| {
+            diagnostics.lines().any(|line| {
+                line.contains("fragment indexing pass finished") && line.contains("built=1")
+            })
+        };
+        if pass_finished(&first_diagnostics) || pass_finished(&second_diagnostics) {
             return;
         }
         assert!(
             Instant::now() < deadline,
-            "fragment index was not built:\n{diagnostics}"
+            "fragment index was not built:\nfirst voter:\n{first_diagnostics}\n\
+             second voter:\n{second_diagnostics}"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -507,10 +513,10 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     };
     let b_base = format!("http://127.0.0.1:{b_http_port}");
 
-    // VOD deliberately refuses to start until this node-local prerequisite is
-    // durable. Wait on the scheduler's completed-work signal instead of racing
-    // the scan with repeated session requests.
-    wait_for_fragment_index(&mut node_b).await;
+    // VOD deliberately refuses to start until this prerequisite is durable.
+    // The indexing lease is cluster-wide, so either voter may complete it;
+    // waiting on node B alone makes scheduler timing decide the test verdict.
+    wait_for_fragment_index(&mut node_a, &mut node_b).await;
 
     let hls = client
         .post(format!("{b_base}/api/v1/files/{file_id}/hls/sessions"))
