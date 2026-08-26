@@ -2,22 +2,22 @@ version = 1
 
 [[coverage]]
 commits = [
-  "b54c6850",
-  "1654c0ed",
-  "86db2907",
-  "cbc8029c",
-  "1d229162",
-  "5ce8e531",
-  "28c909cb",
-  "d2282ad4",
-  "48af30e7",
-  "8a5eb431",
-  "170275ff",
-  "2edeb997",
-  "6e526e60",
-  "c853614d",
-  "1104474b",
-  "af2e6c76",
+  "8d4cef2d",
+  "e0eea0ee",
+  "168ad99e",
+  "748272b0",
+  "61872f43",
+  "5326841f",
+  "6631bda0",
+  "7170eafe",
+  "cf31c512",
+  "cfe6f081",
+  "73ef9e1d",
+  "641dfe22",
+  "91202c3f",
+  "64403b07",
+  "f70ea367",
+  "d1a8faea",
 ]
 points = ["playback.pipeline", "web.experience"]
 checks = ["rust-gate", "web-static"]

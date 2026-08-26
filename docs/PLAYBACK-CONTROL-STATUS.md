@@ -80,11 +80,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Complete on `87d8d7d9`; final status-only commit pending |
-| Adversarial diff review | **Approved** on the complete exact diff at `87d8d7d9`; the reviewer ran no tests or compile commands |
-| Unit/focused tests | Two exact deadline regressions passed, then `make test` passed: 1,878 passed, 0 failed, 3 ignored |
-| Full local gate | `make validate` passed on `87d8d7d9`: 13 passed, 0 failed, 2 optional Playwright checks skipped because the local module is absent |
-| Hosted CI | Draft PR exists; ready-for-review and hosted merge gates are next |
+| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract |
+| Adversarial diff review | Pre-rebase head approved; exact rebased-head review is pending before tests rerun |
+| Unit/focused tests | Pre-rebase: two exact deadline regressions and `make test` green (1,878 passed, 0 failed, 3 ignored); rebased rerun pending review |
+| Full local gate | Pre-rebase `make validate`: 13 passed, 0 failed, 2 optional Playwright skips; exact rebased-head rerun pending review |
+| Hosted CI | PR is ready; the rebase resolved GitHub's merge conflict and will be pushed after review preparation |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger
