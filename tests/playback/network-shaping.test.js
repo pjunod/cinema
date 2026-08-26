@@ -2051,6 +2051,36 @@ test("the raw Chromium driver is safe to launch in an unprivileged runner contai
   assert.equal(lab.CDP_DEVTOOLS_TIMEOUT_MS, 90_000, "cold shared hosts need bounded startup headroom");
 });
 
+test("the raw Chromium driver creates a page when headless shell exposes none", async () => {
+  const calls = [];
+  const page = {
+    type: "page",
+    webSocketDebuggerUrl: "ws://127.0.0.1:41002/devtools/page/created",
+  };
+  const request = async (url, options = {}) => {
+    calls.push({ url, method: options.method || "GET" });
+    if (url.endsWith("/json/list")) {
+      return { json: async () => [{ type: "browser" }] };
+    }
+    return { ok: true, json: async () => page };
+  };
+
+  const target = await lab.findOrCreateCdpPageTarget(
+    "http://127.0.0.1:41002",
+    "http://127.0.0.1:41001/#/player/7",
+    request,
+  );
+
+  assert.deepEqual(target, page);
+  assert.deepEqual(calls, [
+    { url: "http://127.0.0.1:41002/json/list", method: "GET" },
+    {
+      url: "http://127.0.0.1:41002/json/new?http%3A%2F%2F127.0.0.1%3A41001%2F%23%2Fplayer%2F7",
+      method: "PUT",
+    },
+  ]);
+});
+
 runAll().then(() => {
   if (failures.length) {
     process.stderr.write(`\n${failures.length} shaping contract failure(s)\n`);
