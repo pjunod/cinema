@@ -3,8 +3,8 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `bcc5b09a` (PR #613)
 **Current work:** `codex/playback-control-m3-demand-lease` — M3b, ready PR
-[#612](https://github.com/pjunod/plurx/pull/612); a narrow web-layout runner
-repair is awaiting exact-head review before its test rerun and push
+[#612](https://github.com/pjunod/plurx/pull/612); exact reviewed local gates are
+green and the web-layout runner repair is pending push and hosted rerun
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -91,11 +91,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repairs `fb2128e5` and `ca145db4` are local |
-| Adversarial diff review | Exact rebased implementation head `eee52106` approved; changed exact head with the runner repair is pending review before tests |
-| Unit/focused tests | Rebased `make test` green (`plurx-core`: 783; `plurxd`: 1,034; 0 failed); changed exact head pending review and rerun |
-| Full local gate | Rebased `make validate`: 13 passed, 0 failed, 2 optional Playwright skips; changed exact head pending review and rerun |
-| Hosted CI | Exact implementation head passed Rust, WAL, cluster-daemon, and VOD-browser jobs; web-layout exposed one transient root-attachment failure, corrected locally and pending review/push |
+| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repairs `fb2128e5` and `ca145db4` are committed |
+| Adversarial diff review | Exact rebased implementation head `eee52106` approved; review findings on the UI repair were corrected; exact local head `23f8c533` approved before its tests |
+| Unit/focused tests | Exact `23f8c533`: retry-policy regression and `make test` green (`plurx-core`: 783; `plurxd`: 1,034 passed and 3 ignored; 0 failed) |
+| Full local gate | Exact `23f8c533`: `make validate` 13 passed, 0 failed, 2 optional Playwright skips; history audit covers 955 corrective commits |
+| Hosted CI | Prior head passed Rust, WAL, cluster-daemon, replicated-store, and VOD-browser jobs; web-layout exposed one transient root-attachment failure; repaired head is pending push/rerun |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger
