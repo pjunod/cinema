@@ -405,6 +405,7 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
         emulate_p3a_watermark_handler: false,
         role: Default::default(),
         emulate_pre_learner_heartbeat: false,
+        instrument_store_operations: false,
     };
 
     let mut node = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
@@ -838,6 +839,7 @@ async fn startup_error_with_an_occupied_port(occupied: Occupied) -> String {
         emulate_p3a_watermark_handler: false,
         role: Default::default(),
         emulate_pre_learner_heartbeat: false,
+        instrument_store_operations: false,
     };
     let mut voter = NodeProcess::spawn(&harness_binary(), &launch).expect("spawn the voter");
     let error = voter
@@ -1017,6 +1019,7 @@ fn a_voter_config_lands_in_its_own_data_directory() {
         emulate_p3a_watermark_handler: false,
         role: Default::default(),
         emulate_pre_learner_heartbeat: false,
+        instrument_store_operations: false,
     };
 
     let config = node_config(&launch).expect("build the voter config");
@@ -1090,6 +1093,7 @@ async fn a_malformed_request_is_answered_and_the_voter_keeps_serving() {
         emulate_p3a_watermark_handler: false,
         role: Default::default(),
         emulate_pre_learner_heartbeat: false,
+        instrument_store_operations: false,
     };
     // Driven as a raw child rather than through `NodeProcess`, which can only
     // send a well-formed `Request`.

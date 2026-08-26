@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://plurx.tv/schemas/cluster-instrumentation-arm-v1.json",
+  "title": "plurx named-runner Store instrumentation arm",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "instrumentation_enabled", "topology_attestations", "topology"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "instrumentation_enabled": { "type": "boolean" },
+    "topology_attestations": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": { "$ref": "#/$defs/topology_attestation" }
+    },
+    "topology": { "type": "object" }
+  },
+  "$defs": {
+    "topology_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["voter_count", "nodes"],
+      "properties": {
+        "voter_count": { "enum": [3, 4] },
+        "nodes": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/node_attestation" }
+        }
+      }
+    },
+    "node_attestation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "node_id", "instrumentation_enabled", "recorded_operations_total"
+      ],
+      "properties": {
+        "node_id": { "type": "integer", "minimum": 1, "maximum": 4 },
+        "instrumentation_enabled": { "type": "boolean" },
+        "recorded_operations_total": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

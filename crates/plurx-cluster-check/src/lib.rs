@@ -101,8 +101,11 @@ pub use failure_drills::{
     FAILURE_DRILL_ARTIFACT_SCHEMA_VERSION,
 };
 pub use named_runner::{
-    claim_named_output, validate_named_campaign, NamedRunnerConfig, NamedTopologyCampaign,
-    NamedVoter, NAMED_CAMPAIGN_SCHEMA_VERSION,
+    claim_named_output, validate_named_campaign, validate_named_instrumentation_campaign,
+    InstrumentationMetric, InstrumentationNodeAttestation, InstrumentationPairReference,
+    InstrumentationTopologyAttestation, NamedInstrumentationArmArtifact,
+    NamedInstrumentationCampaign, NamedRunnerConfig, NamedTopologyCampaign, NamedVoter,
+    INSTRUMENTATION_CAMPAIGN_SCHEMA_VERSION, NAMED_CAMPAIGN_SCHEMA_VERSION,
 };
 pub use topology::{
     percentile_type7, run_topology_comparison, validate_topology_artifact, ClusterTopologyArtifact,
@@ -297,6 +300,35 @@ pub async fn run(args: Vec<String>) -> Result<()> {
             }
             named_runner::run_named_campaign(&config, &output, &source_root, owner_nonce).await
         }
+        Some("instrumentation-named") => {
+            let config = args
+                .get(2)
+                .map(PathBuf::from)
+                .context("instrumentation-named requires a runner config JSON")?;
+            let output = args
+                .get(3)
+                .map(PathBuf::from)
+                .context("instrumentation-named requires an output directory")?;
+            let source_root = args
+                .get(4)
+                .map(PathBuf::from)
+                .context("instrumentation-named requires the controller source root")?;
+            let owner_nonce = args
+                .get(5)
+                .context("instrumentation-named requires the output owner nonce")?;
+            if args.get(6).is_some() {
+                bail!(
+                    "instrumentation-named accepts exactly config, output, source-root, and owner arguments"
+                );
+            }
+            named_runner::run_named_instrumentation_campaign(
+                &config,
+                &output,
+                &source_root,
+                owner_nonce,
+            )
+            .await
+        }
         Some("topology-claim") => {
             let output = args
                 .get(2)
@@ -324,6 +356,20 @@ pub async fn run(args: Vec<String>) -> Result<()> {
                 .filter(|path| !path.as_os_str().is_empty())
                 .unwrap_or_else(|| Path::new("."));
             validate_named_campaign(&campaign, Some(root))
+        }
+        Some("instrumentation-campaign-validate") => {
+            let path = args.get(2).map(PathBuf::from).context(
+                "instrumentation-campaign-validate requires instrumentation-campaign.json",
+            )?;
+            let campaign: NamedInstrumentationCampaign =
+                serde_json::from_slice(&std::fs::read(&path).with_context(|| {
+                    format!("read named instrumentation campaign {}", path.display())
+                })?)?;
+            let root = path
+                .parent()
+                .filter(|path| !path.as_os_str().is_empty())
+                .unwrap_or_else(|| Path::new("."));
+            validate_named_instrumentation_campaign(&campaign, Some(root))
         }
         Some("topology-cleanup") => {
             let path = args
@@ -6538,6 +6584,10 @@ pub struct NodeLaunch {
     /// report happened to claim.
     #[serde(default = "default_read_pool_size")]
     pub read_pool_size: usize,
+    /// P2f control-arm switch. This field reaches a validation-only hook in
+    /// plurx-core; production plurxd builds have no corresponding switch.
+    #[serde(default = "instrument_store_operations_by_default")]
+    pub instrument_store_operations: bool,
     #[serde(default)]
     pub emulate_old_watermark_handler: bool,
     #[serde(default)]
@@ -6566,6 +6616,7 @@ impl NodeLaunch {
             nodes,
             listen_addr: default_listen_addr(),
             read_pool_size: default_read_pool_size(),
+            instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
             role: ClusterRole::Voter,
@@ -6583,6 +6634,10 @@ impl NodeLaunch {
 
 fn default_listen_addr() -> String {
     LISTEN_ADDR.to_owned()
+}
+
+fn instrument_store_operations_by_default() -> bool {
+    true
 }
 
 /// The daemon's own default, read from the daemon's own config type so the two
@@ -6884,6 +6939,7 @@ pub enum Request {
         network_path: String,
         reset_max_rss: bool,
     },
+    StoreInstrumentationStatus,
     PostLossWrite {
         target: String,
         position_ms: i64,
@@ -6967,6 +7023,10 @@ pub enum Response {
     },
     TopologyResources {
         sample: ResourceSample,
+    },
+    StoreInstrumentationStatus {
+        enabled: bool,
+        recorded_operations_total: u64,
     },
     TopologyCatalogueSeeded {
         item_ids: Vec<i64>,
@@ -8453,6 +8513,9 @@ struct NodeMutableState {
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
     install_crypto_provider();
+    plurx_core::store::validation_set_store_operation_instrumentation(
+        launch.instrument_store_operations,
+    );
     let node_started = Instant::now();
     let listeners = voter_listen_addrs(&launch)?;
     let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
@@ -9698,6 +9761,10 @@ async fn handle_request(
                 network_path,
                 reset_max_rss,
             )?,
+        }),
+        Request::StoreInstrumentationStatus => Ok(Response::StoreInstrumentationStatus {
+            enabled: plurx_core::store::validation_store_operation_instrumentation_enabled(),
+            recorded_operations_total: plurx_core::store::validation_store_operation_metric_count(),
         }),
         Request::PostLossWrite {
             target,
@@ -12053,6 +12120,7 @@ mod tests {
             }],
             listen_addr: default_listen_addr(),
             read_pool_size,
+            instrument_store_operations: true,
             emulate_old_watermark_handler: false,
             emulate_p3a_watermark_handler: false,
             role: ClusterRole::Voter,
@@ -12096,5 +12164,6 @@ mod tests {
         .expect("decode a legacy launch");
         assert_eq!(launch.read_pool_size, default_read_pool_size());
         assert_eq!(launch.read_pool_size, 4);
+        assert!(launch.instrument_store_operations);
     }
 }

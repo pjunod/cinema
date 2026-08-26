@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::hash::Hash;
 use std::path::Path;
+#[cfg(feature = "cluster-read-cost-validation")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -623,6 +625,38 @@ impl StoreOperationMetrics {
 static STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
     LazyLock::new(StoreOperationMetrics::default);
 
+// The named P2f runner needs a production-equivalent control arm without
+// maintaining or rebuilding a historical binary. This switch exists only in
+// the cluster validation build; shipped binaries compile the instrumented path
+// unconditionally and expose no runtime way to disable their metrics.
+#[cfg(feature = "cluster-read-cost-validation")]
+static STORE_OPERATION_INSTRUMENTATION_ENABLED: AtomicBool = AtomicBool::new(true);
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[doc(hidden)]
+pub fn validation_set_store_operation_instrumentation(enabled: bool) {
+    STORE_OPERATION_INSTRUMENTATION_ENABLED.store(enabled, Ordering::Relaxed);
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[doc(hidden)]
+#[must_use]
+pub fn validation_store_operation_instrumentation_enabled() -> bool {
+    STORE_OPERATION_INSTRUMENTATION_ENABLED.load(Ordering::Relaxed)
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+#[doc(hidden)]
+#[must_use]
+pub fn validation_store_operation_metric_count() -> u64 {
+    STORE_OPERATION_METRICS
+        .cells
+        .iter()
+        .fold(0_u64, |total, cell| {
+            total.saturating_add(cell.count.load(Ordering::Relaxed))
+        })
+}
+
 struct StoreOperationTimer {
     metrics: &'static StoreOperationMetrics,
     class: StoreOperationClass,
@@ -665,6 +699,40 @@ async fn time_store_operation<T>(
     operation: impl Future<Output = Result<T, StoreError>>,
     successful: impl FnOnce(&T) -> bool,
 ) -> Result<T, StoreError> {
+    #[cfg(feature = "cluster-read-cost-validation")]
+    {
+        time_store_operation_controlled(
+            metrics,
+            class,
+            operation,
+            successful,
+            validation_store_operation_instrumentation_enabled(),
+        )
+        .await
+    }
+    #[cfg(not(feature = "cluster-read-cost-validation"))]
+    {
+        let timer = StoreOperationTimer::start(metrics, class);
+        let result = operation.await;
+        timer.complete(match result.as_ref() {
+            Ok(value) if successful(value) => StoreOperationOutcome::Ok,
+            Ok(_) | Err(_) => StoreOperationOutcome::Error,
+        });
+        result
+    }
+}
+
+#[cfg(feature = "cluster-read-cost-validation")]
+async fn time_store_operation_controlled<T>(
+    metrics: &'static StoreOperationMetrics,
+    class: StoreOperationClass,
+    operation: impl Future<Output = Result<T, StoreError>>,
+    successful: impl FnOnce(&T) -> bool,
+    enabled: bool,
+) -> Result<T, StoreError> {
+    if !enabled {
+        return operation.await;
+    }
     let timer = StoreOperationTimer::start(metrics, class);
     let result = operation.await;
     timer.complete(match result.as_ref() {
@@ -3344,6 +3412,83 @@ mod tests {
             count(StoreOperationClass::Write, StoreOperationOutcome::Error),
             statement_error_before + 1
         );
+    }
+
+    #[cfg(feature = "cluster-read-cost-validation")]
+    #[tokio::test]
+    async fn validation_control_preserves_results_without_recording_any_outcome() {
+        let metrics: &'static StoreOperationMetrics =
+            Box::leak(Box::new(StoreOperationMetrics::default()));
+        let total = || {
+            metrics
+                .cells
+                .iter()
+                .fold(0_u64, |sum, cell| sum + cell.count.load(Ordering::Relaxed))
+        };
+
+        time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::LocalRead,
+            async { Ok::<_, StoreError>(17) },
+            |_| true,
+            false,
+        )
+        .await
+        .expect("disabled success preserves its value");
+        let error = time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::AuthorityRead,
+            async { Err::<(), _>(StoreError::Database("control error".to_owned())) },
+            |_| true,
+            false,
+        )
+        .await
+        .expect_err("disabled error remains an error");
+        assert_eq!(error.to_string(), "database error: control error");
+        let mut cancelled = Box::pin(time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::Write,
+            std::future::pending::<Result<(), StoreError>>(),
+            |_| true,
+            false,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut cancelled),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+        assert_eq!(total(), 0, "the control arm recorded an outcome");
+
+        time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::LocalRead,
+            async { Ok::<_, StoreError>(17) },
+            |_| true,
+            true,
+        )
+        .await
+        .expect("instrumented success");
+        let _ = time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::AuthorityRead,
+            async { Err::<(), _>(StoreError::Database("measured error".to_owned())) },
+            |_| true,
+            true,
+        )
+        .await;
+        let mut cancelled = Box::pin(time_store_operation_controlled(
+            metrics,
+            StoreOperationClass::Write,
+            std::future::pending::<Result<(), StoreError>>(),
+            |_| true,
+            true,
+        ));
+        assert!(matches!(
+            futures_util::poll!(&mut cancelled),
+            std::task::Poll::Pending
+        ));
+        drop(cancelled);
+        assert_eq!(total(), 3, "the measured arm omitted an outcome class");
     }
 
     #[tokio::test(start_paused = true)]
