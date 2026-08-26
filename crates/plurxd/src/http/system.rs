@@ -934,7 +934,7 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
                 context.insert("observation".to_owned(), observation.into());
             }
         }
-        (!context.is_empty()).then(|| serde_json::Value::Object(context))
+        (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
     for (key, value) in [
