@@ -389,8 +389,8 @@ class OperationsContractCase(unittest.TestCase):
         # emulator passed from a cold image. Keep the SDK outside the checkout
         # (so post-job hashFiles cannot traverse it) and build a disposable AVD
         # for every run instead of treating the snapshot as portable state.
-        self.assertIn("ANDROID_HOME: ${{ runner.temp }}/android-sdk", workflow)
-        self.assertIn("ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk", workflow)
+        self.assertIn('echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk"', workflow)
+        self.assertIn('echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk"', workflow)
         self.assertNotIn("name: Cache the AVD snapshot", workflow)
         self.assertIn("force-avd-creation: true", workflow)
         self.assertIn("-no-snapshot-save", workflow)
