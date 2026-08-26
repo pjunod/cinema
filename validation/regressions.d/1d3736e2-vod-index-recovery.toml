@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1d3736e2"]
+points = ["web.experience", "playback.pipeline"]
+checks = ["web-static", "rust-gate"]
+reason = "`a missing node-local VOD index falls back only where progressive remux works` requires the shipped MSE remux path to attach `stream.mp4` only for `vod_index_pending`, while `the_vod_index_cursor_wraps_past_failed_low_ids` requires a bounded pass to start after its durable cursor and wrap, and `long_remuxes_receive_a_complete_pass_budget` keeps a two-hour 4K title above the fixed 90-second budget that truncated every attempt."
