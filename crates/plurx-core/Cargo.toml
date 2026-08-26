@@ -17,11 +17,16 @@ hiqlite-store = ["dep:hiqlite", "dep:rustls"]
 # Test-only operation accounting for deterministic three-voter read-cost gates.
 # The daemon does not enable this feature, so production requests pay no atomic
 # counter overhead.
-cluster-read-cost-validation = ["hiqlite-store", "hiqlite/validation-test-helpers"]
+cluster-read-cost-validation = ["hiqlite-contract-tests", "hiqlite/validation-test-helpers"]
 # Exposes force paths used only by the separate-process fault harness. The
 # daemon never enables this feature, so production callers cannot bypass
 # write coalescing accidentally.
 cluster-validation = ["hiqlite-store"]
+# Boots three real Hiqlite voter processes for every backend-neutral Store
+# contract. Production enables `hiqlite-store`; keeping this separate prevents
+# that shipping feature from turning an ordinary workspace test into the
+# replicated integration suite.
+hiqlite-contract-tests = ["hiqlite-store"]
 # Compiles the scratch-cleanup fault injection plurxd's startup tests use to
 # prove that a failed clear fails startup without deleting anything. The
 # daemon never enables it, so no production build carries the failpoint.
