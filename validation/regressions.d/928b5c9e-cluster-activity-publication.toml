@@ -2,6 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["928b5c9e"]
-points = ["cluster.auth"]
+points = ["cluster.page-reads"]
 checks = ["cluster-auth"]
 reason = "The retained separate-process cluster activity proof now waits for the scanned item's file row as well as the item row before asking the remote voter to serve it. The cluster-auth job exposed the publication seam by observing the item between those two commits; polling the full playback precondition keeps the cross-node delivery and bounded-failure assertions deterministic without weakening them."
