@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f3612451"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "rust-gate"]
+reason = "The passive browser controller is pinned by `tests/playback/web-control.test.js`: it proves strict bootstrap/response fences, one in-flight exchange, newest-state coalescing behind the server admission floor, exact retry of an unacknowledged sequence, cancellation, the bounded transport deadline, and dynamic capability refresh. The Rust client-log regression proves every legacy recovery can retain the preceding accepted control snapshot. Reverting the reporter, its shipped asset route, or that correlation breaks the mapped web/Rust gates."
