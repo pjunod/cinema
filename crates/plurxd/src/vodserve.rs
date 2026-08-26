@@ -378,6 +378,11 @@ struct Session {
 struct Shared {
     base: PathBuf,
     store: Arc<dyn Store>,
+    /// Serializes owner-local session retirement/reap with the authoritative
+    /// route revalidation performed by control. The gate is node-wide because
+    /// VOD control is sparse and it keeps the mutation proof independent of
+    /// HashMap entry lifetime.
+    lifecycle: Mutex<()>,
     sessions: Mutex<HashMap<String, Session>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
     pool: WaitPool,
@@ -399,6 +404,7 @@ impl VodServe {
             shared: Arc::new(Shared {
                 base,
                 store,
+                lifecycle: Mutex::new(()),
                 sessions: Mutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
@@ -668,6 +674,7 @@ impl VodServe {
     /// Idempotent — the first call writes the tombstone and detaches, every
     /// later one only confirms ownership.
     pub async fn end(&self, session_id: &str, cause: Terminal) -> bool {
+        let lifecycle = self.shared.lifecycle.lock().await;
         let (rendition, file_id, height, kind) = {
             let mut sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions.get_mut(session_id) else {
@@ -684,6 +691,7 @@ impl VodServe {
                 session.kind,
             )
         };
+        drop(lifecycle);
         rendition.detach_reader(session_id).await;
         rendition.kick();
         self.emit_lifecycle(
@@ -906,15 +914,32 @@ impl VodServe {
         &self,
         session_id: &str,
         generation: &str,
+        owner_node_id: &str,
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
+        platform: Option<crate::playback_control::ClientPlatform>,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
             crate::playback_control::ControlStateError,
         >,
     > {
+        // Keep the same gate held from the durable authority read through the
+        // sequence acceptance and legacy-clock touch. `end` and idle reap use
+        // this gate too, so neither can cross the linearization point.
+        let lifecycle = self.shared.lifecycle.lock().await;
+        if let Err(error) = crate::playback_control::verify_authority(
+            self.shared.store.as_ref(),
+            session_id,
+            generation,
+            owner_node_id,
+            owner_epoch,
+        )
+        .await
+        {
+            return Some(Err(error));
+        }
         let outcome = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
@@ -926,8 +951,9 @@ impl VodServe {
                 owner_epoch,
                 client_instance_id,
                 sequence,
+                platform,
             );
-            let (disposition, accepted_sequence, action) = match accepted {
+            let (disposition, accepted_sequence, action, platform) = match accepted {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
             };
@@ -941,13 +967,16 @@ impl VodServe {
                 disposition,
                 accepted_sequence,
                 action,
+                platform,
                 crate::media_sessions::unix_ms().saturating_add(remaining_ms),
             ))
         };
-        let (disposition, accepted_sequence, action, lease_expires_at_unix_ms) = match outcome {
-            Ok(outcome) => outcome,
-            Err(error) => return Some(Err(error)),
-        };
+        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
+            match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+        drop(lifecycle);
         let status = self.status(session_id).await?;
         Some(Ok(crate::playback_control::LocalControlResult {
             disposition,
@@ -956,6 +985,7 @@ impl VodServe {
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             status: crate::transcode::HlsSessionInfo::Vod(status),
+            platform,
         }))
     }
 
@@ -1045,6 +1075,7 @@ impl VodServe {
         // the one ending a session may come back from (via the durable route
         // machinery outside this module).
         let reaped: Vec<(String, Arc<Rendition>)> = {
+            let _lifecycle = self.shared.lifecycle.lock().await;
             let mut sessions = self.shared.sessions.lock().await;
             let expired: Vec<String> = sessions
                 .iter()

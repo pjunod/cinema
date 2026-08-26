@@ -2102,6 +2102,17 @@ async fn session_info(
     let last_request_kind = last_request.kind;
     drop(last_request);
     let suspended = s.suspended.load(Relaxed);
+    let producer_state = if s.failed.load(Relaxed) {
+        "failed"
+    } else if s.cached {
+        "complete"
+    } else if suspended {
+        "held"
+    } else if s.child.lock().await.is_some() {
+        "running"
+    } else {
+        "complete"
+    };
     let hold = if suspended {
         ahead.and_then(|ahead| {
             ahead_hold(ahead, global_live_bytes, global_ahead_bytes, limits, true)
@@ -2121,6 +2132,7 @@ async fn session_info(
         started_unix: s.started_unix,
         idle_seconds,
         last_request: last_request_kind,
+        producer_state,
         speed: s.progress.speed(),
         recent_speed: s.progress.recent_speed(),
         out_time_ms: s.progress.out_time_ms(),
@@ -2167,6 +2179,7 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         started_unix: info.started_unix,
         idle_seconds: info.idle_seconds,
         last_request: "vod",
+        producer_state: "vod",
         speed: None,
         recent_speed: None,
         out_time_ms: None,
@@ -2814,6 +2827,10 @@ pub struct StartInfo {
     /// And the stall watchdog's restart arm has nothing to fix here — a
     /// segment that is late was never going to be produced faster.
     pub vod: bool,
+    /// Legacy activity lifetime enforced by the registry that owns this
+    /// session. A finished transcode-cache hit is seekable VOD to the client
+    /// but still belongs to the 60-second rolling registry.
+    pub control_lease_timeout_ms: u32,
 }
 
 /// A cluster worker and the process-local replacement gate that must remain
@@ -2871,6 +2888,9 @@ pub struct SessionInfo {
     /// client that keeps polling playlists is different from one that stopped
     /// making requests altogether, even when both have the same idle age.
     pub last_request: &'static str,
+    /// Honest current producer verdict. Additive to the legacy status shape;
+    /// control uses it instead of inferring health from suspension alone.
+    pub producer_state: &'static str,
     /// Cumulative encode rate as a multiple of realtime, as ffmpeg reports it.
     pub speed: Option<f64>,
     /// Rate over the last few seconds. This is the one that answers "is the
@@ -6786,6 +6806,7 @@ impl TranscodeManager {
             encoder: "cached",
             grade: opts.pipeline.output_grade(),
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8410,6 +8431,7 @@ impl TranscodeManager {
             // gave without retaining its live presentation.
             grade: OutputGrade::Sdr,
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8821,6 +8843,7 @@ impl TranscodeManager {
                 encoder: "vod",
                 grade: OutputGrade::Sdr,
                 vod: true,
+                control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             });
         }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
@@ -8846,6 +8869,7 @@ impl TranscodeManager {
             encoder,
             grade: session.grade,
             vod: session.cached,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -10137,6 +10161,7 @@ impl TranscodeManager {
             encoder: encoder.label(),
             grade: opts.pipeline.output_grade(),
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -10721,6 +10746,7 @@ impl TranscodeManager {
             // source's, read off `kind`/`preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -11004,9 +11030,11 @@ impl TranscodeManager {
         &self,
         session_id: &str,
         generation: &str,
+        owner_node_id: &str,
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
+        platform: Option<crate::playback_control::ClientPlatform>,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -11018,32 +11046,58 @@ impl TranscodeManager {
             .control(
                 session_id,
                 generation,
+                owner_node_id,
                 owner_epoch,
                 client_instance_id,
                 sequence,
+                platform,
             )
             .await
         {
             return Some(result);
         }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if session.retired.load(Acquire) {
+        let _transition = session.child_transition.lock().await;
+        if session.retired.load(Acquire)
+            || !self
+                .sessions
+                .lock()
+                .await
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
             return None;
         }
-        let (disposition, accepted_sequence, action) = match session.control.lock().await.accept(
+        if let Err(error) = crate::playback_control::verify_authority(
+            self.store.as_ref(),
+            session_id,
             generation,
+            owner_node_id,
             owner_epoch,
-            client_instance_id,
-            sequence,
-        ) {
-            Ok(outcome) => outcome,
-            Err(error) => return Some(Err(error)),
-        };
+        )
+        .await
+        {
+            return Some(Err(error));
+        }
+        let (disposition, accepted_sequence, action, platform) =
+            match session.control.lock().await.accept(
+                generation,
+                owner_epoch,
+                client_instance_id,
+                sequence,
+                platform,
+            ) {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
         if session.retired.load(Acquire) {
             return None;
         }
         let lease_expires_at_unix_ms = {
             let mut last_request = session.last_request.lock().await;
+            if session.retired.load(Acquire) {
+                return None;
+            }
             if disposition == crate::playback_control::ControlDisposition::Accepted {
                 *last_request = LastRequest::now("control");
             }
@@ -11069,6 +11123,7 @@ impl TranscodeManager {
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
             status: HlsSessionInfo::Live(status),
+            platform,
         }))
     }
 

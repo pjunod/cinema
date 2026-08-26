@@ -3676,6 +3676,7 @@ mod tests {
             started_unix: 0,
             idle_seconds: 0,
             last_request: "segment",
+            producer_state: "held",
             speed: Some(2.0),
             recent_speed: Some(1.7),
             out_time_ms: Some(10_000),

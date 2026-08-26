@@ -17,6 +17,8 @@ use crate::transcode::{HlsSessionInfo, SessionKind};
 pub(crate) const PROTOCOL_V1: &str = "plurx-playback-control-v1";
 pub(crate) const MAX_REQUEST_BYTES: usize = 16 * 1024;
 pub(crate) const MAX_RELAY_BYTES: usize = 20 * 1024;
+pub(crate) const MAX_RESPONSE_BYTES: usize = 64 * 1024;
+pub(crate) const EXCHANGE_DEADLINE: Duration = Duration::from_secs(4);
 pub(crate) const NEXT_EXCHANGE_MS: u32 = 5_000;
 pub(crate) const ROLLING_LEASE_TIMEOUT_MS: u32 = 60_000;
 pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
@@ -26,6 +28,7 @@ const MAX_OBSERVED_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
 const MAX_ERROR_DETAIL_BYTES: usize = 512;
 const MAX_CAPABILITY_VALUES: usize = 8;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
+const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -43,21 +46,32 @@ impl ControlBootstrap {
         session_id: &str,
         generation: &str,
         owner_epoch: i64,
-        vod: bool,
+        lease_timeout_ms: u32,
     ) -> Option<Self> {
         let control_epoch = u64::try_from(owner_epoch).ok().filter(|epoch| *epoch > 0)?;
+        if !matches!(
+            lease_timeout_ms,
+            ROLLING_LEASE_TIMEOUT_MS | VOD_LEASE_TIMEOUT_MS
+        ) {
+            return None;
+        }
         Some(Self {
             protocol: PROTOCOL_V1.to_owned(),
             url: format!("/api/v1/hls/{session_id}/control"),
             generation: generation.to_owned(),
             control_epoch,
             next_exchange_ms: NEXT_EXCHANGE_MS,
-            lease_timeout_ms: if vod {
-                VOD_LEASE_TIMEOUT_MS
-            } else {
-                ROLLING_LEASE_TIMEOUT_MS
-            },
+            lease_timeout_ms,
         })
+    }
+
+    pub(crate) fn refreshed(
+        &self,
+        session_id: &str,
+        generation: &str,
+        owner_epoch: i64,
+    ) -> Option<Self> {
+        Self::new(session_id, generation, owner_epoch, self.lease_timeout_ms)
     }
 }
 
@@ -124,6 +138,15 @@ impl ControlRequestV1 {
                 return Err("buffered_from_ms");
             }
         }
+        let buffer_anchor = self.seek_target_ms.unwrap_or(self.position_ms);
+        if self.buffered_through_ms < buffer_anchor {
+            return Err("buffered_through_ms");
+        }
+        if self.buffered_from_ms.is_some_and(|start| {
+            start > buffer_anchor.saturating_add(target_duration_ms.clamp(2_000, 30_000))
+        }) {
+            return Err("buffered_from_ms");
+        }
         if !self.playback_rate.is_finite()
             || match self.demand {
                 PlaybackDemand::Active => !(0.25..=4.0).contains(&self.playback_rate),
@@ -149,6 +172,8 @@ impl ControlRequestV1 {
         self.selection.validate()?;
         if let Some(capabilities) = &self.capabilities {
             capabilities.validate()?;
+        } else if self.sequence == 1 {
+            return Err("capabilities");
         }
         if let Some(observation) = &self.observation {
             observation.validate()?;
@@ -275,10 +300,19 @@ pub(crate) enum DynamicRangePolicy {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct DynamicCapabilities {
+    pub platform: ClientPlatform,
     pub max_height: i64,
     pub codecs: Vec<CodecPolicy>,
     pub dynamic_ranges: Vec<DynamicRangePolicy>,
     pub dual_player_preparation: bool,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ClientPlatform {
+    Web,
+    Apple,
+    Android,
 }
 
 impl DynamicCapabilities {
@@ -309,7 +343,7 @@ pub(crate) struct ClientObservation {
 
 impl ClientObservation {
     fn validate(&self) -> Result<(), &'static str> {
-        if self.error_code.is_none() != self.error_detail.is_none() {
+        if self.error_detail.is_some() && self.error_code.is_none() {
             return Err("observation.error_detail");
         }
         if self.error_detail.as_ref().is_some_and(|detail| {
@@ -389,7 +423,8 @@ pub(crate) enum AcknowledgementState {
     Aborted,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ControlResponseV1 {
     pub protocol: String,
     pub generation: String,
@@ -402,17 +437,80 @@ pub(crate) struct ControlResponseV1 {
     pub action: ControlAction,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+impl ControlResponseV1 {
+    pub(crate) fn is_valid_for(&self, request: &ControlRelayRequest) -> bool {
+        self.protocol == PROTOCOL_V1
+            && self.generation == request.generation
+            && u64::try_from(request.expected_owner_epoch).ok() == Some(self.control_epoch)
+            && self.accepted_sequence > 0
+            && self.accepted_sequence <= request.control.sequence
+            && self.server_time_unix_ms > 0
+            && self.lease.state == "active"
+            && self.lease.renew_after_ms == NEXT_EXCHANGE_MS
+            && self.lease.expires_at_unix_ms >= self.server_time_unix_ms
+            && self.lease.expires_at_unix_ms
+                <= self
+                    .server_time_unix_ms
+                    .saturating_add(i64::from(VOD_LEASE_TIMEOUT_MS))
+            && matches!(self.delivery.presentation.as_str(), "live-recovery" | "vod")
+            && matches!(
+                self.delivery.producer_state.as_str(),
+                "running" | "held" | "complete" | "failed" | "waiting" | "vod"
+            )
+            && self
+                .delivery
+                .produced_through_ms
+                .is_none_or(|value| value >= 0)
+            && self.delivery.fetched_through_ms >= 0
+            && self.delivery.delivered_bps.is_none_or(|value| value >= 0)
+            && self
+                .delivery
+                .delivered_idle_ms
+                .is_none_or(|value| value >= 0)
+            && self
+                .delivery
+                .recent_producer_speed
+                .is_none_or(|value| value.is_finite() && value >= 0.0)
+            && self.delivery.client_runway_ms >= 0
+            && self.delivery.hold_reason.as_deref().is_none_or(|value| {
+                matches!(
+                    value,
+                    "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
+                )
+            })
+            && self.delivery.owner_epoch == self.control_epoch
+            && self.delivery.owner_node_hash.starts_with("n-")
+            && self.delivery.owner_node_hash.len() == 18
+            && self.delivery.owner_node_hash[2..]
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+            && (0..=crate::transcode::MAX_HEIGHT).contains(&self.effective_selection.height)
+            && matches!(
+                self.effective_selection.codec.as_str(),
+                "source" | "server_selected"
+            )
+            && self
+                .effective_selection
+                .dynamic_range
+                .as_deref()
+                .is_none_or(|value| matches!(value, "dolby_vision" | "hdr10" | "hlg" | "sdr"))
+            && self.action == ControlAction::None
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct PlaybackLeaseView {
-    pub state: &'static str,
+    pub state: String,
     pub renew_after_ms: u32,
     pub expires_at_unix_ms: i64,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct DeliveryView {
-    pub presentation: &'static str,
-    pub producer_state: &'static str,
+    pub presentation: String,
+    pub producer_state: String,
     pub produced_through_ms: Option<i64>,
     pub fetched_through_ms: i64,
     pub delivered_bps: Option<i64>,
@@ -431,16 +529,19 @@ impl DeliveryView {
         request: &ControlRequestV1,
         owner_node_id: &str,
         owner_epoch: u64,
+        media_origin_ms: i64,
     ) -> Self {
         let client_runway_ms = request
             .buffered_through_ms
             .saturating_sub(request.position_ms);
         match status {
             HlsSessionInfo::Live(info) => Self {
-                presentation: info.presentation,
-                producer_state: if info.suspended { "held" } else { "running" },
-                produced_through_ms: info.published_end_ms,
-                fetched_through_ms: info.fetched_end_ms,
+                presentation: info.presentation.to_owned(),
+                producer_state: info.producer_state.to_owned(),
+                produced_through_ms: info
+                    .published_end_ms
+                    .map(|value| value.saturating_add(media_origin_ms)),
+                fetched_through_ms: info.fetched_end_ms.saturating_add(media_origin_ms),
                 delivered_bps: info.delivered_bps,
                 delivered_idle_ms: Some(info.delivered_idle_ms),
                 recent_producer_speed: info.recent_speed,
@@ -458,8 +559,8 @@ impl DeliveryView {
                 owner_epoch,
             },
             HlsSessionInfo::Vod(info) => Self {
-                presentation: "vod",
-                producer_state: info.producer_state,
+                presentation: "vod".to_owned(),
+                producer_state: info.producer_state.to_owned(),
                 produced_through_ms: info.published_end_ms,
                 fetched_through_ms: info.fetched_end_ms,
                 delivered_bps: None,
@@ -475,14 +576,15 @@ impl DeliveryView {
     }
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct EffectiveSelection {
     pub quality_auto: bool,
     pub height: i64,
     pub audio_track: Option<i64>,
     pub subtitle_burn: Option<i64>,
     pub audio_offset_ms: i64,
-    pub codec: &'static str,
+    pub codec: String,
     pub dynamic_range: Option<String>,
 }
 
@@ -492,17 +594,17 @@ impl EffectiveSelection {
         delivered_height: i64,
         dynamic_range: Option<String>,
     ) -> Self {
-        let (height, codec) = match &recipe.request.kind {
-            SessionKind::Copy { .. } => (delivered_height, "source"),
-            SessionKind::Transcode { height } => (*height, "server_selected"),
+        let codec = match &recipe.request.kind {
+            SessionKind::Copy { .. } => "source",
+            SessionKind::Transcode { .. } => "server_selected",
         };
         Self {
             quality_auto: recipe.request.automatic,
-            height,
+            height: delivered_height,
             audio_track: recipe.request.audio_index,
             subtitle_burn: recipe.request.subtitle_burn,
             audio_offset_ms: recipe.request.audio_offset_ms,
-            codec,
+            codec: codec.to_owned(),
             dynamic_range,
         }
     }
@@ -516,15 +618,16 @@ pub(crate) fn target_duration_ms(recipe: &crate::media_sessions::RemoteStartRequ
     i64::from(seconds) * 1_000
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ControlAction {
     None,
 }
 
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct ControlErrorBody {
-    pub code: &'static str,
+    pub code: String,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation: Option<String>,
@@ -533,7 +636,33 @@ pub(crate) struct ControlErrorBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retry_after_ms: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub invalid_field: Option<&'static str>,
+    pub invalid_field: Option<String>,
+}
+
+impl ControlErrorBody {
+    pub(crate) fn is_valid_for_status(&self, status: u16) -> bool {
+        matches!(
+            (status, self.code.as_str()),
+            (400, "invalid_control")
+                | (404, "session_gone")
+                | (409, "owner_changed" | "stale_control")
+                | (410, "session_ended")
+                | (425, "owner_transition")
+                | (429, "control_rate_limited")
+                | (503, "control_unavailable")
+        ) && !self.message.is_empty()
+            && self.message.len() <= 512
+            && self
+                .generation
+                .as_deref()
+                .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+            && self.control_epoch.is_none_or(|epoch| epoch > 0)
+            && self.retry_after_ms.is_none_or(|delay| delay <= 60_000)
+            && self
+                .invalid_field
+                .as_deref()
+                .is_none_or(|field| field.len() <= 128)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -575,6 +704,46 @@ pub(crate) enum ControlStateError {
     StaleClient,
     StaleSequence,
     RateLimited(u32),
+    SessionEnded,
+    OwnerTransition,
+    Unavailable,
+}
+
+/// Re-read the committed owner tuple immediately at the local mutation gate.
+/// That read is the control operation's authority linearization point: a
+/// terminal transition committed before it is observed; one committed after
+/// it is ordered after this exchange and the local retirement gate prevents
+/// the two process-local mutations from crossing.
+pub(crate) async fn verify_authority(
+    store: &dyn plurx_core::store::Store,
+    session_id: &str,
+    generation: &str,
+    owner_node_id: &str,
+    owner_epoch: u64,
+) -> Result<(), ControlStateError> {
+    let route = tokio::time::timeout(
+        Duration::from_secs(2),
+        store.media_session_route(session_id),
+    )
+    .await
+    .map_err(|_| ControlStateError::Unavailable)?
+    .map_err(|_| ControlStateError::Unavailable)?
+    .ok_or(ControlStateError::SessionEnded)?;
+    if route.incarnation_id != generation {
+        return Err(ControlStateError::StaleGeneration);
+    }
+    if route.owner_node_id != owner_node_id
+        || u64::try_from(route.owner_epoch).ok() != Some(owner_epoch)
+    {
+        return Err(ControlStateError::OwnerChanged);
+    }
+    if route.state != "active" {
+        return Err(ControlStateError::SessionEnded);
+    }
+    if route.lease_expires_at_ms <= crate::media_sessions::unix_ms() {
+        return Err(ControlStateError::OwnerTransition);
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -585,6 +754,7 @@ pub(crate) struct LocalControlResult {
     pub lease_expires_at_unix_ms: i64,
     pub lease_timeout_ms: u32,
     pub status: HlsSessionInfo,
+    pub platform: ClientPlatform,
 }
 
 #[derive(Debug)]
@@ -592,6 +762,7 @@ pub(crate) struct ControlState {
     generation: Option<String>,
     owner_epoch: u64,
     client_instance_id: Option<uuid::Uuid>,
+    client_platform: Option<ClientPlatform>,
     last_sequence: u64,
     last_accepted_at: Option<Instant>,
     prior_action: ControlAction,
@@ -603,6 +774,7 @@ impl Default for ControlState {
             generation: None,
             owner_epoch: 0,
             client_instance_id: None,
+            client_platform: None,
             last_sequence: 0,
             last_accepted_at: None,
             prior_action: ControlAction::None,
@@ -620,13 +792,15 @@ impl ControlState {
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
-    ) -> Result<(ControlDisposition, u64, ControlAction), ControlStateError> {
+        platform: Option<ClientPlatform>,
+    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
         self.accept_at(
             Instant::now(),
             generation,
             owner_epoch,
             client_instance_id,
             sequence,
+            platform,
         )
     }
 
@@ -637,7 +811,8 @@ impl ControlState {
         owner_epoch: u64,
         client_instance_id: &str,
         sequence: u64,
-    ) -> Result<(ControlDisposition, u64, ControlAction), ControlStateError> {
+        platform: Option<ClientPlatform>,
+    ) -> Result<(ControlDisposition, u64, ControlAction, ClientPlatform), ControlStateError> {
         let client_instance_id = uuid::Uuid::parse_str(client_instance_id)
             .map_err(|_| ControlStateError::StaleClient)?;
         match self.generation.as_deref() {
@@ -653,20 +828,29 @@ impl ControlState {
         if owner_epoch > self.owner_epoch {
             self.owner_epoch = owner_epoch;
             self.client_instance_id = None;
+            self.client_platform = None;
             self.last_sequence = 0;
             self.last_accepted_at = None;
             self.prior_action = ControlAction::None;
         }
-        if self.client_instance_id.is_none() && sequence != 1 {
-            return Err(ControlStateError::StaleSequence);
-        }
         match self.client_instance_id {
-            None => self.client_instance_id = Some(client_instance_id),
+            None => {
+                if sequence != 1 {
+                    return Err(ControlStateError::StaleSequence);
+                }
+                let platform = platform.ok_or(ControlStateError::StaleClient)?;
+                self.client_instance_id = Some(client_instance_id);
+                self.client_platform = Some(platform);
+            }
             Some(existing) if existing != client_instance_id => {
                 return Err(ControlStateError::StaleClient)
             }
             Some(_) => {}
         }
+        if platform.is_some_and(|platform| Some(platform) != self.client_platform) {
+            return Err(ControlStateError::StaleClient);
+        }
+        let client_platform = self.client_platform.ok_or(ControlStateError::StaleClient)?;
         if sequence < self.last_sequence {
             return Err(ControlStateError::StaleSequence);
         }
@@ -675,6 +859,7 @@ impl ControlState {
                 ControlDisposition::Replay,
                 self.last_sequence,
                 self.prior_action.clone(),
+                client_platform,
             ));
         }
         if let Some(accepted_at) = self.last_accepted_at {
@@ -695,6 +880,7 @@ impl ControlState {
             ControlDisposition::Accepted,
             self.last_sequence,
             self.prior_action.clone(),
+            client_platform,
         ))
     }
 }
@@ -728,9 +914,75 @@ static CONTROL_EXCHANGES: [AtomicU64; 9] = [
     AtomicU64::new(0),
     AtomicU64::new(0),
 ];
+static CONTROL_PLATFORMS: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+static CONTROL_RELAY_OUTCOMES: [AtomicU64; 3] =
+    [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+static CONTROL_RELAY_BUCKETS: [AtomicU64; RELAY_BUCKETS_MS.len() + 1] =
+    [const { AtomicU64::new(0) }; RELAY_BUCKETS_MS.len() + 1];
+static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
+
+const RELAY_VALID_RESPONSE: usize = 0;
+const RELAY_TRANSPORT_ERROR: usize = 1;
+const RELAY_INVALID_RESPONSE: usize = 2;
+
+/// Records every outbound control relay even when `?` exits its caller. The
+/// default outcome is transport failure; callers promote it only after a
+/// bounded response has passed the protocol schema and tuple checks.
+pub(crate) struct RelayMetricGuard {
+    started: Instant,
+    outcome: usize,
+}
+
+impl RelayMetricGuard {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: Instant::now(),
+            outcome: RELAY_TRANSPORT_ERROR,
+        }
+    }
+
+    pub(crate) fn invalid_response(&mut self) {
+        self.outcome = RELAY_INVALID_RESPONSE;
+    }
+
+    pub(crate) fn valid_response(&mut self) {
+        self.outcome = RELAY_VALID_RESPONSE;
+    }
+}
+
+impl Drop for RelayMetricGuard {
+    fn drop(&mut self) {
+        let elapsed = self.started.elapsed();
+        CONTROL_RELAY_OUTCOMES[self.outcome].fetch_add(1, Ordering::Relaxed);
+        let elapsed_ms = u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX);
+        let bucket = RELAY_BUCKETS_MS
+            .iter()
+            .position(|bound| elapsed_ms <= *bound)
+            .unwrap_or(RELAY_BUCKETS_MS.len());
+        CONTROL_RELAY_BUCKETS[bucket].fetch_add(1, Ordering::Relaxed);
+        CONTROL_RELAY_DURATION_MICROS.fetch_add(
+            u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX),
+            Ordering::Relaxed,
+        );
+    }
+}
 
 pub(crate) fn record(outcome: MetricOutcome) {
     CONTROL_EXCHANGES[outcome as usize].fetch_add(1, Ordering::Relaxed);
+}
+
+pub(crate) fn record_platform(outcome: MetricOutcome, platform: ClientPlatform) {
+    let outcome_index = match outcome {
+        MetricOutcome::Accepted => 0,
+        MetricOutcome::Replay => 1,
+        _ => return,
+    };
+    let platform_index = match platform {
+        ClientPlatform::Web => 0,
+        ClientPlatform::Apple => 1,
+        ClientPlatform::Android => 2,
+    };
+    CONTROL_PLATFORMS[outcome_index][platform_index].fetch_add(1, Ordering::Relaxed);
 }
 
 pub(crate) fn prometheus() -> String {
@@ -757,6 +1009,52 @@ pub(crate) fn prometheus() -> String {
             CONTROL_EXCHANGES[index].load(Ordering::Relaxed)
         ));
     }
+    output.push_str(
+        "# HELP plurx_playback_control_platform_exchanges_total Successful playback-control exchanges by bounded outcome and client platform.\n\
+         # TYPE plurx_playback_control_platform_exchanges_total counter\n",
+    );
+    for (outcome_index, outcome) in ["accepted", "replay"].iter().enumerate() {
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_control_platform_exchanges_total{{outcome=\"{outcome}\",platform=\"{platform}\"}} {}\n",
+                CONTROL_PLATFORMS[outcome_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_relays_total Outbound playback-control relays by bounded result.\n\
+         # TYPE plurx_playback_control_relays_total counter\n",
+    );
+    for (index, outcome) in ["valid_response", "transport_error", "invalid_response"]
+        .iter()
+        .enumerate()
+    {
+        output.push_str(&format!(
+            "plurx_playback_control_relays_total{{outcome=\"{outcome}\"}} {}\n",
+            CONTROL_RELAY_OUTCOMES[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_relay_seconds Outbound playback-control relay latency.\n\
+         # TYPE plurx_playback_control_relay_seconds histogram\n",
+    );
+    let mut cumulative = 0_u64;
+    for (bucket_index, bound_ms) in RELAY_BUCKETS_MS.iter().enumerate() {
+        cumulative =
+            cumulative.saturating_add(CONTROL_RELAY_BUCKETS[bucket_index].load(Ordering::Relaxed));
+        output.push_str(&format!(
+            "plurx_playback_control_relay_seconds_bucket{{le=\"{}\"}} {cumulative}\n",
+            *bound_ms as f64 / 1_000.0
+        ));
+    }
+    cumulative = cumulative
+        .saturating_add(CONTROL_RELAY_BUCKETS[RELAY_BUCKETS_MS.len()].load(Ordering::Relaxed));
+    let sum = CONTROL_RELAY_DURATION_MICROS.load(Ordering::Relaxed) as f64 / 1_000_000.0;
+    output.push_str(&format!(
+        "plurx_playback_control_relay_seconds_bucket{{le=\"+Inf\"}} {cumulative}\n\
+         plurx_playback_control_relay_seconds_sum {sum}\n\
+         plurx_playback_control_relay_seconds_count {cumulative}\n"
+    ));
     output
 }
 
@@ -790,7 +1088,13 @@ mod tests {
                 codec: CodecPolicy::Auto,
                 dynamic_range: DynamicRangePolicy::Auto,
             },
-            capabilities: None,
+            capabilities: Some(DynamicCapabilities {
+                platform: ClientPlatform::Web,
+                max_height: 2160,
+                codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
+                dynamic_ranges: vec![DynamicRangePolicy::Sdr, DynamicRangePolicy::Hdr10],
+                dual_player_preparation: false,
+            }),
             observation: None,
             acknowledgement: None,
         }
@@ -807,6 +1111,57 @@ mod tests {
         let mut invalid = request();
         invalid.playback_rate = f64::NAN;
         assert_eq!(invalid.validate(Some(60_000), 2_000), Err("playback_rate"));
+
+        let mut no_capabilities = request();
+        no_capabilities.capabilities = None;
+        assert_eq!(
+            no_capabilities.validate(Some(60_000), 2_000),
+            Err("capabilities"),
+            "the first sequence snapshots bounded client capabilities"
+        );
+
+        let mut behind_playhead = request();
+        behind_playhead.buffered_through_ms = behind_playhead.position_ms - 1;
+        assert_eq!(
+            behind_playhead.validate(Some(60_000), 2_000),
+            Err("buffered_through_ms")
+        );
+
+        let mut disconnected = request();
+        disconnected.buffered_from_ms = Some(disconnected.position_ms + 2_001);
+        assert_eq!(
+            disconnected.validate(Some(60_000), 2_000),
+            Err("buffered_from_ms")
+        );
+
+        let mut code_without_detail = request();
+        code_without_detail.observation = Some(ClientObservation {
+            dropped_frames: None,
+            decoder_state: Some(DecoderState::Failed),
+            error_code: Some(ClientErrorCode::Decoder),
+            error_detail: None,
+        });
+        assert_eq!(code_without_detail.validate(Some(60_000), 2_000), Ok(()));
+    }
+
+    #[test]
+    fn bootstrap_uses_the_owning_registry_timeout_and_preserves_it_on_takeover() {
+        let session = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let rolling = ControlBootstrap::new(&session, &generation, 1, ROLLING_LEASE_TIMEOUT_MS)
+            .expect("rolling bootstrap");
+        assert_eq!(rolling.lease_timeout_ms, ROLLING_LEASE_TIMEOUT_MS);
+        let successor = rolling
+            .refreshed(&session, &generation, 2)
+            .expect("takeover bootstrap");
+        assert_eq!(successor.control_epoch, 2);
+        assert_eq!(successor.lease_timeout_ms, ROLLING_LEASE_TIMEOUT_MS);
+
+        let vod = ControlBootstrap::new(&session, &generation, 1, VOD_LEASE_TIMEOUT_MS)
+            .expect("VOD bootstrap");
+        assert_eq!(vod.lease_timeout_ms, VOD_LEASE_TIMEOUT_MS);
+        assert!(ControlBootstrap::new(&session, &generation, 1, 42_000).is_none());
+        assert!(ControlBootstrap::new(&session, &generation, 0, VOD_LEASE_TIMEOUT_MS).is_none());
     }
 
     #[test]
@@ -821,8 +1176,14 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
+                Some(ClientPlatform::Web),
             ),
-            Ok((ControlDisposition::Accepted, 1, ControlAction::None))
+            Ok((
+                ControlDisposition::Accepted,
+                1,
+                ControlAction::None,
+                ClientPlatform::Web,
+            ))
         );
         assert_eq!(
             state.accept_at(
@@ -831,8 +1192,14 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
+                None,
             ),
-            Ok((ControlDisposition::Replay, 1, ControlAction::None))
+            Ok((
+                ControlDisposition::Replay,
+                1,
+                ControlAction::None,
+                ClientPlatform::Web,
+            ))
         );
         assert_eq!(
             state.accept_at(
@@ -841,6 +1208,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 0,
+                None,
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -851,6 +1219,7 @@ mod tests {
                 1,
                 &uuid::Uuid::new_v4().to_string(),
                 2,
+                Some(ClientPlatform::Apple),
             ),
             Err(ControlStateError::StaleClient)
         );
@@ -868,6 +1237,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
+                Some(ClientPlatform::Web),
             )
             .expect("epoch one");
         state
@@ -877,6 +1247,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 8,
+                None,
             )
             .expect("epoch one advance");
         let successor_client = uuid::Uuid::new_v4().to_string();
@@ -887,8 +1258,14 @@ mod tests {
                 2,
                 &successor_client,
                 1,
+                Some(ClientPlatform::Apple),
             ),
-            Ok((ControlDisposition::Accepted, 1, ControlAction::None))
+            Ok((
+                ControlDisposition::Accepted,
+                1,
+                ControlAction::None,
+                ClientPlatform::Apple,
+            ))
         );
         assert_eq!(
             state.accept_at(
@@ -897,6 +1274,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 9,
+                None,
             ),
             Err(ControlStateError::OwnerChanged)
         );
@@ -914,6 +1292,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
+                Some(ClientPlatform::Web),
             ),
             Err(ControlStateError::StaleSequence)
         );
@@ -924,6 +1303,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 1,
+                Some(ClientPlatform::Web),
             )
             .expect("first sequence");
         assert!(matches!(
@@ -933,6 +1313,7 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
+                None,
             ),
             Err(ControlStateError::RateLimited(_))
         ));
@@ -943,8 +1324,241 @@ mod tests {
                 1,
                 &request.client_instance_id,
                 2,
+                None,
             ),
-            Ok((ControlDisposition::Accepted, 2, ControlAction::None))
+            Ok((
+                ControlDisposition::Accepted,
+                2,
+                ControlAction::None,
+                ClientPlatform::Web,
+            ))
+        );
+    }
+
+    #[test]
+    fn first_owner_sequence_requires_platform_and_platform_cannot_change_in_place() {
+        let request = request();
+        let started = Instant::now();
+        let mut state = ControlState::default();
+        assert_eq!(
+            state.accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                None,
+            ),
+            Err(ControlStateError::StaleClient)
+        );
+        state
+            .accept_at(
+                started,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                1,
+                Some(ClientPlatform::Web),
+            )
+            .expect("capability snapshot");
+        assert_eq!(
+            state.accept_at(
+                started + MIN_CONTROL_INTERVAL,
+                &request.generation,
+                1,
+                &request.client_instance_id,
+                2,
+                Some(ClientPlatform::Apple),
+            ),
+            Err(ControlStateError::StaleClient)
+        );
+    }
+
+    fn relay_request() -> ControlRelayRequest {
+        let control = request();
+        ControlRelayRequest {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            generation: control.generation.clone(),
+            expected_owner_node_id: "node-a".to_owned(),
+            expected_owner_epoch: 1,
+            control,
+        }
+    }
+
+    #[test]
+    fn relay_answers_are_schema_bounded_and_tuple_bound() {
+        let request = relay_request();
+        let response = ControlResponseV1 {
+            protocol: PROTOCOL_V1.to_owned(),
+            generation: request.generation.clone(),
+            control_epoch: 1,
+            accepted_sequence: 1,
+            server_time_unix_ms: 1_000_000,
+            lease: PlaybackLeaseView {
+                state: "active".to_owned(),
+                renew_after_ms: NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: 1_060_000,
+            },
+            delivery: DeliveryView {
+                presentation: "vod".to_owned(),
+                producer_state: "complete".to_owned(),
+                produced_through_ms: Some(7_200_000),
+                fetched_through_ms: 25_000,
+                delivered_bps: None,
+                delivered_idle_ms: None,
+                recent_producer_speed: None,
+                client_runway_ms: 15_000,
+                admitted: Some(true),
+                hold_reason: None,
+                owner_node_hash: "n-0123456789abcdef".to_owned(),
+                owner_epoch: 1,
+            },
+            effective_selection: EffectiveSelection {
+                quality_auto: true,
+                height: 1080,
+                audio_track: Some(0),
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "source".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: ControlAction::None,
+        };
+        assert!(response.is_valid_for(&request));
+
+        let mut wrong_epoch = response.clone();
+        wrong_epoch.control_epoch = 2;
+        assert!(!wrong_epoch.is_valid_for(&request));
+        let mut invented_state = response;
+        invented_state.delivery.producer_state = "probably_running".to_owned();
+        assert!(!invented_state.is_valid_for(&request));
+
+        let unavailable = ControlErrorBody {
+            code: "control_unavailable".to_owned(),
+            message: "owner deadline".to_owned(),
+            generation: None,
+            control_epoch: None,
+            retry_after_ms: Some(500),
+            invalid_field: None,
+        };
+        assert!(unavailable.is_valid_for_status(503));
+        assert!(!unavailable.is_valid_for_status(409));
+    }
+
+    #[test]
+    fn metrics_expose_bounded_platform_and_relay_dimensions() {
+        let metrics = prometheus();
+        assert!(metrics.contains(
+            "plurx_playback_control_platform_exchanges_total{outcome=\"accepted\",platform=\"web\"}"
+        ));
+        assert!(
+            metrics.contains("plurx_playback_control_relays_total{outcome=\"invalid_response\"}")
+        );
+        assert!(metrics.contains("# TYPE plurx_playback_control_relay_seconds histogram"));
+    }
+
+    async fn activate_route(
+        store: &plurx_core::store::SqliteStore,
+        now_ms: i64,
+        lease_expires_at_ms: i64,
+    ) -> (String, String) {
+        use plurx_core::store::MediaSessionStore as _;
+
+        let incarnation = uuid::Uuid::new_v4().to_string();
+        let session = uuid::Uuid::new_v4().to_string();
+        let fingerprint = "a".repeat(64);
+        store
+            .claim_media_session_request(
+                7,
+                &incarnation,
+                &fingerprint,
+                "player-a",
+                &incarnation,
+                now_ms,
+                now_ms.saturating_add(60_000),
+            )
+            .await
+            .expect("claim route");
+        assert!(store
+            .assign_media_session_request_owner(7, &incarnation, &incarnation, "node-a", now_ms,)
+            .await
+            .expect("assign owner"));
+        store
+            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
+                incarnation_id: incarnation.clone(),
+                session_id: session.clone(),
+                user_id: 7,
+                playback_id: "player-a".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some(incarnation.clone()),
+                request_fingerprint: fingerprint,
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms,
+                lease_expires_at_ms,
+            })
+            .await
+            .expect("activate route")
+            .expect("activation accepted");
+        (incarnation, session)
+    }
+
+    #[tokio::test]
+    async fn durable_authority_fences_generation_owner_expiry_and_end() {
+        use plurx_core::store::{MediaSessionStore as _, SqliteStore};
+
+        let store = SqliteStore::open_in_memory().expect("store");
+        let now = crate::media_sessions::unix_ms();
+        let (generation, session) = activate_route(&store, now, now + 60_000).await;
+        assert_eq!(
+            verify_authority(&store, &session, &generation, "node-a", 1).await,
+            Ok(())
+        );
+        assert_eq!(
+            verify_authority(
+                &store,
+                &session,
+                &uuid::Uuid::new_v4().to_string(),
+                "node-a",
+                1
+            )
+            .await,
+            Err(ControlStateError::StaleGeneration)
+        );
+        assert_eq!(
+            verify_authority(&store, &session, &generation, "node-b", 1).await,
+            Err(ControlStateError::OwnerChanged)
+        );
+        assert_eq!(
+            verify_authority(&store, &session, &generation, "node-a", 2).await,
+            Err(ControlStateError::OwnerChanged)
+        );
+
+        store
+            .end_media_session(&session, now + 1)
+            .await
+            .expect("end route")
+            .expect("route existed");
+        assert_eq!(
+            verify_authority(&store, &session, &generation, "node-a", 1).await,
+            Err(ControlStateError::SessionEnded)
+        );
+
+        let expired_store = SqliteStore::open_in_memory().expect("expired store");
+        let (expired_generation, expired_session) = activate_route(&expired_store, 1, 2).await;
+        assert_eq!(
+            verify_authority(
+                &expired_store,
+                &expired_session,
+                &expired_generation,
+                "node-a",
+                1,
+            )
+            .await,
+            Err(ControlStateError::OwnerTransition)
         );
     }
 }

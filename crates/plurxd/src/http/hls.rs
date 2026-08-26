@@ -501,13 +501,9 @@ pub async fn create(
             // Same-session owner takeover advances only the control epoch.
             // Replaying the persisted create must not hand a restarted client
             // the stale epoch embedded when owner 1 first activated.
-            if response.control.is_some() {
-                response.control = crate::playback_control::ControlBootstrap::new(
-                    &route.session_id,
-                    &route.incarnation_id,
-                    route.owner_epoch,
-                    response.vod,
-                );
+            if let Some(control) = response.control.as_ref() {
+                response.control =
+                    control.refreshed(&route.session_id, &route.incarnation_id, route.owner_epoch);
             }
             return Ok(Json(response));
         }
@@ -865,7 +861,7 @@ pub async fn create(
                 &info.session_id,
                 &incarnation_id,
                 1,
-                info.vod,
+                info.control_lease_timeout_ms,
             )
             .expect("new media-session owner epochs begin at one")
         }),
@@ -1388,6 +1384,29 @@ pub async fn control(
     AxPath(session): AxPath<String>,
     body: Bytes,
 ) -> Response {
+    match tokio::time::timeout(
+        crate::playback_control::EXCHANGE_DEADLINE,
+        control_inner(state, session, body),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the playback control exchange exceeded its deadline",
+                None,
+                None,
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+async fn control_inner(state: AppState, session: String, body: Bytes) -> Response {
     if uuid::Uuid::parse_str(&session).is_err() {
         crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
         return control_error(
@@ -1397,6 +1416,18 @@ pub async fn control(
             None,
             None,
             None,
+            None,
+        );
+    }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&session) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the ingress control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
             None,
         );
     }
@@ -1605,12 +1636,12 @@ pub(crate) fn control_error(
         status,
         [(header::CACHE_CONTROL, "no-store")],
         Json(crate::playback_control::ControlErrorBody {
-            code,
+            code: code.to_owned(),
             message: message.into(),
             generation,
             control_epoch,
             retry_after_ms,
-            invalid_field,
+            invalid_field: invalid_field.map(str::to_owned),
         }),
     )
         .into_response()
@@ -1620,6 +1651,33 @@ pub(crate) fn control_error(
 /// proved the durable owner tuple. The manager repeats the tuple fence against
 /// owner-local state before it can renew activity.
 pub(crate) async fn control_local(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+) -> Response {
+    match tokio::time::timeout(
+        crate::playback_control::EXCHANGE_DEADLINE,
+        control_local_inner(state, route, request),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owning worker exceeded the control deadline",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+async fn control_local_inner(
     state: &AppState,
     route: &MediaSessionRoute,
     request: crate::playback_control::ControlRequestV1,
@@ -1728,9 +1786,11 @@ pub(crate) async fn control_local(
         .hls_session_control(
             &route.session_id,
             &route.incarnation_id,
+            &route.owner_node_id,
             owner_epoch,
             &request.client_instance_id,
             request.sequence,
+            request.capabilities.as_ref().map(|caps| caps.platform),
         )
         .await
     {
@@ -1759,6 +1819,42 @@ pub(crate) async fn control_local(
                 None,
             );
         }
+        Some(Err(crate::playback_control::ControlStateError::SessionEnded)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::GONE,
+                "session_ended",
+                "the durable media session ended before control could renew it",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::OwnerTransition)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+            return control_error(
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the media owner changed while control was being admitted",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::Unavailable)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owner could not revalidate durable control authority",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
         Some(Err(_)) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
             return control_error(
@@ -1772,14 +1868,14 @@ pub(crate) async fn control_local(
             );
         }
         None => {
-            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
             return control_error(
-                StatusCode::NOT_FOUND,
-                "session_gone",
-                "the owning worker no longer has this media session",
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the durable route is active but its local worker is not yet available",
                 Some(route.incarnation_id.clone()),
                 Some(owner_epoch),
-                None,
+                Some(500),
                 None,
             );
         }
@@ -1791,7 +1887,7 @@ pub(crate) async fn control_local(
         accepted_sequence: result.accepted_sequence,
         server_time_unix_ms: unix_ms(),
         lease: crate::playback_control::PlaybackLeaseView {
-            state: "active",
+            state: "active".to_owned(),
             renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
             expires_at_unix_ms: result.lease_expires_at_unix_ms,
         },
@@ -1800,6 +1896,7 @@ pub(crate) async fn control_local(
             &request,
             &route.owner_node_id,
             owner_epoch,
+            route.media_origin_ms,
         ),
         effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
             &recipe,
@@ -1817,6 +1914,7 @@ pub(crate) async fn control_local(
         }
     };
     crate::playback_control::record(outcome);
+    crate::playback_control::record_platform(outcome, result.platform);
     tracing::debug!(
         session = %crate::transcode::session_log_id(&route.session_id),
         owner_epoch,

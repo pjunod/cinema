@@ -707,6 +707,44 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn playback_control_routes_reject_oversized_bodies_before_handler_work() {
+        let app = test_app();
+        let session = uuid::Uuid::new_v4();
+        let public = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/hls/{session}/control"))
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_REQUEST_BYTES
+                    + 1
+            ]))
+            .expect("public control request");
+        assert_eq!(
+            app.clone()
+                .oneshot(public)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let internal = Request::builder()
+            .method("POST")
+            .uri(crate::media_sessions::CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_RELAY_BYTES + 1
+            ]))
+            .expect("internal control request");
+        assert_eq!(
+            app.oneshot(internal).await.expect("response").status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
     #[test]
     fn trace_targets_omit_queries_and_redact_capability_paths() {
         let ordinary: Uri = "/api/v1/search?q=secret&X-Plex-Token=credential"
@@ -2753,6 +2791,49 @@ mod tests {
                 .as_deref(),
             Some("99")
         );
+    }
+
+    #[tokio::test]
+    async fn playback_control_preview_is_default_off_and_persists_explicit_changes() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["playback_control_protocol_v1"], json!(false));
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                .await
+                .expect("setting"),
+            None,
+            "an upgrade must not advertise a new client contract implicitly"
+        );
+
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "playback_control_protocol_v1": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["playback_control_protocol_v1"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
     }
 
     /// N1's two settings move as one complete replicated pair. JSON null

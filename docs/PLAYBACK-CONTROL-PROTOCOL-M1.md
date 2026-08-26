@@ -61,7 +61,13 @@ sequences strictly increase. One controller UUID is bound for the epoch.
     "codec": "auto",
     "dynamic_range": "auto"
   },
-  "capabilities": null,
+  "capabilities": {
+    "platform": "web",
+    "max_height": 2160,
+    "codecs": ["h264", "hevc"],
+    "dynamic_ranges": ["sdr", "hdr10"],
+    "dual_player_preparation": false
+  },
   "observation": null,
   "acknowledgement": null
 }
@@ -132,11 +138,15 @@ activity can move. The generic read/media relay is not used for control.
 
 `/metrics` exports `plurx_playback_control_exchanges_total` with one bounded
 `outcome` label: `accepted`, `replay`, `invalid`, `stale`, `owner_changed`,
-`owner_transition`, `session_gone`, `unavailable`, or `rate_limited`. Debug events contain
-only a hashed session correlation, epoch, accepted sequence, replay flag, and
-the advertised legacy timeout. Raw session capabilities, generation UUIDs,
-client UUIDs, node names, URLs, and client error text are never metric labels
-or log fields.
+`owner_transition`, `session_gone`, `unavailable`, or `rate_limited`.
+`plurx_playback_control_platform_exchanges_total` joins accepted/replayed
+outcomes to the bounded `web`, `apple`, and `android` platform values.
+`plurx_playback_control_relays_total` and
+`plurx_playback_control_relay_seconds` expose bounded remote-owner outcomes
+and full relay latency. Debug events contain only a hashed session
+correlation, epoch, accepted sequence, replay flag, and the advertised legacy
+timeout. Raw session capabilities, generation UUIDs, client UUIDs, node names,
+URLs, and client error text are never metric labels or log fields.
 
 M1 does not yet add client reporters. Existing media requests and all current
 recovery behavior remain the fallback until M2 has shipped and been measured.

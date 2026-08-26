@@ -250,9 +250,22 @@ pub(crate) async fn control(
     if let Err(status) = authorize(&state, &headers, CONTROL_PATH, &body).await {
         return status.into_response();
     }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&request.session_id) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return super::hls::control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the owner control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
+            None,
+        );
+    }
     let route = match state.store.media_session_route(&request.session_id).await {
         Ok(Some(route)) => route,
         Ok(None) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
             return super::hls::control_error(
                 StatusCode::NOT_FOUND,
                 "session_gone",
@@ -261,9 +274,10 @@ pub(crate) async fn control(
                 None,
                 None,
                 None,
-            )
+            );
         }
         Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             return super::hls::control_error(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "control_unavailable",
@@ -272,7 +286,7 @@ pub(crate) async fn control(
                 None,
                 Some(500),
                 None,
-            )
+            );
         }
     };
     let owner_epoch = u64::try_from(route.owner_epoch).ok();
@@ -280,6 +294,7 @@ pub(crate) async fn control(
         || route.owner_node_id != request.expected_owner_node_id
         || route.owner_epoch != request.expected_owner_epoch
     {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerChanged);
         return super::hls::control_error(
             StatusCode::CONFLICT,
             "owner_changed",
@@ -291,6 +306,7 @@ pub(crate) async fn control(
         );
     }
     if route.incarnation_id != request.generation {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
         return super::hls::control_error(
             StatusCode::CONFLICT,
             "stale_control",
@@ -302,6 +318,7 @@ pub(crate) async fn control(
         );
     }
     if route.state != "active" {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
         return super::hls::control_error(
             StatusCode::GONE,
             "session_ended",
@@ -313,6 +330,7 @@ pub(crate) async fn control(
         );
     }
     if route.lease_expires_at_ms <= unix_ms() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
         return super::hls::control_error(
             StatusCode::TOO_EARLY,
             "owner_transition",

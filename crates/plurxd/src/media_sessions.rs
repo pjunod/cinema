@@ -56,6 +56,10 @@ pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::fro
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const ROUTE_CACHE_TTL: Duration = Duration::from_secs(1);
 const MAX_ROUTE_CACHE_ENTRIES: usize = 4_096;
+const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
+const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
+const CONTROL_RATE_PER_SESSION: u32 = 8;
+const CONTROL_RATE_GLOBAL: u32 = 512;
 const ROUTE_QUERY_SHARDS: usize = 32;
 const ROUTE_GENERATION_SHARDS: usize = 4_096;
 const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
@@ -337,6 +341,7 @@ pub(crate) struct RemoteStartResponse {
     pub encoder: String,
     pub grade: OutputGrade,
     pub vod: bool,
+    pub control_lease_timeout_ms: u32,
 }
 
 impl From<StartInfo> for RemoteStartResponse {
@@ -352,6 +357,7 @@ impl From<StartInfo> for RemoteStartResponse {
             encoder: info.encoder.to_owned(),
             grade: info.grade,
             vod: info.vod,
+            control_lease_timeout_ms: info.control_lease_timeout_ms,
         }
     }
 }
@@ -384,6 +390,11 @@ impl RemoteStartResponse {
                 .encoder
                 .bytes()
                 .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+            && matches!(
+                self.control_lease_timeout_ms,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
+                    | crate::playback_control::VOD_LEASE_TIMEOUT_MS
+            )
         // `vod` is presentation telemetry, not structural validity. A
         // recovery-enabled worker may honestly answer `false` after accepting
         // a VOD request whose immutable prerequisites are still pending.
@@ -528,6 +539,7 @@ pub(crate) struct MediaSessionCoordinator {
     route_queries: Arc<Vec<tokio::sync::Mutex<()>>>,
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
     lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, (String, i64)>>>,
+    control_admission: Arc<StdMutex<ControlAdmission>>,
     #[cfg(test)]
     route_store_queries: Arc<std::sync::atomic::AtomicUsize>,
 }
@@ -536,6 +548,78 @@ pub(crate) struct MediaSessionCoordinator {
 struct CachedRoute {
     route: Option<MediaSessionRoute>,
     expires_at: tokio::time::Instant,
+}
+
+struct ControlRateEntry {
+    window_started: Instant,
+    admitted: u32,
+}
+
+struct ControlAdmission {
+    window_started: Instant,
+    admitted: u32,
+    sessions: HashMap<String, ControlRateEntry>,
+}
+
+impl Default for ControlAdmission {
+    fn default() -> Self {
+        Self {
+            window_started: Instant::now(),
+            admitted: 0,
+            sessions: HashMap::new(),
+        }
+    }
+}
+
+impl ControlAdmission {
+    fn admit(&mut self, now: Instant, session_id: &str) -> Result<(), u32> {
+        if now.duration_since(self.window_started) >= CONTROL_RATE_WINDOW {
+            self.window_started = now;
+            self.admitted = 0;
+        }
+        let global_remaining =
+            CONTROL_RATE_WINDOW.saturating_sub(now.duration_since(self.window_started));
+        if self.admitted >= CONTROL_RATE_GLOBAL {
+            return Err(u32::try_from(global_remaining.as_millis())
+                .unwrap_or(u32::MAX)
+                .max(1));
+        }
+        self.sessions
+            .retain(|_, entry| now.duration_since(entry.window_started) < CONTROL_RATE_WINDOW);
+        if self.sessions.len() >= MAX_CONTROL_RATE_ENTRIES
+            && !self.sessions.contains_key(session_id)
+        {
+            if let Some(oldest) = self
+                .sessions
+                .iter()
+                .min_by_key(|(_, entry)| entry.window_started)
+                .map(|(session_id, _)| session_id.clone())
+            {
+                self.sessions.remove(&oldest);
+            }
+        }
+        let entry = self
+            .sessions
+            .entry(session_id.to_owned())
+            .or_insert(ControlRateEntry {
+                window_started: now,
+                admitted: 0,
+            });
+        if now.duration_since(entry.window_started) >= CONTROL_RATE_WINDOW {
+            entry.window_started = now;
+            entry.admitted = 0;
+        }
+        if entry.admitted >= CONTROL_RATE_PER_SESSION {
+            let remaining =
+                CONTROL_RATE_WINDOW.saturating_sub(now.duration_since(entry.window_started));
+            return Err(u32::try_from(remaining.as_millis())
+                .unwrap_or(u32::MAX)
+                .max(1));
+        }
+        entry.admitted = entry.admitted.saturating_add(1);
+        self.admitted = self.admitted.saturating_add(1);
+        Ok(())
+    }
 }
 
 impl MediaSessionCoordinator {
@@ -556,9 +640,22 @@ impl MediaSessionCoordinator {
                     .collect(),
             ),
             lease_seeds: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            control_admission: Arc::new(StdMutex::new(ControlAdmission::default())),
             #[cfg(test)]
             route_store_queries: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
+    }
+
+    /// Fixed-window admission before any durable lookup. The session budget
+    /// leaves room for idempotent transport retries; the global budget bounds
+    /// random UUID probes, and stale entries are capped and evicted.
+    pub(crate) fn admit_control(&self, session_id: &str) -> Result<(), u32> {
+        let now = Instant::now();
+        let mut admission = self
+            .control_admission
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        admission.admit(now, session_id)
     }
 
     /// Cache active routes and short negative answers. Deterministic query
@@ -823,25 +920,73 @@ impl MediaSessionCoordinator {
         owner_node_id: &str,
         request: &crate::playback_control::ControlRelayRequest,
     ) -> Result<Response<Body>, PeerTransportError> {
-        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        let mut relay_metric = crate::playback_control::RelayMetricGuard::new();
+        let body = serde_json::to_vec(request).map_err(|_| {
+            relay_metric.invalid_response();
+            PeerTransportError::InvalidResponse
+        })?;
         if body.len() > crate::playback_control::MAX_RELAY_BYTES {
+            relay_metric.invalid_response();
             return Err(PeerTransportError::InvalidResponse);
         }
         let deadline = deadline_after(CONTROL_DEADLINE);
         let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport
-            .request_stream(
+            .request(
                 owner_node_id,
                 &base,
                 reqwest::Method::POST,
                 CONTROL_PATH,
                 body,
                 deadline,
+                crate::playback_control::MAX_RESPONSE_BYTES,
                 PeerAuthMode::ExactRequest,
             )
             .await?;
-        relay_response(response)
+        let status = StatusCode::from_u16(response.status.as_u16()).map_err(|_| {
+            relay_metric.invalid_response();
+            PeerTransportError::InvalidResponse
+        })?;
+        let body = if status.is_success() {
+            let parsed = serde_json::from_slice::<crate::playback_control::ControlResponseV1>(
+                &response.body,
+            )
+            .ok()
+            .filter(|parsed| parsed.is_valid_for(request))
+            .ok_or_else(|| {
+                relay_metric.invalid_response();
+                PeerTransportError::InvalidResponse
+            })?;
+            serde_json::to_vec(&parsed).map_err(|_| {
+                relay_metric.invalid_response();
+                PeerTransportError::InvalidResponse
+            })?
+        } else {
+            let parsed =
+                serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
+                    .ok()
+                    .filter(|parsed| parsed.is_valid_for_status(status.as_u16()))
+                    .ok_or_else(|| {
+                        relay_metric.invalid_response();
+                        PeerTransportError::InvalidResponse
+                    })?;
+            serde_json::to_vec(&parsed).map_err(|_| {
+                relay_metric.invalid_response();
+                PeerTransportError::InvalidResponse
+            })?
+        };
+        let response = Response::builder()
+            .status(status)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(header::CACHE_CONTROL, "no-store")
+            .body(Body::from(body))
+            .map_err(|_| {
+                relay_metric.invalid_response();
+                PeerTransportError::InvalidResponse
+            })?;
+        relay_metric.valid_response();
+        Ok(response)
     }
 }
 
@@ -1778,6 +1923,7 @@ mod tests {
             encoder: "qsv".to_owned(),
             grade: OutputGrade::Sdr,
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         }
     }
 
@@ -2092,6 +2238,55 @@ mod tests {
         assert!(unknown_copy.is_valid());
         unknown_copy.target_height = -1;
         assert!(!unknown_copy.is_valid());
+
+        let mut rolling = valid_start_response();
+        rolling.control_lease_timeout_ms = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS;
+        assert!(
+            rolling.is_valid(),
+            "the rolling registry's real TTL is valid"
+        );
+        rolling.control_lease_timeout_ms = 42_000;
+        assert!(
+            !rolling.is_valid(),
+            "a worker cannot invent a lease lifetime the owning registry does not enforce"
+        );
+    }
+
+    #[test]
+    fn control_admission_bounds_retries_and_uuid_spray_before_store_work() {
+        let started = Instant::now();
+        let mut admission = ControlAdmission {
+            window_started: started,
+            admitted: 0,
+            sessions: HashMap::new(),
+        };
+        for _ in 0..CONTROL_RATE_PER_SESSION {
+            assert_eq!(admission.admit(started, "one-session"), Ok(()));
+        }
+        assert!(admission.admit(started, "one-session").is_err());
+        assert_eq!(
+            admission.admit(started + CONTROL_RATE_WINDOW, "one-session"),
+            Ok(()),
+            "the bounded retry budget reopens after its fixed window"
+        );
+
+        let next_window = started + CONTROL_RATE_WINDOW * 2;
+        let mut spray = ControlAdmission {
+            window_started: next_window,
+            admitted: 0,
+            sessions: HashMap::new(),
+        };
+        for index in 0..CONTROL_RATE_GLOBAL {
+            assert_eq!(
+                spray.admit(next_window, &format!("random-capability-{index}")),
+                Ok(())
+            );
+        }
+        assert!(spray.admit(next_window, "one-too-many").is_err());
+        assert!(
+            spray.sessions.len() <= MAX_CONTROL_RATE_ENTRIES,
+            "the admission map itself must stay bounded"
+        );
     }
 
     #[test]
