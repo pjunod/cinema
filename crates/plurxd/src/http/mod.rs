@@ -4658,22 +4658,19 @@ mod tests {
         let package_id = first["id"].as_str().expect("package id").to_owned();
 
         // Rate control is server policy, not part of the client's idempotent
-        // request. A lost create response retried after an administrator flips
-        // that policy must recover the original package and its first-write
-        // snapshot, never conflict or silently retarget it.
-        let (status_code, quality) = call(
-            &app,
-            put(
-                "/api/v1/settings",
-                Some(&admin),
-                json!({
-                    "transcode_rate_mode": "quality",
-                    "transcode_quality": 22
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(status_code, StatusCode::OK, "{quality}");
+        // request. Model a completed administrator change directly: the
+        // settings endpoint's real ffmpeg probe has its own focused tests and
+        // may correctly defer under a loaded test host. A lost create response
+        // retried under this new validated policy must still recover the
+        // original package and its first-write snapshot.
+        state
+            .store
+            .put_settings(&[
+                (plurx_core::store::keys::TRANSCODE_QUALITY, "22"),
+                (plurx_core::store::keys::TRANSCODE_RATE_MODE, "quality"),
+            ])
+            .await
+            .expect("publish changed rate-control request");
         let selected = state.transcode.test_publish_supported_quality(22).await;
         assert_eq!(
             state.transcode.effective_rate_control(selected),

@@ -385,8 +385,14 @@ class OperationsContractCase(unittest.TestCase):
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
 
-        # The emulator restores a cached AVD snapshot and never saves over it.
-        self.assertIn("key: avd-35-google_apis-pixel_7_pro", workflow)
+        # A restored AVD made the Compose focus suite fail after the same
+        # emulator passed from a cold image. Keep the SDK outside the checkout
+        # (so post-job hashFiles cannot traverse it) and build a disposable AVD
+        # for every run instead of treating the snapshot as portable state.
+        self.assertIn("ANDROID_HOME: ${{ runner.temp }}/android-sdk", workflow)
+        self.assertIn("ANDROID_SDK_ROOT: ${{ runner.temp }}/android-sdk", workflow)
+        self.assertNotIn("name: Cache the AVD snapshot", workflow)
+        self.assertIn("force-avd-creation: true", workflow)
         self.assertIn("-no-snapshot-save", workflow)
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
