@@ -1872,6 +1872,33 @@ function lifecycleDependencies(manifest, result, state, startError = null) {
   };
 }
 
+test("a shaped suite enables the in-play Auto controller it measures", async () => {
+  await withTempDir(async (directory) => {
+    const manifest = lab.loadManifest();
+    const json = path.join(directory, "auto-enabled.json");
+    const junit = path.join(directory, "auto-enabled.xml");
+    const state = { server_closed: 0, shaper_closed: 0, driver_closed: 0 };
+    const score = lab.scoreRecovery(CRITERIA, observation());
+    const result = { ...score, status: "passed", shaping: observation().shaping };
+    const dependencies = lifecycleDependencies(manifest, result, state);
+    const startServer = dependencies.startServer;
+    let serverOptions = null;
+    dependencies.startServer = async (options, fixtureDirectory) => {
+      serverOptions = options;
+      return startServer(options, fixtureDirectory);
+    };
+
+    const outcome = await lab.executeRun(manifest, {
+      suite: "stall-recovery", network_profile: "8mbps-to-1.5mbps", json, junit,
+    }, dependencies);
+
+    assert.deepEqual(outcome, { code: 0, error: null });
+    assert.equal(serverOptions.enable_auto_abr, true,
+      "the real server must not silently run the Auto acceptance suite with Auto disabled");
+    assert.deepEqual(state, { server_closed: 1, shaper_closed: 1, driver_closed: 1 });
+  });
+});
+
 test("an unavailable shaper fails the full run, retains artifacts, and cleans owned state", async () => {
   await withTempDir(async (directory) => {
     const manifest = lab.loadManifest();
