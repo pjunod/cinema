@@ -314,11 +314,19 @@ struct PlurxAPI {
     /// `playback_id` and a per-attempt `request_id` so a replay recovers the
     /// same session instead.
     func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
-        try await post(
+        let started: HlsStart = try await post(
             "files/\(fileId)/hls/sessions",
             body: body,
             using: Self.playbackPreparationSession
         )
+        return Self.acceptHlsSessionPresentation(started)
+    }
+
+    /// `vod` describes the presentation the server selected; it is not a
+    /// client compatibility gate. During index recovery the same HLS contract
+    /// is served by the retained live engine and arrives as `vod: false`.
+    static func acceptHlsSessionPresentation(_ started: HlsStart) -> HlsStart {
+        started
     }
 
     func hlsStatus(sessionId: String) async throws -> PlaybackSessionStatus {

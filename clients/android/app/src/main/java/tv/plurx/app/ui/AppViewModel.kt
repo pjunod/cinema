@@ -715,7 +715,7 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart =
-        api().createHlsSession(fileId, body)
+        acceptHlsSessionPresentation(api().createHlsSession(fileId, body))
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
 
@@ -828,6 +828,9 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         Session.configureNodeOrigins(ingress.node_urls, origin)
     }
 }
+
+/** `vod` is presentation telemetry, not a compatibility gate. */
+internal fun acceptHlsSessionPresentation(started: HlsStart): HlsStart = started
 
 /**
  * The longest a saved session may hold the splash screen before Home takes

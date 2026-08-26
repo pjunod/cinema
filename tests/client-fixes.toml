@@ -532,3 +532,11 @@ source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt
 source_anchor = ".then(rowFocusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)"
 test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/components/ShelfFocusTest.kt"
 test_anchor = "dpadWalksDownThroughTheGroupByPickerAndBackUp"
+
+[[fixes]]
+id = "apple.live-recovery-session-presentation"
+commits = ["39db8672"]
+source = "clients/apple/Sources/PlurxAPI.swift"
+source_anchor = "static func acceptHlsSessionPresentation(_ started: HlsStart) -> HlsStart"
+test = "clients/apple/Tests/AppleClientTests.swift"
+test_anchor = "testLiveRecoveryPresentationIsAPlayableHlsSession"
