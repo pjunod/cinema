@@ -30,11 +30,16 @@ use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
+#[cfg(test)]
+use crate::admission::Admission;
 use crate::admission::{
-    Admission, Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
+    Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
 };
+#[cfg(test)]
 use crate::copyseg;
-use crate::ffmpeg::{ffmpeg_bin, pacing_caps};
+use crate::ffmpeg::ffmpeg_bin;
+#[cfg(test)]
+use crate::ffmpeg::pacing_caps;
 use crate::meter::Meter;
 
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
@@ -43,6 +48,7 @@ const SESSION_IDLE_SECS: u64 = 60;
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
+#[cfg(test)]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -71,6 +77,7 @@ fn session_log_text(text: &str, session_id: &str) -> String {
     text.replace(session_id, &session_log_id(session_id))
 }
 
+#[cfg(test)]
 fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
     format!("{label}: {}", session_log_text(&args.join(" "), session_id))
 }
@@ -127,6 +134,25 @@ pub(crate) fn invalid_reopen_reason(error: &str) -> Option<&str> {
     error.strip_prefix(INVALID_REOPEN_PREFIX)
 }
 
+/// Stable classification for a request that cannot receive the immutable VOD
+/// presentation. The live HLS presentation is not a recovery path: callers
+/// must receive this verdict and either wait for the named prerequisite or
+/// show the honest unsupported result.
+const VOD_REFUSAL_PREFIX: &str = "vod presentation unavailable: ";
+
+pub(crate) fn vod_refusal_error(code: &'static str, message: impl AsRef<str>) -> String {
+    format!("{VOD_REFUSAL_PREFIX}{code}: {}", message.as_ref())
+}
+
+pub(crate) fn vod_refusal(error: &str) -> Option<(&str, &str)> {
+    let classified = error.strip_prefix(VOD_REFUSAL_PREFIX)?;
+    let (code, message) = classified.split_once(": ")?;
+    if code.is_empty() || message.is_empty() {
+        return None;
+    }
+    Some((code, message))
+}
+
 /// What "Auto" resolves to — see [`TranscodeManager::auto_height`].
 const AUTO_SOFTWARE_HEIGHT: i64 = 720;
 /// Safe fallback when the source has no usable geometry, and the highest HDR
@@ -179,8 +205,10 @@ const SOFTWARE_GRACE: Duration = Duration::from_secs(30);
 /// second while it is working at all, so a frozen `out_time` for this long is
 /// a wedged pipeline — not a 4K decode losing to the clock, which advances
 /// steadily however far behind realtime it falls.
+#[cfg(test)]
 const PROGRESS_STALL: Duration = Duration::from_secs(10);
 /// How often the stall watchdog re-asks, once past its initial grace.
+#[cfg(test)]
 const WATCHDOG_POLL: Duration = Duration::from_secs(5);
 /// Slack on top of the startup-recovery graces, covering the cadence at which
 /// each stage actually renders its verdict: the first-segment watch re-asks
@@ -1080,6 +1108,7 @@ fn spawn_ffmpeg(
 /// feeds the telemetry the watchdog and the activity page already read. Losing
 /// that would leave a segmenter session with no `speed`, no `out_time`, and a
 /// stall watchdog with nothing to watch.
+#[cfg(test)]
 fn spawn_ffmpeg_pipe(
     args: &[String],
     session_id: &str,
@@ -1151,6 +1180,7 @@ pub(crate) fn configure_ffmpeg_runtime(
 /// "contains an `=`" — an error message about `filter_units=remove_types=32-34`
 /// contains plenty of those, and swallowing it would hide exactly the failure
 /// a copy session is most likely to have.
+#[cfg(test)]
 fn is_progress_line(line: &str) -> bool {
     let Some((key, _)) = line.split_once('=') else {
         return false;
@@ -1178,6 +1208,7 @@ fn is_progress_line(line: &str) -> bool {
 /// fallback watchdog (the exact bug behind a 4K-DV grey screen that spun ffmpeg
 /// for a minute and was never retried). A `.ts` line lands in the playlist only
 /// when a segment is complete.
+#[cfg(test)]
 async fn session_producing(dir: &std::path::Path) -> bool {
     match tokio::fs::read(dir.join("index.m3u8")).await {
         Ok(bytes) => String::from_utf8_lossy(&bytes).lines().any(|l| {
@@ -1195,6 +1226,7 @@ async fn session_producing(dir: &std::path::Path) -> bool {
 /// encoder is motionless on purpose, an exited child is EOF or a kill (both
 /// already have owners reporting them), and a session failed elsewhere is
 /// already being torn down.
+#[cfg(test)]
 #[derive(Debug, PartialEq)]
 enum WatchNext {
     /// Nothing wrong, or nothing judgeable: look again next poll.
@@ -1206,6 +1238,7 @@ enum WatchNext {
     Stall,
 }
 
+#[cfg(test)]
 fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration) -> WatchNext {
     if failed || exited {
         return WatchNext::Done;
@@ -1221,6 +1254,7 @@ fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration
 /// A replacement can begin immediately after this returns, so `Done` and
 /// `Stall` must be confirmed while holding `Session::child_transition` before
 /// either one acts. `Wait` has no consequence and can go straight to sleep.
+#[cfg(test)]
 async fn observed_watch_next(session: &Session) -> WatchNext {
     let (replacing_child, exited) = {
         let mut child = session.child.lock().await;
@@ -1260,10 +1294,12 @@ async fn observed_watch_next(session: &Session) -> WatchNext {
 /// purpose — and `apply_ahead_window` restarts the motion clock at resume, so
 /// the suspension itself can never be read back as a stall — and a *cached*
 /// session has no process at all, so there is nothing here to watch.
+#[cfg(test)]
 struct WatchdogClaim {
     session: Arc<Session>,
 }
 
+#[cfg(test)]
 impl WatchdogClaim {
     fn take(session: &Arc<Session>) -> Option<Self> {
         if session.cached
@@ -1280,12 +1316,14 @@ impl WatchdogClaim {
     }
 }
 
+#[cfg(test)]
 impl Drop for WatchdogClaim {
     fn drop(&mut self) {
         self.session.watchdog_active.store(false, Release);
     }
 }
 
+#[cfg(test)]
 async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: String) {
     // A generous floor before the first verdict: opening a 4K file over NFS
     // and filling a first segment is legitimately slow, and `stalled_for`
@@ -1377,6 +1415,7 @@ async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: Strin
     }
 }
 
+#[cfg(test)]
 async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
     // No process, nothing to judge — and `failed` on a cache entry would be a
     // lie with consequences (its segments exist; readers would refuse them).
@@ -1393,6 +1432,7 @@ async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
 /// The claim is taken synchronously, before the task is scheduled, so a copy
 /// fallback can publish a successor without leaving a scheduler-sized gap in
 /// which no watchdog owns it. An existing watcher makes this a no-op.
+#[cfg(test)]
 fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
     let Some(claim) = WatchdogClaim::take(&session) else {
         return;
@@ -1404,6 +1444,7 @@ fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
+#[cfg(test)]
 async fn clear_session_dir(dir: &std::path::Path) {
     if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {
@@ -1487,6 +1528,7 @@ struct CacheOfferVerification {
     revoke_shared_member: bool,
 }
 
+#[cfg(test)]
 struct PreparedSharedCacheRead {
     dir: PathBuf,
     manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
@@ -1515,6 +1557,7 @@ struct Session {
     /// Exactly one task owns lifetime stall coverage for the current producer.
     /// A copy fallback that follows a predecessor `Done` verdict re-arms it
     /// before publishing the successor; an already-active watcher wins.
+    #[cfg(test)]
     watchdog_active: AtomicBool,
     /// True only while a fallback deliberately replaces one live producer
     /// with another inside this same session. The predecessor's non-zero kill
@@ -1561,6 +1604,7 @@ struct Session {
     /// Exact bounded text-subtitle inode inherited by ffmpeg as `/dev/fd/5`.
     /// Keeping it for the session lifetime also lets a fallback child inherit
     /// the same bytes without reopening a replaceable pathname.
+    #[cfg(test)]
     subtitle_handle: Option<std::fs::File>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
@@ -1728,11 +1772,13 @@ struct Session {
 /// Keeps the replacement marker true across every await between killing the
 /// predecessor and publishing (or failing) its successor. Cancellation clears
 /// it too, so a dropped fallback task cannot leave the session unjudgeable.
+#[cfg(test)]
 struct ChildReplacement<'a> {
     session: &'a Session,
     _transition: tokio::sync::MutexGuard<'a, ()>,
 }
 
+#[cfg(test)]
 impl Drop for ChildReplacement<'_> {
     fn drop(&mut self) {
         self.session.replacing_child.store(false, Release);
@@ -1809,6 +1855,7 @@ impl Session {
             })
     }
 
+    #[cfg(test)]
     async fn begin_child_replacement(&self) -> ChildReplacement<'_> {
         let transition = self.child_transition.lock().await;
         self.replacing_child.store(true, Release);
@@ -1818,6 +1865,7 @@ impl Session {
         }
     }
 
+    #[cfg(test)]
     async fn kill_child_for_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
         // Retirement uses the same transition. If it won first, this
@@ -1857,6 +1905,7 @@ impl Session {
     /// asynchronous deletion completes. An exited child is still replaceable:
     /// the caller re-arms a watchdog synchronously when it publishes that
     /// successor.
+    #[cfg(test)]
     async fn begin_copy_child_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
         if self.retired.load(Acquire)
@@ -1939,6 +1988,7 @@ impl Session {
     /// admission class flips to software, so the speeds measured from here on
     /// are recorded as what they are rather than poisoning the hardware
     /// class's record with a software encoder's numbers.
+    #[cfg(test)]
     fn demote_to_software(&self, work: Workload<'_>, permit: crate::admission::SwPermit) {
         self.release_hardware();
         *self.class.lock().expect("class mutex") = work.software_class();
@@ -2096,6 +2146,42 @@ async fn session_info(
         readrate: s.readrate,
         suspended,
         suspend_count: s.suspend_count.load(Relaxed),
+    }
+}
+
+fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
+    SessionInfo {
+        id: info.id,
+        file_id: info.file_id,
+        item_id: info.item_id,
+        item_title: info.item_title,
+        user_name: info.user_name,
+        target_height: info.target_height,
+        encoder: "vod",
+        started_unix: info.started_unix,
+        idle_seconds: info.idle_seconds,
+        last_request: "vod",
+        speed: None,
+        recent_speed: None,
+        out_time_ms: None,
+        progress_idle_ms: 0,
+        published_end_ms: None,
+        fetched_end_ms: 0,
+        fetched_segment: None,
+        first_retained_segment: None,
+        playlist_shape: "vod",
+        ahead_seconds: None,
+        hold_reason: None,
+        resume_below_seconds: None,
+        resume_below_bytes: None,
+        ahead_bytes: None,
+        delivered_bytes: 0,
+        delivered_bps: None,
+        delivered_idle_ms: i64::try_from(info.idle_seconds.saturating_mul(1_000))
+            .unwrap_or(i64::MAX),
+        readrate: 0.0,
+        suspended: false,
+        suspend_count: 0,
     }
 }
 
@@ -2956,15 +3042,11 @@ pub struct SessionRequest {
     /// because the passthrough filter on a non-DV input emits a broken
     /// picture at exit 0 rather than failing (measured).
     pub hdr10: bool,
-    /// Which presentation the client asked for. Defaults to the live
-    /// presentation, so every shipped client and every stored recipe
-    /// deserializes to exactly the behaviour it always had; `"vod"` is the
-    /// per-request half of the plan §2.7 opt-in (the other half is the
-    /// `playback.vod_presentation` setting). A VOD request the server cannot
-    /// honour — no fragment index, varying parameter sets, a transcode rung,
-    /// a subtitle burn — falls back to the live presentation with one log
-    /// line saying why, never to an error: the opt-in is a request, not a
-    /// promise.
+    /// Which presentation this durable request names. `Live` remains the
+    /// serde default solely so recipes written by an older binary retain
+    /// their identity and can be refused rather than misread as VOD. Public
+    /// session ingress maps an omitted field to `Vod`; no new live request is
+    /// admitted.
     #[serde(default, skip_serializing_if = "Presentation::is_live")]
     pub presentation: Presentation,
     /// Client's ceiling for one blocking segment GET, in seconds. Clamped to
@@ -3032,6 +3114,7 @@ struct CopySessionOptions {
 }
 
 #[derive(Clone, Copy)]
+#[cfg(test)]
 struct SessionOwner<'a> {
     user_name: &'a str,
     supersession_user: &'a str,
@@ -3285,6 +3368,7 @@ enum PartEnd {
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
 /// Constructed only after every background permit has been released.
+#[cfg(test)]
 struct LiveAdmission {
     encoder: Encoder,
     hw_slot: Option<HwSlot>,
@@ -6268,6 +6352,7 @@ impl TranscodeManager {
         }
     }
 
+    #[cfg(test)]
     async fn prepare_shared_cached_read(
         store: Arc<dyn Store>,
         coordinator: Arc<crate::shared_cache::SharedCacheCoordinator>,
@@ -6387,6 +6472,7 @@ impl TranscodeManager {
     /// and a viewer to point at them. It is still a session because the
     /// activity page should show somebody watching, and because the idle
     /// reaper is what eventually forgets them.
+    #[cfg(test)]
     async fn serve_cached(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -8084,17 +8170,11 @@ impl TranscodeManager {
             None => (None, req),
         };
 
-        let info = if let Some(info) = self
-            .try_vod_session(
-                req,
-                supersession_user,
-                replacement_deadline,
-                takeover.is_some(),
-            )
-            .await?
-        {
-            info
-        } else {
+        // The former engine remains buildable only inside its historical
+        // regression harness. No production target contains this branch or
+        // any of the live-start methods it calls.
+        #[cfg(test)]
+        let info = if req.presentation == Presentation::Live {
             match req.kind {
                 SessionKind::Transcode { height } => {
                     self.start_with_audio_offset(
@@ -8137,7 +8217,26 @@ impl TranscodeManager {
                     .await?
                 }
             }
+        } else {
+            self.try_vod_session(
+                req,
+                user_name,
+                supersession_user,
+                replacement_deadline,
+                takeover.is_some(),
+            )
+            .await?
         };
+        #[cfg(not(test))]
+        let info = self
+            .try_vod_session(
+                req,
+                user_name,
+                supersession_user,
+                replacement_deadline,
+                takeover.is_some(),
+            )
+            .await?;
         if let Some(claim) = claim {
             let mut live: std::collections::HashSet<String> =
                 self.sessions.lock().await.keys().cloned().collect();
@@ -8150,35 +8249,33 @@ impl TranscodeManager {
         Ok(info)
     }
 
-    /// The VOD arm of session creation (plan §2.7, milestone M3).
-    ///
-    /// `None` means "not this presentation" — the caller proceeds down the
-    /// live-presentation arms exactly as if the opt-in had never been sent,
-    /// which is the fallback contract: a VOD request the server cannot honour
-    /// degrades to today's behaviour, never to an error. One log line inside
-    /// names each fallback reason.
+    /// The only public HLS presentation. A request either receives immutable
+    /// VOD or fails with a stable refusal; it never enters the live arms.
     async fn try_vod_session(
         &self,
         req: &SessionRequest,
+        user_name: &str,
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
-    ) -> Result<Option<StartInfo>, String> {
+    ) -> Result<StartInfo, String> {
         if req.presentation != Presentation::Vod {
-            return Ok(None);
+            return Err(vod_refusal_error(
+                "live_presentation_removed",
+                "the growing live HLS presentation has been removed; create a VOD session",
+            ));
         }
         if is_takeover {
-            // A takeover continues a live incarnation's exact serving shape;
-            // a presentation switch is a new create's business.
-            tracing::info!("vod presentation refused for a takeover start");
-            return Ok(None);
+            return Err(vod_refusal_error(
+                "vod_reopen_required",
+                "this session must be reopened as a new VOD handle after owner takeover",
+            ));
         }
         let Some(settings) = self.vod_settings(req).await? else {
-            tracing::info!(
-                file = req.file_id,
-                "vod presentation requested but playback.vod_presentation is off"
-            );
-            return Ok(None);
+            return Err(vod_refusal_error(
+                "vod_disabled",
+                "VOD session creation is disabled on this server",
+            ));
         };
         let file = self
             .store
@@ -8192,32 +8289,49 @@ impl TranscodeManager {
         self.reap_superseded_before(replacement_deadline, supersession_user, &req.playback_id)
             .await?;
         let session_id = uuid::Uuid::new_v4().to_string();
-        match self
+        let item_title = self
+            .store
+            .get_item(file.item_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|item| item.title)
+            .unwrap_or_else(|| format!("#{}", file.item_id));
+        let start = self
             .vod
-            .try_create(req, &file, &settings, supersession_user, session_id)
-            .await?
-        {
-            Some(start) => Ok(Some(StartInfo {
-                playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
-                session_id: start.session_id,
-                duration_ms: Some(start.duration_ms),
-                // Like a cached generation: the timeline is the whole film
-                // from zero, and the client seeks — that is the point.
-                start_seconds: 0.0,
-                media_origin_seconds: 0.0,
-                target_height: file.height.unwrap_or(0),
-                kind: req.kind,
-                encoder: "vod",
-                // A copy session encodes nothing; same answer the live copy
-                // arm gives.
-                grade: OutputGrade::Sdr,
-                vod: true,
-            })),
-            None => Ok(None),
-        }
+            .try_create(
+                req,
+                &file,
+                &settings,
+                crate::vodserve::VodAttribution {
+                    user_name,
+                    item_title: &item_title,
+                    supersession_user,
+                },
+                session_id,
+            )
+            .await?;
+        Ok(StartInfo {
+            playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
+            session_id: start.session_id,
+            duration_ms: Some(start.duration_ms),
+            // Like a cached generation: the timeline is the whole film from
+            // zero, and the client seeks — that is the point.
+            start_seconds: 0.0,
+            media_origin_seconds: 0.0,
+            target_height: file.height.unwrap_or(0),
+            kind: req.kind,
+            encoder: "vod",
+            // A copy session encodes nothing; same answer the old copy arm
+            // gave without retaining its live presentation.
+            grade: OutputGrade::Sdr,
+            vod: true,
+        })
     }
 
-    /// Read the VOD serving settings, `None` when the presentation is off.
+    /// Read the VOD serving settings. Absence means enabled; an explicit `0`
+    /// is a maintenance kill switch that refuses playback rather than routing
+    /// it through the removed live presentation.
     async fn vod_settings(
         &self,
         req: &SessionRequest,
@@ -8233,8 +8347,7 @@ impl TranscodeManager {
         };
         if read(plurx_core::store::keys::VOD_PRESENTATION)
             .await?
-            .as_deref()
-            != Some("1")
+            .is_some_and(|value| value.trim() == "0")
         {
             return Ok(None);
         }
@@ -8357,6 +8470,22 @@ impl TranscodeManager {
         let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
             return false;
         };
+        let user_name = self
+            .store
+            .get_user(user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|user| user.username)
+            .unwrap_or_else(|| format!("user #{user_id}"));
+        let item_title = self
+            .store
+            .get_item(file.item_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|item| item.title)
+            .unwrap_or_else(|| format!("#{}", file.item_id));
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
         match self
             .vod
@@ -8364,12 +8493,16 @@ impl TranscodeManager {
                 &req,
                 &file,
                 &settings,
-                &supersession_user,
+                crate::vodserve::VodAttribution {
+                    user_name: &user_name,
+                    item_title: &item_title,
+                    supersession_user: &supersession_user,
+                },
                 session_id.to_owned(),
             )
             .await
         {
-            Ok(Some(_)) => {
+            Ok(_) => {
                 tracing::info!(
                     session = %session_log_id(session_id),
                     "resurrected a vod session from its durable route"
@@ -8566,8 +8699,16 @@ impl TranscodeManager {
         let mut normalized = request.clone();
         normalized.automatic = automatic;
         normalized.kind = if automatic {
+            // One rung is the server-owned upper bound, not a reason to ignore
+            // stronger link evidence from the player that actually stalled.
+            // A lower requested rung can only make the retry safer; a stale or
+            // maliciously higher request can never prevent the bounded step.
+            let client_height = match request.kind {
+                SessionKind::Transcode { height } => height,
+                SessionKind::Copy { .. } => previous_height,
+            };
             SessionKind::Transcode {
-                height: one_rung_below(previous_height),
+                height: one_rung_below(previous_height).min(client_height),
             }
         } else {
             kind
@@ -8681,6 +8822,7 @@ impl TranscodeManager {
     /// How an HLS session's input should be paced, given the admin settings
     /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
     /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
+    #[cfg(test)]
     async fn pacing(&self, for_copy: bool) -> Pacing {
         let rate = self
             .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
@@ -9362,6 +9504,7 @@ impl TranscodeManager {
     /// capacity back. The permit then carries live ownership for the session's
     /// whole lifetime, keeping every background pool parked after this method
     /// drops the short-lived waiter.
+    #[cfg(test)]
     async fn admit_live(
         &self,
         preferred: Encoder,
@@ -9465,6 +9608,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
+    #[cfg(test)]
     async fn start_with_audio_offset(
         &self,
         file_id: i64,
@@ -9928,6 +10072,7 @@ impl TranscodeManager {
     /// downgraded session also stalls, the lifetime watchdog takes it. On a
     /// spawn failure the session is marked failed; the caller checks.
     #[allow(clippy::too_many_arguments)] // one fallback's worth of context
+    #[cfg(test)]
     async fn downgrade_one_step(
         session: &Session,
         file: &plurx_core::domain::MediaFile,
@@ -10086,6 +10231,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
+    #[cfg(test)]
     async fn start_copy_with_audio_offset(
         &self,
         file_id: i64,
@@ -10492,9 +10638,10 @@ impl TranscodeManager {
         })
     }
 
-    /// Number of live transcode sessions (for /metrics).
+    /// Number of active HLS sessions across the public VOD registry and the
+    /// test-only historical live registry (for /metrics and activity).
     pub async fn active_sessions(&self) -> usize {
-        self.sessions.lock().await.len()
+        self.sessions.lock().await.len() + self.vod.active_sessions().await
     }
 
     /// Publish a provisional successor under the incarnation's stable bearer
@@ -10626,6 +10773,16 @@ impl TranscodeManager {
         self.list_deliveries_bounded(usize::MAX).await
     }
 
+    /// Bounded VOD identities for the cluster-only activity snapshot. These
+    /// are already complete delivery facts, unlike historical live-session
+    /// candidates, and never consult the removed presentation engine.
+    pub(crate) async fn vod_delivery_infos_bounded(
+        &self,
+        limit: usize,
+    ) -> Vec<crate::vodserve::VodDeliveryInfo> {
+        self.vod.delivery_infos_bounded(limit).await
+    }
+
     /// A diagnostics-safe prefix that bounds the expensive per-session
     /// telemetry reads before they begin.
     pub async fn list_deliveries_bounded(
@@ -10643,10 +10800,25 @@ impl TranscodeManager {
             .into_iter()
             .map(|detail| (detail.0.id.clone(), detail))
             .collect::<HashMap<_, _>>();
-        candidates
+        let mut deliveries = candidates
             .into_iter()
             .filter_map(|candidate| details.remove(&candidate.id))
-            .collect()
+            .collect::<Vec<_>>();
+        deliveries.extend(self.vod.delivery_infos().await.into_iter().map(|info| {
+            (
+                vod_delivery_session_info(info),
+                crate::delivery::Method::HlsCopy,
+            )
+        }));
+        deliveries.sort_by(|left, right| {
+            right
+                .0
+                .started_unix
+                .cmp(&left.0.started_unix)
+                .then(left.0.id.cmp(&right.0.id))
+        });
+        deliveries.truncate(limit);
+        deliveries
     }
 
     /// Top-K session identities without awaiting any per-session telemetry.
@@ -10858,6 +11030,7 @@ impl TranscodeManager {
     /// fence is open. The post-insert load and the loss loop's pre-snapshot
     /// store cover both orderings: either that snapshot sees this session or
     /// this method observes the closed fence and retires it itself.
+    #[cfg(test)]
     async fn register_session(&self, session_id: &str, session: Arc<Session>) -> bool {
         let admitted_generation = self.serving_loss_generation.load(Acquire);
         {
@@ -12292,9 +12465,11 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// Note the **H**igh tier: `should_serve_high_tier_media_playlist` already
 /// collapses a High-tier HDR master to its media rendition for AVPlayer, and
 /// this rung inherits that unchanged.
+#[cfg(test)]
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
+#[cfg(test)]
 const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
@@ -12304,6 +12479,7 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// read, and unlike an fMP4 session there is no `init.mp4` for
 /// `http::hls::exact_hls_context` to open (this muxer writes MPEG-TS). So the
 /// string is the grade's, and the grade is the pipeline's.
+#[cfg(test)]
 fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
     match grade {
         OutputGrade::Sdr => "avc1.640034,mp4a.40.2".to_owned(),
@@ -20015,6 +20191,100 @@ mod tests {
             "the target is stored before either session can be superseded"
         );
         drop(claim);
+    }
+
+    /// The browser that observed the cliff may have a fresher transfer sample
+    /// than the server's predecessor record. It may ask to descend farther,
+    /// but never use that hint to avoid the server-owned one-rung minimum.
+    #[tokio::test]
+    async fn a_bound_auto_reopen_honors_a_safer_client_rung() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let previous_dir = crate::test_tempdir().expect("previous session");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        insert_reopen_fixture(
+            &mgr,
+            ReopenFixture {
+                session_id: "measured-cliff-session",
+                dir: previous_dir.path().to_path_buf(),
+                user_name: "paul",
+                playback_id: "measured-cliff-player",
+                file_id: 51,
+                target_height: 720,
+                automatic: true,
+                kind: SessionKind::Transcode { height: 720 },
+            },
+        )
+        .await;
+
+        let lower = SessionRequest {
+            kind: SessionKind::Transcode { height: 360 },
+            ..reopen_request(
+                51,
+                "measured-cliff-player",
+                "measured-cliff-reopen",
+                "measured-cliff-session",
+            )
+        };
+        let Claimed::Mine(claim, normalized) = mgr
+            .claim_request("measured-cliff-reopen", &lower, r#"["username","paul"]"#)
+            .await
+            .expect("lower measured rung is valid")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(normalized.kind, SessionKind::Transcode { height: 360 });
+        assert_eq!(
+            mgr.requests
+                .lock()
+                .expect("requests")
+                .get("measured-cliff-reopen")
+                .and_then(|entry| entry.target_height),
+            Some(360),
+        );
+        drop(claim);
+
+        let higher_dir = crate::test_tempdir().expect("higher previous session");
+        insert_reopen_fixture(
+            &mgr,
+            ReopenFixture {
+                session_id: "stale-high-session",
+                dir: higher_dir.path().to_path_buf(),
+                user_name: "paul",
+                playback_id: "stale-high-player",
+                file_id: 52,
+                target_height: 720,
+                automatic: true,
+                kind: SessionKind::Transcode { height: 720 },
+            },
+        )
+        .await;
+        let higher = reopen_request(
+            52,
+            "stale-high-player",
+            "stale-high-reopen",
+            "stale-high-session",
+        );
+        let Claimed::Mine(higher_claim, higher_normalized) = mgr
+            .claim_request("stale-high-reopen", &higher, r#"["username","paul"]"#)
+            .await
+            .expect("higher hint is bounded")
+        else {
+            panic!("new request owns its claim")
+        };
+        assert_eq!(
+            higher_normalized.kind,
+            SessionKind::Transcode { height: 480 },
+            "the client cannot avoid the server-owned one-rung descent",
+        );
+        drop(higher_claim);
     }
 
     #[tokio::test]

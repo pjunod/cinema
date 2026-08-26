@@ -6,6 +6,12 @@ edition.workspace = true
 publish.workspace = true
 repository.workspace = true
 
+[features]
+# Separate-process daemon tests bind several loopback listeners, launch real
+# voters, and create media with ffmpeg. Keep them out of the ordinary unit lane;
+# validation targets enable them explicitly where those contracts belong.
+cluster-integration-tests = []
+
 [dependencies]
 anyhow = { workspace = true }
 axum = { workspace = true }
@@ -56,3 +62,11 @@ tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "cluster_activation"
+required-features = ["cluster-integration-tests"]
+
+[[test]]
+name = "cluster_activity"
+required-features = ["cluster-integration-tests"]

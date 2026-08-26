@@ -250,6 +250,10 @@ class CatalogCase(unittest.TestCase):
 
     def test_ci_profile_splits_the_rust_gate_and_local_profiles_keep_it_whole(self):
         catalog = load_catalog(ROOT / "validation/points.toml")
+        self.assertEqual(
+            set(catalog.always_checks),
+            {"catalog-contract", "history-regressions"},
+        )
         selection = select_points(catalog, ("crates/plurxd/src/http/stream.rs",))
 
         ci = {check.id for check in selected_checks(catalog, selection, "ci")}

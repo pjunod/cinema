@@ -30,12 +30,21 @@ run: ## Run the server (http://localhost:32400)
 fmt: ## Auto-format all code
 	$(CARGO) fmt --all
 
-# `--no-fail-fast` because cargo otherwise abandons the run at the first red
-# target, so one broken crate hides every other crate's failures and the next
-# fix reveals a second one instead of the whole list.
-.PHONY: test
-test: ## Run the test suite
-	$(CARGO) test --workspace --no-fail-fast
+# The ordinary lane keeps cheap integration contracts alongside unit tests,
+# but excludes the separate-process cluster member. Replicated Store contracts
+# and daemon fixtures also require explicit features, so production dependency
+# feature unification cannot pull them into this target accidentally.
+# `--no-fail-fast` reports every failing target in one run.
+.PHONY: unit test test-full
+unit: ## Run the fast Rust unit and SQLite contract lane
+	$(CARGO) test --workspace --exclude plurx-cluster-check --no-fail-fast
+
+test: unit ## Run the fast Rust test lane
+
+test-full: ## Run every Rust test, including replicated and daemon contracts
+	$(CARGO) test --workspace \
+	  --features plurx-core/hiqlite-contract-tests,plurxd/cluster-integration-tests \
+	  --no-fail-fast
 
 ## ---- baseline gates ----------------------------------------------------
 
@@ -50,14 +59,12 @@ lint: ## Clippy across the workspace, warnings are errors
 .PHONY: rust-check
 rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 
-# The CI split of `rust-check`: lint.yml already runs the identical clippy
-# gate in a parallel workflow, and the cluster_auth job owns the replicated
-# store member — excluding it here keeps cargo's feature unification from
-# compiling the whole hiqlite/openraft stack into the PR gate, so this suite
-# also exercises plurx-core with the features the shipped plurxd resolves.
-# Local development keeps `make rust-check`; this target exists for ci.yml.
+# The CI split of `rust-check`: lint.yml owns clippy, while the cluster jobs own
+# WAL, replicated Store, harness, and daemon contracts. Explicit test features
+# keep those contracts out of this workspace lane even though plurxd ships the
+# underlying Hiqlite implementation.
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check ## CI Rust gate: format + workspace tests minus the cluster member
+ci-rust-gate: fmt-check ## CI Rust gate: format + fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 
 # The real mount-namespace exercises for scratch aliasing and mount points
@@ -94,8 +101,8 @@ hiqlite-baseline: ## Measure the manual M0 one-voter cost gate on a quiet host
 	  --test hiqlite_m0 \
 	  single_voter_cost_stays_inside_the_m0_budget -- --ignored --exact --nocapture
 
-.PHONY: cluster-check
-cluster-check: ## Run WAL recovery plus M1b-P7 durable-state, growth, proxy, and failure contracts
+.PHONY: cluster-wal-check
+cluster-wal-check: ## Run exact Hiqlite and WAL recovery regressions
 	$(CARGO) test --locked --manifest-path vendor/hiqlite/Cargo.toml \
 	  --no-default-features --features auto-heal,macros,sqlite \
 	  snapshot_metrics --lib -- --test-threads=1
@@ -149,8 +156,15 @@ cluster-check: ## Run WAL recovery plus M1b-P7 durable-state, growth, proxy, and
 	  --no-default-features --features auto-heal,macros,sqlite,validation-test-helpers \
 	  store::state_machine::sqlite::state_machine::snapshot_metrics_contracts::validation_apply_resume_cannot_miss_the_registered_waiter \
 	  --lib -- --exact
-	$(CARGO) test --locked -p plurx-core --features cluster-read-cost-validation \
+
+.PHONY: cluster-store-check
+cluster-store-check: ## Run the Store contracts against SQLite and three voters
+	$(CARGO) test --locked -p plurx-core \
+	  --features cluster-read-cost-validation,hiqlite-contract-tests \
 	  --test store_contract -- --test-threads=1
+
+.PHONY: cluster-harness-check
+cluster-harness-check: ## Run replicated growth and topology harness contracts
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  --test harness compacted_growth_gate -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
@@ -159,10 +173,19 @@ cluster-check: ## Run WAL recovery plus M1b-P7 durable-state, growth, proxy, and
 	  failure_drills::tests --lib -- --nocapture
 	$(CARGO) test --locked -p plurx-cluster-check \
 	  named_runner::tests --lib -- --nocapture
-	$(CARGO) test --locked -p plurxd --test cluster_activity -- --nocapture
 	$(CARGO) run --locked -p plurx-cluster-check -- check
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology target/validation/cluster-topology-semantic.json 3,4
+
+.PHONY: cluster-daemon-check
+cluster-daemon-check: ## Run real-daemon activation and activity contracts
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
+	  --test cluster_activation -- --nocapture
+	$(CARGO) test --locked -p plurxd --features cluster-integration-tests \
+	  --test cluster_activity -- --nocapture
+
+.PHONY: cluster-check
+cluster-check: cluster-wal-check cluster-store-check cluster-harness-check cluster-daemon-check ## Run every replicated recovery and failure contract
 
 .PHONY: cluster-campaign-validate
 cluster-campaign-validate: ## Validate P0c campaign (set CAMPAIGN=.../campaign.json)

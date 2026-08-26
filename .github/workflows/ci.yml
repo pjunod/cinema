@@ -201,12 +201,12 @@ jobs:
           retention-days: 1
 
   cluster_auth:
-    name: replicated storage contracts
+    name: replicated store and topology contracts
     needs: [scope, preflight]
     if: >-
       needs.scope.outputs.cluster_auth == 'true' ||
       needs.scope.outputs.hiqlite_spike == 'true'
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     # The first cold lab run reached the final three-voter proof but crossed
     # the old 25-minute guard while building the command-profile dependency
     # graph. Keep enough headroom for a cold NUC and artifact cleanup; warm
@@ -214,8 +214,8 @@ jobs:
     timeout-minutes: 40
     env:
       # The M0 proof has its own manifest, but not its own dependency build.
-      # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph that
-      # cluster-check just compiled instead of paying for ~400 crates twice.
+      # Sharing the root target lets it reuse the Hiqlite/OpenRaft graph from
+      # the Store and topology contracts instead of compiling it twice.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
@@ -230,12 +230,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: hiqlite-cluster-auth
-      - uses: ./.github/actions/ffmpeg
-        with:
-          major: "6"
-      - name: Run separate-process replica and failure contracts
+      - name: Run replicated Store and topology contracts
         if: needs.scope.outputs.cluster_auth == 'true'
-        run: make cluster-check
+        run: make cluster-store-check cluster-harness-check
       - name: Retain deterministic topology evidence
         if: always() && needs.scope.outputs.cluster_auth == 'true'
         continue-on-error: true
@@ -260,6 +257,43 @@ jobs:
       - name: Run the three-voter semantic proof
         if: needs.scope.outputs.hiqlite_spike == 'true'
         run: make hiqlite-spike
+
+  cluster_wal:
+    name: replicated WAL recovery contracts
+    needs: [scope, preflight]
+    if: needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: hiqlite-wal
+      - name: Run exact Hiqlite and WAL recovery regressions
+        run: make cluster-wal-check
+
+  cluster_daemon:
+    name: cluster daemon contracts
+    needs: [scope, preflight]
+    if: needs.scope.outputs.cluster_auth == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu","ffmpeg-6"]') }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: cluster-daemon
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - name: Verify the cluster fixture generator
+        run: |
+          command -v ffmpeg
+          ffmpeg -version
+      - name: Run real-daemon activation and activity contracts
+        run: make cluster-daemon-check
 
   web_layout:
     name: web layout and accessibility
@@ -638,6 +672,10 @@ jobs:
       # routine validation does not exhaust the repository artifact quota.
       - name: Retain release binary for push and tag runs
         if: github.event_name == 'push'
+        # The build itself is the validation verdict. Artifact retention is
+        # best-effort because repository quota exhaustion must not fail an
+        # otherwise successful release build (or block tag publication).
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: plurxd-${{ matrix.target }}
@@ -697,6 +735,8 @@ jobs:
       - preflight
       - check
       - cluster_auth
+      - cluster_wal
+      - cluster_daemon
       - web_layout
       - vod_web
       - android_jvm
@@ -714,6 +754,8 @@ jobs:
           PREFLIGHT_RESULT: ${{ needs.preflight.result }}
           CHECK_RESULT: ${{ needs.check.result }}
           CLUSTER_AUTH_RESULT: ${{ needs.cluster_auth.result }}
+          CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
+          CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
           VOD_WEB_RESULT: ${{ needs.vod_web.result }}
           ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
@@ -725,7 +767,8 @@ jobs:
           for result in \
             "$SCOPE_RESULT" "$MOBILE_VERSION_RESULT" \
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
-            "$CLUSTER_AUTH_RESULT" \
+            "$CLUSTER_AUTH_RESULT" "$CLUSTER_WAL_RESULT" \
+            "$CLUSTER_DAEMON_RESULT" \
             "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
             "$BUILD_RESULT" "$DOCKER_RESULT"; do

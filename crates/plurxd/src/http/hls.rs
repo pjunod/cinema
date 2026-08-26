@@ -268,12 +268,9 @@ pub struct CreateSession {
     /// audio. It is carried into every seek/reopen by the client and is never
     /// written back to the media file.
     pub audio_offset_ms: Option<i64>,
-    /// `"vod"` asks for the film-addressed immutable presentation (plan
-    /// §2.7). Anything else — including absent, which is what every shipped
-    /// client sends — keeps today's live presentation. A request, never a
-    /// promise: a title the VOD presentation cannot serve falls back to the
-    /// live presentation, and the response's `vod` field says which one the
-    /// client actually got.
+    /// The only accepted value is `"vod"`. Omitted also means VOD so clients
+    /// predating this field cannot accidentally enter the removed growing
+    /// live-HLS path. An explicit legacy value receives a typed refusal.
     pub presentation: Option<String>,
     /// With `presentation:"vod"`: the client's ceiling for one blocking
     /// segment fetch, in seconds. Clamped server-side.
@@ -312,10 +309,7 @@ impl CreateSession {
             subtitle_burn: self.subtitle_burn.filter(|s| *s >= 0),
             audio_offset_ms: self.audio_offset_ms.unwrap_or(0).clamp(-15_000, 15_000),
             hdr10: self.hdr10 == Some(true),
-            presentation: match self.presentation.as_deref() {
-                Some("vod") => crate::transcode::Presentation::Vod,
-                _ => crate::transcode::Presentation::Live,
-            },
+            presentation: crate::transcode::Presentation::Vod,
             block_budget_secs: self.block_budget_secs.filter(|s| s.is_finite() && *s > 0.0),
         }
     }
@@ -382,6 +376,17 @@ pub async fn create(
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
             "playback_id must contain 1 to 128 safe characters".into(),
+        ));
+    }
+    if req
+        .presentation
+        .as_deref()
+        .is_some_and(|presentation| presentation != "vod")
+    {
+        return Err(ApiError::typed(
+            StatusCode::GONE,
+            "live_presentation_removed",
+            "the growing live HLS presentation has been removed; request VOD",
         ));
     }
     // The source height answers three things now: Auto, the ladder in the
@@ -1087,6 +1092,25 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
     }
     if let Some(reason) = crate::transcode::invalid_reopen_reason(&error) {
         return ApiError::BadRequest(reason.to_owned());
+    }
+    if let Some((code, reason)) = crate::transcode::vod_refusal(&error) {
+        let (status, code) = match code {
+            "vod_disabled" => (StatusCode::SERVICE_UNAVAILABLE, "vod_disabled"),
+            "vod_index_pending" => (StatusCode::SERVICE_UNAVAILABLE, "vod_index_pending"),
+            "vod_transcode_unavailable" => {
+                (StatusCode::NOT_IMPLEMENTED, "vod_transcode_unavailable")
+            }
+            "vod_subtitle_burn_unavailable" => {
+                (StatusCode::NOT_IMPLEMENTED, "vod_subtitle_burn_unavailable")
+            }
+            "vod_source_unsupported" => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "vod_source_unsupported")
+            }
+            "vod_reopen_required" => (StatusCode::CONFLICT, "vod_reopen_required"),
+            "live_presentation_removed" => (StatusCode::GONE, "live_presentation_removed"),
+            _ => return ApiError::Internal(error),
+        };
+        return ApiError::typed(status, code, reason);
     }
     // A build that lacks a filter is not a server fault to be swallowed as
     // "internal server error" — it is a fact about this install that the
@@ -3538,6 +3562,47 @@ mod tests {
             session_start_error(42, "ffmpeg failed".into()),
             ApiError::Internal(_)
         ));
+    }
+
+    #[test]
+    fn omitted_public_presentation_means_vod_never_live() {
+        let create: CreateSession = serde_json::from_value(serde_json::json!({
+            "playback_id": "older-native-client",
+            "copy": true
+        }))
+        .expect("create body");
+        assert_eq!(
+            create.into_request(42, 1080).presentation,
+            crate::transcode::Presentation::Vod
+        );
+    }
+
+    #[test]
+    fn every_vod_ineligibility_reaches_the_wire_as_a_typed_refusal() {
+        let cases = [
+            ("vod_disabled", StatusCode::SERVICE_UNAVAILABLE),
+            ("vod_index_pending", StatusCode::SERVICE_UNAVAILABLE),
+            ("vod_transcode_unavailable", StatusCode::NOT_IMPLEMENTED),
+            ("vod_subtitle_burn_unavailable", StatusCode::NOT_IMPLEMENTED),
+            ("vod_source_unsupported", StatusCode::UNPROCESSABLE_ENTITY),
+            ("vod_reopen_required", StatusCode::CONFLICT),
+            ("live_presentation_removed", StatusCode::GONE),
+        ];
+        for (code, status) in cases {
+            let error = crate::transcode::vod_refusal_error(code, "named reason");
+            match session_start_error(42, error) {
+                ApiError::Typed {
+                    status: actual_status,
+                    code: actual_code,
+                    message,
+                } => {
+                    assert_eq!(actual_status, status, "{code}");
+                    assert_eq!(actual_code, code, "{code}");
+                    assert_eq!(message, "named reason", "{code}");
+                }
+                other => panic!("{code} was not typed: {other:?}"),
+            }
+        }
     }
 
     /// §7.3 requirement 3 is about VIEWER intent, not wire presence. Android's

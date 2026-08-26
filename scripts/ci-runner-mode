@@ -24,7 +24,11 @@ case "$mode" in
     usage
     ;;
   status)
-    if value="$(gh variable get CI_RUNNER_MODE --repo "$repo" 2>/dev/null)"; then
+    value="$(
+      gh variable list --repo "$repo" --json name,value \
+        --jq '.[] | select(.name == "CI_RUNNER_MODE") | .value'
+    )"
+    if [[ -n "$value" ]]; then
       printf '%s\n' "$value"
     else
       printf '%s\n' "self-hosted (default; CI_RUNNER_MODE is unset)"
@@ -32,7 +36,7 @@ case "$mode" in
     ;;
   self-hosted|github)
     gh variable set CI_RUNNER_MODE --body "$mode" --repo "$repo"
-    printf 'CI_RUNNER_MODE=%s for %s; new jobs will use that runner pool.\n' \
+    printf 'CI_RUNNER_MODE=%s for %s; new workflow runs will use that runner pool.\n' \
       "$mode" "$repo"
     ;;
   *)

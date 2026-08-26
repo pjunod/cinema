@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["45ebeaaa"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "Commit `45ebeaaa` registered the Darwin secure-path correction while its mainline mapping was not yet present. The canonical `f85a37a9-darwin-secure-path.toml` entry now supersedes that provisional registration; this metadata-only row retains history evidence for `45ebeaaa` itself without duplicating the runtime correction's coverage."

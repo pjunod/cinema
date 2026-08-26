@@ -36,7 +36,8 @@ pub enum DueJob {
     /// Pre-transcode what somebody is likely to play next (PERF-PLAN §6.2).
     ProduceCache,
     /// Build fragment indexes for files that have none
-    /// (VOD-PRESENTATION-PLAN §2.2). Off by default.
+    /// (VOD-PRESENTATION-PLAN §2.2). VOD's default-on exception uses a
+    /// 15-minute cadence; an explicit zero pauses it.
     BuildFragmentIndexes,
 }
 

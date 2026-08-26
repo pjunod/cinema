@@ -314,9 +314,11 @@ Phases are gates — each ends with something you actually use. Full detail in
   Metadata enrichment and the physical airplane-mode acceptance matrix remain
   in [EBOOK-READER-PLAN.md](docs/EBOOK-READER-PLAN.md). M0–M3 are complete and
   M4 implementation is complete with device acceptance in progress.
-- [~] **Playback experience.** Borderless player, staged loading, rich stats, skip
-  intro/credits with auto-skip — shipped. Public ratings and multi-server
-  dashboard still to come.
+- [~] **Playback experience.** Borderless player, staged loading, rich stats,
+  skip intro/credits with auto-skip, and immutable film-addressed VOD HLS are
+  shipped. HLS no longer falls back to the removed growing live presentation;
+  unfinished transcode-rung and subtitle-burn VOD classes fail explicitly.
+  Public ratings and multi-server dashboard still remain.
 - [~] **Phase 4 — HA for real.** Clustering M0–M2 is merged behind the
   unchanged `Store` trait: `plurxd run` verifies and atomically activates a
   one-voter replicated store while retaining SQLite for pre-membership

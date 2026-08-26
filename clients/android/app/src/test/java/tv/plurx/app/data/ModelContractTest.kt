@@ -433,6 +433,7 @@ class ModelContractTest {
         assertTrue(native.contains("\"subtitle\":3"))
         assertTrue(native.contains("\"copy\":true"))
         assertTrue(native.contains("\"preserve_dolby_vision\":true"))
+        assertTrue(native.contains("\"presentation\":\"vod\""))
         // The one field that costs the stream its resolution and its HDR.
         assertFalse(native.contains("subtitle_burn"))
 
