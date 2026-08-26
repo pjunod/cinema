@@ -4076,6 +4076,7 @@ mod tests {
             .join(HIQLITE_READDRESS_MARKER_FILENAME)
             .exists());
         let coordinator = source.membership_manager();
+        let source_client = source.local_client.clone().expect("source client");
         let app = Router::new()
             .route("/api/v1/cluster/join/redeem", post(redeem_join_for_test))
             .route(
@@ -4141,7 +4142,7 @@ mod tests {
             .await
             .expect("reserve the preceding Raft id");
         let issued = coordinator
-            .issue_token(Duration::from_secs(1))
+            .issue_token(Duration::from_secs(120))
             .await
             .expect("issue daemon join token");
         assert_eq!(
@@ -4180,7 +4181,14 @@ mod tests {
             })
             .await
             .expect("reserve the token to the staged node before its failed start");
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        source_client
+            .execute(
+                "UPDATE cluster_join_tokens SET expires_at = 0 \
+                 WHERE token_hash = $1 AND state = 'redeeming'",
+                hiqlite::params!(issued_digest.as_str()),
+            )
+            .await
+            .expect("expire the identity-bound reservation deterministically");
         let joined = select_daemon_store(&joining_config)
             .await
             .expect("resume an expired identity-bound join through daemon store selection");

@@ -1763,6 +1763,23 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
+  const source = fs.readFileSync(LAB, "utf8");
+  const start = source.indexOf("async function startServer");
+  const end = source.indexOf("\nfunction cdpBrowserArgs", start);
+  const server = source.slice(start, end);
+  const pause = server.indexOf("body: { vod_index_mins: 0 }");
+  const library = server.indexOf('const library = await api(baseUrl, "/libraries"');
+  const scan = server.indexOf('"fixture scan"', library);
+  const enable = server.indexOf("vod_presentation: true");
+
+  assert.ok(start >= 0 && end > start, "the server harness remains inspectable");
+  assert.ok(pause >= 0, "the startup indexer is explicitly paused");
+  assert.ok(pause < library, "indexing is paused before the fixture library can scan");
+  assert.ok(library < scan, "the fixture library reaches its explicit scan wait");
+  assert.ok(scan < enable, "indexing is re-enabled only after the scan wait");
+});
+
 test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites["stall-recovery"];

@@ -765,19 +765,26 @@ class SelfHost:
             {"vod_index_mins": 0})
         libs = []
         for name, kind, share in LIBRARIES:
-            libs.append(api(self.base_url, "/libraries", self.token, "POST", {
+            library = api(self.base_url, "/libraries", self.token, "POST", {
                 "name": name, "kind": kind,
                 "paths": [str(self.media_dir / share)], "anime": False,
-            }))
-        deadline = time.time() + 300
-        while time.time() < deadline:
-            status = api(self.base_url, "/scan/status", self.token)
-            done = [status.get(str(l["id"])) for l in libs]
-            if all(s and not s["running"] and s.get("last_scan") for s in done):
-                break
-            time.sleep(0.4)
-        else:
-            raise Fail("the seeded libraries never finished scanning")
+            })
+            libs.append(library)
+            # File ids are allocated by concurrent scanners in completion
+            # order. The VOD indexer deliberately handles only four files per
+            # pass, so racing all three scans made Heat land on either side of
+            # that boundary and changed its detail DOM from Indexed to Pending.
+            # Finish each tiny fixture library before creating the next one;
+            # Heat is then in the first two files on every filesystem.
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                status = api(self.base_url, "/scan/status", self.token)
+                done = status.get(str(library["id"]))
+                if done and not done["running"] and done.get("last_scan"):
+                    break
+                time.sleep(0.4)
+            else:
+                raise Fail(f"the seeded library {name!r} never finished scanning")
 
         by_title = {}
         for lib in libs:
@@ -1246,12 +1253,36 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:
             resume_activity_polling(page)
+        settle_ms = args.settle_ms
+        if name == "settings":
+            # The Libraries tab loads scan status once, then polls every 2s.
+            # A fixed sleep lets an overloaded event loop enqueue a third tick
+            # before the sleep callback, changing an unchanged request golden
+            # from three calls to four. Observe exactly two production ticks,
+            # then stop this route's timer at that named boundary.
+            deadline = time.time() + args.timeout / 1000
+            while (api_calls.count("GET /api/v1/scan/status") < 3 or
+                   api_calls.count("GET /api/v1/activity") < 2):
+                if time.time() >= deadline:
+                    raise Fail("settings did not complete its scan-status and activity polling ticks")
+                page.wait_for_timeout(50)
+            page.evaluate("""() => {
+              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
+              PAGE_TIMER = null;
+              if (ACT_TIMER) clearInterval(ACT_TIMER);
+              ACT_TIMER = null;
+            }""")
+            # Waiting for those two 2s ticks already spans one complete 4s
+            # activity period. A second full settle window would add another
+            # activity request only on Settings and lengthen the sweep without
+            # observing any new state.
+            settle_ms = 200
         # The app polls activity every 4s and the activity page re-renders every
         # 3s. Rather than stubbing either — the baseline has to be of the real
         # app — the capture waits out more than one full period, so it always
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
-        page.wait_for_timeout(args.settle_ms)
+        page.wait_for_timeout(settle_ms)
         if route.get("player"):
             open_player(page, args.timeout)
 

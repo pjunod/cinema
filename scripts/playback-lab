@@ -1472,6 +1472,19 @@ async function startServer(options, fixtureDirectory) {
     body: { username: "playback-lab", password: "playback-lab" },
   });
   const token = setup.token;
+  if (options.enable_vod) {
+    // VOD indexing is default-on. Pause it before publishing the fixture
+    // library so the startup scheduler cannot index the first scanned file,
+    // stamp the 15-minute cadence, and leave the suite's later file pending.
+    // An empty startup pass deliberately does not stamp, so re-enabling after
+    // the completed scan guarantees one fresh pass over the whole fixture.
+    process.stdout.write("INDEX   pause VOD until the fixture scan completes\n");
+    await api(baseUrl, "/settings", {
+      token,
+      method: "PUT",
+      body: { vod_index_mins: 0 },
+    });
+  }
   const library = await api(baseUrl, "/libraries", {
     token,
     method: "POST",

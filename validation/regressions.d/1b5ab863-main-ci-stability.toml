@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1b5ab863"]
+points = ["persistence.upgrades", "web.experience", "operations.packaging"]
+checks = ["rust-gate", "database-upgrades", "web-layout", "operations-contract"]
+reason = "The retained cluster migration unit expires the identity-bound join reservation through persisted state instead of a wall-clock sleep, while the UI layout sweep and operations source contract pin deterministic fixture ordering and the exact Settings polling boundary."

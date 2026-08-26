@@ -45,13 +45,17 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
         self.assertIn('page.wait_for_load_state("networkidle"', script)
         self.assertIn("resume_activity_polling(page)", script)
+        self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
+        self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
+        self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
         self.assertLess(
             script.index('[data-phase="settled"]'),
             script.index("resume_activity_polling(page)", script.index("def capture_route")),
         )
         self.assertLess(
             script.index("resume_activity_polling(page)", script.index("def capture_route")),
-            script.index("page.wait_for_timeout(args.settle_ms)"),
+            script.index("page.wait_for_timeout(settle_ms)"),
         )
 
     def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
