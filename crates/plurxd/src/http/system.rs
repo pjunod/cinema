@@ -1177,6 +1177,9 @@ pub struct SettingsDto {
     /// Temporary growing-HLS fallback for typed VOD prerequisite failures.
     /// On by default while the recovery feature is compiled in.
     pub vod_live_recovery: bool,
+    /// Additive, behavior-neutral playback-control v1 advertisement. Off by
+    /// default until clients ship passive reporters.
+    pub playback_control_protocol_v1: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1395,6 +1398,8 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
             .is_some_and(|value| value.trim() == "1"),
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
         vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
+        playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
+            == Some("1"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
@@ -1450,6 +1455,7 @@ pub struct UpdateSettings {
     /// the removed live engine. `vod_working_set_bytes` refuses 0.
     pub vod_presentation: Option<bool>,
     pub vod_live_recovery: Option<bool>,
+    pub playback_control_protocol_v1: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
@@ -1628,6 +1634,15 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_LIVE_RECOVERY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.playback_control_protocol_v1 {
+        state
+            .store
+            .put_setting(
+                keys::PLAYBACK_CONTROL_PROTOCOL_V1,
+                if on { "1" } else { "0" },
+            )
             .await?;
     }
     if let Some(raw) = req
@@ -3093,10 +3108,11 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
+         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
+        control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
     );
     (

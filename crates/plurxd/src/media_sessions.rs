@@ -29,6 +29,7 @@ use crate::transcode::{SessionKind, SessionRequest, SessionTakeoverStart, StartI
 pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
+pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
@@ -38,6 +39,7 @@ pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_FAST_RECONCILIATION: Duration = Duration::from_secs(3);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
+const CONTROL_DEADLINE: Duration = Duration::from_secs(5);
 const LEASE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
@@ -610,6 +612,29 @@ impl MediaSessionCoordinator {
         .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))
     }
 
+    /// Authoritative, admission-bounded route read for a control mutation.
+    /// Unlike media GET routing this deliberately bypasses the positive cache:
+    /// an owner epoch may advance during its one-second TTL. The same query
+    /// shards still prevent random capability probes from creating unbounded
+    /// concurrent consensus reads.
+    pub(crate) async fn control_route(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
+        let deadline = tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE;
+        let shard = route_hash(session_id) % self.route_queries.len();
+        let _query = tokio::time::timeout_at(deadline, self.route_queries[shard].lock())
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session control route admission timed out".to_owned())
+            })?;
+        tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session control route lookup timed out".to_owned())
+            })?
+    }
+
     pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
         let session_id = route.session_id.clone();
         let route = authorizing_route(&route).then_some(route);
@@ -782,6 +807,35 @@ impl MediaSessionCoordinator {
                 &base,
                 reqwest::Method::POST,
                 RELAY_PATH,
+                body,
+                deadline,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        relay_response(response)
+    }
+
+    /// Mutating playback control uses its own exact-auth endpoint. It must not
+    /// inherit the generic relay's read authorization merely because the M1
+    /// action happens to be `none`.
+    pub(crate) async fn control(
+        &self,
+        owner_node_id: &str,
+        request: &crate::playback_control::ControlRelayRequest,
+    ) -> Result<Response<Body>, PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > crate::playback_control::MAX_RELAY_BYTES {
+            return Err(PeerTransportError::InvalidResponse);
+        }
+        let deadline = deadline_after(CONTROL_DEADLINE);
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let response = self
+            .transport
+            .request_stream(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                CONTROL_PATH,
                 body,
                 deadline,
                 PeerAuthMode::ExactRequest,

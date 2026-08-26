@@ -14,6 +14,7 @@ mod meter;
 mod offline;
 mod pgs_overlay;
 mod pipeprobe;
+mod playback_control;
 mod playstart;
 mod prodexec;
 mod prodrun;

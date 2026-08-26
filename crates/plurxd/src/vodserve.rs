@@ -368,6 +368,8 @@ struct Session {
     supersession_user: String,
     block_budget: Duration,
     last_touch: StdMutex<Instant>,
+    /// Owner-local sequence fence kept separate from media-object touches.
+    control: StdMutex<crate::playback_control::ControlState>,
     tombstone: Option<Terminal>,
 }
 
@@ -548,6 +550,7 @@ impl VodServe {
                 supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
                 last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );
@@ -894,6 +897,66 @@ impl VodServe {
             suspended,
             final_: complete,
         })
+    }
+
+    /// Apply one fenced control exchange without conflating a replay or stale
+    /// request with a media-object touch. Only a newly accepted sequence moves
+    /// the existing five-minute VOD activity clock.
+    pub(crate) async fn control(
+        &self,
+        session_id: &str,
+        generation: &str,
+        owner_epoch: u64,
+        client_instance_id: &str,
+        sequence: u64,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        let outcome = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(session_id)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            let accepted = session.control.lock().expect("control lock").accept(
+                generation,
+                owner_epoch,
+                client_instance_id,
+                sequence,
+            );
+            let (disposition, accepted_sequence, action) = match accepted {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+            let mut last_touch = session.last_touch.lock().expect("touch lock");
+            if disposition == crate::playback_control::ControlDisposition::Accepted {
+                *last_touch = Instant::now();
+            }
+            let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
+            let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+            Ok::<_, crate::playback_control::ControlStateError>((
+                disposition,
+                accepted_sequence,
+                action,
+                crate::media_sessions::unix_ms().saturating_add(remaining_ms),
+            ))
+        };
+        let (disposition, accepted_sequence, action, lease_expires_at_unix_ms) = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        let status = self.status(session_id).await?;
+        Some(Ok(crate::playback_control::LocalControlResult {
+            disposition,
+            accepted_sequence,
+            action,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            status: crate::transcode::HlsSessionInfo::Vod(status),
+        }))
     }
 
     /// The facts a stall-reopen's normalization checks against its
@@ -3292,6 +3355,7 @@ mod tests {
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
                 last_touch: StdMutex::new(touched),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );
@@ -3345,6 +3409,7 @@ mod tests {
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_millis(1),
                 last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );

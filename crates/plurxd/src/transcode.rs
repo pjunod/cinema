@@ -1616,6 +1616,10 @@ struct Session {
     /// clock makes an idle reap explain whether the last sign of life was a
     /// playlist reload, a media segment, or only a subtitle/context lookup.
     last_request: Mutex<LastRequest>,
+    /// Owner-local sequence fence for the explicit control protocol. It is
+    /// independent of media GET bookkeeping so equal/stale controls cannot
+    /// accidentally renew the legacy activity clock.
+    control: Mutex<crate::playback_control::ControlState>,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -6697,6 +6701,7 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: Mutex::new(crate::playback_control::ControlState::default()),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -9937,6 +9942,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: Mutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10512,6 +10518,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: Mutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10988,6 +10995,81 @@ impl TranscodeManager {
         self.session_status(session_id)
             .await
             .map(HlsSessionInfo::Live)
+    }
+
+    /// Fenced behavior-neutral control for either HLS presentation. A newly
+    /// accepted sequence renews the selected engine's established activity
+    /// clock with the explicit `control` reason; replay and rejection do not.
+    pub(crate) async fn hls_session_control(
+        &self,
+        session_id: &str,
+        generation: &str,
+        owner_epoch: u64,
+        client_instance_id: &str,
+        sequence: u64,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        if let Some(result) = self
+            .vod
+            .control(
+                session_id,
+                generation,
+                owner_epoch,
+                client_instance_id,
+                sequence,
+            )
+            .await
+        {
+            return Some(result);
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        if session.retired.load(Acquire) {
+            return None;
+        }
+        let (disposition, accepted_sequence, action) = match session.control.lock().await.accept(
+            generation,
+            owner_epoch,
+            client_instance_id,
+            sequence,
+        ) {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        if session.retired.load(Acquire) {
+            return None;
+        }
+        let lease_expires_at_unix_ms = {
+            let mut last_request = session.last_request.lock().await;
+            if disposition == crate::playback_control::ControlDisposition::Accepted {
+                *last_request = LastRequest::now("control");
+            }
+            let remaining =
+                Duration::from_secs(SESSION_IDLE_SECS).saturating_sub(last_request.at.elapsed());
+            let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+            crate::media_sessions::unix_ms().saturating_add(remaining_ms)
+        };
+        let limits = self.ahead_limits().await;
+        let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+        let status = session_info(
+            session_id,
+            &session,
+            limits,
+            global_live_bytes,
+            global_ahead_bytes,
+        )
+        .await;
+        Some(Ok(crate::playback_control::LocalControlResult {
+            disposition,
+            accepted_sequence,
+            action,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            status: HlsSessionInfo::Live(status),
+        }))
     }
 
     async fn emit_session_event(
@@ -12930,6 +13012,7 @@ fn test_session(dir: PathBuf) -> Session {
         cache_manifest: None,
         cache_location: None,
         last_request: Mutex::new(LastRequest::now("test-start")),
+        control: Mutex::new(crate::playback_control::ControlState::default()),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -17478,6 +17561,7 @@ mod tests {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("test-start")),
+            control: Mutex::new(crate::playback_control::ControlState::default()),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),
