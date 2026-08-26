@@ -2490,11 +2490,11 @@ mod tests {
         assert!(!explicit.is_retired());
         let before_deadline = explicit.snapshot().await.expect("live explicit snapshot");
         assert_eq!(before_deadline.remaining, Duration::from_millis(1));
-        let advertised_remaining_ms = before_deadline
-            .expires_at_unix_ms()
-            .saturating_sub(crate::media_sessions::unix_ms());
+        let wall_before = crate::media_sessions::unix_ms();
+        let advertised_expiry = before_deadline.expires_at_unix_ms();
+        let wall_after = crate::media_sessions::unix_ms();
         assert!(
-            (0..=1).contains(&advertised_remaining_ms),
+            advertised_expiry >= wall_before && advertised_expiry <= wall_after.saturating_add(1),
             "wire expiry uses the same paused monotonic clock as the actor"
         );
         {
