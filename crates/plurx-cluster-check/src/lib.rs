@@ -93,6 +93,8 @@ use production_serving_fence::ServingFence;
 
 mod failure_drills;
 mod named_runner;
+#[cfg(test)]
+mod storage_evidence;
 mod topology;
 pub use failure_drills::{
     validate_failure_drill_artifact, ClusterFailureDrillArtifact,
