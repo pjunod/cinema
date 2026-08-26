@@ -3029,7 +3029,7 @@ pub struct SessionInfo {
 #[derive(Clone, serde::Serialize)]
 #[serde(untagged)]
 pub enum HlsSessionInfo {
-    Live(SessionInfo),
+    Live(Box<SessionInfo>),
     Vod(crate::vodserve::VodSessionInfo),
 }
 
@@ -11094,7 +11094,7 @@ impl TranscodeManager {
         }
         self.session_status(session_id)
             .await
-            .map(HlsSessionInfo::Live)
+            .map(|status| HlsSessionInfo::Live(Box::new(status)))
     }
 
     /// Fenced behavior-neutral control for either HLS presentation. A newly
@@ -11162,7 +11162,7 @@ impl TranscodeManager {
             action,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
-            status: HlsSessionInfo::Live(status),
+            status: HlsSessionInfo::Live(Box::new(status)),
             platform,
         }))
     }

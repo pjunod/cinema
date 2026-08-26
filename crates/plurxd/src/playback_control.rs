@@ -1079,7 +1079,7 @@ enum RollingControlCommand {
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     Control {
-        request: OwnedLocalControlRequest,
+        request: Box<OwnedLocalControlRequest>,
         reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
     },
     Snapshot {
@@ -1209,7 +1209,7 @@ impl RollingControlActor {
                     let _ = reply.send(self.renew_at(Instant::now(), kind, source));
                 }
                 RollingControlCommand::Control { request, reply } => {
-                    let _ = reply.send(self.control_at(Instant::now(), request));
+                    let _ = reply.send(self.control_at(Instant::now(), *request));
                 }
                 RollingControlCommand::Snapshot { reply } => {
                     let _ = reply.send(self.snapshot_at(Instant::now()));
@@ -1285,7 +1285,10 @@ impl RollingControlHandle {
         };
         let (reply, response) = tokio::sync::oneshot::channel();
         self.sender
-            .send(RollingControlCommand::Control { request, reply })
+            .send(RollingControlCommand::Control {
+                request: Box::new(request),
+                reply,
+            })
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)?
@@ -2052,7 +2055,7 @@ mod tests {
         control
             .sender
             .send(RollingControlCommand::Control {
-                request: owned_control(&request),
+                request: Box::new(owned_control(&request)),
                 reply,
             })
             .await
