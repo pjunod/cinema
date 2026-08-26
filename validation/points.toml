@@ -3,7 +3,7 @@ version = 1
 [settings]
 profiles = ["commit", "ci", "full", "nightly"]
 artifact_dir = "target/validation"
-always_checks = ["catalog-contract", "history-regressions", "rust-gate", "rust-gate-ci"]
+always_checks = ["catalog-contract", "history-regressions"]
 audit_paths = [
   ".dockerignore",
   ".github/actions/**",
@@ -73,22 +73,21 @@ timeout_seconds = 60
 
 [[checks]]
 id = "rust-gate"
-title = "Rust format, lint, and workspace tests"
+title = "Rust format, lint, unit tests, and SQLite contracts"
 command = "make rust-check"
 profiles = ["commit", "full", "nightly"]
 requires = ["cargo", "make"]
 missing = "fail"
 timeout_seconds = 1800
 
-# The CI profile splits the local gate three ways so nothing runs twice per
-# push: clippy is lint.yml's whole job, and the replicated store member is the
-# cluster_auth job's whole job — `--exclude plurx-cluster-check` keeps feature
-# unification from dragging the hiqlite stack into this build, which is also
-# what makes this suite test plurx-core with the features plurxd actually
-# ships. Local profiles keep the one-command `make rust-check` above.
+# The CI profile splits the local gate so nothing runs twice per push: clippy
+# is lint.yml's whole job, while WAL, replicated Store, harness, and real-daemon
+# contracts run in parallel cluster jobs. Explicit test features keep those
+# processes out of this fast lane while plurx-core still resolves the Hiqlite
+# implementation shipped by plurxd. Local profiles keep `make rust-check`.
 [[checks]]
 id = "rust-gate-ci"
-title = "Rust format and workspace tests (CI split: clippy in lint.yml, replicated store in cluster_auth)"
+title = "Rust format, unit tests, and SQLite contracts (CI split)"
 command = "make ci-rust-gate"
 profiles = ["ci"]
 requires = ["cargo", "make"]
@@ -239,7 +238,7 @@ profiles = ["commit", "full", "nightly"]
 platforms = ["darwin", "linux"]
 requires = ["cargo", "make"]
 missing = "fail"
-timeout_seconds = 600
+timeout_seconds = 1800
 
 [[checks]]
 id = "offline-contract"
@@ -333,7 +332,7 @@ paths = [
   "spikes/hiqlite-m0/{Cargo.toml,Cargo.lock,src/lib.rs,tests/hiqlite_m0.rs}",
   "rust-toolchain.toml",
 ]
-checks = ["rust-gate"]
+checks = ["rust-gate", "rust-gate-ci"]
 
 [[points]]
 id = "persistence.upgrades"
@@ -345,7 +344,7 @@ paths = [
   "crates/plurx-core/src/store/sqlite/mod.rs",
   "crates/plurxd/tests/cluster_activation.rs",
 ]
-checks = ["rust-gate", "database-upgrades", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "cluster-auth"]
 depends_on = ["core.media"]
 
 [[points]]
@@ -391,7 +390,7 @@ paths = [
   "vendor/rust_decimal/**",
   "vendor/s3-simple/**",
 ]
-checks = ["rust-gate", "cluster-auth"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
 depends_on = ["core.media", "identity.access"]
 
 [[points]]
@@ -408,7 +407,7 @@ paths = [
   "crates/plurxd/src/playstart.rs",
   "crates/plurxd/src/transcode.rs",
 ]
-checks = ["rust-gate", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.auth", "identity.access"]
 
 [[points]]
@@ -427,7 +426,7 @@ paths = [
   "crates/plurxd/src/state.rs",
   "crates/plurxd/src/transcode.rs",
 ]
-checks = ["rust-gate", "cluster-auth", "security-boundaries"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries"]
 depends_on = ["cluster.membership", "cluster.auth", "identity.access"]
 
 [[points]]
@@ -454,7 +453,7 @@ paths = [
   "scripts/cluster-page-latency",
   "tests/benchmark/test_cluster_page_latency.py",
 ]
-checks = ["rust-gate", "cluster-auth", "benchmark-contract", "web-static"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "benchmark-contract", "web-static"]
 depends_on = ["cluster.auth"]
 
 [[points]]
@@ -470,7 +469,7 @@ paths = [
   "crates/plurxd/src/http/{cluster,internal_media_sessions,peer_transport}.rs",
   "plurx.example.toml",
 ]
-checks = ["rust-gate", "api-wire", "user-journey", "resource-bounds"]
+checks = ["rust-gate", "rust-gate-ci", "api-wire", "user-journey", "resource-bounds"]
 depends_on = ["core.media", "persistence.upgrades"]
 
 [[points]]
@@ -499,7 +498,7 @@ paths = [
   "docs/FEATURES.md",
   "docs/REQUIREMENTS.md",
 ]
-checks = ["rust-gate"]
+checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
@@ -512,7 +511,7 @@ paths = [
   "crates/plurxd/src/http/items.rs",
   "docs/METADATA*.md",
 ]
-checks = ["rust-gate"]
+checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -527,7 +526,7 @@ paths = [
   "crates/plurxd/src/http/{auth,keys,users}.rs",
   "docs/SECURITY.md",
 ]
-checks = ["rust-gate", "security-boundaries", "credential-encryption"]
+checks = ["rust-gate", "rust-gate-ci", "security-boundaries", "credential-encryption"]
 depends_on = ["core.media", "server.api"]
 
 [[points]]
@@ -559,7 +558,7 @@ paths = [
   "scripts/vod-probe-stub",
   "tests/playback/**",
 ]
-checks = ["rust-gate", "web-static", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "playback-shaping", "playback-smoke", "playback-recovery", "resource-bounds", "playback-exhaustive"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -573,7 +572,7 @@ paths = [
   "crates/plurxd/src/http/mod.rs",
   "crates/plurxd/src/http/{trakt,watch}.rs",
 ]
-checks = ["rust-gate", "user-journey"]
+checks = ["rust-gate", "rust-gate-ci", "user-journey"]
 depends_on = ["core.media", "server.api", "library.catalog"]
 
 [[points]]
@@ -631,7 +630,7 @@ paths = [
   "crates/plurx-compat-plex/**",
   "crates/plurxd/src/http/plex.rs",
 ]
-checks = ["rust-gate"]
+checks = ["rust-gate", "rust-gate-ci"]
 depends_on = ["server.api", "api.contract", "playback.pipeline"]
 
 [[points]]
@@ -651,7 +650,7 @@ paths = [
   "tests/ui-structure.golden",
   "tests/web/**",
 ]
-checks = ["rust-gate", "web-static", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
+checks = ["rust-gate", "rust-gate-ci", "web-static", "web-membership", "reader-browser", "web-layout", "playback-smoke", "playback-exhaustive"]
 depends_on = ["server.api", "api.contract", "identity.access", "metadata.enrichment", "playback.pipeline"]
 
 [[points]]
@@ -710,7 +709,7 @@ paths = [
   "scripts/container-smoke",
   "tests/operations/**",
 ]
-checks = ["rust-gate", "operations-contract", "container-runtime", "resource-bounds"]
+checks = ["rust-gate", "rust-gate-ci", "operations-contract", "container-runtime", "resource-bounds"]
 depends_on = ["server.api"]
 
 [[points]]

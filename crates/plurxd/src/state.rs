@@ -2410,9 +2410,21 @@ impl JobManager {
     /// a voter in ten minutes, and this loop has to start scheduling then
     /// without a restart. The individual leases are gated too, but skipping the
     /// tick keeps a learner from doing the reads and the log noise as well.
+    ///
+    /// The cluster integration feature exposes a process-
+    /// local cadence override so real-daemon tests can wait on scheduler-owned
+    /// prerequisites without adding a full minute to every fixture.
     pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         self.scan_on_startup().await;
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        #[cfg(feature = "cluster-integration-tests")]
+        let interval = std::env::var("PLURX_TEST_SCHEDULER_TICK_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|milliseconds| (10..=60_000).contains(milliseconds))
+            .map_or(Duration::from_secs(60), Duration::from_millis);
+        #[cfg(not(feature = "cluster-integration-tests"))]
+        let interval = Duration::from_secs(60);
+        let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
             self.schedule_tick(&transcode).await;
