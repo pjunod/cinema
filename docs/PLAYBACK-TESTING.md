@@ -133,19 +133,17 @@ across the target hardware.
 
 ## Film-addressed VOD — enable it and prove the client contract
 
-The web player always asks for the VOD presentation, but the server honors the
-request only while the operator opt-in is enabled. New installations therefore
-retain the legacy presentation until an administrator changes the setting.
+Every HLS client asks for the VOD presentation, and the server treats an absent
+setting as enabled. There is no live-HLS fallback.
 
 In the web app, open **Settings → Playback → Film-addressed VOD**:
 
-1. Set **Build indexes** to at least every 15 minutes, choose the working-set
-   budget, and save. A title safely keeps the live presentation until its
-   node-local fragment index exists.
-2. Enable **VOD presentation for new web sessions** and save again. The change
-   applies to sessions opened after the save; an existing player is untouched.
-3. To roll back, clear that checkbox. The client may continue to declare VOD,
-   but the server ignores the declaration while the gate is off.
+1. Leave **Build indexes** at its 15-minute default or choose another nonzero
+   cadence, set the working-set budget, and save.
+2. Leave **Accept VOD session creation** enabled. The change applies to sessions
+   opened after a save; an existing player is untouched.
+3. For maintenance, clearing the checkbox refuses new HLS sessions with
+   `vod_disabled`. It does not restore the removed live engine.
 
 The equivalent administrative request is:
 
@@ -185,9 +183,9 @@ The last case is a deterministic browser suspension surrogate. It proves the
 player/session contract but does not claim that an operating system slept. The
 nynuc release protocol still closes the laptop or sleeps the browser host
 mid-film and checks the same session after wake. Transcode-rung VOD remains
-disabled until the open P2/D6 device measurement establishes that AVPlayer and
-Media3 tolerate the planned EXTINF timing; such a request deliberately keeps
-the live presentation.
+unavailable until the open P2/D6 device measurement establishes that AVPlayer
+and Media3 tolerate the planned EXTINF timing; such a request returns the typed
+`vod_transcode_unavailable` refusal.
 
 ## Network shaping — a bandwidth cliff you can reproduce and timestamp
 

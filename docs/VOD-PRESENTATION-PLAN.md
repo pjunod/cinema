@@ -1,5 +1,14 @@
 # VOD presentation — every title is a film, not a broadcast
 
+> **Cutover ruling — 2026-08-25.** The staged fallback and default-off rollout
+> in this plan are superseded by
+> [VOD-CUTOVER.md](VOD-CUTOVER.md). Production HLS creation is VOD-only:
+> omitted presentation means VOD, unsupported classes fail typed, and neither
+> the setting nor an eligibility miss restores the growing live engine. The
+> older text remains below as the implementation history and measurement map;
+> where it says an ineligible request keeps or falls back to live HLS, the
+> cutover ruling controls.
+
 **Status:** M0 ACCEPTED, M1 AUTHORIZED with amendments — P0 failed clause (b)
 as v2 wrote it, rulings A1–A3 amended §2.1/§2.2/§2.3/§6/§9 accordingly, and
 D6 stays open pending the device halves. Results are §12; the rulings are
@@ -123,9 +132,8 @@ segments), a completed-VOD assembly path (`produce::assemble` →
 
 ## 2. The presentation contract
 
-Everything in this section is normative for the new shape. The legacy live
-shape remains in the codebase, served to clients that do not opt in
-(§2.7), and to NULL-duration files (§2.6).
+Everything in this section is normative for the new shape. The cutover ruling
+above supersedes the original compatibility exceptions in §2.6 and §2.7.
 
 ### 2.1 The playlist — immutable, complete, film-addressed
 
@@ -428,24 +436,22 @@ the owner of media, timeline, and playlist identity.
   from session scratch to store working set; the reporting surface
   (`hold_reason`, `resume_below_*`) is unchanged.
 
-### 2.6 What stays live
+### 2.6 Unplannable sources
 
-Files with NULL/unprobed duration cannot be planned; they keep today's
-live presentation end-to-end (and remain the reason the legacy path is not
-deleted server-side). A follow-up worth doing but out of scope here:
-probe-at-import so the population shrinks toward zero. Genuinely unbounded
-sources (a future live-TV feature) would use the legacy path by nature.
+Files with NULL/unprobed duration cannot be planned and now receive the typed
+`vod_source_unsupported` refusal. Probe-at-import should shrink that population
+toward zero. A future genuinely unbounded live-TV feature would need a separate
+presentation and API; it does not retain this film-playback engine as a hidden
+fallback.
 
-### 2.7 Rollout mechanics — the client asks for it
+### 2.7 Session creation — VOD or a typed refusal
 
-A new create-body field `presentation: "vod"` (absent = legacy) declares
-that the client understands the VOD contract. The server honors it only
-when the setting `playback.vod_presentation` is enabled (default off until
-M7). This is the entire compatibility story: old clients never see a new
-shape, new clients on old servers get the legacy shape and keep their
-machinery (which is why client compensations are deleted only in M8, after
-the fleet flips). No wire version, no double-serving, no migration window
-where a shipped client breaks.
+`presentation: "vod"` confirms the client contract; absent also means VOD.
+Any other explicit value returns `live_presentation_removed`. The setting
+`playback.vod_presentation` is a fail-closed maintenance switch, default on:
+when explicitly disabled it returns `vod_disabled` rather than changing
+presentation. Successful creates always acknowledge `vod:true`, and every
+shipped client rejects a response that does not.
 
 ## 3. Server work plan
 

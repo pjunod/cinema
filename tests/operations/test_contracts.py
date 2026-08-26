@@ -405,6 +405,8 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("rustup which --toolchain 1.97.1 rustc", cluster)
         self.assertNotIn("CARGO: rustup run 1.97.1 cargo", cluster)
         self.assertIn("run: make cluster-check", cluster)
+        self.assertIn("name: Verify the cluster fixture generator", cluster)
+        self.assertIn("command -v ffmpeg", cluster)
         self.assertIn("run: make hiqlite-spike", cluster)
         self.assertIn("uses: ./.github/actions/ffmpeg", cluster)
         self.assertIn('major: "6"', cluster)
@@ -437,6 +439,7 @@ class OperationsContractCase(unittest.TestCase):
         build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
         self.assertIn("name: Retain release binary for push and tag runs", build)
         self.assertIn("if: github.event_name == 'push'", build)
+        self.assertIn("continue-on-error: true", build)
         self.assertIn("name: plurxd-${{ matrix.target }}", build)
 
     def test_release_registry_and_weekly_readiness_match_ci(self):
@@ -574,6 +577,9 @@ class OperationsContractCase(unittest.TestCase):
         )
         switch = script.read_text()
         self.assertIn("gh variable set CI_RUNNER_MODE", switch)
+        self.assertIn("gh variable list", switch)
+        self.assertNotIn("2>/dev/null", switch)
+        self.assertIn("new workflow runs will use", switch)
         self.assertIn("self-hosted|github", switch)
 
     def test_every_ffmpeg_lane_pins_the_build_it_asserts_against(self):

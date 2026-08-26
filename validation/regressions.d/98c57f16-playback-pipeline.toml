@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["98c57f16"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained plurxd router regressions persist a real fragment index and require eligible copy requests to create immutable VOD, explicit live requests to return typed 410, deferred rung and subtitle-burn transcodes to return typed 501 instead of entering the removed engine, and the resulting VOD handle to remain visible in the shared activity inventory until teardown; the focused VOD suite separately retains the session, rendition, eviction, restart-adoption, and typed-refusal lifecycle exercised by the same Rust gate."

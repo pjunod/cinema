@@ -561,6 +561,47 @@
       : "prompt";
   }
 
+  // A persistent supply stall has one restart budget, so spend it on the rung
+  // the same Auto controller would choose from the link evidence already in
+  // hand. Falling back to `null` preserves the server's bounded one-rung step
+  // when the player has no trustworthy ladder or estimate yet.
+  function stallRecoveryTargetHeight({
+    method,
+    quality = "auto",
+    kind = null,
+    ladder = [],
+    currentHeight = null,
+    estimateKbps = null,
+    recentEstimateKbps = null,
+    recentEstimateAtMs = null,
+    nowMs = 0,
+    defaults = AUTO_DEFAULTS,
+  } = {}) {
+    const current = Number(currentHeight);
+    if (
+      method !== "transcode" ||
+      qualityForce(quality) !== "auto" ||
+      kind !== "supply" ||
+      !(current > 0)
+    ) {
+      return null;
+    }
+    const decision = decideRung({
+      ladder,
+      currentHeight: current,
+      estimateKbps,
+      recentEstimateKbps,
+      recentEstimateAtMs,
+      runwaySeconds: 0,
+      activeSupplyStall: true,
+      nowMs,
+      defaults,
+    });
+    return decision.height > 0 && decision.height < current
+      ? decision.height
+      : null;
+  }
+
   // Bind a transcode restart to the exact session that stalled. The server
   // owns Auto rung normalization, so a plain create would only reproduce the
   // same unsustainable rung and spend the client's one recovery attempt.
@@ -935,6 +976,7 @@
     initialRoute,
     fallbackAction,
     stallRecoveryAction,
+    stallRecoveryTargetHeight,
     stallReopenSessionOptions,
     fallbackResetBeforeOpen,
     parseStreamFailure,

@@ -317,9 +317,8 @@ pub mod keys {
     /// Nothing reads an index yet; a file without one keeps today's
     /// presentation, so this job is invisible to every client either way.
     pub const VOD_INDEX_MINS: &str = "playback.vod_index_mins";
-    /// Server-side half of the VOD presentation opt-in (plan §2.7). Off by
-    /// default: even a client that sends `presentation:"vod"` keeps today's
-    /// live presentation until an operator turns this on.
+    /// VOD availability kill switch. Absent/on accepts immutable VOD session
+    /// creation; `0` refuses it. It never selects the removed live HLS path.
     pub const VOD_PRESENTATION: &str = "playback.vod_presentation";
     /// Node-wide byte budget for un-admitted VOD rendition working sets.
     /// Absent takes the built-in default. A parsed zero is refused at the
