@@ -1461,6 +1461,14 @@ async function startServer(options, fixtureDirectory) {
     const detail = await api(baseUrl, `/items/${item.id}`, { token });
     for (const file of detail.files || []) files.set(file.filename, { ...file, item_id: item.id, title: item.title });
   }
+  if (options.enable_auto_abr) {
+    process.stdout.write("AUTO    enable in-play Auto quality adjustment\n");
+    await api(baseUrl, "/settings", {
+      token,
+      method: "PUT",
+      body: { playback_auto_abr: true },
+    });
+  }
   if (options.enable_vod) {
     process.stdout.write("INDEX   enable VOD and wait for the node-local fragment pass\n");
     await api(baseUrl, "/settings", {
@@ -2802,7 +2810,15 @@ async function runSuite(manifest, options, dependencies = {}) {
   const wanted = new Set(plan.cases.map((testCase) => testCase.fixture));
   const corpus = await (dependencies.buildFixtures || buildFixtures)(manifest, options, wanted);
   process.stdout.write("\nSTART   isolated plurx server\n");
-  const serverOptions = requiresVod ? { ...options, enable_vod: true } : options;
+  // A shaped-cliff case is evidence for the in-play Auto controller. Starting
+  // the isolated server with that controller disabled only exercises the
+  // independent persistent-stall watchdog and can make a correct rung switch
+  // miss the suite's cliff-relative recovery deadline.
+  const serverOptions = {
+    ...options,
+    ...(requiresVod ? { enable_vod: true } : {}),
+    ...(shapedCases.length ? { enable_auto_abr: true } : {}),
+  };
   const server = await (dependencies.startServer || startServer)(serverOptions, corpus.directory);
   const missing = manifest.fixtures
     .filter((fixture) => wanted.has(fixture.id))
