@@ -2988,8 +2988,34 @@ let ATTEMPT_SEQ=0;
 // Every full play() open supersedes the previous one, including an older call
 // still awaiting a decision or session. The token is independent of PLAYER so
 // it survives the point where a successful open replaces that object.
-let PLAY_OPEN_SEQ=0;
-let REPLAY_OPEN_PROMISE=null;
+function createPlaybackOpenGate(){
+  let sequence=0, replayAttempt=null;
+  const current=attempt=>!!attempt&&attempt.token===sequence;
+  return {
+    begin(kind){
+      if(kind==="replay"&&replayAttempt&&current(replayAttempt)) return null;
+      const next=sequence+1;
+      if(!Number.isSafeInteger(next)) throw new RangeError("playback open sequence exhausted");
+      const attempt=Object.freeze({token:next,kind:kind==="replay"?"replay":"open"});
+      sequence=next;
+      if(attempt.kind==="replay") replayAttempt=attempt;
+      return attempt;
+    },
+    current,
+    finish(attempt){ if(replayAttempt===attempt) replayAttempt=null; },
+    invalidate(){
+      const next=sequence+1;
+      if(!Number.isSafeInteger(next)) throw new RangeError("playback open sequence exhausted");
+      sequence=next;
+    },
+    acceptResource(attempt,resource,release){
+      if(current(attempt)) return true;
+      if(resource!=null&&typeof release==="function") release(resource);
+      return false;
+    },
+  };
+}
+const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Set by a caller that is about to re-enter play() for a reason play()
 // cannot infer — a quality change looks exactly like a resume from the
 // inside, and mislabelling it would put restart timings in the cold-start
@@ -6396,9 +6422,9 @@ function qualityLabel(){
   return h?`${h}p`:"Auto";
 }
 
-async function play(fileId, title, resumeMs, knownDurMs, meta){
-  const openToken=++PLAY_OPEN_SEQ;
-  const openIsCurrent=()=>PLAY_OPEN_SEQ===openToken;
+async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt){
+  const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
+  const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
   // Consume both one-shot inputs before the first await. An overlapping play
   // may set its own reason while this decision is in flight; reading the
   // shared slot afterwards would steal the newer attempt's attribution.
@@ -6562,9 +6588,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
       failedHeights:new Set()},
     waitAt:null, waitRunway:null, waitTimer:null, waitReported:false,
     stallsByKind:null, stallRecoveries:0, recoveringStall:null, stallPrompt:false,
-    burnedSub:preBurn, vod:false, openToken, };
+    burnedSub:preBurn, vod:false, openToken:openAttempt.token, };
   const openedPlayer=PLAYER;
-  const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer&&PLAYER.openToken===openToken;
+  const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
+    &&PLAYER.openToken===openAttempt.token;
   newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
   if(PLAYER.curAudio<0) PLAYER.curAudio=0;
   const initialAudio=selectedAudioIndex(PLAYER);
@@ -6620,6 +6647,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
       if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
       return;
     }
+    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return;
     if(!openIsAttached()){
       releaseSession(info&&info.session_id);
       return;
@@ -6645,7 +6673,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     setLoading(true,"Preparing the stream…",
       why? `${why} — sending it as HLS so the player can buffer ahead`
          : "remuxing to HLS — keeping the original video");
-    try{ if(!await startCopyHls(video, startSec, openIsAttached)) return; }
+    try{ if(!await startCopyHls(video, startSec, openIsAttached, openAttempt)) return; }
     catch(e){
       if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
       return;
@@ -6713,7 +6741,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
 // `live` (optional) is re-checked after the await: a seek or audio switch that
 // has since been superseded must not attach, or two hls.js instances end up
 // pulling two server sessions at once. Returns false when it bailed.
-async function startCopyHls(v, startSec, live){
+async function startCopyHls(v, startSec, live, openAttempt){
   const aidx=selectedAudioIndex(PLAYER);
   const src=PLAYER.source||{}, track=PLAYER.audio&&PLAYER.audio[PLAYER.curAudio];
   const codec=track&&track.codec;
@@ -6759,6 +6787,8 @@ async function startCopyHls(v, startSec, live){
     v.src=remuxUrl(base,aidx,from); armStall(from,20000); v.play().catch(()=>{});
     return true;
   }
+  if(openAttempt&&!PLAY_OPEN_GATE.acceptResource(
+    openAttempt,info&&info.session_id,releaseSession)) return false;
   if(live && !live()){
     releaseSession(info&&info.session_id);
     return false;
@@ -8125,12 +8155,14 @@ function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.
 // session, control generation, and sequence space before the first frame.
 function replayEnded(){
   const p=PLAYER;
-  if(!p||!p.fileId||REPLAY_OPEN_PROMISE) return false;
+  if(!p||!p.fileId) return false;
+  const openAttempt=PLAY_OPEN_GATE.begin("replay");
+  if(!openAttempt) return false;
   PENDING_ATTEMPT_REASON="replay";
-  const opening=Promise.resolve(play(p.fileId,p.title||"",0,p.knownDur||p.durMs||0,p.meta));
-  REPLAY_OPEN_PROMISE=opening;
+  const opening=Promise.resolve(
+    play(p.fileId,p.title||"",0,p.knownDur||p.durMs||0,p.meta,openAttempt));
   opening.catch(()=>{}).finally(()=>{
-    if(REPLAY_OPEN_PROMISE===opening) REPLAY_OPEN_PROMISE=null;
+    PLAY_OPEN_GATE.finish(openAttempt);
   });
   return true;
 }
@@ -9739,7 +9771,7 @@ async function reportProgress(fileId, ended){
 function closePlayer(){
   // Fence a full play() still awaiting its decision/session. PLAYER identity
   // alone cannot do that because close intentionally keeps the object around.
-  PLAY_OPEN_SEQ+=1;
+  PLAY_OPEN_GATE.invalidate();
   const video=document.getElementById("video");
   const player=document.getElementById("player");
   if(player){ player.classList.remove("audio"); player.style.backgroundImage=""; }

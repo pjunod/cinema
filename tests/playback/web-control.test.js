@@ -352,6 +352,22 @@ async function main() {
   triggerDeferred.resolve(response({generation:bootstrap().generation,control_epoch:7,sequence:1}));
   await flush();
 
+  const acceptedTypedSnapshot=snapshot(13_000,"failed");
+  acceptedTypedSnapshot.observation={
+    decoder_state:"failed",error_code:"decoder",error_detail:"videoDecodeError",
+  };
+  const acceptedTypedReporter=new control.Reporter({
+    bootstrap:bootstrap(),
+    clientInstanceId:"acacacac-acac-4cac-8cac-acacacacacac",
+    snapshot:()=>acceptedTypedSnapshot,
+    send:async (_url,request)=>response(request),
+  }).start();
+  await flush();
+  assert.deepEqual(acceptedTypedReporter.legacyContext().observation,{
+    decoder_state:"failed",error_code:"decoder",error_detail:"videoDecodeError",
+  },"an accepted typed observation survives in legacy recovery context");
+  acceptedTypedReporter.stop();
+
   const endTimers=[];
   const endingSnapshot=snapshot(60_000,"ended");
   endingSnapshot.demand="end";
@@ -496,41 +512,113 @@ async function main() {
   video.error=null; player.controlRenderOverride=null; player.controlObservationOverride=null;
 
   const replayCalls=[];
-  const replayDone=deferred();
+  const firstReplayDone=deferred(), secondReplayDone=deferred();
   const replayAdapter=new Function("playImpl",[
     "let PLAYER={fileId:'file-1',title:'Film',knownDur:90000,durMs:90000,meta:{kind:'movie'}};",
     "let PENDING_ATTEMPT_REASON=null;",
-    "let REPLAY_OPEN_PROMISE=null;",
+    shippedSource("createPlaybackOpenGate"),
+    "const PLAY_OPEN_GATE=createPlaybackOpenGate();",
     shippedSource("takePlaybackAttemptReason"),
     "function play(...args){ return playImpl(args,takePlaybackAttemptReason()); }",
     shippedSource("replayEnded"),
     "return {replayEnded,replacePlayer(value){PLAYER=value;},"+
-      "state:()=>({player:PLAYER,reason:PENDING_ATTEMPT_REASON,replayOpen:!!REPLAY_OPEN_PROMISE})};",
-  ].join("\n"))((args,reason)=>{ replayCalls.push({args,reason}); return replayDone.promise; });
+      "invalidate(){PLAY_OPEN_GATE.invalidate();},supersede(){PLAY_OPEN_GATE.begin('open');},"+
+      "state:()=>({player:PLAYER,reason:PENDING_ATTEMPT_REASON})};",
+  ].join("\n"))((args,reason)=>{
+    replayCalls.push({args,reason});
+    return replayCalls.length===1?firstReplayDone.promise:secondReplayDone.promise;
+  });
   assert.equal(replayAdapter.replayEnded(),true);
   replayAdapter.replacePlayer({fileId:"file-1",title:"Film replacement",knownDur:90000});
   assert.equal(replayAdapter.replayEnded(),false,"double-click cannot open two replay sessions");
-  assert.deepEqual(replayCalls[0],{
-    args:["file-1","Film",0,90000,{kind:"movie"}],reason:"replay",
-  });
+  assert.deepEqual(replayCalls[0].args.slice(0,5),
+    ["file-1","Film",0,90000,{kind:"movie"}]);
+  assert.equal(replayCalls[0].args[5].kind,"replay");
+  assert.equal(replayCalls[0].reason,"replay");
   assert.equal(replayAdapter.state().reason,null);
-  assert.equal(replayAdapter.state().replayOpen,true,
-    "the duplicate guard survives replacement of the ended PLAYER object");
-  replayDone.resolve();
+  replayAdapter.invalidate();
+  assert.equal(replayAdapter.replayEnded(),true,
+    "close invalidation allows replay even if the superseded replay promise never settles");
+  assert.equal(replayCalls.length,2);
+  secondReplayDone.resolve();
   await flush();
-  assert.equal(replayAdapter.state().replayOpen,false);
+  assert.equal(replayAdapter.state().reason,null);
 
   const reasonAdapter=new Function([
     "let PENDING_ATTEMPT_REASON=null;",
     shippedSource("takePlaybackAttemptReason"),
-    "return {set(value){PENDING_ATTEMPT_REASON=value;},take:takePlaybackAttemptReason};",
+    "return {async begin(value,wait){PENDING_ATTEMPT_REASON=value;"+
+      "const captured=takePlaybackAttemptReason(); await wait; return captured;}};",
   ].join("\n"))();
-  reasonAdapter.set("quality");
-  const qualityReason=reasonAdapter.take();
-  reasonAdapter.set("subtitle-off");
-  const subtitleReason=reasonAdapter.take();
+  const qualityDone=deferred(), subtitleDone=deferred();
+  const qualityPending=reasonAdapter.begin("quality",qualityDone.promise);
+  const subtitlePending=reasonAdapter.begin("subtitle-off",subtitleDone.promise);
+  subtitleDone.resolve();
+  const subtitleReason=await subtitlePending;
+  qualityDone.resolve();
+  const qualityReason=await qualityPending;
   assert.equal(qualityReason,"quality");
   assert.equal(subtitleReason,"subtitle-off");
+
+  const gateFactory=new Function([
+    shippedSource("createPlaybackOpenGate"),"return createPlaybackOpenGate;",
+  ].join("\n"))();
+  const replayGate=gateFactory();
+  const staleReplayAttempt=replayGate.begin("replay");
+  assert.equal(replayGate.begin("replay"),null);
+  replayGate.begin("open");
+  const successorReplayAttempt=replayGate.begin("replay");
+  assert.ok(successorReplayAttempt,
+    "a newer full open supersedes a never-settling replay claim");
+  replayGate.finish(staleReplayAttempt);
+  assert.equal(replayGate.current(successorReplayAttempt),true,
+    "a stale replay completion cannot clear or supersede its successor");
+  const decisionGate=gateFactory(), decisionEvents=[];
+  const oldDecisionDone=deferred(), newDecisionDone=deferred();
+  const oldDecisionAttempt=decisionGate.begin("open");
+  const oldDecisionFlow=(async()=>{
+    await oldDecisionDone.promise;
+    if(decisionGate.current(oldDecisionAttempt)) decisionEvents.push("old");
+  })();
+  const newDecisionAttempt=decisionGate.begin("open");
+  const newDecisionFlow=(async()=>{
+    await newDecisionDone.promise;
+    if(decisionGate.current(newDecisionAttempt)) decisionEvents.push("new");
+  })();
+  newDecisionDone.resolve(); await newDecisionFlow;
+  oldDecisionDone.resolve(); await oldDecisionFlow;
+  assert.deepEqual(decisionEvents,["new"],"reversed decisions cannot revive a superseded open");
+  const closedDecisionDone=deferred();
+  const closedDecisionAttempt=decisionGate.begin("open");
+  const closedDecisionFlow=(async()=>{
+    await closedDecisionDone.promise;
+    if(decisionGate.current(closedDecisionAttempt)) decisionEvents.push("closed");
+  })();
+  decisionGate.invalidate(); closedDecisionDone.resolve(); await closedDecisionFlow;
+  assert.deepEqual(decisionEvents,["new"],"close fences a decision still in flight");
+
+  const sessionGate=gateFactory(), attachedSessions=[], releasedSessions=[];
+  const sessionFlow=async(attempt,done)=>{
+    const sessionId=await done.promise;
+    if(sessionGate.acceptResource(attempt,sessionId,id=>releasedSessions.push(id)))
+      attachedSessions.push(sessionId);
+  };
+  const oldSessionDone=deferred(), newSessionDone=deferred();
+  const oldSessionAttempt=sessionGate.begin("open");
+  const oldSessionFlow=sessionFlow(oldSessionAttempt,oldSessionDone);
+  const newSessionAttempt=sessionGate.begin("open");
+  const newSessionFlow=sessionFlow(newSessionAttempt,newSessionDone);
+  newSessionDone.resolve("session-new"); await newSessionFlow;
+  oldSessionDone.resolve("session-old"); await oldSessionFlow;
+  assert.deepEqual(attachedSessions,["session-new"]);
+  assert.deepEqual(releasedSessions,["session-old"],
+    "a session returned to a stale open is released rather than attached");
+  const closedSessionDone=deferred();
+  const closedSessionAttempt=sessionGate.begin("open");
+  const closedSessionFlow=sessionFlow(closedSessionAttempt,closedSessionDone);
+  sessionGate.invalidate(); closedSessionDone.resolve("session-closed"); await closedSessionFlow;
+  assert.deepEqual(releasedSessions,["session-old","session-closed"],
+    "close releases a session whose open completed late");
 
   let replayClicks=0,elementPlays=0,activities=0;
   const endedToggle=new Function("document","replayEnded","playerActivity",[
@@ -555,8 +643,9 @@ async function main() {
   const playSource=shippedSource("play");
   assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<playSource.indexOf("await api("),
     "play captures its one-shot reason before its first await");
-  assert.match(playSource,/openToken=\+\+PLAY_OPEN_SEQ/);
-  assert.match(playSource,/if\(!openIsAttached\(\)\)[\s\S]*releaseSession/);
+  assert.match(playSource,/PLAY_OPEN_GATE\.current\(openAttempt\)/);
+  assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
+  assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");
