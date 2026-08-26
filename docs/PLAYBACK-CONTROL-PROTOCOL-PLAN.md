@@ -12,6 +12,7 @@ giving VOD, automatic quality, subtitles, and clustered handoff one shared
 source of playback truth.
 
 Companions: [PLAYBACK.md](PLAYBACK.md),
+[PLAYBACK-CONTROL-STATUS.md](PLAYBACK-CONTROL-STATUS.md),
 [ADAPTIVE-QUALITY.md](ADAPTIVE-QUALITY.md),
 [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md),
 [CLUSTERING-PLAN.md](CLUSTERING-PLAN.md), and
