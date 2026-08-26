@@ -36,6 +36,43 @@ class OperationsContractCase(unittest.TestCase):
                 self.assertIn('"--mute-audio"', script)
                 self.assertIn("HardwareMediaKeyHandling", script)
 
+    def test_ui_baseline_starts_poll_observation_after_route_settles(self):
+        script = read("scripts/ui-baseline")
+
+        self.assertIn('if name in {"home", "activity", "settings"}:', script)
+        self.assertIn('[data-phase="settled"]', script)
+        self.assertIn('wait_until="domcontentloaded"', script)
+        self.assertIn("activity_poll_paused = pause_activity_polling", script)
+        self.assertIn('page.wait_for_load_state("networkidle"', script)
+        self.assertIn("resume_activity_polling(page)", script)
+        self.assertLess(
+            script.index('[data-phase="settled"]'),
+            script.index("resume_activity_polling(page)", script.index("def capture_route")),
+        )
+        self.assertLess(
+            script.index("resume_activity_polling(page)", script.index("def capture_route")),
+            script.index("page.wait_for_timeout(args.settle_ms)"),
+        )
+
+    def test_ui_baseline_releases_and_retries_real_player_captures(self):
+        script = read("scripts/ui-baseline")
+
+        self.assertIn("releaseSession(PLAYER.sessionId);", script)
+        self.assertIn(
+            'call == "GET /api/v1/files/<id>/direct"',
+            script,
+        )
+        cleanup = script.index(
+            "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
+        )
+        self.assertNotIn("closePlayer();", script[cleanup : cleanup + 500])
+        self.assertIn('attempts = 2 if route.get("player") else 1', script)
+        self.assertIn('print(f"RETRY   {key}: {e}"', script)
+        self.assertLess(
+            cleanup,
+            script.index("page.close()", script.index("def capture_route")),
+        )
+
     def test_rust_test_artifacts_omit_replicated_debug_information(self):
         cargo = read("Cargo.toml")
         profile = cargo.split("[profile.test]", 1)[1].split("[", 1)[0]
@@ -272,8 +309,8 @@ class OperationsContractCase(unittest.TestCase):
         android_device = workflow.split("\n  android_device:", 1)[1].split(
             "\n  coverage:", 1
         )[0]
-        self.assertIn("if: ${{ false }}", web_layout)
-        self.assertIn("if: ${{ false }}", android_device)
+        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
+        self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
@@ -297,6 +334,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("      - cluster_auth", pr_gate)
         self.assertIn("      - cluster_wal", pr_gate)
         self.assertIn("      - cluster_daemon", pr_gate)
+        self.assertIn("      - web_layout", pr_gate)
+        self.assertIn("      - vod_web", pr_gate)
+        self.assertIn("      - android_device", pr_gate)
         self.assertNotIn("      - hiqlite_spike", pr_gate)
         self.assertIn("needs: scope", workflow)
         self.assertNotIn("github.event_name == 'pull_request' && github.ref == 'refs/heads/main'", workflow)
@@ -430,12 +470,44 @@ class OperationsContractCase(unittest.TestCase):
         makefile = read("Makefile")
         self.assertIn('if [ "$${PLURX_ANDROID_IMAGE_READY:-}" = "1" ]', makefile)
 
-        # The emulator restores a cached AVD snapshot and never saves over it.
-        self.assertIn("key: avd-35-google_apis-tv_1080p", workflow)
-        self.assertEqual(workflow.count("profile: tv_1080p"), 2)
+        # A restored AVD made the Compose focus suite fail after the same
+        # emulator passed from a cold image. Keep the SDK outside the checkout
+        # (so post-job hashFiles cannot traverse it) and build a disposable AVD
+        # for every run instead of treating the snapshot as portable state.
+        self.assertIn('echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk"', workflow)
+        self.assertIn('echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk"', workflow)
+        self.assertNotIn("name: Cache the AVD snapshot", workflow)
+        self.assertIn("force-avd-creation: true", workflow)
         self.assertIn("-no-snapshot-save", workflow)
+        self.assertIn("api-level: 36", workflow)
+        self.assertIn("target: android-tv", workflow)
+        self.assertIn("arch: x86", workflow)
+        self.assertNotIn("arch: x86_64", workflow)
+        self.assertIn("profile: tv_1080p", workflow)
+        self.assertNotIn("clients/android/**/*.gradle*", workflow)
+        self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
+        android_device = workflow.split("  android_device:", 1)[1].split(
+            "\n  coverage:", 1
+        )[0]
+        self.assertEqual(
+            android_device.count("uses: reactivecircus/android-emulator-runner@v2"),
+            2,
+        )
+        self.assertIn("id: android_instrumentation", android_device)
+        self.assertIn("continue-on-error: true", android_device)
+        self.assertIn("Retry a pre-test emulator boot failure once", android_device)
+        self.assertIn(
+            "hashFiles('target/validation/android-instrumentation-started') == ''",
+            android_device,
+        )
+        self.assertIn(
+            "hashFiles('target/validation/android-instrumentation-started') != ''",
+            android_device,
+        )
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
+        self.assertIn("target/validation/android-instrumentation.txt", makefile)
+        self.assertIn("Android instrumentation did not report a passing suite", makefile)
 
         # The semantic proof reuses the cluster job's root target instead of
         # compiling the same Hiqlite/OpenRaft dependency graph a second time.

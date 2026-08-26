@@ -241,10 +241,7 @@ jobs:
   web_layout:
     name: web layout and accessibility
     needs: [scope, preflight]
-    # Deferred after consecutive PR failures in unrelated browser readiness
-    # probes. Keep the lane defined for a focused follow-up, but do not let it
-    # hold the learner-protocol merge.
-    if: ${{ false }}
+    if: needs.scope.outputs.web_layout == 'true'
     # Pinned for the same reason as `check`: a browser sweep still plays media
     # through ffmpeg. See .github/actions/ffmpeg.
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
@@ -270,6 +267,44 @@ jobs:
           version: "1.62.0"
       - name: Check every affected web layout
         run: make ui-check
+
+  vod_web:
+    name: film-addressed VOD browser acceptance
+    needs: [scope, preflight]
+    if: needs.scope.outputs.web_layout == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","ffmpeg-6"]') }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: vod-web
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-1.62.0
+      - uses: ./.github/actions/ffmpeg
+        with:
+          major: "6"
+      - uses: ./.github/actions/playwright
+        with:
+          version: "1.62.0"
+      - name: Build the exact server under test
+        run: cargo build --locked -p plurxd
+      - name: Run VOD browser acceptance
+        run: |
+          mkdir -p target/playback-lab/acceptance
+          chrome="$(python3 -c 'from playwright.sync_api import sync_playwright; p=sync_playwright().start(); print(p.chromium.executable_path); p.stop()')"
+          scripts/playback-lab run --suite vod --exclude-case seek-storm --browser chrome \
+            --chrome "$chrome" --json target/playback-lab/acceptance/vod.json
+          # The seek-storm case and stall-recovery suite are intentionally out
+          # of CI. See docs/VOD-SEEK-STORM-ACCEPTANCE-HANDOFF.md and
+          # docs/VOD-STALL-ACCEPTANCE-HANDOFF.md for restoration prompts.
 
   android_jvm:
     name: Android JVM tests and lint
@@ -307,7 +342,7 @@ jobs:
           path: |
             clients/android/.gradle-validation/caches
             clients/android/.gradle-validation/wrapper
-          key: gradle-${{ hashFiles('clients/android/**/*.gradle*', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Run unit tests and lint in the pinned Android toolchain
         run: |
@@ -384,17 +419,18 @@ jobs:
   android_device:
     name: Android instrumented UI tests
     needs: [scope, preflight]
-    # Deferred after consecutive emulator/focus failures unrelated to P6.
-    # Keep the lane defined for a focused follow-up, but do not let it hold the
-    # learner-protocol merge.
-    if: ${{ false }}
+    if: needs.scope.outputs.android_device == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
+      - name: Isolate the Android SDK from the repository checkout
+        run: |
+          echo "ANDROID_HOME=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$RUNNER_TEMP/android-sdk" >> "$GITHUB_ENV"
       - name: Provision or verify emulator acceleration
         run: |
           if [ "${RUNNER_ENVIRONMENT:-}" = "github-hosted" ]; then
@@ -427,43 +463,50 @@ jobs:
           path: |
             clients/android/.gradle-validation/caches
             clients/android/.gradle-validation/wrapper
-          key: gradle-${{ hashFiles('clients/android/**/*.gradle*', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          key: gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
           restore-keys: gradle-
       - name: Build app and instrumentation APKs in the pinned toolchain
         run: make android-instrumentation-build
-      # Booting a cold AVD costs minutes; a cached snapshot boots in seconds.
-      # The snapshot is created once per (api-level, profile) key by a throwaway
-      # emulator run, then every later run restores it and boots with
-      # -no-snapshot-save so test runs never mutate the cached image.
-      - name: Cache the AVD snapshot
-        uses: actions/cache@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: avd-35-google_apis-tv_1080p
-      - name: Create the AVD snapshot for caching
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
-          profile: tv_1080p
-          force-avd-creation: false
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: echo "Generated AVD snapshot for caching."
       - name: Run the Compose and TV focus suite on a disposable emulator
+        id: android_instrumentation
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
-          api-level: 35
-          target: google_apis
-          arch: x86_64
+          # Google's Android TV repository publishes API 36 for both x86 and
+          # x86_64 (and none for API 35). The x86_64 guest hangs its QEMU CPU
+          # threads under nested KVM on the lab runners; the x86 guest keeps
+          # the same TV/API contract without that broken boot path.
+          api-level: 36
+          target: android-tv
+          arch: x86
           profile: tv_1080p
-          force-avd-creation: false
+          force-avd-creation: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Retry a pre-test emulator boot failure once
+        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') == ''
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          # The upstream action checks boot completion and then sends one
+          # unretied unlock command. API 36 can briefly reconnect ADB between
+          # those commands. Retry the disposable AVD only when our script never
+          # started; an instrumentation failure is never retried or hidden.
+          api-level: 36
+          target: android-tv
+          arch: x86
+          profile: tv_1080p
+          force-avd-creation: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Propagate an instrumented-test failure without retrying it
+        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') != ''
+        run: exit 1
       - name: Upload Android test reports
         if: always()
         continue-on-error: true
@@ -473,6 +516,7 @@ jobs:
           path: |
             clients/android/app/build/reports/androidTests
             clients/android/app/build/outputs/androidTest-results
+            target/validation/android-instrumentation.txt
           if-no-files-found: warn
           retention-days: 1
 
@@ -649,6 +693,7 @@ jobs:
       - cluster_wal
       - cluster_daemon
       - web_layout
+      - vod_web
       - android_jvm
       - apple
       - android_device
@@ -667,6 +712,7 @@ jobs:
           CLUSTER_WAL_RESULT: ${{ needs.cluster_wal.result }}
           CLUSTER_DAEMON_RESULT: ${{ needs.cluster_daemon.result }}
           WEB_LAYOUT_RESULT: ${{ needs.web_layout.result }}
+          VOD_WEB_RESULT: ${{ needs.vod_web.result }}
           ANDROID_JVM_RESULT: ${{ needs.android_jvm.result }}
           APPLE_RESULT: ${{ needs.apple.result }}
           ANDROID_DEVICE_RESULT: ${{ needs.android_device.result }}
@@ -678,7 +724,7 @@ jobs:
             "$PREFLIGHT_RESULT" "$CHECK_RESULT" \
             "$CLUSTER_AUTH_RESULT" "$CLUSTER_WAL_RESULT" \
             "$CLUSTER_DAEMON_RESULT" \
-            "$WEB_LAYOUT_RESULT" \
+            "$WEB_LAYOUT_RESULT" "$VOD_WEB_RESULT" \
             "$ANDROID_JVM_RESULT" "$APPLE_RESULT" "$ANDROID_DEVICE_RESULT" \
             "$BUILD_RESULT" "$DOCKER_RESULT"; do
             case "$result" in

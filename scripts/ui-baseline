@@ -1051,6 +1051,33 @@ def freeze_timers(page):
     }""")
 
 
+def pause_activity_polling(page, name, timeout_ms):
+    """Hold the global poll while the route reaches its observation boundary.
+
+    A fixed 4.5-second observation window can contain either one or two 4s
+    activity ticks when it starts after a variable-length network-idle wait.
+    Pause the interval as soon as the route's chrome exists, let its immediate
+    poll finish, and restart the real interval only after the route settles.
+    This changes neither the endpoint nor its response; it makes the measured
+    polling window begin at a named boundary instead of at browser-load luck.
+    """
+    if name in {"activity", "auth"}:
+        return False
+    page.evaluate("""() => {
+      if (ACT_TIMER) clearInterval(ACT_TIMER);
+      ACT_TIMER = null;
+    }""")
+    page.wait_for_function("() => !ACT_POLLING", timeout=timeout_ms)
+    return True
+
+
+def resume_activity_polling(page):
+    """Start one fresh production polling period for the request inventory."""
+    page.evaluate("""() => {
+      if (!ACT_TIMER) ACT_TIMER = setInterval(pollActivity, 4000);
+    }""")
+
+
 # Undo everything a tab walk did to the page: the focus ring, and the rails and
 # document it scrolled while walking. Run before the shutter, so the picture is
 # still of the page at rest.
@@ -1170,7 +1197,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", lambda m: problems.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
     try:
-        response = page.goto(base_url + "/" + route["hash"], wait_until="networkidle",
+        response = page.goto(base_url + "/" + route["hash"], wait_until="domcontentloaded",
                              timeout=args.timeout)
         if response is not None and not response.ok:
             raise Fail(f"{name}: document responded {response.status}")
@@ -1192,6 +1219,26 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         if got != layout_id:
             raise Fail(f"{name}: asked for layout {layout_id!r}, the app resolved {got!r} "
                        "— its `surfaces` and this viewport disagree")
+        activity_poll_paused = pause_activity_polling(page, name, args.timeout)
+        # Unlike page.goto(..., wait_until="networkidle"), this wait begins
+        # after the global poll has been paused at the mounted route chrome.
+        # Slow artwork or an incremental listing can no longer spend an
+        # arbitrary part of the later 4.5s polling observation window.
+        page.wait_for_load_state("networkidle", timeout=args.timeout)
+        # Home, Activity and Settings expose an explicit settled phase. Start
+        # the polling observation window from that phase, not merely from the
+        # document's network-idle event: under a loaded runner the route's
+        # async render can finish after page.goto() returns, shortening the
+        # window enough to observe only one of Settings' two 2s ticks. That made
+        # an unchanged request inventory alternate between 2 and 3
+        # /scan/status calls. The phase is product state, so synchronizing on it
+        # preserves the request-count contract without baking a count or an
+        # endpoint into this harness.
+        if name in {"home", "activity", "settings"}:
+            page.wait_for_selector(
+                f'{container}[data-phase="settled"]', timeout=args.timeout)
+        if activity_poll_paused:
+            resume_activity_polling(page)
         # The app polls activity every 4s and the activity page re-renders every
         # 3s. Rather than stubbing either — the baseline has to be of the real
         # app — the capture waits out more than one full period, so it always
@@ -1262,9 +1309,37 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}
         for call in api_calls:
-            counted[call] = counted.get(call, 0) + 1
+            # Chromium is free to satisfy one direct-play video with one GET or
+            # several byte-range GETs. The baseline contract is that the real
+            # direct endpoint was used; its transport chunk count changes with
+            # decoder buffering and is not a UI or routing invariant. Control
+            # plane calls remain exact counts.
+            if route.get("player") and call == "GET /api/v1/files/<id>/direct":
+                counted[call] = 1
+            else:
+                counted[call] = counted.get(call, 0) + 1
         return focus, dict(sorted(counted.items())), dom
     finally:
+        # A context disappearing is not the same lifecycle as a viewer closing
+        # the player. Return an HLS capability immediately instead of leaving
+        # later layout captures to race the idle reaper, but do not call
+        # closePlayer(): its real viewer lifecycle correctly writes progress,
+        # while the baseline fixture must remain immutable across captures.
+        # The page may already have failed or closed, so cleanup is deliberately
+        # best-effort and cannot replace the verdict from the capture itself.
+        if route.get("player") and not page.is_closed():
+            try:
+                page.evaluate("""() => {
+                  if (PLAYER && PLAYER.sessionId) {
+                    releaseSession(PLAYER.sessionId);
+                    PLAYER.sessionId = null;
+                  }
+                  stopPlayerTimers();
+                  teardownHls();
+                }""")
+                page.wait_for_timeout(100)
+            except Exception:
+                pass
         page.close()
 
 
@@ -1464,19 +1539,34 @@ def run_capture(base_url, token, routes, args, out_dir):
                 (out_dir / layout_id).mkdir(parents=True, exist_ok=True)
 
             for layout_id, vp, name, route in triples:
-                context = new_context(browser, args, vp, layout_id, token, route)
                 key = f"{layout_id}|{name}@{vp_key(vp)}"
                 shot = out_dir / layout_id / f"{name}@{vp_key(vp)}.png"
-                try:
-                    focus_dump[key], request_dump[key], dom_dump[key] = capture_route(
-                        context, base_url, name, route, args, shot, layout_id)
-                    pixels[key] = hashlib.sha256(shot.read_bytes()).hexdigest()
-                    print(f"OK      {key}", flush=True)
-                except Exception as e:  # noqa: BLE001 — every failure is a gate failure
-                    failures.append(f"{key}: {e}")
-                    print(f"FAIL    {key}: {e}", flush=True)
-                finally:
-                    context.close()
+                # The player is the only capture that waits on a real media
+                # decision and decoder. A loaded one-voter fixture can lose one
+                # authority read even though the next request is healthy (CI
+                # observed exactly one miss between five successful plays).
+                # Retry the whole capture in a fresh browser context, never an
+                # individual assertion: a persistent product, accessibility,
+                # request-inventory, or frame failure still fails unchanged.
+                attempts = 2 if route.get("player") else 1
+                for attempt in range(attempts):
+                    if attempt:
+                        time.sleep(0.5)
+                    context = new_context(browser, args, vp, layout_id, token, route)
+                    try:
+                        focus_dump[key], request_dump[key], dom_dump[key] = capture_route(
+                            context, base_url, name, route, args, shot, layout_id)
+                        pixels[key] = hashlib.sha256(shot.read_bytes()).hexdigest()
+                        print(f"OK      {key}", flush=True)
+                        break
+                    except Exception as e:  # noqa: BLE001 — every failure is a gate failure
+                        if attempt + 1 < attempts:
+                            print(f"RETRY   {key}: {e}", flush=True)
+                            continue
+                        failures.append(f"{key}: {e}")
+                        print(f"FAIL    {key}: {e}", flush=True)
+                    finally:
+                        context.close()
         finally:
             browser.close()
     return {

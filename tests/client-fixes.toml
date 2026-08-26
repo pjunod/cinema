@@ -516,3 +516,19 @@ source = "clients/apple/Sources/PlayerController.swift"
 source_anchor = "static func isCompatibilityPlaybackFailure("
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testNoFailureIsBothAMediaVerdictAndANodeFault"
+
+[[fixes]]
+id = "android.ci-tv-focus-profile"
+commits = ["970511da"]
+source = ".github/workflows/ci.yml"
+source_anchor = "target: android-tv"
+test = "tests/operations/test_contracts.py"
+test_anchor = "test_ci_caches_are_keyed_to_what_they_cache"
+
+[[fixes]]
+id = "android.shelf-focus-requester-reentry"
+commits = ["ab0d4322"]
+source = "clients/android/app/src/main/java/tv/plurx/app/ui/components/Common.kt"
+source_anchor = ".then(rowFocusRequester?.let { Modifier.focusRequester(it) } ?: Modifier)"
+test = "clients/android/app/src/androidTest/java/tv/plurx/app/ui/components/ShelfFocusTest.kt"
+test_anchor = "dpadWalksDownThroughTheGroupByPickerAndBackUp"

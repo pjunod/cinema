@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["64d63df4"]
+points = ["cluster.page-reads", "playback.pipeline"]
+checks = ["cluster-auth", "playback-shaping"]
+reason = "The retained real-daemon cluster regression proves that fragment-index completion is recognized through CI ANSI color controls, while the playback shaping contract pins a bounded 90-second Chrome DevTools startup allowance for loaded self-hosted runners without weakening any VOD assertions."

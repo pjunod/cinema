@@ -513,8 +513,14 @@ android-instrumentation-run: ## Install and run instrumented tests (set PLURX_AN
 	adb -s "$${PLURX_ANDROID_SERIAL}" uninstall tv.plurx.app >/dev/null 2>&1 || true
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/debug/app-debug.apk
 	adb -s "$${PLURX_ANDROID_SERIAL}" install -r clients/android/app/build/outputs/apk/androidTest/debug/app-debug-androidTest.apk
-	adb -s "$${PLURX_ANDROID_SERIAL}" shell am instrument -w \
-	  tv.plurx.app.test/androidx.test.runner.AndroidJUnitRunner
+	@mkdir -p target/validation
+	@output="$$(adb -s "$${PLURX_ANDROID_SERIAL}" shell am instrument -w \
+	  tv.plurx.app.test/androidx.test.runner.AndroidJUnitRunner 2>&1)"; status=$$?; \
+	  printf '%s\n' "$$output" | tee target/validation/android-instrumentation.txt; \
+	  if [ "$$status" -ne 0 ] || ! printf '%s\n' "$$output" | grep -Eq '^OK \([0-9]+ tests?\)\r?$$'; then \
+	    echo "Android instrumentation did not report a passing suite" >&2; \
+	    exit 1; \
+	  fi
 
 .PHONY: android-instrumentation
 android-instrumentation: android-instrumentation-build android-instrumentation-run ## Run UI tests on an explicitly selected disposable device

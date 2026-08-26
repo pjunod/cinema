@@ -742,6 +742,17 @@ async fn time_store_operation_controlled<T>(
     result
 }
 
+fn is_retryable_authority_read_error<T>(result: &Result<T, StoreError>) -> bool {
+    match result {
+        Err(StoreError::Database(message)) => {
+            message == REPLICATED_STORE_TIMEOUT
+                || (message.starts_with("CheckIsLeaderError:")
+                    && message.contains("not enough for a quorum"))
+        }
+        _ => false,
+    }
+}
+
 fn is_replicated_store_timeout<T>(result: &Result<T, StoreError>) -> bool {
     matches!(
         result,
@@ -765,13 +776,13 @@ where
             |_| true,
         )
         .await;
-        if !is_replicated_store_timeout(&result) || attempt == AUTHORITY_READ_MAX_ATTEMPTS {
+        if !is_retryable_authority_read_error(&result) || attempt == AUTHORITY_READ_MAX_ATTEMPTS {
             return result;
         }
         tracing::warn!(
             attempt,
             max_attempts = AUTHORITY_READ_MAX_ATTEMPTS,
-            "replicated authority read timed out; retrying"
+            "transient replicated authority read failed; retrying"
         );
         tokio::time::sleep(AUTHORITY_READ_RETRY_DELAY).await;
     }
@@ -3492,7 +3503,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn authority_reads_retry_one_replicated_deadline_and_nothing_else() {
+    async fn authority_reads_retry_one_transient_failure_and_nothing_else() {
         let metrics = Box::leak(Box::new(StoreOperationMetrics::default()));
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let retried = time_authority_read_with_retry(metrics, {
@@ -3533,6 +3544,27 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+
+        let quorum_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recovered = time_authority_read_with_retry(metrics, {
+            let attempts = Arc::clone(&quorum_attempts);
+            move || {
+                let attempt = attempts.fetch_add(1, Ordering::Relaxed);
+                async move {
+                    if attempt == 0 {
+                        Err(StoreError::Database(
+                            "CheckIsLeaderError: not enough for a quorum; got:{1}".to_owned(),
+                        ))
+                    } else {
+                        Ok(84)
+                    }
+                }
+            }
+        })
+        .await
+        .expect("a transient quorum check gets the same bounded retry");
+        assert_eq!(recovered, 84);
+        assert_eq!(quorum_attempts.load(Ordering::Relaxed), 2);
 
         let permanent_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let error = time_authority_read_with_retry(metrics, {

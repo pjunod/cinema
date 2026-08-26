@@ -1,0 +1,20 @@
+version = 1
+
+[[coverage]]
+commits = ["4a6b339352c1a5e0a0143dbd357fae87bea27abf"]
+points = [
+  "cluster.auth",
+  "offline.viewing",
+  "playback.pipeline",
+  "android.client",
+  "validation.framework",
+]
+checks = [
+  "cluster-auth",
+  "rust-gate",
+  "offline-contract",
+  "playback-shaping",
+  "android-device",
+  "operations-contract",
+]
+reason = "The retained Hiqlite retry unit and three-voter cluster contract cover the exact transient quorum failure, the offline API test keeps idempotency independent of a load-sensitive ffmpeg probe, the shaping contracts preserve the disabled VOD cliff harness for D6 restoration, and the operations plus Android device checks enforce an isolated SDK with a freshly created AVD instead of the poisoned snapshot cache."
