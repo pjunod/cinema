@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["d11679d3", "ca0c0d8e", "707b5cf2", "5ea0ad77"]
+commits = ["d11679d3", "ca0c0d8e", "707b5cf2", "5ea0ad77", "534961d0"]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
 reason = "The rolling lease actor review corrections are pinned by the Rust gate at each affected boundary. `dropped_replies_preserve_the_shared_fence_and_committed_sequence` covers cancellation before enqueue, committed-command cancellation, and single-owner retirement; `rolling_absolute_expiry_subtracts_reply_delay_from_the_deadline` covers deadline recomputation; `rolling_actor_claims_expiry_once_and_fences_every_later_renewal` covers the shared retirement fence; and `reap_loop_finishes_a_dropped_retirement_with_truthful_cause_and_cleanup` proves the real manager removes the session, waits for its child, deletes scratch state, and persists `retired_recovery`. `live_control_renews_only_fresh_sequences_and_cannot_cross_a_fence` exercises the corrected session-id lifetime through the endpoint. The same gate compiles every construction and match of the boxed control/status payloads and runs Clippy's large-enum check, preventing the mailbox and status envelopes from returning to the oversized inline representation."
