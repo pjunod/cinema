@@ -680,7 +680,7 @@ test("a bandwidth cliff drops from 1080p to the sustainable rung in one move", (
   });
 });
 
-test("an emergency downgrade ignores cooldown, dwell, and restart cost", () => {
+test("an active supply stall spends its one restart on the floor", () => {
   const decision = policy.decideRung({
     ladder: serverLadder,
     currentHeight: 720,
@@ -689,7 +689,7 @@ test("an emergency downgrade ignores cooldown, dwell, and restart cost", () => {
     nowMs: 20_000,
     lastSwitchAtMs: 19_999,
   });
-  assert.equal(decision.height, 480);
+  assert.equal(decision.height, 360);
   assert.equal(decision.reason, "supply stalls");
   assert.equal(decision.emergency, true);
 });
@@ -709,6 +709,20 @@ test("an empty-buffer supply stall spends its one restart on the floor", () => {
   });
   assert.equal(decision.height, 360);
   assert.equal(decision.reason, "supply stalls");
+  assert.equal(decision.emergency, true);
+});
+
+test("near-empty runway spends its one restart on the floor", () => {
+  const decision = policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    // The stall callback can arrive after the controller already observed the
+    // empty runway, so this signal must be sufficient on its own.
+    estimateKbps: 5_000,
+    runwaySeconds: 0.1,
+  });
+  assert.equal(decision.height, 360);
+  assert.equal(decision.reason, "buffer ran dry");
   assert.equal(decision.emergency, true);
 });
 
@@ -779,7 +793,7 @@ test("three supply stalls act while decode stalls never choose a rung", () => {
     estimateKbps: 7000,
     supplyStalls: 3,
   });
-  assert.equal(supply.height, 480);
+  assert.equal(supply.height, 360);
   assert.equal(supply.emergency, true);
 
   const decode = policy.decideRung({
@@ -2822,7 +2836,7 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
     estimateKbps: 1_000,
     runwaySeconds: 0.5,
   });
-  assert.equal(pressured.height, 480, "emergencies still fall");
+  assert.equal(pressured.height, 360, "starvation reaches the ladder floor");
   assert.equal(pressured.emergency, true);
 });
 
