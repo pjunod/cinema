@@ -2512,33 +2512,29 @@ mod tests {
         tokio::time::advance(Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(explicit.is_retired(), "explicit deadline is actor-owned");
+    }
 
-        let snapshot_race = RollingControlHandle::spawn("session-start");
-        snapshot_race
-            .control(LocalControlRequest {
-                session_id: "unused",
-                generation: &request.generation,
-                owner_node_id: "node-a",
-                owner_epoch: request.control_epoch,
-                client_instance_id: &request.client_instance_id,
-                sequence: request.sequence,
-                snapshot: PlaybackDemandSnapshot::from(&request),
-            })
-            .await
-            .expect("snapshot race enters explicit mode");
-        snapshot_race
-            .set_renewal_for_test(
-                rolling_now() - ROLLING_EXPLICIT_LEASE_TIMEOUT,
-                "exact-deadline",
-            )
-            .await;
-        // Queue the snapshot without yielding to the already-ready timer
-        // branch. Whichever branch the actor selects first must commit the
-        // same expiry before answering; a zero-remaining live snapshot could
-        // otherwise authorize SIGCONT after the deadline.
-        let deadline_snapshot = snapshot_race.snapshot().await.expect("deadline snapshot");
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_command_claims_expiry_at_the_exact_actor_deadline() {
+        let deadline = rolling_now();
+        let accepted_at = deadline - ROLLING_EXPLICIT_LEASE_TIMEOUT;
+        let retired_fence = Arc::new(AtomicBool::new(false));
+        let mut actor =
+            RollingControlActor::new(accepted_at, "session-start", Arc::clone(&retired_fence));
+        let accepted = actor
+            .control_at(accepted_at, owned_control(&request()))
+            .expect("control establishes an explicit lease");
+        assert_eq!(accepted.lease.deadline, deadline);
+
+        // Drive the Snapshot command itself at the exact deadline. This is
+        // independent of timer scheduling and fails if the handler ever
+        // returns a zero-remaining live lease instead of claiming expiry.
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor.handle_command(RollingControlCommand::Snapshot { reply });
+        let deadline_snapshot = response.await.expect("snapshot command reply");
         assert!(deadline_snapshot.retired, "snapshot linearizes expiry");
         assert!(deadline_snapshot.expiration_claimed);
+        assert!(retired_fence.load(Ordering::Acquire));
     }
 
     #[tokio::test]
