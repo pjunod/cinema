@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9fba2d3d", "f4314611"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "These metadata-only corrective commits retain and then extend the published schema-migration evidence. The history-regressions audit verifies that both ledger edits remain uniquely mapped without treating them as additional runtime behavior."
