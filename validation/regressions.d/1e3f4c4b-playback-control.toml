@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1e3f4c4b"]
+points = ["playback.pipeline", "server.api"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained playback-control model, live/VOD engine, router-cap, missing-worker, durable-authority, admission, and relay-schema tests prove that fresh fenced controls alone renew the owning engine's real legacy activity clock, replays and stale tuples do not, an absent owner-local worker remains a typed transition, and exact-write cluster exchanges stay bounded."

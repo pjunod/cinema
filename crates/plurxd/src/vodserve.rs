@@ -367,7 +367,13 @@ struct Session {
     /// viewer's `playback_id` can never end another viewer's session.
     supersession_user: String,
     block_budget: Duration,
+    /// Serializes authority-checked control with terminal/reap transitions for
+    /// this session only. Keeping the gate on the session avoids making an
+    /// unrelated rolling or VOD control wait behind node-wide Store I/O.
+    lifecycle: Arc<Mutex<()>>,
     last_touch: StdMutex<Instant>,
+    /// Owner-local sequence fence kept separate from media-object touches.
+    control: StdMutex<crate::playback_control::ControlState>,
     tombstone: Option<Terminal>,
 }
 
@@ -547,7 +553,9 @@ impl VodServe {
                 kind: req.kind,
                 supersession_user: attribution.supersession_user.to_owned(),
                 block_budget: settings.block_budget,
+                lifecycle: Arc::new(Mutex::new(())),
                 last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );
@@ -665,11 +673,22 @@ impl VodServe {
     /// Idempotent — the first call writes the tombstone and detaches, every
     /// later one only confirms ownership.
     pub async fn end(&self, session_id: &str, cause: Terminal) -> bool {
+        let lifecycle = {
+            let sessions = self.shared.sessions.lock().await;
+            let Some(session) = sessions.get(session_id) else {
+                return false;
+            };
+            Arc::clone(&session.lifecycle)
+        };
+        let _lifecycle = lifecycle.lock().await;
         let (rendition, file_id, height, kind) = {
             let mut sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions.get_mut(session_id) else {
                 return false;
             };
+            if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
+                return false;
+            }
             if session.tombstone.is_some() {
                 return true;
             }
@@ -896,6 +915,91 @@ impl VodServe {
         })
     }
 
+    /// Apply one fenced control exchange without conflating a replay or stale
+    /// request with a media-object touch. Only a newly accepted sequence moves
+    /// the existing five-minute VOD activity clock.
+    pub(crate) async fn control(
+        &self,
+        control: crate::playback_control::LocalControlRequest<'_>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        // Resolve registry ownership before durable I/O, then keep this
+        // session's gate held from the authority read through sequence
+        // acceptance and the legacy-clock touch. `end` and idle reap take the
+        // same per-session gate, so neither can cross the linearization point.
+        let lifecycle = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(control.session_id)?;
+            if session.tombstone.is_some() {
+                return None;
+            }
+            Arc::clone(&session.lifecycle)
+        };
+        let lifecycle_guard = lifecycle.lock().await;
+        if let Err(error) = crate::playback_control::verify_authority(
+            self.shared.store.as_ref(),
+            control.session_id,
+            control.generation,
+            control.owner_node_id,
+            control.owner_epoch,
+        )
+        .await
+        {
+            return Some(Err(error));
+        }
+        let outcome = {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(control.session_id)?;
+            if !Arc::ptr_eq(&session.lifecycle, &lifecycle) || session.tombstone.is_some() {
+                return None;
+            }
+            let accepted = session.control.lock().expect("control lock").accept(
+                control.generation,
+                control.owner_epoch,
+                control.client_instance_id,
+                control.sequence,
+                control.platform,
+            );
+            let (disposition, accepted_sequence, action, platform) = match accepted {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+            let mut last_touch = session.last_touch.lock().expect("touch lock");
+            if disposition == crate::playback_control::ControlDisposition::Accepted {
+                *last_touch = Instant::now();
+            }
+            let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
+            let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+            Ok::<_, crate::playback_control::ControlStateError>((
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                crate::media_sessions::unix_ms().saturating_add(remaining_ms),
+            ))
+        };
+        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
+            match outcome {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+        drop(lifecycle_guard);
+        let status = self.status(control.session_id).await?;
+        Some(Ok(crate::playback_control::LocalControlResult {
+            disposition,
+            accepted_sequence,
+            action,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            status: crate::transcode::HlsSessionInfo::Vod(status),
+            platform,
+        }))
+    }
+
     /// The facts a stall-reopen's normalization checks against its
     /// predecessor. `None` for unknown/tombstoned.
     // TODO(m3-wire): the allow comes out when the stall-reopen wiring lands.
@@ -981,26 +1085,41 @@ impl VodServe {
         // Idle live sessions vanish — tombstone-free, because an idle reap is
         // the one ending a session may come back from (via the durable route
         // machinery outside this module).
-        let reaped: Vec<(String, Arc<Rendition>)> = {
-            let mut sessions = self.shared.sessions.lock().await;
-            let expired: Vec<String> = sessions
+        let expired: Vec<(String, Arc<Mutex<()>>)> = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
                 .iter()
                 .filter(|(_, session)| {
                     session.tombstone.is_none()
                         && now.duration_since(*session.last_touch.lock().expect("touch lock"))
                             > SESSION_IDLE_TTL
                 })
-                .map(|(id, _)| id.clone())
-                .collect();
-            expired
-                .into_iter()
-                .filter_map(|id| {
-                    sessions
-                        .remove(&id)
-                        .map(|session| (id, Arc::clone(&session.rendition)))
-                })
+                .map(|(id, session)| (id.clone(), Arc::clone(&session.lifecycle)))
                 .collect()
         };
+        let mut reaped = Vec::new();
+        for (id, lifecycle) in expired {
+            let _lifecycle = lifecycle.lock().await;
+            let rendition = {
+                let mut sessions = self.shared.sessions.lock().await;
+                let still_expired = sessions.get(&id).is_some_and(|session| {
+                    Arc::ptr_eq(&session.lifecycle, &lifecycle)
+                        && session.tombstone.is_none()
+                        && now.duration_since(*session.last_touch.lock().expect("touch lock"))
+                            > SESSION_IDLE_TTL
+                });
+                if still_expired {
+                    sessions
+                        .remove(&id)
+                        .map(|session| Arc::clone(&session.rendition))
+                } else {
+                    None
+                }
+            };
+            if let Some(rendition) = rendition {
+                reaped.push((id, rendition));
+            }
+        }
         for (id, rendition) in &reaped {
             rendition.detach_reader(id).await;
             tracing::info!(
@@ -2545,7 +2664,7 @@ async fn sync_file(path: &Path) -> io::Result<()> {
 mod tests {
     use super::*;
 
-    use plurx_core::store::{FragmentIndexStore, SqliteStore};
+    use plurx_core::store::{FragmentIndexStore, MediaSessionStore as _, SqliteStore};
     use plurx_core::testfixtures;
 
     use crate::fragindex::IndexOutcome;
@@ -2647,6 +2766,74 @@ mod tests {
     fn bare_serve(base: &Path) -> Arc<VodServe> {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         VodServe::new(base.to_path_buf(), store)
+    }
+
+    async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
+        let now_ms = crate::media_sessions::unix_ms();
+        let fingerprint = "a".repeat(64);
+        store
+            .claim_media_session_request(
+                7,
+                generation,
+                &fingerprint,
+                "vod-control",
+                generation,
+                now_ms,
+                now_ms + 60_000,
+            )
+            .await
+            .expect("claim route");
+        assert!(store
+            .assign_media_session_request_owner(7, generation, generation, "node-a", now_ms,)
+            .await
+            .expect("assign route owner"));
+        store
+            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
+                incarnation_id: generation.to_owned(),
+                session_id: session_id.to_owned(),
+                user_id: 7,
+                playback_id: "vod-control".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some(generation.to_owned()),
+                request_fingerprint: fingerprint,
+                owner_node_id: "node-a".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms,
+                lease_expires_at_ms: now_ms + 60_000,
+            })
+            .await
+            .expect("activate route")
+            .expect("route accepted");
+    }
+
+    async fn insert_control_session(
+        serve: &VodServe,
+        session_id: &str,
+        rendition: Arc<Rendition>,
+        touched: Instant,
+    ) {
+        rendition.attach_reader(session_id, 0).await;
+        serve.shared.sessions.lock().await.insert(
+            session_id.to_owned(),
+            Session {
+                rendition,
+                playback_id: "vod-control".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
+                target_height: 360,
+                kind: request("vod-control", 0.0).kind,
+                supersession_user: "[\"user_id\",1]".into(),
+                block_budget: Duration::from_secs(8),
+                lifecycle: Arc::new(Mutex::new(())),
+                last_touch: StdMutex::new(touched),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                tombstone: None,
+            },
+        );
     }
 
     /// A synthetic ~7 s-per-segment index, prodsched's own fixture shape.
@@ -3291,7 +3478,9 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_secs(8),
+                lifecycle: Arc::new(Mutex::new(())),
                 last_touch: StdMutex::new(touched),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );
@@ -3324,6 +3513,94 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn vod_control_renews_only_fresh_sequences_and_lifecycle_is_per_session() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        let before = Instant::now() - Duration::from_secs(10);
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, owner_epoch| crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "node-a",
+            owner_epoch,
+            client_instance_id: &client,
+            sequence,
+            platform: Some(crate::playback_control::ClientPlatform::Apple),
+        };
+
+        let accepted = serve
+            .control(request(1, 1))
+            .await
+            .expect("VOD registry owner")
+            .expect("accepted control");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let accepted_touch = {
+            let sessions = serve.shared.sessions.lock().await;
+            let last = sessions[&session_id].last_touch.lock().expect("touch lock");
+            assert!(*last > before);
+            *last
+        };
+        let replay = serve
+            .control(request(1, 1))
+            .await
+            .expect("VOD registry owner")
+            .expect("replay control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(
+            *serve.shared.sessions.lock().await[&session_id]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            accepted_touch
+        );
+        assert!(matches!(
+            serve.control(request(0, 1)).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::StaleSequence
+            ))
+        ));
+        assert!(matches!(
+            serve.control(request(2, 2)).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::OwnerChanged
+            ))
+        ));
+        assert_eq!(
+            *serve.shared.sessions.lock().await[&session_id]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            accepted_touch
+        );
+
+        // Holding A's lifecycle cannot head-of-line block an unrelated VOD
+        // terminal transition. A node-wide gate makes this timeout.
+        let other_id = uuid::Uuid::new_v4().to_string();
+        insert_control_session(&serve, &other_id, rendition, Instant::now()).await;
+        let lifecycle = Arc::clone(&serve.shared.sessions.lock().await[&session_id].lifecycle);
+        let lifecycle_guard = lifecycle.lock().await;
+        assert!(tokio::time::timeout(
+            Duration::from_millis(250),
+            serve.end(&other_id, Terminal::Deleted),
+        )
+        .await
+        .expect("unrelated lifecycle must not queue"));
+        drop(lifecycle_guard);
+    }
+
+    #[tokio::test]
     async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
@@ -3344,7 +3621,9 @@ mod tests {
                 kind: request("play-a", 0.0).kind,
                 supersession_user: "[\"user_id\",1]".into(),
                 block_budget: Duration::from_millis(1),
+                lifecycle: Arc::new(Mutex::new(())),
                 last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
                 tombstone: None,
             },
         );

@@ -11,8 +11,8 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
     unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ABORT_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW,
-    START_DEADLINE, START_PATH,
+    RemoteStartResponse, ABORT_PATH, CONTROL_PATH, RELAY_PATH,
+    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
 
@@ -230,4 +230,156 @@ pub(crate) async fn relay(
         return StatusCode::GONE.into_response();
     }
     super::hls::relay_local(&state, request).await
+}
+
+/// Exact-write-authenticated control relay. The envelope repeats the durable
+/// owner tuple so a delayed peer request cannot mutate whichever owner happens
+/// to hold the public session id when it arrives.
+pub(crate) async fn control(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(request) =
+        serde_json::from_slice::<crate::playback_control::ControlRelayRequest>(&body)
+            .ok()
+            .filter(crate::playback_control::ControlRelayRequest::is_valid)
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let generation = request.generation.clone();
+    let owner_epoch = u64::try_from(request.expected_owner_epoch).ok();
+    let Some(budget) = crate::playback_control::inherited_exchange_budget(
+        request.deadline_unix_ms,
+        crate::media_sessions::unix_ms(),
+    ) else {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+        return super::hls::control_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control_unavailable",
+            "the relayed control exchange arrived after its ingress deadline",
+            Some(generation),
+            owner_epoch,
+            Some(500),
+            None,
+        );
+    };
+    match tokio::time::timeout(budget, control_inner(state, headers, body, request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            super::hls::control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owner exceeded the inherited control deadline",
+                Some(generation),
+                owner_epoch,
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+async fn control_inner(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    request: crate::playback_control::ControlRelayRequest,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, CONTROL_PATH, &body).await {
+        return status.into_response();
+    }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&request.session_id) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return super::hls::control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the owner control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
+            None,
+        );
+    }
+    let route = match state.store.media_session_route(&request.session_id).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return super::hls::control_error(
+                StatusCode::NOT_FOUND,
+                "session_gone",
+                "no durable media session has this capability",
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return super::hls::control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable media route is temporarily unavailable",
+                None,
+                None,
+                Some(500),
+                None,
+            );
+        }
+    };
+    let owner_epoch = u64::try_from(route.owner_epoch).ok();
+    if route.owner_node_id != state.node_id
+        || route.owner_node_id != request.expected_owner_node_id
+        || route.owner_epoch != request.expected_owner_epoch
+    {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerChanged);
+        return super::hls::control_error(
+            StatusCode::CONFLICT,
+            "owner_changed",
+            "the durable media owner changed before the relayed control arrived",
+            Some(route.incarnation_id),
+            owner_epoch,
+            None,
+            None,
+        );
+    }
+    if route.incarnation_id != request.generation {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+        return super::hls::control_error(
+            StatusCode::CONFLICT,
+            "stale_control",
+            "the durable media generation changed before the relayed control arrived",
+            Some(route.incarnation_id),
+            owner_epoch,
+            None,
+            None,
+        );
+    }
+    if route.state != "active" {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+        return super::hls::control_error(
+            StatusCode::GONE,
+            "session_ended",
+            "this media session has ended or been superseded",
+            Some(route.incarnation_id),
+            owner_epoch,
+            None,
+            None,
+        );
+    }
+    if route.lease_expires_at_ms <= unix_ms() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+        return super::hls::control_error(
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the media owner lease expired and takeover is not yet settled",
+            Some(route.incarnation_id),
+            owner_epoch,
+            Some(500),
+            None,
+        );
+    }
+    super::hls::control_local(&state, &route, request.control).await
 }

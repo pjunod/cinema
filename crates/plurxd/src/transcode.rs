@@ -12,7 +12,7 @@ use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{
@@ -1568,6 +1568,15 @@ struct Session {
     /// same gate later must not publish into this retired session even while
     /// its scratch directory still exists.
     retired: AtomicBool,
+    /// Couples the monotonic retirement verdict to activity-clock mutation.
+    /// Serving fences do not wait for a producer transition, but a control or
+    /// media touch can no longer land between its final retired check and the
+    /// lease renewal it publishes.
+    retirement_activity: Mutex<()>,
+    /// Deterministic cancellation seam: true while a control is waiting to
+    /// acquire the activity clock, before it can mutate sequence state.
+    #[cfg(test)]
+    control_clock_waiting: AtomicBool,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
@@ -1616,6 +1625,10 @@ struct Session {
     /// clock makes an idle reap explain whether the last sign of life was a
     /// playlist reload, a media segment, or only a subtitle/context lookup.
     last_request: Mutex<LastRequest>,
+    /// Owner-local sequence fence for the explicit control protocol. It is
+    /// independent of media GET bookkeeping so equal/stale controls cannot
+    /// accidentally renew the legacy activity clock.
+    control: StdMutex<crate::playback_control::ControlState>,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -1808,6 +1821,83 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// Fence activity renewal synchronously with the serving verdict. The
+    /// async mutex is held for only the atomic store; unlike
+    /// `child_transition`, it never waits for encoder teardown/replacement.
+    async fn fence_activity(&self) {
+        let _activity = self.retirement_activity.lock().await;
+        self.retired.store(true, Release);
+    }
+
+    /// Renew the legacy activity clock only if no serving fence linearized
+    /// first. Taking the clock before the gate gives every caller one lock
+    /// order and makes the check plus write indivisible with `fence_activity`.
+    async fn touch_if_active(&self, kind: &'static str) -> bool {
+        let mut last_request = self.last_request.lock().await;
+        let _activity = self.retirement_activity.lock().await;
+        if self.retired.load(Acquire) {
+            return false;
+        }
+        *last_request = LastRequest::now(kind);
+        true
+    }
+
+    /// Acquire every async lock before sequence acceptance, then commit the
+    /// sequence and its activity renewal without another cancellation point.
+    /// A timed-out future therefore commits both facts or neither one.
+    async fn accept_control(
+        &self,
+        request: crate::playback_control::LocalControlRequest<'_>,
+    ) -> Option<
+        Result<
+            (
+                crate::playback_control::ControlDisposition,
+                u64,
+                crate::playback_control::ControlAction,
+                crate::playback_control::ClientPlatform,
+                i64,
+            ),
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        #[cfg(test)]
+        self.control_clock_waiting.store(true, Release);
+        let mut last_request = self.last_request.lock().await;
+        #[cfg(test)]
+        self.control_clock_waiting.store(false, Release);
+        let _activity = self.retirement_activity.lock().await;
+        if self.retired.load(Acquire) {
+            return None;
+        }
+        let (disposition, accepted_sequence, action, platform) = match self
+            .control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .accept(
+                request.generation,
+                request.owner_epoch,
+                request.client_instance_id,
+                request.sequence,
+                request.platform,
+            ) {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        if disposition == crate::playback_control::ControlDisposition::Accepted {
+            *last_request = LastRequest::now("control");
+        }
+        let remaining =
+            Duration::from_secs(SESSION_IDLE_SECS).saturating_sub(last_request.at.elapsed());
+        let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+        Some(Ok((
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            crate::media_sessions::unix_ms().saturating_add(remaining_ms),
+        )))
+    }
+
     /// Where this generation's session-relative zero sits on the durable
     /// incarnation timeline.
     ///
@@ -2098,6 +2188,17 @@ async fn session_info(
     let last_request_kind = last_request.kind;
     drop(last_request);
     let suspended = s.suspended.load(Relaxed);
+    let producer_state = if s.failed.load(Relaxed) {
+        "failed"
+    } else if s.cached {
+        "complete"
+    } else if suspended {
+        "held"
+    } else if s.child.lock().await.is_some() {
+        "running"
+    } else {
+        "complete"
+    };
     let hold = if suspended {
         ahead.and_then(|ahead| {
             ahead_hold(ahead, global_live_bytes, global_ahead_bytes, limits, true)
@@ -2117,6 +2218,7 @@ async fn session_info(
         started_unix: s.started_unix,
         idle_seconds,
         last_request: last_request_kind,
+        producer_state,
         speed: s.progress.speed(),
         recent_speed: s.progress.recent_speed(),
         out_time_ms: s.progress.out_time_ms(),
@@ -2163,6 +2265,7 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         started_unix: info.started_unix,
         idle_seconds: info.idle_seconds,
         last_request: "vod",
+        producer_state: "vod",
         speed: None,
         recent_speed: None,
         out_time_ms: None,
@@ -2810,6 +2913,10 @@ pub struct StartInfo {
     /// And the stall watchdog's restart arm has nothing to fix here — a
     /// segment that is late was never going to be produced faster.
     pub vod: bool,
+    /// Legacy activity lifetime enforced by the registry that owns this
+    /// session. A finished transcode-cache hit is seekable VOD to the client
+    /// but still belongs to the 60-second rolling registry.
+    pub control_lease_timeout_ms: u32,
 }
 
 /// A cluster worker and the process-local replacement gate that must remain
@@ -2867,6 +2974,9 @@ pub struct SessionInfo {
     /// client that keeps polling playlists is different from one that stopped
     /// making requests altogether, even when both have the same idle age.
     pub last_request: &'static str,
+    /// Honest current producer verdict. Additive to the legacy status shape;
+    /// control uses it instead of inferring health from suspension alone.
+    pub producer_state: &'static str,
     /// Cumulative encode rate as a multiple of realtime, as ffmpeg reports it.
     pub speed: Option<f64>,
     /// Rate over the last few seconds. This is the one that answers "is the
@@ -6681,6 +6791,9 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
+            #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -6697,6 +6810,7 @@ impl TranscodeManager {
             cache_manifest,
             cache_location: Some(cache_location),
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -6781,6 +6895,7 @@ impl TranscodeManager {
             encoder: "cached",
             grade: opts.pipeline.output_grade(),
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8405,6 +8520,7 @@ impl TranscodeManager {
             // gave without retaining its live presentation.
             grade: OutputGrade::Sdr,
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8816,6 +8932,7 @@ impl TranscodeManager {
                 encoder: "vod",
                 grade: OutputGrade::Sdr,
                 vod: true,
+                control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             });
         }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
@@ -8841,6 +8958,7 @@ impl TranscodeManager {
             encoder,
             grade: session.grade,
             vod: session.cached,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -9921,6 +10039,9 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
+            #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -9937,6 +10058,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10131,6 +10253,7 @@ impl TranscodeManager {
             encoder: encoder.label(),
             grade: opts.pipeline.output_grade(),
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -10496,6 +10619,9 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
+            #[cfg(test)]
+            control_clock_waiting: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -10512,6 +10638,7 @@ impl TranscodeManager {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("session-start")),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10714,6 +10841,7 @@ impl TranscodeManager {
             // source's, read off `kind`/`preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -10990,6 +11118,75 @@ impl TranscodeManager {
             .map(HlsSessionInfo::Live)
     }
 
+    /// Fenced behavior-neutral control for either HLS presentation. A newly
+    /// accepted sequence renews the selected engine's established activity
+    /// clock with the explicit `control` reason; replay and rejection do not.
+    pub(crate) async fn hls_session_control(
+        &self,
+        control: crate::playback_control::LocalControlRequest<'_>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        if let Some(result) = self.vod.control(control).await {
+            return Some(result);
+        }
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .cloned()?;
+        let _transition = session.child_transition.lock().await;
+        if session.retired.load(Acquire)
+            || !self
+                .sessions
+                .lock()
+                .await
+                .get(control.session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return None;
+        }
+        if let Err(error) = crate::playback_control::verify_authority(
+            self.store.as_ref(),
+            control.session_id,
+            control.generation,
+            control.owner_node_id,
+            control.owner_epoch,
+        )
+        .await
+        {
+            return Some(Err(error));
+        }
+        let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
+            match session.accept_control(control).await? {
+                Ok(outcome) => outcome,
+                Err(error) => return Some(Err(error)),
+            };
+        let limits = self.ahead_limits().await;
+        let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+        let status = session_info(
+            control.session_id,
+            &session,
+            limits,
+            global_live_bytes,
+            global_ahead_bytes,
+        )
+        .await;
+        Some(Ok(crate::playback_control::LocalControlResult {
+            disposition,
+            accepted_sequence,
+            action,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            status: HlsSessionInfo::Live(status),
+            platform,
+        }))
+    }
+
     async fn emit_session_event(
         &self,
         session_id: &str,
@@ -11089,7 +11286,7 @@ impl TranscodeManager {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     return Err(replacement_deadline_error());
                 }
-                session.retired.store(true, Release);
+                session.fence_activity().await;
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
             }
@@ -11214,7 +11411,7 @@ impl TranscodeManager {
         let sessions = self.sessions.lock().await;
         for session_id in session_ids {
             if let Some(session) = sessions.get(session_id) {
-                session.retired.store(true, Release);
+                session.fence_activity().await;
             }
         }
     }
@@ -11231,7 +11428,7 @@ impl TranscodeManager {
             // Serving authority is lost now, not after a producer transition
             // happens to unblock. Lease renewal and every media path observe
             // this bit while detached teardown catches up.
-            session.retired.store(true, Release);
+            session.fence_activity().await;
         }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
@@ -11368,10 +11565,9 @@ impl TranscodeManager {
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if session.retired.load(Acquire) {
+        if !session.touch_if_active(kind).await {
             return None;
         }
-        *session.last_request.lock().await = LastRequest::now(kind);
         Some(session)
     }
 
@@ -12915,6 +13111,8 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
         retired: AtomicBool::new(false),
+        retirement_activity: Mutex::new(()),
+        control_clock_waiting: AtomicBool::new(false),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -12930,6 +13128,7 @@ fn test_session(dir: PathBuf) -> Session {
         cache_manifest: None,
         cache_location: None,
         last_request: Mutex::new(LastRequest::now("test-start")),
+        control: StdMutex::new(crate::playback_control::ControlState::default()),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -12977,6 +13176,215 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn activate_control_route(
+        store: &dyn Store,
+        session_id: &str,
+        generation: &str,
+        owner_node_id: &str,
+    ) {
+        let now_ms = crate::media_sessions::unix_ms();
+        let fingerprint = "a".repeat(64);
+        store
+            .claim_media_session_request(
+                7,
+                generation,
+                &fingerprint,
+                "player-control",
+                generation,
+                now_ms,
+                now_ms + 60_000,
+            )
+            .await
+            .expect("claim route");
+        assert!(store
+            .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
+            .await
+            .expect("assign route owner"));
+        store
+            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
+                incarnation_id: generation.to_owned(),
+                session_id: session_id.to_owned(),
+                user_id: 7,
+                playback_id: "player-control".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some(generation.to_owned()),
+                request_fingerprint: fingerprint,
+                owner_node_id: owner_node_id.to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms,
+                lease_expires_at_ms: now_ms + 60_000,
+            })
+            .await
+            .expect("activate route")
+            .expect("route accepted");
+    }
+
+    #[tokio::test]
+    async fn live_control_renews_only_fresh_sequences_and_cannot_cross_a_fence() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        {
+            let mut last = fixture.session.last_request.lock().await;
+            last.at = Instant::now() - Duration::from_secs(10);
+            last.kind = "before-control";
+        }
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, owner_epoch| crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "test-node",
+            owner_epoch,
+            client_instance_id: &client,
+            sequence,
+            platform: Some(crate::playback_control::ClientPlatform::Web),
+        };
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("accepted control");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let accepted_touch = {
+            let last = fixture.session.last_request.lock().await;
+            assert_eq!(last.kind, "control");
+            last.at
+        };
+
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("replay control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(0, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::StaleSequence
+            ))
+        ));
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2, 2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::OwnerChanged
+            ))
+        ));
+        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+
+        // Pin the real activity clock and cancel a manager exchange only after
+        // it reaches that wait. Sequence 2 must remain uncommitted so the
+        // identical retry can still be accepted and renew the clock.
+        let clock = fixture.session.last_request.lock().await;
+        let manager = Arc::clone(&fixture.state.transcode);
+        let cancel_session = session_id.clone();
+        let cancel_generation = generation.clone();
+        let cancel_client = client.clone();
+        let cancelled = tokio::spawn(async move {
+            manager
+                .hls_session_control(crate::playback_control::LocalControlRequest {
+                    session_id: &cancel_session,
+                    generation: &cancel_generation,
+                    owner_node_id: "test-node",
+                    owner_epoch: 1,
+                    client_instance_id: &cancel_client,
+                    sequence: 2,
+                    platform: Some(crate::playback_control::ClientPlatform::Web),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.control_clock_waiting.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager reached the blocked activity clock");
+        cancelled.abort();
+        assert!(matches!(cancelled.await, Err(error) if error.is_cancelled()));
+        drop(clock);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let after_cancel = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, 1))
+            .await
+            .expect("local worker")
+            .expect("cancelled sequence remains admissible");
+        assert_eq!(
+            after_cancel.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let after_cancel_touch = fixture.session.last_request.lock().await.at;
+        assert!(after_cancel_touch > accepted_touch);
+
+        // Now force retirement to win the same blocked-clock window through
+        // the real manager. The late sequence and touch must both disappear.
+        let clock = fixture.session.last_request.lock().await;
+        let manager = Arc::clone(&fixture.state.transcode);
+        let fence_session = session_id.clone();
+        let fence_generation = generation.clone();
+        let fence_client = client.clone();
+        let fenced = tokio::spawn(async move {
+            manager
+                .hls_session_control(crate::playback_control::LocalControlRequest {
+                    session_id: &fence_session,
+                    generation: &fence_generation,
+                    owner_node_id: "test-node",
+                    owner_epoch: 1,
+                    client_instance_id: &fence_client,
+                    sequence: 3,
+                    platform: Some(crate::playback_control::ClientPlatform::Web),
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.control_clock_waiting.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("manager reached the retirement race window");
+        fixture.session.fence_activity().await;
+        drop(clock);
+        assert!(fenced.await.expect("control task").is_none());
+        assert_eq!(
+            fixture.session.last_request.lock().await.at,
+            after_cancel_touch
+        );
+    }
 
     #[test]
     fn bearer_session_ids_are_stably_redacted_for_observability() {
@@ -17463,6 +17871,8 @@ mod tests {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
+            control_clock_waiting: AtomicBool::new(false),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -17478,6 +17888,7 @@ mod tests {
             cache_manifest: None,
             cache_location: None,
             last_request: Mutex::new(LastRequest::now("test-start")),
+            control: StdMutex::new(crate::playback_control::ControlState::default()),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),

@@ -277,6 +277,12 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route(
+            "/hls/{session}/control",
+            post(hls::control).layer(DefaultBodyLimit::max(
+                crate::playback_control::MAX_REQUEST_BYTES,
+            )),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
@@ -364,6 +370,12 @@ pub fn router(state: AppState) -> Router {
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
             )),
         )
+        .route(
+            crate::media_sessions::CONTROL_PATH,
+            post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
+                crate::playback_control::MAX_RELAY_BYTES,
+            )),
+        )
         .nest("/api/v1", api)
         .merge(plex_routes)
         .fallback(web::fallback)
@@ -427,6 +439,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                     | crate::media_sessions::START_PATH
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
+                    | crate::media_sessions::CONTROL_PATH
             ))
     {
         return true;
@@ -494,7 +507,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     let node_local_create = method == Method::POST
         && matches!(
             segments.as_slice(),
-            ["api", "v1", "files", _, "hls", "sessions"] | ["api", "v1", "files", _, "publication"]
+            ["api", "v1", "files", _, "hls", "sessions"]
+                | ["api", "v1", "files", _, "publication"]
+                | ["api", "v1", "hls", _, "control"]
         );
     let node_local_close = method == Method::DELETE
         && matches!(
@@ -682,12 +697,52 @@ mod tests {
         }
         for (method, path) in [
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::POST, crate::media_sessions::START_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
+            (Method::POST, crate::media_sessions::CONTROL_PATH),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
+    }
+
+    #[tokio::test]
+    async fn playback_control_routes_reject_oversized_bodies_before_handler_work() {
+        let app = test_app();
+        let session = uuid::Uuid::new_v4();
+        let public = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/hls/{session}/control"))
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_REQUEST_BYTES
+                    + 1
+            ]))
+            .expect("public control request");
+        assert_eq!(
+            app.clone()
+                .oneshot(public)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let internal = Request::builder()
+            .method("POST")
+            .uri(crate::media_sessions::CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_RELAY_BYTES + 1
+            ]))
+            .expect("internal control request");
+        assert_eq!(
+            app.oneshot(internal).await.expect("response").status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     #[test]
@@ -2736,6 +2791,49 @@ mod tests {
                 .as_deref(),
             Some("99")
         );
+    }
+
+    #[tokio::test]
+    async fn playback_control_preview_is_default_off_and_persists_explicit_changes() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["playback_control_protocol_v1"], json!(false));
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                .await
+                .expect("setting"),
+            None,
+            "an upgrade must not advertise a new client contract implicitly"
+        );
+
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "playback_control_protocol_v1": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["playback_control_protocol_v1"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
     }
 
     /// N1's two settings move as one complete replicated pair. JSON null
