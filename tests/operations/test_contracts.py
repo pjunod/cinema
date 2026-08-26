@@ -41,8 +41,16 @@ class OperationsContractCase(unittest.TestCase):
 
         self.assertIn('if name in {"home", "activity", "settings"}:', script)
         self.assertIn('[data-phase="settled"]', script)
+        self.assertIn('wait_until="domcontentloaded"', script)
+        self.assertIn("activity_poll_paused = pause_activity_polling", script)
+        self.assertIn('page.wait_for_load_state("networkidle"', script)
+        self.assertIn("resume_activity_polling(page)", script)
         self.assertLess(
             script.index('[data-phase="settled"]'),
+            script.index("resume_activity_polling(page)", script.index("def capture_route")),
+        )
+        self.assertLess(
+            script.index("resume_activity_polling(page)", script.index("def capture_route")),
             script.index("page.wait_for_timeout(args.settle_ms)"),
         )
 

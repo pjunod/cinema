@@ -1051,6 +1051,33 @@ def freeze_timers(page):
     }""")
 
 
+def pause_activity_polling(page, name, timeout_ms):
+    """Hold the global poll while the route reaches its observation boundary.
+
+    A fixed 4.5-second observation window can contain either one or two 4s
+    activity ticks when it starts after a variable-length network-idle wait.
+    Pause the interval as soon as the route's chrome exists, let its immediate
+    poll finish, and restart the real interval only after the route settles.
+    This changes neither the endpoint nor its response; it makes the measured
+    polling window begin at a named boundary instead of at browser-load luck.
+    """
+    if name in {"activity", "auth"}:
+        return False
+    page.evaluate("""() => {
+      if (ACT_TIMER) clearInterval(ACT_TIMER);
+      ACT_TIMER = null;
+    }""")
+    page.wait_for_function("() => !ACT_POLLING", timeout=timeout_ms)
+    return True
+
+
+def resume_activity_polling(page):
+    """Start one fresh production polling period for the request inventory."""
+    page.evaluate("""() => {
+      if (!ACT_TIMER) ACT_TIMER = setInterval(pollActivity, 4000);
+    }""")
+
+
 # Undo everything a tab walk did to the page: the focus ring, and the rails and
 # document it scrolled while walking. Run before the shutter, so the picture is
 # still of the page at rest.
@@ -1170,7 +1197,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page.on("console", lambda m: problems.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
     try:
-        response = page.goto(base_url + "/" + route["hash"], wait_until="networkidle",
+        response = page.goto(base_url + "/" + route["hash"], wait_until="domcontentloaded",
                              timeout=args.timeout)
         if response is not None and not response.ok:
             raise Fail(f"{name}: document responded {response.status}")
@@ -1192,6 +1219,12 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         if got != layout_id:
             raise Fail(f"{name}: asked for layout {layout_id!r}, the app resolved {got!r} "
                        "— its `surfaces` and this viewport disagree")
+        activity_poll_paused = pause_activity_polling(page, name, args.timeout)
+        # Unlike page.goto(..., wait_until="networkidle"), this wait begins
+        # after the global poll has been paused at the mounted route chrome.
+        # Slow artwork or an incremental listing can no longer spend an
+        # arbitrary part of the later 4.5s polling observation window.
+        page.wait_for_load_state("networkidle", timeout=args.timeout)
         # Home, Activity and Settings expose an explicit settled phase. Start
         # the polling observation window from that phase, not merely from the
         # document's network-idle event: under a loaded runner the route's
@@ -1204,6 +1237,8 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         if name in {"home", "activity", "settings"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
+        if activity_poll_paused:
+            resume_activity_polling(page)
         # The app polls activity every 4s and the activity page re-renders every
         # 3s. Rather than stubbing either — the baseline has to be of the real
         # app — the capture waits out more than one full period, so it always
