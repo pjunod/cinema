@@ -57,8 +57,9 @@ passing tests; the corrected pre-rebase head then passed all 1,878 executed
 tests. After rebasing over PR #613, the expanded suites were green again
 (`plurx-core`: 783; `plurxd`: 1,034; zero failures). The hosted UI layout sweep
 later lost one disposable Playwright page before `#main` attached, then
-rendered every following page and reported no golden mismatch. Commit
-`fb2128e5` adds one fresh-context retry only for that root-attachment timeout;
+rendered every following page and reported no golden mismatch. Commits
+`fb2128e5` and `ca145db4` add one fresh-context retry only for a root-attachment
+timeout that carries no captured page/console error;
 non-player semantic and golden failures remain immediately fatal, while the
 pre-existing real-player capture retains its separately bounded one retry.
 The slice's acceptance boundary is intentionally smaller than the whole actor
@@ -90,7 +91,7 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repair `fb2128e5` is local |
+| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repairs `fb2128e5` and `ca145db4` are local |
 | Adversarial diff review | Exact rebased implementation head `eee52106` approved; changed exact head with the runner repair is pending review before tests |
 | Unit/focused tests | Rebased `make test` green (`plurx-core`: 783; `plurxd`: 1,034; 0 failed); changed exact head pending review and rerun |
 | Full local gate | Rebased `make validate`: 13 passed, 0 failed, 2 optional Playwright skips; changed exact head pending review and rerun |
