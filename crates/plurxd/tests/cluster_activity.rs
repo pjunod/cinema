@@ -259,6 +259,24 @@ async fn wait_for_two_voters(
     }
 }
 
+fn strip_ansi(input: &str) -> String {
+    let mut plain = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.peek().is_some_and(|next| *next == '[') {
+            chars.next();
+            for code in chars.by_ref() {
+                if ('@'..='~').contains(&code) {
+                    break;
+                }
+            }
+        } else {
+            plain.push(character);
+        }
+    }
+    plain
+}
+
 async fn wait_for_fragment_index(first: &mut Daemon, second: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
@@ -268,6 +286,7 @@ async fn wait_for_fragment_index(first: &mut Daemon, second: &mut Daemon) {
         let second_diagnostics = second.diagnostics();
         let pass_finished = |diagnostics: &str| {
             diagnostics.lines().any(|line| {
+                let line = strip_ansi(line);
                 line.contains("fragment indexing pass finished") && line.contains("built=1")
             })
         };
