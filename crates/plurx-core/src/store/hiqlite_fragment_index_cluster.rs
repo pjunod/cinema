@@ -361,7 +361,7 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .txn(vec![
                 (
                     "UPDATE analysis_requests
-                        SET state = 'submitted', owner_node_id = NULL, lease_expires_ms = NULL,
+                        SET state = 'submitted', lease_expires_ms = NULL,
                             result_cache_key = $1, last_error_code = NULL, updated_at_ms = $2
                       WHERE request_id = $3 AND state = 'running' AND owner_node_id = $4
                         AND fence = $5 AND lease_expires_ms > $2
@@ -417,7 +417,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                       WHERE EXISTS (SELECT 1 FROM analysis_requests
                         WHERE request_id = $9 AND state = 'submitted' AND fence = $10
                           AND file_id = $2 AND source_size = $3 AND source_mtime = $4
-                          AND result_cache_key = $1 AND updated_at_ms = $8)
+                          AND result_cache_key = $1 AND updated_at_ms = $8
+                          AND owner_node_id = $13)
                      ON CONFLICT(cache_key) DO UPDATE SET
                         file_id = excluded.file_id, source_size = excluded.source_size,
                         source_mtime = excluded.source_mtime,
@@ -454,7 +455,26 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         &request.request_id,
                         request.fence,
                         if request.force_rebuild { 1_i64 } else { 0_i64 },
-                        MAX_ATTEMPTS
+                        MAX_ATTEMPTS,
+                        &request.owner_node_id
+                    ),
+                ),
+                (
+                    "UPDATE analysis_requests SET owner_node_id = NULL
+                      WHERE request_id = $1 AND state = 'submitted'
+                        AND owner_node_id = $2 AND fence = $3
+                        AND file_id = $4 AND source_size = $5 AND source_mtime = $6
+                        AND result_cache_key = $7 AND updated_at_ms = $8"
+                        .to_owned(),
+                    params!(
+                        &request.request_id,
+                        &request.owner_node_id,
+                        request.fence,
+                        job.file_id,
+                        job.source_size,
+                        job.source_mtime,
+                        &job.cache_key,
+                        now_ms
                     ),
                 ),
             ])
@@ -462,7 +482,13 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        Ok(results.first().copied() == Some(1))
+        match (results.first().copied(), results.get(2).copied()) {
+            (Some(1), Some(1)) => Ok(true),
+            (Some(0), Some(0)) => Ok(false),
+            _ => Err(StoreError::Task(
+                "analysis handoff token was not consumed atomically".to_owned(),
+            )),
+        }
     }
 
     async fn retry_analysis_request(

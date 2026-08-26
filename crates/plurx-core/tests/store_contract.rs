@@ -6486,6 +6486,28 @@ async fn replicated_analysis_handoff_is_atomic_and_fenced() {
         .await
         .expect("read retained artifact after rebind")
         .is_some());
+
+    client
+        .execute(
+            "UPDATE cluster_fragment_index_jobs
+                SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                    updated_at_ms = 52 WHERE cache_key = $1",
+            hiqlite::params!(&job.cache_key),
+        )
+        .await
+        .expect("finish rebound worker before stale replay");
+    assert!(!store
+        .submit_fragment_index_analysis(&force_claim, &forced_job, 41)
+        .await
+        .expect("replay accepted forced handoff"));
+    let after_replay = store
+        .cluster_fragment_index_job(&job.cache_key)
+        .await
+        .expect("read worker after stale replay")
+        .expect("worker after stale replay");
+    assert_eq!(after_replay.state, "ready");
+    assert_eq!(after_replay.file_id, 2);
+    assert_eq!(after_replay.updated_at_ms, 52);
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]

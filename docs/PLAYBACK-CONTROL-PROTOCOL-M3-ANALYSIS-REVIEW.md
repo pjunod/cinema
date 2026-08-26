@@ -93,3 +93,14 @@ became terminal. SQLite and real-Raft contracts cover ready replacement,
 canceled rebind, forced reopen with artifact retention, ambiguous committed
 insert recovery, charged retry exhaustion, the foreground stop signal, and
 both v11 and v12 migration paths.
+
+The fourth review found that Hiqlite's second handoff statement could reuse a
+durable `submitted` request after its original transaction, allowing a stale
+forced replay to reopen a terminal worker. The replicated transaction now
+retains the fenced owner only as a one-use, transaction-local handoff token:
+the worker mutation requires it and a final statement consumes it. Atomic
+commit means no observer sees the temporary owner, and an exact transaction or
+caller replay finds no token and cannot mutate the worker. The real-Raft
+contract finishes a rebound worker, replays the earlier accepted forced
+submission, and requires the ready state, rebound file identity, and timestamp
+to remain unchanged.
