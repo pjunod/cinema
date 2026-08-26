@@ -3213,6 +3213,7 @@ impl JobManager {
         let paths = ordered_index_paths(paths, cursor);
 
         let mut built = 0usize;
+        let mut built_file_ids = Vec::new();
         let mut attempted = 0usize;
         let mut last_examined = None;
         for (examined, (file_id, _path)) in paths.into_iter().enumerate() {
@@ -3259,6 +3260,7 @@ impl JobManager {
                         tracing::warn!(file_id, error = %error, "storing a fragment index");
                     } else {
                         built += 1;
+                        built_file_ids.push(file_id);
                     }
                 }
                 // These now make an HLS title unavailable, so keep the reason
@@ -3288,7 +3290,12 @@ impl JobManager {
             self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
         }
         if attempted > 0 {
-            tracing::info!(attempted, built, "fragment indexing pass finished");
+            tracing::info!(
+                attempted,
+                built,
+                built_files = ?built_file_ids,
+                "fragment indexing pass finished"
+            );
         }
     }
 
