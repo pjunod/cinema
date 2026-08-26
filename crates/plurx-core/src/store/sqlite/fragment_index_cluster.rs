@@ -182,8 +182,10 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = 'queue_expired'
-                  WHERE state = 'queued' AND created_at_ms < ?2",
-                params![job.created_at_ms, eligibility_cutoff],
+                  WHERE (state = 'queued' AND created_at_ms < ?2)
+                     OR (state = 'running' AND attempts >= ?3
+                       AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                params![job.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS],
             )?;
             let changed = conn.execute(
                 "INSERT INTO cluster_fragment_index_jobs
@@ -268,8 +270,14 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = 'queue_expired'
-                  WHERE state = 'queued' AND created_at_ms < ?2",
-                params![now_ms, now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS)],
+                  WHERE (state = 'queued' AND created_at_ms < ?2)
+                     OR (state = 'running' AND attempts >= ?3
+                       AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                params![
+                    now_ms,
+                    now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS),
+                    MAX_ATTEMPTS
+                ],
             )?;
             let candidates = {
                 let mut statement = transaction.prepare(&format!(
@@ -343,8 +351,10 @@ impl ClusterFragmentIndexStore for SqliteStore {
                     SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                         not_before_ms = ?1, updated_at_ms = ?1,
                         last_error_code = 'queue_expired'
-                  WHERE state = 'queued' AND created_at_ms < ?2",
-                params![replacement.created_at_ms, eligibility_cutoff],
+                  WHERE (state = 'queued' AND created_at_ms < ?2)
+                     OR (state = 'running' AND attempts >= ?3
+                       AND COALESCE(lease_expires_ms, 0) <= ?1)",
+                params![replacement.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS],
             )?;
             Ok(conn.execute(
                 "UPDATE cluster_fragment_index_jobs
@@ -352,16 +362,18 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         source_sha256 = ?5, pipeline_sha256 = ?6,
                         state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = CASE
-                          WHEN state = 'ready' OR file_id <> ?2 THEN 0
+                          WHEN state = 'ready' OR last_error_code = 'queue_expired'
+                            OR file_id <> ?2 THEN 0
                           ELSE attempts END,
-                        not_before_ms = ?7, updated_at_ms = ?8,
+                        not_before_ms = ?7, created_at_ms = ?8, updated_at_ms = ?8,
                         last_error_code = 'holders_unavailable'
                   WHERE cache_key = ?1
-                    AND (state = 'ready' OR (state = 'failed'
+                    AND (state = 'ready'
+                      OR (state = 'failed' AND last_error_code = 'queue_expired')
+                      OR (state = 'failed'
                       AND attempts < ?9 AND not_before_ms <= ?8))
-                    AND (state <> 'ready' OR
-                      (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                        WHERE state IN ('queued', 'running')) < ?10)
+                    AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                          WHERE state IN ('queued', 'running')) < ?10
                     AND EXISTS (SELECT 1 FROM files
                       WHERE id = ?2 AND size = ?3 AND mtime = ?4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
@@ -917,7 +929,7 @@ mod tests {
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, state, fence, attempts, not_before_ms,
                        created_at_ms, updated_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', 5, 5, 0, 10, 10)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'ready', 5, 5, 0, 1, 1)",
                     params![
                         seeded.cache_key,
                         seeded.file_id,
@@ -931,7 +943,7 @@ mod tests {
                     "INSERT INTO cluster_fragment_index_artifacts
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
                        pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 10)",
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 1)",
                     params![
                         seeded.cache_key,
                         seeded.file_id,
@@ -948,18 +960,20 @@ mod tests {
             .expect("seed exhausted ready artifact");
 
         let mut repair = original;
-        repair.not_before_ms = 20;
-        repair.created_at_ms = 20;
+        let now = QUEUE_ELIGIBILITY_MS.saturating_add(10);
+        repair.not_before_ms = now;
+        repair.created_at_ms = now;
         assert!(store
             .requeue_cluster_fragment_index(&repair)
             .await
             .expect("requeue"));
         let claimed = store
-            .claim_cluster_fragment_index("node-b", &[], 20, 1_020)
+            .claim_cluster_fragment_index("node-b", &[], now, now.saturating_add(1_000))
             .await
             .expect("claim")
             .expect("fresh repair claim");
         assert_eq!(claimed.attempts, 1);
+        assert_eq!(claimed.created_at_ms, now);
     }
 
     #[tokio::test]
@@ -1034,15 +1048,20 @@ mod tests {
                 let mut insert = conn.prepare(
                     "INSERT INTO cluster_fragment_index_jobs
                       (cache_key, file_id, source_size, source_mtime, source_sha256,
-                       pipeline_sha256, state, fence, attempts, not_before_ms,
-                       created_at_ms, updated_at_ms)
-                     VALUES (?1, 1, 100, 10, ?2, ?3, 'queued', 0, 0, 1, 1, 1)",
+                       pipeline_sha256, state, owner_node_id, fence, lease_expires_ms,
+                       attempts, not_before_ms, created_at_ms, updated_at_ms)
+                     VALUES (?1, 1, 100, 10, ?2, ?3, ?4, ?5, 0, ?6, ?7, 1, 1, 1)",
                 )?;
                 for sequence in 0_i64..MAX_ACTIVE_JOBS {
+                    let crashed = sequence >= MAX_ACTIVE_JOBS / 2;
                     insert.execute(params![
                         format!("{sequence:064x}"),
                         format!("{:064x}", sequence.saturating_add(1)),
                         "b".repeat(64),
+                        if crashed { "running" } else { "queued" },
+                        crashed.then_some("lost-node"),
+                        crashed.then_some(1_i64),
+                        if crashed { MAX_ATTEMPTS } else { 0 },
                     ])?;
                 }
                 Ok(())
@@ -1067,6 +1086,104 @@ mod tests {
             .expect("claim")
             .expect("later readable job");
         assert_eq!(claimed.cache_key, readable.cache_key);
+    }
+
+    #[tokio::test]
+    async fn failed_repair_cannot_bypass_the_active_queue_cap() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let mut repair = job(2, 20, 100);
+        repair.source_sha256 = "f".repeat(64);
+        repair.pipeline_sha256 = "e".repeat(64);
+        repair.cache_key =
+            cluster_fragment_index_key(&repair.source_sha256, &repair.pipeline_sha256)
+                .expect("repair key");
+        let seeded_repair = repair.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       created_at_ms, updated_at_ms, last_error_code)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'failed', 1, 1, 1, 1, 1,
+                       'holder_read_failed')",
+                    params![
+                        seeded_repair.cache_key,
+                        seeded_repair.file_id,
+                        seeded_repair.source_size,
+                        seeded_repair.source_mtime,
+                        seeded_repair.source_sha256,
+                        seeded_repair.pipeline_sha256,
+                    ],
+                )?;
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_artifacts
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, blob_sha256, bytes, built_by_node_id, built_at_ms)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 10, 'node-a', 1)",
+                    params![
+                        seeded_repair.cache_key,
+                        seeded_repair.file_id,
+                        seeded_repair.source_size,
+                        seeded_repair.source_mtime,
+                        seeded_repair.source_sha256,
+                        seeded_repair.pipeline_sha256,
+                        "d".repeat(64),
+                    ],
+                )?;
+                let mut insert = conn.prepare(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       created_at_ms, updated_at_ms)
+                     VALUES (?1, 1, 100, 10, ?2, ?3, 'queued', 0, 0, 100, 100, 100)",
+                )?;
+                for sequence in 0_i64..MAX_ACTIVE_JOBS {
+                    insert.execute(params![
+                        format!("{sequence:064x}"),
+                        format!("{:064x}", sequence.saturating_add(1)),
+                        "b".repeat(64),
+                    ])?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed full queue and failed repair");
+
+        assert!(!store
+            .requeue_cluster_fragment_index(&repair)
+            .await
+            .expect("full requeue"));
+        let active = store
+            .with_read(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                      WHERE state IN ('queued', 'running')",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .map_err(Into::into)
+            })
+            .await
+            .expect("active count");
+        assert_eq!(active, MAX_ACTIVE_JOBS);
+
+        store
+            .with_conn(|conn| {
+                conn.execute(
+                    "UPDATE cluster_fragment_index_jobs SET state = 'failed'
+                      WHERE cache_key = ?1",
+                    params!["0".repeat(64)],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("free one slot");
+        assert!(store
+            .requeue_cluster_fragment_index(&repair)
+            .await
+            .expect("requeue with capacity"));
     }
 
     #[tokio::test]

@@ -223,8 +223,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = 'queue_expired'
-              WHERE state = 'queued' AND created_at_ms < $2",
-            params!(job.created_at_ms, eligibility_cutoff),
+              WHERE (state = 'queued' AND created_at_ms < $2)
+                 OR (state = 'running' AND attempts >= $3
+                   AND COALESCE(lease_expires_ms, 0) <= $1)",
+            params!(job.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS),
         )
         .await?;
         Ok(self
@@ -307,8 +309,14 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = 'queue_expired'
-              WHERE state = 'queued' AND created_at_ms < $2",
-            params!(now_ms, now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS)),
+              WHERE (state = 'queued' AND created_at_ms < $2)
+                 OR (state = 'running' AND attempts >= $3
+                   AND COALESCE(lease_expires_ms, 0) <= $1)",
+            params!(
+                now_ms,
+                now_ms.saturating_sub(QUEUE_ELIGIBILITY_MS),
+                MAX_ATTEMPTS
+            ),
         )
         .await?;
         for _ in 0..8 {
@@ -383,8 +391,10 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 SET state = 'failed', owner_node_id = NULL, lease_expires_ms = NULL,
                     not_before_ms = $1, updated_at_ms = $1,
                     last_error_code = 'queue_expired'
-              WHERE state = 'queued' AND created_at_ms < $2",
-            params!(replacement.created_at_ms, eligibility_cutoff),
+              WHERE (state = 'queued' AND created_at_ms < $2)
+                 OR (state = 'running' AND attempts >= $3
+                   AND COALESCE(lease_expires_ms, 0) <= $1)",
+            params!(replacement.created_at_ms, eligibility_cutoff, MAX_ATTEMPTS),
         )
         .await?;
         Ok(self
@@ -394,16 +404,18 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                         source_sha256 = $5, pipeline_sha256 = $6,
                         state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
                         attempts = CASE
-                          WHEN state = 'ready' OR file_id <> $2 THEN 0
+                          WHEN state = 'ready' OR last_error_code = 'queue_expired'
+                            OR file_id <> $2 THEN 0
                           ELSE attempts END,
-                        not_before_ms = $7, updated_at_ms = $8,
+                        not_before_ms = $7, created_at_ms = $8, updated_at_ms = $8,
                         last_error_code = 'holders_unavailable'
                   WHERE cache_key = $1
-                    AND (state = 'ready' OR (state = 'failed'
+                    AND (state = 'ready'
+                      OR (state = 'failed' AND last_error_code = 'queue_expired')
+                      OR (state = 'failed'
                       AND attempts < $9 AND not_before_ms <= $8))
-                    AND (state <> 'ready' OR
-                      (SELECT COUNT(*) FROM cluster_fragment_index_jobs
-                        WHERE state IN ('queued', 'running')) < $10)
+                    AND (SELECT COUNT(*) FROM cluster_fragment_index_jobs
+                          WHERE state IN ('queued', 'running')) < $10
                     AND EXISTS (SELECT 1 FROM files
                       WHERE id = $2 AND size = $3 AND mtime = $4)
                     AND EXISTS (SELECT 1 FROM cluster_fragment_index_artifacts
