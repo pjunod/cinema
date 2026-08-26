@@ -11140,6 +11140,7 @@ impl TranscodeManager {
         {
             return Some(Err(error));
         }
+        let session_id = control.session_id.to_owned();
         let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
             match session.accept_control(control).await? {
                 Ok(outcome) => outcome,
@@ -11148,7 +11149,7 @@ impl TranscodeManager {
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
-            control.session_id,
+            &session_id,
             &session,
             limits,
             global_live_bytes,
