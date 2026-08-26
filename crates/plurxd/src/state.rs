@@ -2410,9 +2410,21 @@ impl JobManager {
     /// a voter in ten minutes, and this loop has to start scheduling then
     /// without a restart. The individual leases are gated too, but skipping the
     /// tick keeps a learner from doing the reads and the log noise as well.
+    ///
+    /// The cluster integration feature exposes a process-
+    /// local cadence override so real-daemon tests can wait on scheduler-owned
+    /// prerequisites without adding a full minute to every fixture.
     pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         self.scan_on_startup().await;
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        #[cfg(feature = "cluster-integration-tests")]
+        let interval = std::env::var("PLURX_TEST_SCHEDULER_TICK_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|milliseconds| (10..=60_000).contains(milliseconds))
+            .map_or(Duration::from_secs(60), Duration::from_millis);
+        #[cfg(not(feature = "cluster-integration-tests"))]
+        let interval = Duration::from_secs(60);
+        let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
             self.schedule_tick(&transcode).await;
@@ -2514,7 +2526,10 @@ impl JobManager {
                 .await,
             cache_produce_mins: self.job_interval(keys::JOB_CACHE_PRODUCE_MINS).await,
             last_cache_produce: self.job_stamp(keys::JOB_LAST_CACHE_PRODUCE).await,
-            vod_index_mins: self.job_interval(keys::VOD_INDEX_MINS).await,
+            // VOD is the only HLS presentation, so an absent index cadence
+            // cannot mean "leave the library permanently unplayable". An
+            // explicit stored zero still pauses indexing.
+            vod_index_mins: self.job_interval_or(keys::VOD_INDEX_MINS, 15).await,
             last_vod_index: self
                 .job_stamp(&self.local_job_key(keys::JOB_LAST_VOD_INDEX))
                 .await,
@@ -3073,9 +3088,10 @@ impl JobManager {
     /// pre-transcode worker is busy, for the same reason that worker declines
     /// to start while a foreground session is.
     ///
-    /// Nothing reads an index yet. A file without one keeps today's
-    /// presentation (plan §2.2, ledger D4), which is what lets this run — or
-    /// not run — without any client noticing either way.
+    /// VOD is the only segmented presentation, so a missing current index is
+    /// an explicit `vod_index_pending` refusal. Empty or preempted passes must
+    /// therefore remain due instead of consuming the full cadence before the
+    /// scanner has published the files they need to examine.
     /// Forget node-local VOD rows whose file no longer exists.
     ///
     /// Bounded per tick rather than exhaustive: the rows are small, nothing
@@ -3138,8 +3154,6 @@ impl JobManager {
             return;
         }
         let _running = IndexingGuard(Arc::clone(&self));
-        self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
-
         // Before building anything, give back what belongs to files that are
         // gone. Node-local rows and a replicated `files` table share no
         // transaction, so a hook inside `delete_files` could only ever clean
@@ -3227,6 +3241,15 @@ impl JobManager {
                     }
                 }
             }
+        }
+        // The scheduler can tick before a first-run library has been created
+        // or before its initial scan has published any files. Stamping that
+        // empty pass would make a default-on VOD server refuse every new title
+        // for a full cadence. A pass that examined media is complete even when
+        // everything was already current or unsupported; an empty or
+        // preempted pass remains due for the next minute tick.
+        if examined > 0 {
+            self.stamp_local(keys::JOB_LAST_VOD_INDEX).await;
         }
         if attempted > 0 {
             tracing::info!(attempted, built, "fragment indexing pass finished");
@@ -4686,6 +4709,30 @@ mod tests {
             jobs.all_statuses().await.contains_key(&library.id),
             "and must start it once it carries one"
         );
+    }
+
+    #[tokio::test]
+    async fn an_empty_vod_pass_does_not_delay_the_first_useful_index() {
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let artwork = tempfile::tempdir().expect("artwork");
+        let transcode_dir = tempfile::tempdir().expect("transcode");
+        let jobs = manager(store.clone(), artwork.path());
+        let transcode = Arc::new(TranscodeManager::new(
+            store.clone(),
+            transcode_dir.path().join("work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+
+        Arc::clone(&jobs).build_fragment_indexes(transcode).await;
+
+        let stamp = jobs.local_job_key(keys::JOB_LAST_VOD_INDEX);
+        assert_eq!(
+            store.get_setting(&stamp).await.expect("read VOD stamp"),
+            None,
+            "a boot tick before library creation must stay due for the first scan"
+        );
+        assert!(!jobs.indexing.load(Ordering::Relaxed));
     }
 
     #[tokio::test]

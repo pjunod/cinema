@@ -6611,10 +6611,10 @@ mod tests {
         assert_eq!(body["delivered_dynamic_range"], "sdr", "{body}");
     }
 
-    /// ADAPTIVE-QUALITY Phase 1, the server half: the decision and the
-    /// session response both carry the source-filtered ladder, a stray
-    /// explicit height snaps onto it, and a request for the source's own
-    /// height — the Original/forced-burn promise — passes through unsnapped.
+    /// ADAPTIVE-QUALITY Phase 1 still advertises the source-filtered ladder,
+    /// but M4 must not use the removed live engine to fulfill a rung. Until D6
+    /// unlocks transcode-rung VOD, both a stray rung and the source-height
+    /// promise fail with the same typed, honest refusal.
     #[tokio::test]
     async fn the_ladder_is_advertised_and_stray_heights_snap() {
         crate::transcode::require_ffmpeg();
@@ -6673,56 +6673,25 @@ mod tests {
         assert_eq!(body["ladder"][0]["total_kbps"], 4_160, "{body}");
         assert_eq!(body["ladder"][0]["peak_kbps"], 6_160, "{body}");
 
-        // A stray explicit height snaps onto the ladder (850 → 720)…
-        let (status, body) = call(
-            &app,
-            post(
-                &format!("/api/v1/files/{odd}/hls/sessions"),
-                Some(&admin),
-                json!({ "playback_id": "pb-snap", "height": 850 }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        assert!(
-            body["ladder"].as_array().is_some_and(|l| !l.is_empty()),
-            "the session response carries the ladder too: {body}"
-        );
-        let sid = body["session_id"].as_str().expect("sid").to_owned();
-        let info = state
-            .transcode
-            .session_status(&sid)
-            .await
-            .expect("session status");
-        assert_eq!(info.target_height, 720, "850 is a stray; 720 is its rung");
-        // Release it before the next create: this test is about the snap,
-        // and on a 2-core runner the machine-derived CPU pool would refuse
-        // a second coexisting software session for the wrong reason.
-        assert!(state.transcode.stop_session(&sid, "test").await);
-
-        // …and the source's own height does not: that request is the
-        // Original/forced-burn promise, and snapping it to 720 would be
-        // exactly the silent downgrade the burn fix removed.
-        let (status, body) = call(
-            &app,
-            post(
-                &format!("/api/v1/files/{odd}/hls/sessions"),
-                Some(&admin),
-                json!({ "playback_id": "pb-promise", "height": 900 }),
-            ),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK, "{body}");
-        let sid = body["session_id"].as_str().expect("sid").to_owned();
-        let info = state
-            .transcode
-            .session_status(&sid)
-            .await
-            .expect("session status");
-        assert_eq!(
-            info.target_height, 900,
-            "the source's own height is a promise"
-        );
+        for (playback_id, height) in [("pb-snap", 850), ("pb-promise", 900)] {
+            let (status, body) = call(
+                &app,
+                post(
+                    &format!("/api/v1/files/{odd}/hls/sessions"),
+                    Some(&admin),
+                    json!({ "playback_id": playback_id, "height": height }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+            assert_eq!(body["code"], "vod_transcode_unavailable", "{body}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("D6 device measurement")),
+                "the refusal names the gate instead of falling back: {body}"
+            );
+        }
     }
 
     /// The write path and the read paths have to agree on the primary key.
@@ -6741,6 +6710,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
         state
             .store
             .put_setting(plurx_core::store::keys::PLAYBACK_NETWORK_PRIORS, "1")
@@ -6854,6 +6824,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
         let request_with_network = |mut request: Request<Body>, ua: &'static str| {
             request.headers_mut().insert(
                 "x-forwarded-for",
@@ -8338,25 +8309,11 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
-        let media = state
-            .store
-            .get_file(s.file)
-            .await
-            .expect("file read")
-            .expect("file");
         // Progressive remux is intentionally allowed to run at several times
         // realtime. Keep enough source behind it that the response-owned
-        // activity guard cannot reach EOF while two HLS sessions start under
+        // activity guard cannot reach EOF while the VOD session starts under
         // the fully parallel test binary.
-        write_real_av_fixture(&media.path, 120);
-        // Two software sessions coexist below; on a 2-core runner the
-        // machine-derived pool would refuse the second and fail this test for
-        // a reason that has nothing to do with what it is testing.
-        state
-            .store
-            .put_setting(plurx_core::store::keys::SW_POOL_THREADS, "64")
-            .await
-            .expect("pool headroom");
+        prepare_vod_copy_fixture(&state, s.file, 120).await;
 
         // 1. direct — a range request, no session anywhere.
         let status = app
@@ -8383,9 +8340,7 @@ mod tests {
             .expect("r");
         assert_eq!(remux.status(), StatusCode::OK);
 
-        // 3 & 4. the two HLS kinds, which differ only in what ffmpeg is asked
-        // to do — and never in the encoder label, which is why the method is
-        // recorded rather than inferred.
+        // 3. Immutable copy VOD is the only HLS method available before D6.
         let (st, copy) = call(
             &app,
             post(
@@ -8396,6 +8351,9 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{copy}");
+
+        // The old fourth method is not a fallback. A transcode request is an
+        // explicit typed refusal until transcode-rung VOD is unlocked.
         let (st, tx) = call(
             &app,
             post(
@@ -8405,9 +8363,10 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(st, StatusCode::OK, "{tx}");
+        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{tx}");
+        assert_eq!(tx["code"], "vod_transcode_unavailable", "{tx}");
 
-        let rows = settled_deliveries(&app, &admin, 4).await;
+        let rows = settled_deliveries(&app, &admin, 3).await;
         let mut methods: Vec<&str> = rows
             .iter()
             .map(|r| r["method"].as_str().unwrap_or("?"))
@@ -8415,32 +8374,29 @@ mod tests {
         methods.sort_unstable();
         assert_eq!(
             methods,
-            ["direct", "hls-copy", "remux", "transcode"],
-            "four routes, four names: {rows:?}"
+            ["direct", "hls-copy", "remux"],
+            "three viable routes, three names: {rows:?}"
         );
         for row in &rows {
             assert_eq!(row["user"], "paul", "{row}");
             assert_eq!(row["title"], "The Target", "{row}");
             assert_eq!(row["file_id"], s.file, "{row}");
         }
-        // Only the two that really are sessions carry a session id, and they
-        // are the two the old array has always listed.
+        // Only immutable VOD is a session. Direct and progressive remux keep
+        // their existing non-session accounting.
         let with_session = rows.iter().filter(|r| !r["session_id"].is_null()).count();
-        assert_eq!(with_session, 2, "{rows:?}");
+        assert_eq!(with_session, 1, "{rows:?}");
         let (_, page) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
         let sessions = page["sessions"].as_array().expect("sessions");
-        assert_eq!(sessions.len(), 2, "unchanged in meaning: {page}");
+        assert_eq!(sessions.len(), 1, "only VOD copy is live: {page}");
         assert!(
             sessions[0].get("encoder").is_some() && sessions[0].get("user_name").is_some(),
             "and unchanged in shape: {page}"
         );
 
-        // Each row ends the way its delivery does. The two sessions when they
-        // are stopped...
-        for id in [&copy["session_id"], &tx["session_id"]] {
-            let id = id.as_str().expect("session id");
-            assert!(state.transcode.stop_session(id, "test").await);
-        }
+        // Each row ends the way its delivery does. VOD when it is stopped...
+        let id = copy["session_id"].as_str().expect("session id");
+        assert!(state.transcode.stop_session(id, "test").await);
         // ...the remux when its body is dropped, which is the same moment
         // `kill_on_drop` takes its ffmpeg down...
         drop(remux);
@@ -8650,6 +8606,80 @@ mod tests {
             "A/V fixture encode failed: {}",
             String::from_utf8_lossy(&made.stderr)
         );
+    }
+
+    /// Replace `seed_content`'s placeholder with a real, duration-matched
+    /// source and persist the fragment index that the VOD-only session route
+    /// requires. Router tests that are about the session wire should exercise
+    /// an eligible title, not accidentally assert the old live fallback.
+    async fn prepare_vod_copy_fixture(state: &AppState, file_id: i64, seconds: u32) {
+        use plurx_core::domain::ProbeResult;
+
+        let file = state
+            .store
+            .get_file(file_id)
+            .await
+            .expect("file read")
+            .expect("file");
+        write_real_av_fixture(&file.path, seconds);
+        let size = i64::try_from(
+            std::fs::metadata(&file.path)
+                .expect("fixture metadata")
+                .len(),
+        )
+        .expect("fixture size");
+        let refreshed = state
+            .store
+            .upsert_file(
+                file.item_id,
+                &file.path.to_string_lossy(),
+                size,
+                file.mtime,
+                &ProbeResult {
+                    duration_ms: Some(i64::from(seconds) * 1_000),
+                    container: file.container.clone(),
+                    video_codec: file.video_codec.clone(),
+                    video_profile: file.video_profile.clone(),
+                    width: file.width,
+                    height: file.height,
+                    bit_depth: file.bit_depth,
+                    hdr: file.hdr.clone(),
+                    hdr_format: file.hdr_format.clone(),
+                    bitrate: file.bitrate,
+                    audio_streams: file.audio_streams.clone(),
+                    subtitle_streams: file.subtitle_streams.clone(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("refresh fixture probe");
+        assert_eq!(refreshed, file_id, "fixture keeps its file identity");
+        store_current_fragment_index(state, file_id).await;
+    }
+
+    async fn store_current_fragment_index(state: &AppState, file_id: i64) {
+        let file = state
+            .store
+            .get_file(file_id)
+            .await
+            .expect("file read")
+            .expect("file");
+        let outcome = crate::fragindex::build(
+            &file,
+            state.transcode.dv_strippable(),
+            false,
+            state.transcode.runtime_cache_dir(),
+            std::time::Duration::from_secs(120),
+        )
+        .await;
+        let crate::fragindex::IndexOutcome::Built(index) = outcome else {
+            panic!("the router fixture must build a fragment index: {outcome:?}");
+        };
+        state
+            .store
+            .put_fragment_index(file_id, &index)
+            .await
+            .expect("store fixture fragment index");
     }
 
     /// The §3.3 contract: the first request extracts and files the VTT under
@@ -8890,16 +8920,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let s = seed_content(&state).await;
-        // This endpoint now mirrors the live video playlist. Replace the
-        // general router fixture's placeholder bytes with a tiny real source
-        // so the copy segmenter can publish that playlist.
-        let media = state
-            .store
-            .get_file(s.file)
-            .await
-            .expect("file read")
-            .expect("file");
-        write_real_av_fixture(&media.path, 16);
+        prepare_vod_copy_fixture(&state, s.file, 16).await;
 
         // Unknown session → 404 for both playlist and segment.
         assert_eq!(
@@ -8911,21 +8932,41 @@ mod tests {
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            status_of(&app, get_q("/api/v1/hls/nosuchsession/seg00000.ts")).await,
+            status_of(&app, get_q("/api/v1/hls/nosuchsession/seg00000.m4s")).await,
             StatusCode::NOT_FOUND
         );
-        // Start a session (spawns ffmpeg; returns the playlist URL immediately).
-        let (st, body) = call(
+
+        // The query-shaped compatibility route has no copy recipe. It must
+        // refuse that transcode honestly instead of reviving live HLS.
+        let (st, old_start) = call(
             &app,
             get_q(&format!("/api/v1/files/{}/hls/start?token={admin}", s.file)),
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
-        assert!(body["session_id"].is_string());
+        assert_eq!(st, StatusCode::NOT_IMPLEMENTED, "{old_start}");
+        assert_eq!(old_start["code"], "vod_transcode_unavailable");
 
-        // Apple opts into a master playlist whose child subtitle URLs are
-        // authenticated by the unguessable session capability. AVPlayer adds
-        // no bearer header to these autonomous requests.
+        // A client that explicitly names the removed presentation gets a
+        // terminal typed answer; omission below means VOD.
+        let (st, live) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", s.file),
+                Some(&admin),
+                json!({
+                    "playback_id": "legacy-live-client",
+                    "copy": true,
+                    "presentation": "live"
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(st, StatusCode::GONE, "{live}");
+        assert_eq!(live["code"], "live_presentation_removed", "{live}");
+
+        // An eligible copy request creates the immutable VOD presentation.
+        // Apple may still wrap that fixed child playlist in a native-subtitle
+        // master; every child is authenticated by the session capability.
         let (st, native) = call(
             &app,
             post(
@@ -8934,15 +8975,6 @@ mod tests {
                 json!({
                     "playback_id": "apple-native-subs",
                     "request_id": "native-subs-attempt",
-                    // Deliberately NOT on a keyframe. The fixture above is
-                    // 10 fps with `-g 20`, so its keyframes are every 2 s and
-                    // a copy session asked for 10.5 s actually begins at
-                    // 10.0 s — `-noaccurate_seek` seeks backwards and
-                    // `-avoid_negative_ts make_zero` calls that keyframe t=0.
-                    // A start that lands exactly on a keyframe (which 10.0
-                    // did) makes this test pass whether cues are shifted by
-                    // the request or by the media origin, which is how the
-                    // half-second lead below shipped.
                     "start": 10.5,
                     "copy": true,
                     "native_subtitles": true,
@@ -8952,13 +8984,9 @@ mod tests {
         )
         .await;
         assert_eq!(st, StatusCode::OK, "{native}");
-        assert_eq!(
-            native["media_origin_ms"], 10_000,
-            "copy-session local time zero must map to the preceding keyframe: {native}"
-        );
-        // The session's own answer, on the wire: `StartResponse` skips the key
-        // when it is None, so this is the only thing that would catch it
-        // silently disappearing from every create.
+        assert_eq!(native["vod"], true, "{native}");
+        assert_eq!(native["start_seconds"], 0.0, "{native}");
+        assert_eq!(native["media_origin_ms"], 0, "{native}");
         assert_eq!(native["delivered_dynamic_range"], "sdr", "{native}");
         let session = native["session_id"].as_str().expect("session");
         let expected_playlist = format!("/api/v1/hls/{session}/master.m3u8?subtitle=0");
@@ -8966,26 +8994,6 @@ mod tests {
             native["playlist_url"].as_str(),
             Some(expected_playlist.as_str())
         );
-
-        // Progressive copy has no JSON start envelope, so it exposes the same
-        // keyframe-aligned origin before attachment in a response header.
-        let progressive = app
-            .clone()
-            .oneshot(get(
-                &format!("/api/v1/files/{}/stream.mp4?start=10.5", s.file),
-                Some(&admin),
-            ))
-            .await
-            .expect("progressive response");
-        assert_eq!(progressive.status(), StatusCode::OK);
-        assert_eq!(
-            progressive
-                .headers()
-                .get(stream::MEDIA_ORIGIN_MS_HEADER)
-                .and_then(|value| value.to_str().ok()),
-            Some("10000")
-        );
-        drop(progressive);
 
         let (status, master) = body_of(
             &app,
@@ -8998,17 +9006,13 @@ mod tests {
         assert!(master.contains("LANGUAGE=\"en\",DEFAULT=YES"), "{master}");
         assert!(master.contains("subs/0/index.m3u8"), "{master}");
 
-        // Sessions returned before the dedicated path was introduced remain
-        // playable for their lifetime through the query-form bridge.
-        let (legacy_status, legacy_master) = body_of(
-            &app,
-            get_q(&format!(
-                "/api/v1/hls/{session}/index.m3u8?native=1&subtitle=0"
-            )),
-        )
-        .await;
-        assert_eq!(legacy_status, StatusCode::OK);
-        assert_eq!(legacy_master, master.as_bytes());
+        let (status, video) =
+            body_of(&app, get_q(&format!("/api/v1/hls/{session}/index.m3u8"))).await;
+        assert_eq!(status, StatusCode::OK);
+        let video = String::from_utf8(video).expect("video playlist utf8");
+        assert!(video.contains("#EXT-X-PLAYLIST-TYPE:VOD"), "{video}");
+        assert!(video.contains("#EXT-X-ENDLIST"), "{video}");
+        assert!(video.contains("seg00000.m4s"), "{video}");
 
         let (status, subtitle_playlist) = body_of(
             &app,
@@ -9018,7 +9022,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let subtitle_playlist = String::from_utf8(subtitle_playlist).expect("playlist utf8");
         assert!(
-            subtitle_playlist.contains("#EXT-X-PLAYLIST-TYPE:EVENT"),
+            subtitle_playlist.contains("#EXT-X-PLAYLIST-TYPE:VOD"),
             "{subtitle_playlist}"
         );
         assert!(
@@ -9027,72 +9031,8 @@ mod tests {
         );
         assert!(subtitle_playlist.contains("#EXT-X-ENDLIST"));
 
-        // A cold embedded subtitle is a full-file extraction. AVPlayer gives
-        // each VTT segment only about two seconds and holds the video in
-        // `AVPlayerWaitingToMinimizeStallsReason` when that request does not
-        // answer, so the segment route must return a valid empty window while
-        // the sidecar warms instead of awaiting the scan.
-        let (status, cold) = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            body_of(
-                &app,
-                get_q(&format!("/api/v1/hls/{session}/subs/0/seg00000.vtt")),
-            ),
-        )
-        .await
-        .expect("a cold subtitle segment must answer before AVPlayer's deadline");
-        assert_eq!(status, StatusCode::OK);
-        let cold = String::from_utf8(cold).expect("cold VTT utf8");
-        assert!(cold.starts_with("WEBVTT"), "{cold}");
-        assert!(
-            cold.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"),
-            "the empty answer still has to align with its video segment: {cold}"
-        );
-
-        // Seed the extraction cache so the handler test can focus on the
-        // capability and timeline mapping rather than the placeholder MP4.
-        let file = state
-            .store
-            .get_file(s.file)
-            .await
-            .expect("file read")
-            .expect("file");
-        tokio::fs::create_dir_all(&state.subs_dir)
-            .await
-            .expect("subs dir");
-        let cached = crate::subtitles::vtt_path(&state.subs_dir, &file, 0);
-        tokio::fs::write(
-            cached,
-            "WEBVTT\n\n00:00:09.000 --> 00:00:11.000\ncrossing\n\n00:00:15.000 --> 00:00:16.000\nafter\n",
-        )
-        .await
-        .expect("cached VTT");
-        let (status, shifted) = body_of(
-            &app,
-            get_q(&format!("/api/v1/hls/{session}/subs/0/seg00000.vtt")),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        let shifted = String::from_utf8(shifted).expect("VTT utf8");
-        // The cue is authored 9.000 → 11.000. The session's media begins at
-        // the 10.0 s keyframe, so it belongs at −1.000 → 1.000 and is emitted
-        // from the window edge to 1.000. Shifting by the REQUESTED 10.5 s
-        // instead would end it at 0.500 — the whole of P0-2, at this
-        // fixture's two-second GOP. On a 4K film's GOP the same mistake is
-        // seconds of visible lead.
-        assert!(
-            shifted.contains("00:00:00.000 --> 00:00:01.000"),
-            "cues must be shifted by the session's media origin, not by the \
-             requested start:\n{shifted}"
-        );
-        assert!(
-            !shifted.contains("--> 00:00:00.500"),
-            "cues are being shifted by the requested start (P0-2):\n{shifted}"
-        );
-        assert!(shifted.contains("X-TIMESTAMP-MAP=MPEGTS:0,LOCAL:00:00:00.000"));
-
-        // The old file-id route is still bearer protected; only URLs rooted
-        // in the live session capability are headerless.
+        // The old file-id route remains bearer protected; only URLs rooted in
+        // the VOD session capability are headerless.
         assert_eq!(
             status_of(&app, get_q(&format!("/api/v1/files/{}/subs/0", s.file))).await,
             StatusCode::UNAUTHORIZED
@@ -9112,6 +9052,15 @@ mod tests {
             )
             .await,
             StatusCode::NOT_FOUND
+        );
+
+        assert_eq!(
+            status_of(
+                &app,
+                delete(&format!("/api/v1/hls/{session}"), Some(&admin))
+            )
+            .await,
+            StatusCode::NO_CONTENT
         );
     }
 
@@ -9262,6 +9211,7 @@ mod tests {
         let (app, state) = test_state();
         let admin = setup_admin(&app).await;
         let file = seed_mixed_subtitles(&state, None).await;
+        store_current_fragment_index(&state, file).await;
 
         for (index, why) in [
             (9_i64, "unknown native subtitle track"),
@@ -9297,8 +9247,9 @@ mod tests {
             );
         }
 
-        // The control: the same request with a convertible track is accepted,
-        // so the refusals above are about the subtitle index and nothing else.
+        // The control: the same VOD request with a convertible track is
+        // accepted, so the refusals above are about the subtitle index and
+        // nothing else.
         let (status, body) = call(
             &app,
             post(
@@ -9375,9 +9326,10 @@ mod tests {
         );
 
         // TCL 9445X / Bad Boys for Life's route: the display advertises
-        // `hdr=0`, so the source is already tone-mapped before its forced PGS
-        // track is considered. `/decision` and session creation must agree
-        // that drawing into this already-SDR output is not an HDR downgrade.
+        // `hdr=0`, so the decision may still select an SDR transcode before
+        // considering its forced PGS track. M4 must not fulfill that decision
+        // through the removed live engine: session creation names the deferred
+        // transcode-rung VOD gate instead.
         let (status, sdr_preflight) = call(
             &app,
             get(
@@ -9413,17 +9365,8 @@ mod tests {
             ),
         )
         .await;
-        assert_eq!(status, StatusCode::OK, "{accepted}");
-        assert_eq!(accepted["delivered_dynamic_range"], "sdr", "{accepted}");
-        let session = accepted["session_id"].as_str().expect("session id");
-        assert_eq!(
-            status_of(
-                &app,
-                delete(&format!("/api/v1/hls/{session}"), Some(&admin))
-            )
-            .await,
-            StatusCode::NO_CONTENT
-        );
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{accepted}");
+        assert_eq!(accepted["code"], "vod_transcode_unavailable", "{accepted}");
     }
 
     /// `/decision` used to promise more than the server would accept: a

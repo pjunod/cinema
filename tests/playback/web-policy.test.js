@@ -118,7 +118,7 @@ asyncTest("every web HLS session requests the bounded VOD presentation", async (
     ].join("\n"),
   );
   const { openSession } = build(
-    async (url, options) => { requests.push({ url, options }); return {}; },
+    async (url, options) => { requests.push({ url, options }); return { vod: true }; },
     () => `request-${++requestId}`,
     () => ({
       session: { presentation: "vod", block_budget_secs: 8 },
@@ -159,8 +159,47 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
   );
   assert.match(
     shippedSource("attachHls"),
-    /PLAYER&&PLAYER\.vod\?\{fragLoadPolicy:vodClientContract\(\)\.fragLoadPolicy\}/,
-    "the measured policy must be installed only for a VOD response",
+    /fragLoadPolicy:vodClientContract\(\)\.fragLoadPolicy/,
+    "every HLS response uses the VOD materialization policy",
+  );
+  assert.doesNotMatch(
+    shippedSource("attachHls"),
+    /LEVEL_LOADING[\s\S]*_keeperFires/,
+    "the removed live-playlist keeper must not survive the VOD-only cutover",
+  );
+});
+
+asyncTest("a server that returns the removed live presentation is refused", async () => {
+  const build = new Function(
+    "api",
+    "newRequestId",
+    "vodClientContract",
+    "PlaybackPolicy",
+    [
+      'const PLAYBACK_ID="playback-1";',
+      shippedSource("openSession"),
+      "return {openSession};",
+    ].join("\n"),
+  );
+  const { openSession } = build(
+    async () => ({ vod: false }),
+    () => "request-1",
+    () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
+    policy,
+  );
+  await assert.rejects(
+    () => openSession(42, { copy: true }),
+    error => error.code === "server_vod_required" && error.status === 426,
+  );
+});
+
+test("an initial VOD refusal stays visible instead of closing the player", () => {
+  const play = shippedSource("play");
+  assert.match(play, /showSessionOpenFailure\(e\)/);
+  assert.doesNotMatch(
+    play,
+    /openSession[\s\S]{0,500}return closePlayer\(\)/,
+    "a typed VOD refusal must remain on the playback surface",
   );
 });
 
@@ -183,7 +222,7 @@ test("VOD diagnostics describe materialization instead of claiming a cache hit",
   assert.doesNotMatch(status({ producer_state: "complete" }), /cache/i);
 });
 
-test("an operator can enable and provision VOD from Playback settings", () => {
+test("an operator can provision or stop VOD without restoring live HLS", () => {
   const panel = shippedSource("playbackPanel");
   const save = shippedSource("savePlayback");
   assert.match(panel, /id="pvod"/);
@@ -194,6 +233,8 @@ test("an operator can enable and provision VOD from Playback settings", () => {
   assert.match(save, /vod_index_mins:/);
   assert.match(save, /vod_materialize_budget_secs:/);
   assert.match(save, /vod_block_budget_secs:"8"/);
+  assert.match(panel, /neither setting restores live HLS/);
+  assert.doesNotMatch(panel, /falls back safely/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
@@ -1301,6 +1342,46 @@ test("a persistent stall gets one bounded method-aware recovery", () => {
     "prompt",
   );
   assert.equal(policy.stallRecoveryAction({ method: "unknown" }), "prompt");
+});
+
+test("a persistent supply stall spends its one restart on the sustainable rung", () => {
+  assert.equal(
+    policy.stallRecoveryTargetHeight({
+      method: "transcode",
+      quality: "auto",
+      kind: "supply",
+      ladder: serverLadder,
+      currentHeight: 720,
+      // hls.js still carries pre-cliff history, while the last completed
+      // transfer measures the shaped link closely enough to choose 360p.
+      estimateKbps: 2_800,
+      recentEstimateKbps: 1_530,
+      recentEstimateAtMs: 10_000,
+      nowMs: 12_000,
+    }),
+    360,
+  );
+  for (const input of [
+    { method: "transcode", quality: "1080", kind: "supply" },
+    { method: "transcode", quality: "auto", kind: "decode" },
+    { method: "remux", quality: "auto", kind: "supply" },
+  ]) {
+    assert.equal(
+      policy.stallRecoveryTargetHeight({
+        ...input,
+        ladder: serverLadder,
+        currentHeight: 720,
+        estimateKbps: 1_530,
+        nowMs: 12_000,
+      }),
+      null,
+    );
+  }
+  assert.match(
+    shippedSource("persistentWait"),
+    /stallRecoveryTargetHeight\([\s\S]*?seekTo\(position,true,recoveryHeight\)/,
+    "the shipped persistent-stall path must pass the measured target into its bound reopen",
+  );
 });
 
 test("a transcode stall reopen is bound to the exact predecessor", () => {

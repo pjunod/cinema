@@ -232,8 +232,13 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         .transcode
         .delivery_candidates_bounded(MAX_DELIVERIES)
         .await;
+    let vod = state
+        .transcode
+        .vod_delivery_infos_bounded(MAX_DELIVERIES)
+        .await;
     let candidates = activity_candidates_bounded(
         transcodes,
+        vod,
         state.streams.list_bounded(MAX_DELIVERIES),
         state.direct_plays.list_bounded(MAX_DELIVERIES),
         MAX_DELIVERIES,
@@ -242,7 +247,9 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
         .iter()
         .filter_map(|candidate| match candidate {
             ActivityCandidate::Transcode(candidate) => Some(candidate.id.clone()),
-            ActivityCandidate::Remux(_) | ActivityCandidate::Direct(_) => None,
+            ActivityCandidate::Vod(_)
+            | ActivityCandidate::Remux(_)
+            | ActivityCandidate::Direct(_) => None,
         })
         .collect::<Vec<_>>();
     let mut transcode_details = state
@@ -274,6 +281,19 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
                     idle_seconds: session.idle_seconds,
                     delivered_bytes: Some(session.delivered_bytes),
                     delivered_bps: session.delivered_bps,
+                });
+            }
+            ActivityCandidate::Vod(session) => {
+                deliveries.push(ActivityDelivery {
+                    method: "hls-copy".to_owned(),
+                    user: bounded_text(session.user_name, MAX_USER_BYTES),
+                    file_id: session.file_id,
+                    item_id: session.item_id,
+                    title: bounded_text(session.item_title, MAX_TITLE_BYTES),
+                    started_unix: session.started_unix,
+                    idle_seconds: session.idle_seconds,
+                    delivered_bytes: Some(0),
+                    delivered_bps: None,
                 });
             }
             ActivityCandidate::Remux(stream) => {
@@ -324,6 +344,7 @@ async fn local_snapshot(state: &AppState) -> ActivitySnapshot {
 #[derive(Debug)]
 enum ActivityCandidate {
     Transcode(crate::transcode::DeliveryCandidate),
+    Vod(crate::vodserve::VodDeliveryInfo),
     Remux(crate::progressive::StreamListing),
     Direct(crate::delivery::Live),
 }
@@ -332,6 +353,7 @@ impl ActivityCandidate {
     fn ordering_key(&self) -> (i64, &'static str, &str) {
         match self {
             Self::Transcode(candidate) => (candidate.started_unix, "hls", &candidate.id),
+            Self::Vod(session) => (session.started_unix, "hls-copy", &session.id),
             Self::Remux(stream) => (stream.started_unix, "remux", &stream.id),
             Self::Direct(play) => (play.started_unix, "direct", &play.registry_id),
         }
@@ -340,6 +362,7 @@ impl ActivityCandidate {
 
 fn activity_candidates_bounded(
     transcodes: Vec<crate::transcode::DeliveryCandidate>,
+    vod: Vec<crate::vodserve::VodDeliveryInfo>,
     remuxes: Vec<crate::progressive::StreamListing>,
     direct: Vec<crate::delivery::Live>,
     limit: usize,
@@ -347,6 +370,7 @@ fn activity_candidates_bounded(
     let mut candidates = transcodes
         .into_iter()
         .map(ActivityCandidate::Transcode)
+        .chain(vod.into_iter().map(ActivityCandidate::Vod))
         .chain(remuxes.into_iter().map(ActivityCandidate::Remux))
         .chain(direct.into_iter().map(ActivityCandidate::Direct))
         .collect::<Vec<_>>();
@@ -376,7 +400,7 @@ where
         .filter_map(|candidate| match candidate {
             ActivityCandidate::Remux(stream) => Some(stream.item_id),
             ActivityCandidate::Direct(play) => Some(play.item_id),
-            ActivityCandidate::Transcode(_) => None,
+            ActivityCandidate::Transcode(_) | ActivityCandidate::Vod(_) => None,
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -575,11 +599,38 @@ mod tests {
             })
             .collect();
 
-        let selected = activity_candidates_bounded(transcodes, remuxes, direct, MAX_DELIVERIES);
+        let selected =
+            activity_candidates_bounded(transcodes, Vec::new(), remuxes, direct, MAX_DELIVERIES);
         assert_eq!(selected.len(), MAX_DELIVERIES);
         assert!(selected
             .iter()
             .all(|candidate| matches!(candidate, ActivityCandidate::Direct(_))));
+    }
+
+    #[test]
+    fn vod_session_participates_in_the_bounded_peer_inventory() {
+        let session = crate::vodserve::VodDeliveryInfo {
+            id: "vod-session".to_owned(),
+            file_id: 7,
+            item_id: 9,
+            item_title: "VOD title".to_owned(),
+            user_name: "viewer".to_owned(),
+            target_height: 1080,
+            started_unix: 20,
+            idle_seconds: 3,
+        };
+        let selected = activity_candidates_bounded(
+            vec![crate::transcode::DeliveryCandidate {
+                id: "historical-live".to_owned(),
+                started_unix: 10,
+            }],
+            vec![session],
+            Vec::new(),
+            Vec::new(),
+            1,
+        );
+
+        assert!(matches!(selected.as_slice(), [ActivityCandidate::Vod(_)]));
     }
 
     #[tokio::test]

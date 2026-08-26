@@ -180,15 +180,21 @@ Apple uses macOS 26 with Xcode 26.6.
 
 ```bash
 scripts/ci-runner-mode status       # print the active mode or the unset default
-scripts/ci-runner-mode github       # route new jobs to GitHub-hosted runners
-scripts/ci-runner-mode self-hosted  # route new jobs back to the lab fleet
+scripts/ci-runner-mode github       # route new workflow runs to GitHub-hosted runners
+scripts/ci-runner-mode self-hosted  # route new workflow runs back to the lab fleet
 ```
 
-Changing the variable affects jobs created after the change. It does not move
-an in-progress job between runners, and GitHub Actions does not retry a queued
+Changing the variable affects workflow runs created after the change. Jobs in
+an existing run keep the runner labels captured when that run was created. The
+switch does not move in-progress work, and GitHub Actions does not retry a queued
 or failed hosted job on the other pool automatically. That is deliberate: an
 automatic fallback can run privileged repository code on a trust boundary you
 did not select.
+
+GitHub-hosted mode also requires an account with usable Actions billing and
+spending limits. If GitHub refuses the job before assigning a runner, repair
+the account billing limit or switch back to `self-hosted`; workflow code cannot
+fall back from that account-level refusal.
 
 Disposable GitHub runners install the pinned ffmpeg, Playwright, XcodeGen, KVM,
 and cross-compiler prerequisites in the job. Persistent lab runners verify the

@@ -178,6 +178,7 @@ enum Stdout {
     /// Read it back. The two encodes write a file and their stdout is noise,
     /// but a capability query's stdout *is* the answer — so the filter probe
     /// asks through the same spawn rather than keeping a second copy of it.
+    #[cfg(test)]
     Capture,
 }
 
@@ -196,6 +197,7 @@ impl Tools for Spawn {
             .stdout(match stdout {
                 Stdout::Discard => std::process::Stdio::null(),
                 Stdout::Inherit => std::process::Stdio::inherit(),
+                #[cfg(test)]
                 Stdout::Capture => std::process::Stdio::piped(),
             })
             .stderr(std::process::Stdio::piped())
@@ -227,6 +229,7 @@ impl Tools for Spawn {
 /// conversion of a subtitle stream into video frames for a filter graph, not a
 /// row in `-filters`, so there is nothing to look for — the bitmap composite's
 /// two checkable filters are `overlay` and `scale`.
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct BurnFilters {
     /// `overlay` — composites the subtitle plane onto the picture.
@@ -250,6 +253,7 @@ pub struct BurnFilters {
 /// `zscale` for any build that merely mentions it in another filter's
 /// description, and the graph would then fail at session start. This lived
 /// under `#[cfg(test)]`, which is exactly why production never checked.
+#[cfg(test)]
 pub fn declares_filters(listing: &str, names: &[&str]) -> bool {
     names.iter().all(|n| {
         listing
@@ -263,6 +267,7 @@ pub fn declares_filters(listing: &str, names: &[&str]) -> bool {
 /// A listing that names none of the three is treated as unread rather than as
 /// a build without them: every ffmpeg has `scale`, so an answer that lacks it
 /// is a parse or a spawn that went wrong, not a capability report.
+#[cfg(test)]
 fn burn_filters_from_listing(listing: &str) -> BurnFilters {
     let caps = BurnFilters {
         overlay: declares_filters(listing, &["overlay"]),
@@ -276,6 +281,7 @@ fn burn_filters_from_listing(listing: &str) -> BurnFilters {
     caps
 }
 
+#[cfg(test)]
 impl BurnFilters {
     /// Why this build cannot burn the requested subtitle, or `None` when it
     /// can. The sentence is the one the viewer is shown, so it names the
@@ -307,16 +313,19 @@ impl BurnFilters {
     }
 }
 
+#[cfg(test)]
 static BURN_FILTERS: tokio::sync::OnceCell<BurnFilters> = tokio::sync::OnceCell::const_new();
 
 /// What this build can burn. Probed once per process, through the same spawn
 /// seam the tone-map probe uses.
+#[cfg(test)]
 pub async fn burn_filters() -> BurnFilters {
     *BURN_FILTERS
         .get_or_init(|| async { burn_filters_with(&Spawn).await })
         .await
 }
 
+#[cfg(test)]
 async fn burn_filters_with<T: Tools>(tools: &T) -> BurnFilters {
     let args = vec!["-hide_banner".to_owned(), "-filters".to_owned()];
     let Ok(out) = tools.ffmpeg(args, Stdout::Capture).await else {

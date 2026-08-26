@@ -1111,6 +1111,96 @@
     [data-theme=vhs] .pspin{background-size:100% 12px;animation:vhstrack .9s linear infinite}
     @keyframes vhstrack{from{background-position:0 0}to{background-position:0 12px}}
   }
+  /* Panoptic and Redline — dark intelligence-cockpit themes. The reference language is
+     carried by paint rather than by pretending a media library is a globe:
+     signal telemetry, smoked glass, mono microcopy and fine instrument lines.
+     Artwork and information hierarchy remain Cinema's. */
+  :is([data-theme=panoptic],[data-theme=redline]) body{
+    background-color:var(--bg);
+    background-image:
+      radial-gradient(ellipse at 50% -18%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 42%),
+      repeating-linear-gradient(180deg,transparent 0 3px,color-mix(in srgb,var(--accent) 1.8%,transparent) 3px 4px)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) header.top,
+  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-side,
+  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-tabs{
+    background:var(--glass-strong);border-color:var(--hairline);
+    -webkit-backdrop-filter:blur(24px) saturate(1.35);backdrop-filter:blur(24px) saturate(1.35);
+    box-shadow:inset 0 1px rgba(255,255,255,.035),0 10px 30px rgba(0,0,0,.26)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .logo{
+    background:none;-webkit-background-clip:initial;background-clip:initial;color:var(--text);
+    font-family:var(--font-mono);font-size:16px;font-weight:700;letter-spacing:.28em;
+    text-transform:uppercase;text-shadow:0 0 24px var(--glow)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .logo::after{
+    content:"";display:inline-block;width:6px;height:6px;margin-left:8px;border:1px solid var(--accent);
+    border-radius:50%;vertical-align:2px;box-shadow:0 0 9px var(--glow),inset 0 0 5px var(--glow)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) header.top nav a,
+  :is([data-theme=panoptic],[data-theme=redline]) .px-nav a,
+  :is([data-theme=panoptic],[data-theme=redline]) .th-nav a{
+    font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) h2.section{
+    display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:11px;font-weight:700;
+    letter-spacing:.22em;text-transform:uppercase
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) h2.section::before{content:"//";color:var(--accent);text-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline]) h2.section::after{
+    content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hairline),transparent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .card,
+  :is([data-theme=panoptic],[data-theme=redline]) .version,
+  :is([data-theme=panoptic],[data-theme=redline]) .filebox,
+  :is([data-theme=panoptic],[data-theme=redline]) .amenu,
+  :is([data-theme=panoptic],[data-theme=redline]) .pmenu,
+  :is([data-theme=panoptic],[data-theme=redline]) .toast,
+  :is([data-theme=panoptic],[data-theme=redline]) .statsov{
+    background:var(--glass);border-color:var(--hairline);
+    -webkit-backdrop-filter:blur(20px) saturate(1.3);backdrop-filter:blur(20px) saturate(1.3);
+    box-shadow:var(--shadow),inset 0 1px rgba(255,255,255,.035)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn){
+    background:var(--accent-dim);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 42%,transparent);
+    box-shadow:inset 0 1px rgba(255,255,255,.035);letter-spacing:.02em
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn):hover{
+    background:var(--accent);color:var(--btn-ink);border-color:var(--accent);box-shadow:0 0 16px var(--glow)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) button.ghost{
+    background:rgba(255,255,255,.035);border-color:var(--hairline);color:var(--text)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) button.ghost:hover{
+    background:color-mix(in srgb,var(--accent) 9%,transparent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);color:var(--accent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) input,
+  :is([data-theme=panoptic],[data-theme=redline]) select{
+    background:color-mix(in srgb,var(--bg) 82%,transparent);border-color:var(--hairline);caret-color:var(--accent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) input:focus,
+  :is([data-theme=panoptic],[data-theme=redline]) select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+  :is([data-theme=panoptic],[data-theme=redline]) .chip,
+  :is([data-theme=panoptic],[data-theme=redline]) .pill,
+  :is([data-theme=panoptic],[data-theme=redline]) .vbadge,
+  :is([data-theme=panoptic],[data-theme=redline]) .missbadge,
+  :is([data-theme=panoptic],[data-theme=redline]) .specs,
+  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid,
+  :is([data-theme=panoptic],[data-theme=redline]) .activity{
+    font-family:var(--font-mono);letter-spacing:.045em;text-transform:uppercase
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
+  :is([data-theme=panoptic],[data-theme=redline]) .poster:hover{
+    transform:none;border-color:color-mix(in srgb,var(--accent) 62%,var(--line));
+    box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent),0 0 20px color-mix(in srgb,var(--accent) 12%,transparent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .poster .prog>i,
+  :is([data-theme=panoptic],[data-theme=redline]) .hprog>i{box-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline]) ::selection{background:var(--accent);color:var(--btn-ink)}
+  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar{width:10px;height:10px}
+  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-track{background:var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb{background:var(--hairline);border:2px solid var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
   /* Paper — deliberately plain: no grain, no glow, no animated brand. The
      rule that earns its keep is the reading measure, because an editorial
      theme whose prose runs the full width of a 1400px column is not one. */
@@ -2536,6 +2626,19 @@ const THEMES={
   tide:{name:"Tide",
     dark:{"--bg":"#071412","--panel":"#0d1e1b","--panel2":"#142a25","--line":"#2a4841","--text":"#e4f2ed","--muted":"#93aaa2","--accent":"#73d6b1","--accent2":"#d6b56d","--good":"#6fd39f","--bad":"#ff8a80","--warn":"#e5c875","--radius":"10px","--btn-ink":"#052019","--prose":"#c8dcd5","--font":FONT_INTER,"--font-mono":FONT_MONO},
     light:{"--bg":"#edf4f0","--panel":"#fbfdfa","--panel2":"#dfeae4","--line":"#bccfc5","--text":"#14201c","--muted":"#586a62","--accent":"#176b54","--accent2":"#8a631a","--good":"#196b48","--bad":"#b33a32","--warn":"#735b0b","--radius":"10px","--btn-ink":"#ffffff","--prose":"#34473f","--font":FONT_INTER,"--font-mono":FONT_MONO}},
+  // Panoptic — a dark-only intelligence cockpit: cyan telemetry on smoked
+  // glass, hairline instrument borders and quiet signal glow. Its visual
+  // reference is geospatial, but this remains a media UI: theme paint only,
+  // never decorative fake coordinates or controls that imply nonexistent data.
+  panoptic:{name:"Panoptic", darkOnly:true,
+    dark:{"--bg":"#0a0a0f","--panel":"#10131b","--panel2":"#171c25","--line":"rgba(138,232,255,.16)","--text":"#e8eaed","--muted":"#9eaab2","--accent":"#00d4ff","--accent2":"#5cffc6","--good":"#5ce1b4","--bad":"#ff8191","--warn":"#ffd178","--radius":"12px","--btn-ink":"#001014","--prose":"#c6d1d8","--font":FONT_INTER,"--font-mono":FONT_MONO,
+      "--accent-dim":"rgba(0,212,255,.12)","--glow":"rgba(0,212,255,.34)","--glass":"rgba(12,14,22,.78)","--glass-strong":"rgba(9,12,18,.90)","--hairline":"rgba(138,232,255,.16)","--shadow":"0 12px 34px rgba(0,0,0,.58)"}},
+  // Redline — Panoptic's graphite instrument panel in restrained crimson.
+  // Interaction red remains separate from success, warning and failure colors,
+  // so operational meaning never relies on interpreting one ambiguous hue.
+  redline:{name:"Redline", darkOnly:true,
+    dark:{"--bg":"#070708","--panel":"#111214","--panel2":"#191a1d","--line":"rgba(255,122,128,.17)","--text":"#f0eded","--muted":"#aaa1a3","--accent":"#ff5964","--accent2":"#d62e3d","--good":"#6ccf9a","--bad":"#ff9f70","--warn":"#f6c760","--radius":"12px","--btn-ink":"#170204","--prose":"#d4ccce","--font":FONT_INTER,"--font-mono":FONT_MONO,
+      "--accent-dim":"rgba(255,89,100,.13)","--glow":"rgba(255,55,70,.32)","--glass":"rgba(16,13,15,.80)","--glass-strong":"rgba(10,9,11,.92)","--hairline":"rgba(255,122,128,.17)","--shadow":"0 12px 34px rgba(0,0,0,.62)"}},
 };
 // Favicons: the noirr theme wears the kit icon (icon-a — n + cursor, midnight
 // in both showtimes); everything else gets a neutral play mark.
@@ -2553,7 +2656,7 @@ function applyTheme(){
   try{ id=localStorage.getItem("plurx_theme"); app=localStorage.getItem("plurx_appearance"); }catch(e){}
   if(!THEMES[id]) id="classic";
   const theme=THEMES[id];
-  // A dark-only theme (Void, VHS) keeps its midnight palette whatever the
+  // A dark-only theme keeps its midnight palette whatever the
   // appearance toggle says, and the theme menu says so inline rather than
   // leaving the toggle looking broken. The rejected alternative — falling back
   // to a different theme in light mode — swaps the whole personality of the UI
@@ -3003,8 +3106,18 @@ function persistentWait(v,p,began,generation){
       `<button onclick="closePlayer()">Close</button>`);
     return;
   }
+  const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
+  const recoveryHeight=PlaybackPolicy.stallRecoveryTargetHeight({
+    method:p.method,quality:playQuality(),kind,ladder:p.ladder,
+    currentHeight:Number((p.health&&p.health.target_height)||p.autoHeight||v.videoHeight),
+    estimateKbps:estimateBps>0?estimateBps/1000:(p.priorKbps||null),
+    recentEstimateKbps:p.abr&&p.abr.recentEstimateKbps,
+    recentEstimateAtMs:p.abr&&p.abr.recentEstimateAtMs,
+    nowMs:performance.now()
+  });
   p.stallRecoveries=(p.stallRecoveries||0)+1;
-  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom};
+  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
+    targetHeight:recoveryHeight};
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
     message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`},
     playbackContext()));
@@ -3014,7 +3127,7 @@ function persistentWait(v,p,began,generation){
     `resuming from ${clockFromSec(position)}`);
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
-  else seekTo(position,true);
+  else seekTo(position,true,recoveryHeight);
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;
@@ -5224,7 +5337,7 @@ function currentStreamFailureOverlay(){
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());
 }
 // Session creation fails before `attachHls`, so render its preserved typed
-// refusal here. Returning false lets callers keep their legacy handling for
+// refusal here. Returning false lets callers keep their generic handling for
 // an unstructured network/server error; true means the persistent overlay now
 // owns the verdict and must not be hidden by `setLoading(false)` or a toast.
 function showSessionOpenFailure(error){
@@ -5245,9 +5358,7 @@ function showSessionOpenFailure(error){
 // seek-restart, and audio-switch). Worker off: a wallet extension's injected
 // CSP can silently kill a blob worker; main-thread demux of one 720p stream
 // is nothing.
-// `startAt` is where to begin *inside* the playlist, and is non-zero only for a
-// VOD presentation being resumed: a live session was built at the requested
-// offset, so its own zero already is the right place.
+// `startAt` is where to begin inside the immutable film timeline.
 function vodClientContract(){
   // P3 measured this exact vendored hls.js policy. Keep the fragment request's
   // first-byte timer and the server declaration in one place: the server must
@@ -5309,11 +5420,10 @@ function attachHls(video, playlistUrl, startAt){
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
-      // The server gate may decline the VOD declaration and return the legacy
-      // live presentation. Keep that rollback byte-for-byte at the player
-      // policy layer too: the longer retry horizon belongs only to the typed
-      // VOD materialization contract.
-      ...(PLAYER&&PLAYER.vod?{fragLoadPolicy:vodClientContract().fragLoadPolicy}:{}),
+      // Every HLS session is VOD. The old growing-playlist path is not an
+      // alternate response, so every fragment fetch uses the measured VOD
+      // materialization contract from its first request.
+      fragLoadPolicy:vodClientContract().fragLoadPolicy,
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
       // on a 4K cache hit that is tens of megabytes and several seconds of
@@ -5378,40 +5488,6 @@ function attachHls(video, playlistUrl, startAt){
       PLAYER._levelAt=performance.now();
       PLAYER._levelLive=!!(d&&d.details&&d.details.live);
     });
-    // The live-playlist reload keeper — the fix for the stop at the cushion
-    // edge (STUTTER-4K §5.8). hls.js reloads a live playlist on demand, not
-    // on the RFC's targetduration cadence, and it stretches the interval
-    // when playback is far behind the live edge — which is exactly where the
-    // publish gate puts every session on purpose: the first playlist IS a
-    // cushion. Measured in a headless harness against this very hls.min.js:
-    // on a 16 s initial playlist the first reload came 16 s after load, then
-    // 4 s unchanged-backoff, so the playhead reached the cushion edge before
-    // the reload that would have revealed the next segment — a several-second
-    // freeze at a fixed position, every play (bufferStalledError at 12.4 s on
-    // the reference film). Safari never stalled on the same stream:
-    // AVFoundation polls every targetduration unconditionally. So restore
-    // that cadence ourselves: while the playlist is live and hls.js has not
-    // refreshed it for ~half a target duration, ask for one. LEVEL_LOADING
-    // with levelInfo is the loader's own entry point, verified against this
-    // vendored build (without levelInfo it works but throws an
-    // internalException per poll; with it, clean). With the keeper the
-    // harness fetched every segment on the first poll after it existed and
-    // the stall was gone outright. The interval outlives nothing: it clears
-    // itself the moment this hls instance is no longer the player's.
-    {
-      const iv=setInterval(()=>{
-        const p=PLAYER;
-        if(!p || p.hls!==hls){ clearInterval(iv); return; }
-        if(!p._levelLive || !p._levelAt) return;
-        if(performance.now()-p._levelAt<=4500) return;
-        const li=hls.currentLevel<0?0:hls.currentLevel;
-        const lv=hls.levels&&hls.levels[li];
-        if(!lv) return;
-        p._keeperFires=(p._keeperFires||0)+1;
-        try{ hls.trigger(Hls.Events.LEVEL_LOADING,
-          {url:lv.url,level:li,levelInfo:lv,id:0,deliveryDirectives:null}); }catch(e){}
-      },1000);
-    }
     // The largest segment this session has actually appended, in BYTES.
     //
     // Every other figure available before this one is a derivation — seconds
@@ -5635,7 +5711,18 @@ async function openSession(fileId, opts){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
+  const info=await api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
+  if(!info || info.vod!==true){
+    const message="This server returned the removed live HLS presentation. Update every server node before playing this title.";
+    const error=new Error(message);
+    error.status=426;
+    error.code="server_vod_required";
+    error.streamFailure=PlaybackPolicy.parseStreamFailure({status:426,body:JSON.stringify({
+      code:error.code,message
+    })});
+    throw error;
+  }
+  return info;
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -5645,13 +5732,9 @@ async function openSession(fileId, opts){
 // of them is a bug that only appears on the sixth. That is exactly how seeking
 // came to drop the burned subtitle, and `vod` would have gone the same way.
 //
-// `wantSec` is where the viewer expects to be, in film time. The two kinds of
-// stream reach it differently and this is the only place that knows which:
-// a live session was *built* at that offset, so it plays from its own zero,
-// while a cached one is the whole title and has to be seeked into. Returns the
-// absolute position playback should begin at, which is what the stall watchdog
-// has to be armed with — a watchdog armed at zero on a stream that correctly
-// starts at forty minutes early-outs immediately and never diagnoses anything.
+// `wantSec` is where the viewer expects to be in film time. Every HLS response
+// is now the whole immutable title, so the media element seeks there directly.
+// The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
@@ -6223,7 +6306,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     // ordinary path, and on the forced-burn path above PLAYER is the one that
     // knows a burn is why this is a transcode at all.
     setLoading(true,"Starting the transcoder…",transcodeReason(PLAYER));
-    let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){ setLoading(false); toast(e.message); return closePlayer(); }
+    let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){
+      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      return;
+    }
     const from=attachSession(video, PLAYER, info, startSec);
     setLoading(true,"Preparing the stream…",(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
       (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments"));
@@ -6246,7 +6332,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
       why? `${why} — sending it as HLS so the player can buffer ahead`
          : "remuxing to HLS — keeping the original video");
     try{ await startCopyHls(video, startSec); }
-    catch(e){ setLoading(false); toast(e.message); return closePlayer(); }
+    catch(e){
+      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      return;
+    }
   } else {
     // Direct play, or remux for a browser that plays progressive fMP4 (Chrome).
     // A raw direct-play file gives the browser control of its mux defaults, not
@@ -7881,7 +7970,7 @@ function skipMarker(m){
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
 // restart the server-side stream at the new offset (the stream is one-directional).
-async function seekTo(targetSec, forceReopen=false){
+async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   endWait(false);
   targetSec=Math.max(0,targetSec);
@@ -7906,12 +7995,7 @@ async function seekTo(targetSec, forceReopen=false){
     }
     targetSec=local;
   }
-  // Two kinds of stream seek without touching the server: direct play, and a
-  // cache hit. A cached transcode is a finished asset — every segment already
-  // exists — so seeking into it is a seek, in the same fraction of a second
-  // direct play manages, and the stall watchdog's restart arm has nothing to
-  // fix. Restarting the session instead would throw a hit away and start an
-  // encoder to produce bytes that are already on the disk it is reading from.
+  // Direct play and film-addressed VOD seek without opening a new session.
   if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
     try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
     playerActivity(); return;
@@ -7961,7 +8045,7 @@ async function seekTo(targetSec, forceReopen=false){
   [...v.querySelectorAll("track")].forEach(t=>t.remove());
   if(PLAYER.method==='transcode'){
     const opts=PlaybackPolicy.stallReopenSessionOptions({
-      options:transcodeOpts(targetSec,aidx),forceReopen,
+      options:transcodeOpts(targetSec,aidx,autoHeightOverride),forceReopen,
       method:PLAYER.method,sessionId:PLAYER.sessionId
     });
     let info; try{ info=await openSession(PLAYER.fileId,opts);}catch(e){ return failed(e); }
@@ -8538,12 +8622,18 @@ async function switchAudio(idx){
   const curSub=PLAYER.curSub;
   [...v.querySelectorAll("track")].forEach(t=>t.remove()); // re-added below if a sub was on
   if(PLAYER.method==='transcode'){
-    let info; try{ info=await openSession(PLAYER.fileId,transcodeOpts(pos,aidx));}catch(e){ return toast(e.message); }
+    let info; try{ info=await openSession(PLAYER.fileId,transcodeOpts(pos,aidx));}catch(e){
+      if(!showSessionOpenFailure(e)) toast(e.message);
+      return;
+    }
     if(!live()) return;
     attachSession(v, PLAYER, info, pos);
   } else if(PLAYER.copyHls){
     // Copy-video HLS (Safari): re-open with the chosen audio track.
-    try{ if(!await startCopyHls(v, pos, live)) return; }catch(e){ return toast(e.message); }
+    try{ if(!await startCopyHls(v, pos, live)) return; }catch(e){
+      if(!showSessionOpenFailure(e)) toast(e.message);
+      return;
+    }
   } else {
     // Switching audio forces a remux so the chosen track is the one delivered.
     PLAYER.method='remux'; PLAYER.offset=pos;
@@ -9950,14 +10040,14 @@ function playbackPanel(settings){
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
       <h2 class="section">Film-addressed VOD</h2>
-      <p class="muted" style="margin-top:0">Present eligible remuxes as one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. Files without a current fragment index, subtitle burns, and transcode rungs keep the live presentation.</p>
-      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Enable VOD presentation for new web sessions</label>
+      <p class="muted" style="margin-top:0">Every HLS session is one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. An unindexed or unsupported title is refused explicitly and never routed through the removed growing live presentation.</p>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
       <div class="row" style="align-items:end">
         <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
-      <div class="hint">Indexing reads each eligible file once and is node-local. Turn on an interval before enabling VOD; a title falls back safely until its index exists. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
+      <div class="hint">Indexing reads each eligible file once and is node-local; 15 minutes is the default. Disabling VOD or pausing indexing can make HLS titles unavailable — neither setting restores live HLS. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets

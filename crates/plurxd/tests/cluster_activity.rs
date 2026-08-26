@@ -36,12 +36,32 @@ fn canonical_tempdir() -> tempfile::TempDir {
     tempfile::tempdir_in(root).expect("cluster activity root")
 }
 
-fn free_port() -> u16 {
-    TcpListener::bind("127.0.0.1:0")
-        .expect("bind test port")
-        .local_addr()
-        .expect("test port")
-        .port()
+struct ReservedPort {
+    listener: Option<TcpListener>,
+    port: u16,
+}
+
+impl ReservedPort {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("reserve test port");
+        let port = listener.local_addr().expect("reserved test port").port();
+        Self {
+            listener: Some(listener),
+            port,
+        }
+    }
+
+    fn release(&mut self) {
+        drop(self.listener.take());
+    }
+
+    fn into_listener(mut self) -> TcpListener {
+        self.listener.take().expect("reserved listener")
+    }
+}
+
+fn reserved_ports(count: usize) -> Vec<ReservedPort> {
+    (0..count).map(|_| ReservedPort::new()).collect()
 }
 
 fn toml_path(path: &Path) -> String {
@@ -61,6 +81,7 @@ impl Daemon {
         let errors = output.try_clone().expect("clone daemon log");
         let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
             .args(["--config", config.to_str().expect("config path"), "run"])
+            .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(errors))
@@ -74,6 +95,11 @@ impl Daemon {
             let log = std::fs::read_to_string(&self.log).unwrap_or_default();
             panic!("{context}: daemon exited {status}: {log}");
         }
+    }
+
+    fn diagnostics(&self) -> String {
+        std::fs::read_to_string(&self.log)
+            .unwrap_or_else(|error| format!("<cannot read {}: {error}>", self.log.display()))
     }
 }
 
@@ -146,7 +172,7 @@ struct ActivityProxy {
 }
 
 impl ActivityProxy {
-    async fn start(port: u16, target_port: u16) -> Self {
+    async fn start(listener: TcpListener, target_port: u16) -> Self {
         let mode = Arc::new(AtomicU8::new(FORWARD));
         let shutdown = CancellationToken::new();
         let state = ActivityProxyState {
@@ -160,9 +186,10 @@ impl ActivityProxy {
         let app = Router::new()
             .route(ACTIVITY_PATH, get(activity_proxy))
             .with_state(state);
-        let listener = TokioTcpListener::bind(("127.0.0.1", port))
-            .await
-            .expect("activity proxy bind");
+        listener
+            .set_nonblocking(true)
+            .expect("activity proxy nonblocking");
+        let listener = TokioTcpListener::from_std(listener).expect("activity proxy listener");
         let stopped = shutdown.clone();
         let task = tokio::spawn(async move {
             let _ = axum::serve(listener, app)
@@ -232,6 +259,24 @@ async fn wait_for_two_voters(
     }
 }
 
+async fn wait_for_fragment_index(daemon: &mut Daemon) {
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        daemon.assert_running("waiting for the fragment index");
+        let diagnostics = daemon.diagnostics();
+        if diagnostics.lines().any(|line| {
+            line.contains("fragment indexing pass finished") && line.contains("built=1")
+        }) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fragment index was not built:\n{diagnostics}"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn write_av_fixture(path: &Path) {
     let output = Command::new("ffmpeg")
         .args([
@@ -286,14 +331,19 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     let fixture = media.join("Cluster Activity Proof.mp4");
     write_av_fixture(&fixture);
 
-    let a_http = free_port();
-    let a_raft = free_port();
-    let a_api = free_port();
-    let b_http = free_port();
-    let b_raft = free_port();
-    let b_api = free_port();
-    let proxy_port = free_port();
-    let proxy = ActivityProxy::start(proxy_port, b_http).await;
+    // Keep the whole set reserved at once so it contains no duplicates. The
+    // proxy takes ownership of its listener; each daemon's three reservations
+    // are released only immediately before that child is spawned.
+    let mut ports = reserved_ports(7).into_iter();
+    let mut a_http = ports.next().expect("node A HTTP reservation");
+    let mut a_raft = ports.next().expect("node A Raft reservation");
+    let mut a_api = ports.next().expect("node A API reservation");
+    let mut b_http = ports.next().expect("node B HTTP reservation");
+    let mut b_raft = ports.next().expect("node B Raft reservation");
+    let mut b_api = ports.next().expect("node B API reservation");
+    let proxy_port = ports.next().expect("proxy reservation");
+    let proxy_port_number = proxy_port.port;
+    let proxy = ActivityProxy::start(proxy_port.into_listener(), b_http.port).await;
 
     let a_data = root.path().join("node-a");
     std::fs::create_dir_all(&a_data).expect("node A data");
@@ -302,14 +352,19 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     std::fs::write(
         &a_config,
         format!(
-            "[server]\nbind = \"127.0.0.1:{a_http}\"\n\
+            "[server]\nbind = \"127.0.0.1:{}\"\n\
              [storage]\ndata_dir = \"{}\"\n\
-             [cluster]\nraft_bind = \"127.0.0.1:{a_raft}\"\n\
-             api_bind = \"127.0.0.1:{a_api}\"\n\
+             [cluster]\nraft_bind = \"127.0.0.1:{}\"\n\
+             api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n\
-             join_url = \"http://127.0.0.1:{a_http}\"\n\
-             artwork_url = \"http://127.0.0.1:{a_http}\"\n",
+             join_url = \"http://127.0.0.1:{}\"\n\
+             artwork_url = \"http://127.0.0.1:{}\"\n",
+            a_http.port,
             toml_path(&a_data),
+            a_raft.port,
+            a_api.port,
+            a_http.port,
+            a_http.port,
         ),
     )
     .expect("node A config");
@@ -319,9 +374,13 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .timeout(Duration::from_secs(8))
         .build()
         .expect("test client");
+    let a_http_port = a_http.port;
+    a_http.release();
+    a_raft.release();
+    a_api.release();
     let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"));
-    wait_ready(&client, &mut node_a, a_http).await;
-    let a_base = format!("http://127.0.0.1:{a_http}");
+    wait_ready(&client, &mut node_a, a_http_port).await;
+    let a_base = format!("http://127.0.0.1:{a_http_port}");
     let setup = client
         .post(format!("{a_base}/api/v1/setup"))
         .json(&json!({"username":"owner","password":"cluster-proof-password"}))
@@ -357,20 +416,28 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     std::fs::write(
         &b_config,
         format!(
-            "[server]\nbind = \"127.0.0.1:{b_http}\"\n\
+            "[server]\nbind = \"127.0.0.1:{}\"\n\
              [storage]\ndata_dir = \"{}\"\n\
-             [cluster]\nraft_bind = \"127.0.0.1:{b_raft}\"\n\
-             api_bind = \"127.0.0.1:{b_api}\"\n\
+             [cluster]\nraft_bind = \"127.0.0.1:{}\"\n\
+             api_bind = \"127.0.0.1:{}\"\n\
              advertise_host = \"127.0.0.1\"\n\
-             artwork_url = \"http://127.0.0.1:{proxy_port}\"\n\
+             artwork_url = \"http://127.0.0.1:{}\"\n\
              join_token_file = \"{}\"\n",
+            b_http.port,
             toml_path(&b_data),
+            b_raft.port,
+            b_api.port,
+            proxy_port_number,
             toml_path(&join_file),
         ),
     )
     .expect("node B config");
+    let b_http_port = b_http.port;
+    b_http.release();
+    b_raft.release();
+    b_api.release();
     let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"));
-    wait_ready(&client, &mut node_b, b_http).await;
+    wait_ready(&client, &mut node_b, b_http_port).await;
     let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
     let local_node = roster["local_node_id"].as_str().expect("local node id");
     let remote_node = roster["nodes"]
@@ -433,7 +500,12 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .await
         .expect("item detail JSON");
     let file_id = detail["files"][0]["id"].as_i64().expect("file id");
-    let b_base = format!("http://127.0.0.1:{b_http}");
+    let b_base = format!("http://127.0.0.1:{b_http_port}");
+
+    // VOD deliberately refuses to start until this node-local prerequisite is
+    // durable. Wait on the scheduler's completed-work signal instead of racing
+    // the scan with repeated session requests.
+    wait_for_fragment_index(&mut node_b).await;
 
     let hls = client
         .post(format!("{b_base}/api/v1/files/{file_id}/hls/sessions"))
@@ -442,10 +514,16 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .send()
         .await
         .expect("start node B HLS session");
+    let hls_status = hls.status();
+    let hls_body = hls
+        .text()
+        .await
+        .unwrap_or_else(|error| format!("<cannot read response body: {error}>"));
     assert!(
-        hls.status().is_success(),
-        "HLS start failed: {}",
-        hls.status()
+        hls_status.is_success(),
+        "HLS start failed: {hls_status}: {hls_body}\nnode A log:\n{}\nnode B log:\n{}",
+        node_a.diagnostics(),
+        node_b.diagnostics(),
     );
 
     let direct = client

@@ -1,37 +1,37 @@
 //! Backend-neutral behavioral contract for the durable store boundary.
 //!
 //! Every scenario receives only `Arc<dyn Store>` and runs against both SQLite
-//! modes. With `hiqlite-store`, the same scenarios also run through a remote
-//! client backed by three separate voter processes.
+//! modes. With `hiqlite-contract-tests`, the same scenarios also run through a
+//! remote client backed by three separate voter processes.
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 use std::future::Future;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use std::io::{BufRead, BufReader, Write};
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use std::net::TcpListener;
-#[cfg(all(feature = "hiqlite-store", unix))]
+#[cfg(all(feature = "hiqlite-contract-tests", unix))]
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use hiqlite::tls::ServerTlsConfig;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use hiqlite::{Client, Node, NodeConfig, Row};
 use plurx_core::cluster::coordination::{Lease, LeaseClaim};
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::cluster::migration::{
     connect_activated_store, prepare_sqlite_import, select_daemon_store, ActivationMarker,
     SelectedBackend, ACTIVATED_SOURCE_FILENAME, ACTIVATION_MARKER_FILENAME, HIQLITE_ACTIVE_DIRNAME,
     HIQLITE_WAL_SIZE_BYTES, HIQLITE_WAL_USABLE_PAYLOAD_BYTES,
 };
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
@@ -49,7 +49,7 @@ use plurx_core::segplan::{
     FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
     SEGPLAN_VERSION,
 };
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
     OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
@@ -62,27 +62,27 @@ use plurx_core::store::{
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 use tokio::io::AsyncReadExt;
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_RAFT_SECRET: &str = "plurx-store-contract-raft";
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_API_SECRET: &str = "plurx-store-contract-api";
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_INSTANCE_ID: &str = "00000000-0000-4000-8000-000000000090";
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 static HIQLITE_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 struct I64Value {
     value: i64,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl From<&mut Row<'_>> for I64Value {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -91,14 +91,14 @@ impl From<&mut Row<'_>> for I64Value {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Debug, PartialEq, Eq)]
 struct CacheTouchTimes {
     last_used_at: i64,
     last_seen_at: i64,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl From<&mut Row<'_>> for CacheTouchTimes {
     fn from(row: &mut Row<'_>) -> Self {
         Self {
@@ -417,7 +417,7 @@ where
         contract(Arc::clone(&fixture.store), fixture.name).await;
     }
 
-    #[cfg(feature = "hiqlite-store")]
+    #[cfg(feature = "hiqlite-contract-tests")]
     {
         let _case = HIQLITE_CASE.lock().await;
         let cluster = ContractCluster::start().await;
@@ -1744,7 +1744,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
     .await;
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn hiqlite_media_activation_requires_its_lease_mutation() {
     let _case = HIQLITE_CASE.lock().await;
@@ -3710,7 +3710,7 @@ async fn separate_sqlite_connections_claim_distinct_pretranscode_rows() {
     assert_distinct_pretranscode_claims_from_separate_handles(stores, "sqlite-separate").await;
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn open_contract_hiqlite_store(cluster: &ContractCluster) -> HiqliteAuthStore {
     let client = Client::remote(
         cluster.addresses.clone(),
@@ -3746,7 +3746,7 @@ async fn open_contract_hiqlite_store(cluster: &ContractCluster) -> HiqliteAuthSt
     )
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn contract_applied_index(client: &Client) -> u64 {
     client
         .metrics_db()
@@ -3757,7 +3757,7 @@ async fn contract_applied_index(client: &Client) -> u64 {
         .index
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ContractLeaderPoint {
     leader_id: u64,
@@ -3765,7 +3765,7 @@ struct ContractLeaderPoint {
     committed_index: u64,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn contract_leader_point(client: &Client) -> ContractLeaderPoint {
     let watermark = client
         .db_quorum_watermark()
@@ -3778,7 +3778,7 @@ async fn contract_leader_point(client: &Client) -> ContractLeaderPoint {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLeaderPoint) -> u64 {
     assert_eq!(
         (after.leader_id, after.term),
@@ -3788,7 +3788,7 @@ fn contract_stable_leader_delta(before: ContractLeaderPoint, after: ContractLead
     after.committed_index.saturating_sub(before.committed_index)
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn contract_cache_touch_times(
     client: &Client,
     recipe_hash: &str,
@@ -3806,7 +3806,7 @@ async fn contract_cache_touch_times(
     rows.pop().expect("cache timestamp row")
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     let _case = HIQLITE_CASE.lock().await;
@@ -3975,7 +3975,7 @@ async fn manifest_scrub_cursor_batch_costs_one_consensus_entry() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
 async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4022,7 +4022,7 @@ async fn separate_replicated_clients_claim_distinct_pretranscode_rows() {
     assert_distinct_pretranscode_claims_from_separate_handles(stores, "hiqlite-separate").await;
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4179,7 +4179,7 @@ async fn separate_clients_racing_an_expired_lease_choose_one_fenced_owner() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4402,7 +4402,7 @@ async fn separate_clients_cannot_interleave_cache_takeover_with_stale_cleanup() 
     assert_eq!(rows[0].relative_dir, "ca/cache-takeover-recipe-f2");
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4595,7 +4595,7 @@ async fn fenced_cache_publication_never_regresses_activity_timestamps() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4688,7 +4688,7 @@ async fn token_activity_refresh_has_a_fixed_clock_concurrent_write_budget() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4802,7 +4802,7 @@ async fn token_activity_refresh_burst_is_bounded_by_independent_store_count() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() {
     let _case = HIQLITE_CASE.lock().await;
@@ -4914,7 +4914,7 @@ async fn api_key_activity_refresh_burst_is_bounded_by_independent_store_count() 
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5030,7 +5030,7 @@ async fn api_key_activity_refresh_is_bounded_and_disabled_keys_do_not_touch() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5216,7 +5216,7 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5387,7 +5387,7 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5532,7 +5532,7 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5709,7 +5709,7 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5832,7 +5832,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
@@ -5959,7 +5959,7 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContractNodeSpec {
     id: u64,
@@ -5967,7 +5967,7 @@ struct ContractNodeSpec {
     api: String,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ContractNodeLaunch {
     node_id: u64,
@@ -5975,35 +5975,35 @@ struct ContractNodeLaunch {
     nodes: Vec<ContractNodeSpec>,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 struct ContractNodeProcess {
     _child: Child,
     _input: Option<ChildStdin>,
     _output: ChildStdout,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 struct ContractCluster {
     addresses: Vec<String>,
     _root: tempfile::TempDir,
     _nodes: Vec<ContractNodeProcess>,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Debug)]
 enum ContractStartError {
     PortCollision,
     Failed(String),
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 struct ContractStartupEvent {
     node_id: u64,
     result: Result<(), ContractStartError>,
     output: Option<ChildStdout>,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl ContractCluster {
     async fn start() -> Self {
         const ATTEMPTS: usize = 5;
@@ -6142,7 +6142,7 @@ impl ContractCluster {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn stop_contract_starting(starting: &mut [(u64, Child, Option<ChildStdin>)]) {
     for (_, child, input) in starting.iter_mut() {
         drop(input.take());
@@ -6153,7 +6153,7 @@ fn stop_contract_starting(starting: &mut [(u64, Child, Option<ChildStdin>)]) {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl Drop for ContractCluster {
     fn drop(&mut self) {
         // Ask every voter to stop before removing their shared temporary data
@@ -6168,7 +6168,7 @@ impl Drop for ContractCluster {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "spawned by the backend-neutral contract factory"]
 async fn hiqlite_contract_node_process() {
@@ -6248,7 +6248,7 @@ async fn hiqlite_contract_node_process() {
     std::process::exit(0);
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn contract_free_ports(count: usize) -> Vec<u16> {
     let listeners = (0..count)
         .map(|_| TcpListener::bind("127.0.0.1:0").expect("bind contract port"))
@@ -6259,12 +6259,12 @@ fn contract_free_ports(count: usize) -> Vec<u16> {
         .collect()
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn install_contract_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = data_dir.join("plurx.db");
     drop(SqliteStore::open(&path).expect("create current SQLite fixture"));
@@ -6435,16 +6435,16 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
 /// The row-count chunk bound #279 shipped and #282 replaced. Present only so
 /// the fixtures below can assert they sit *past* it: a fixture the old bound
 /// would also have carried proves nothing about a byte bound.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const SUPERSEDED_ROW_CHUNK_BOUND: usize = 16;
 /// Usable payload measured under the former 2 MiB production tuning.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const INCIDENT_WAL_USABLE_PAYLOAD_BYTES: usize = 2_097_118;
 
 /// The retained #279 band: adjacent rows with full-size probe documents.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const LARGE_PROBE_FILE_COUNT: i64 = 64;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const LARGE_PROBE_PADDING_BYTES: usize = 48 * 1024;
 
 /// The band a row count cannot bound, and the reason this contract is about
@@ -6452,28 +6452,28 @@ const LARGE_PROBE_PADDING_BYTES: usize = 48 * 1024;
 /// past [`INCIDENT_WAL_USABLE_PAYLOAD_BYTES`], which is #290's production
 /// panic. Importing them proves the builder still splits the incident shape on
 /// bytes after the WAL is raised.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const OVERSIZED_PROBE_FILE_COUNT: i64 = 18;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const OVERSIZED_PROBE_PADDING_BYTES: usize = 144 * 1024;
 
 /// The importer's single-row ceiling, mirroring its derivation from
 /// [`HIQLITE_WAL_USABLE_PAYLOAD_BYTES`] less its encoding reserve and
 /// transaction envelope. A row above this cannot be submitted in any
 /// transaction, so import refuses the backup.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_IMPORT_MAX_ROW_BYTES: usize = HIQLITE_WAL_USABLE_PAYLOAD_BYTES - 64 * 1024 - 256;
 
 /// A single probe document larger than the whole WAL payload capacity, so it is
 /// unimportable under any bound rather than merely past the reserve. Import must
 /// refuse it instead of handing it to the WAL writer.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const UNIMPORTABLE_PROBE_PADDING_BYTES: usize = HIQLITE_WAL_USABLE_PAYLOAD_BYTES + 1024;
 
 /// The premises the probe fixtures rest on, checked where they are declared so
 /// a later size tweak cannot quietly turn either regression into a test of
 /// something easier than the bound it was written for.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const _: () = {
     assert!(
         OVERSIZED_PROBE_PADDING_BYTES * SUPERSEDED_ROW_CHUNK_BOUND
@@ -6496,10 +6496,10 @@ const _: () = {
         "the single-row ceiling must sit under the capacity it is derived from"
     );
 };
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const UNIMPORTABLE_PROBE_FILE_ID: i64 = 3_001;
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn large_probe_json(ordinal: i64, padding_bytes: usize) -> String {
     serde_json::json!({
         "format": {
@@ -6515,7 +6515,7 @@ fn large_probe_json(ordinal: i64, padding_bytes: usize) -> String {
 
 /// Seeds `count` `files` rows whose `probe_json` is padded to `padding_bytes`,
 /// numbered from `first_id` so several bands can share one fixture.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn seed_probe_band(path: &std::path::Path, first_id: i64, count: i64, padding_bytes: usize) {
     let mut connection = rusqlite::Connection::open(path).expect("open large-probe fixture");
     let transaction = connection
@@ -6553,19 +6553,19 @@ fn seed_probe_band(path: &std::path::Path, first_id: i64, count: i64, padding_by
 /// Fixed bytes rather than `generate()` so a fixture built in one test can be
 /// opened in another, and so an envelope in a failure message is reproducible.
 /// It guards nothing real — the values it seals are the string `fixture-access`.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn fixture_credential_key() -> CredentialKey {
     CredentialKey::from_bytes([0x2b; 32])
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const FIXTURE_TRAKT_USER: i64 = 7;
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const FIXTURE_TRAKT_ACCESS: &str = "fixture-access";
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 const FIXTURE_TRAKT_REFRESH: &str = "fixture-refresh";
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn seed_sealed_trakt_fixture_row(connection: &rusqlite::Connection, key: &CredentialKey) {
     let access = key
         .seal_trakt(FIXTURE_TRAKT_USER, FIXTURE_TRAKT_ACCESS)
@@ -6592,7 +6592,7 @@ fn seed_sealed_trakt_fixture_row(connection: &rusqlite::Connection, key: &Creden
 /// Raw SQL on purpose: `put_trakt_auth` now refuses an unsealed credential, so
 /// the only honest way to produce a legacy backup is to go around the boundary
 /// that did not exist when those rows were written.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
     rusqlite::Connection::open(path)
         .expect("open fixture to downgrade its Trakt row")
@@ -6607,7 +6607,7 @@ fn make_trakt_fixture_row_cleartext(path: &std::path::Path) {
         .expect("write legacy cleartext Trakt row");
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     let path = populated_current_import_fixture(data_dir);
     let connection = rusqlite::Connection::open(&path).expect("open current SQLite fixture");
@@ -6681,7 +6681,7 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     path
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     let _case = HIQLITE_CASE.lock().await;
@@ -6807,7 +6807,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
     assert!(retry.to_string().contains("target is not fresh"));
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7053,7 +7053,7 @@ fn unreachable_voter_diagnosis(probe: &StoreError) -> String {
 /// Run one replicated read, re-attempting only while the store reports its
 /// per-operation deadline. Any real error is the contract's answer and fails
 /// immediately.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn replicated_read<T, F, Fut>(label: &str, mut operation: F) -> T
 where
     F: FnMut() -> Fut,
@@ -7142,7 +7142,7 @@ fn a_replicated_deadline_is_never_reported_as_a_wal_size_violation() {
 ///
 /// The #279 band is retained alongside it: the byte bound must not regress the
 /// ordinary large-library case that motivated the row cap.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn large_probe_json_import_respects_the_production_wal_limit() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7251,7 +7251,7 @@ async fn large_probe_json_import_respects_the_production_wal_limit() {
 /// unreplicated SQLite while reporting healthy. A refusal keeps the node alive
 /// and tells the operator which row to look at, so this asserts both — that the
 /// error is actionable, and that the voter still answers afterwards.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_probe_row_larger_than_the_wal_is_refused_instead_of_crashing_the_node() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7318,7 +7318,7 @@ async fn a_probe_row_larger_than_the_wal_is_refused_instead_of_crashing_the_node
 /// The second half is the part that gives this teeth. Asserting only that the
 /// import errored would still pass if the refusal happened after the rows were
 /// submitted, which is the failure that matters here.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7405,7 +7405,7 @@ async fn a_cleartext_trakt_row_is_refused_before_any_row_reaches_raft() {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn one_voter_config(data_dir: &std::path::Path) -> Config {
     let mut config = Config::default();
     let mut ports = contract_free_ports(2).into_iter();
@@ -7426,7 +7426,7 @@ fn one_voter_config(data_dir: &std::path::Path) -> Config {
     config
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct ActivationNodeLaunch {
     data_dir: PathBuf,
@@ -7436,7 +7436,7 @@ struct ActivationNodeLaunch {
     first_boot: bool,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeLaunch {
     fn config(&self) -> Config {
         let mut config = Config::default();
@@ -7448,14 +7448,14 @@ impl ActivationNodeLaunch {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 struct ActivationNodeProcess {
     child: Child,
     input: ChildStdin,
     _output: ChildStdout,
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 impl ActivationNodeProcess {
     fn start(launch: &ActivationNodeLaunch) -> Self {
         let executable = std::env::current_exe().expect("activation test executable");
@@ -7507,7 +7507,7 @@ impl ActivationNodeProcess {
     }
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 fn run_injected_activation(launch: &ActivationNodeLaunch, failpoint: &str) {
     let executable = std::env::current_exe().expect("activation test executable");
     let output = Command::new(executable)
@@ -7530,7 +7530,7 @@ fn run_injected_activation(launch: &ActivationNodeLaunch, failpoint: &str) {
     );
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version: i64) {
     // The raw importer fixture is pre-sealed to test that boundary in
     // isolation. A real legacy activation starts before credential encryption,
@@ -7615,7 +7615,7 @@ async fn assert_one_voter_activation(data_dir: &std::path::Path, source_version:
     reopened.stop();
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn populated_v14_and_current_sources_activate_once_and_reopen_replicated() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7637,7 +7637,7 @@ async fn populated_v14_and_current_sources_activate_once_and_reopen_replicated()
 /// the ordinary SQLite credential upgrade first. This covers both halves: a
 /// key-resolution refusal leaves no incoming target, then the same directory
 /// activates and its replicated envelope still opens under the node-local key.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7726,7 +7726,7 @@ async fn direct_upgrade_seals_legacy_trakt_before_any_import_state_exists() {
     selected.shutdown().await.expect("stop activated voter");
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7794,7 +7794,7 @@ async fn killed_activation_boundaries_recover_sqlite_or_completed_target() {
 /// retained source would boot the daemon on pre-activation state while the
 /// replicated target sat right there. Every case here is reached before a voter
 /// starts, so the refusal is the only thing under test.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_ambiguous_active_target_refuses_rather_than_reverting_to_sqlite() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7886,7 +7886,7 @@ async fn an_ambiguous_active_target_refuses_rather_than_reverting_to_sqlite() {
 /// directory that lost `hiqlite/` is byte-indistinguishable from one that never
 /// activated, so without the breadcrumb the next boot would quietly discard
 /// every write since activation — the failure an operator would never see.
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     let _case = HIQLITE_CASE.lock().await;
@@ -7937,7 +7937,7 @@ async fn a_lost_replicated_target_refuses_to_reimport_the_retained_source() {
     run_injected_activation(&launch, "after-quiescence");
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "spawned by the one-voter activation contract"]
 async fn hiqlite_activation_node_process() {
@@ -7993,7 +7993,7 @@ async fn hiqlite_activation_node_process() {
     selected.shutdown().await.expect("stop activation voter");
 }
 
-#[cfg(feature = "hiqlite-store")]
+#[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn sqlite_import_verification_refusals_have_teeth() {
     let _case = HIQLITE_CASE.lock().await;

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["41b25984"]
+points = ["cluster.media-observation", "server.api", "playback.pipeline"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained two-voter cluster activity contract starts immutable VOD and direct delivery on node B, reads the operator inventory through node A, and requires both routes to carry node B's identity. The internal snapshot unit coverage keeps VOD handles inside the shared newest-first bound before enrichment, preventing the cluster-only transport from silently consulting only the removed live-session registry."
