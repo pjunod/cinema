@@ -59,12 +59,11 @@ lint: ## Clippy across the workspace, warnings are errors
 .PHONY: rust-check
 rust-check: fmt-check lint test ## Rust format, lint, and workspace tests
 
-# The CI split of `rust-check`: lint.yml owns clippy, while the cluster jobs own
-# WAL, replicated Store, harness, and daemon contracts. Explicit test features
-# keep those contracts out of this workspace lane even though plurxd ships the
-# underlying Hiqlite implementation.
+# The fast CI Rust lane owns formatting, Clippy, unit tests, and SQLite
+# contracts. Cluster jobs own WAL, replicated Store, topology, and daemon
+# contracts. Explicit test features keep those processes out of this lane.
 .PHONY: ci-rust-gate
-ci-rust-gate: fmt-check ## CI Rust gate: format + fast workspace tests
+ci-rust-gate: fmt-check lint ## CI Rust gate: format, Clippy, and fast workspace tests
 	$(CARGO) test --workspace --locked --exclude plurx-cluster-check --no-fail-fast
 
 # The real mount-namespace exercises for scratch aliasing and mount points

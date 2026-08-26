@@ -102,8 +102,14 @@ impl ServerTlsConfig {
             let key_pair = tokio::task::spawn_blocking(|| rcgen::KeyPair::generate().unwrap())
                 .await
                 .unwrap();
-            KEY_PAIR.set(key_pair).unwrap();
-            KEY_PAIR.get().unwrap()
+            // Several embedded nodes can reach this path concurrently during
+            // startup. Losing the OnceLock race only means another task
+            // published an equally valid process-wide key first; it must not
+            // turn healthy parallel node starts into a panic.
+            let _ = KEY_PAIR.set(key_pair);
+            KEY_PAIR
+                .get()
+                .expect("a generated self-signed key must be published")
         };
 
         let name = if let Some((name, _)) = url.rsplit_once(":") {

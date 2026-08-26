@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["71c4209a"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "playback-smoke"]
+reason = "The retained web policy unit gives an Auto session a stale pre-cliff estimate, an active supply stall, and 0.1 seconds of runway, then requires its single emergency restart to choose the 360p floor. web-static runs that policy contract on every CI change, while playback-smoke exercises the same shipped player and adaptive ladder end to end."

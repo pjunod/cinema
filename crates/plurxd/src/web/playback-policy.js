@@ -332,7 +332,17 @@
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
-      const target = available[Math.min(currentIndex - 1, safeIndex)];
+      // Starvation can surface as a supply wait, empty runway, or the rolling
+      // stall burst on different controller ticks. Any one of those signals
+      // spends the one allowed automatic restart on the ladder floor: the
+      // transfer that proves the lower link may not complete before this
+      // decision, leaving both EWMA inputs biased by the pre-cliff rate. A
+      // one-rung restart can then starve again after the restart claim is
+      // already spent. A bandwidth estimate alone keeps the safe-rung logic.
+      const starvation = activeSupplyStall || nearEmpty || supplyBurst;
+      const target = starvation
+        ? available[0]
+        : available[Math.min(currentIndex - 1, safeIndex)];
       const reason = supplyBurst || activeSupplyStall
         ? "supply stalls"
         : nearEmpty
