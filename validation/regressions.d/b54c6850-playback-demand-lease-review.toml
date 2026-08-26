@@ -17,6 +17,7 @@ commits = [
   "6e526e60",
   "c853614d",
   "1104474b",
+  "af2e6c76",
 ]
 points = ["playback.pipeline", "web.experience"]
 checks = ["rust-gate", "web-static"]
