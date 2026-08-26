@@ -51,13 +51,17 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-#[cfg(feature = "cluster-read-cost-validation")]
-pub use self::hiqlite::HiqliteOperationCounts;
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
     AUTH_PROTOCOL_MAX, AUTH_PROTOCOL_MIN, AUTH_PROTOCOL_VERSION, AUTH_SCHEMA_MIGRATION_SOURCE,
     AUTH_SCHEMA_VERSION,
+};
+#[cfg(feature = "cluster-read-cost-validation")]
+pub use self::hiqlite::{
+    validation_set_store_operation_instrumentation,
+    validation_store_operation_instrumentation_enabled, validation_store_operation_metric_count,
+    HiqliteOperationCounts,
 };
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite_import::{SqliteImportReport, SqliteImportTableDigest};

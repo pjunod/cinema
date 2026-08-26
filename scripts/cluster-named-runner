@@ -59,11 +59,16 @@ case "${1:-}" in
       [ "$remote_id" = "$local_id" ] || die "$host loaded a different image digest"
     done
     ;;
-  collect)
+  collect|collect-instrumentation)
+    action=$1
     config=${2:-}
     output=${3:-}
-    [ -n "$config" ] || die "collect requires a runner config JSON"
-    [ -n "$output" ] || die "collect requires an output directory"
+    [ -n "$config" ] || die "$action requires a runner config JSON"
+    [ -n "$output" ] || die "$action requires an output directory"
+    runner_mode=topology-named
+    if [ "$action" = collect-instrumentation ]; then
+      runner_mode=instrumentation-named
+    fi
     source_sha=$(clean_head)
     owner=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
     [ ${#owner} -eq 64 ] || die "could not generate a 256-bit output owner"
@@ -85,7 +90,7 @@ case "${1:-}" in
     }
     trap cleanup_on_exit EXIT HUP INT TERM
     cargo run --locked --manifest-path "$repo/Cargo.toml" \
-      -p plurx-cluster-check -- topology-named "$config" "$output" "$repo" "$owner"
+      -p plurx-cluster-check -- "$runner_mode" "$config" "$output" "$repo" "$owner"
     final_sha=$(clean_head)
     [ "$final_sha" = "$source_sha" ] || die "controller source HEAD changed during collection"
     ;;
@@ -96,6 +101,6 @@ case "${1:-}" in
       -p plurx-cluster-check -- topology-cleanup "$manifest"
     ;;
   *)
-    die "usage: scripts/cluster-named-runner image <build-sha> | collect <config.json> <output-dir> | cleanup <manifest.json>"
+    die "usage: scripts/cluster-named-runner image <build-sha> | collect <config.json> <output-dir> | collect-instrumentation <config.json> <output-dir> | cleanup <manifest.json>"
     ;;
 esac

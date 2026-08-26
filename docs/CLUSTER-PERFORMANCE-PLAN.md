@@ -372,7 +372,14 @@ slices:
 - **P2e — snapshot hooks:** separate build/install operation labels and vendor
   patch documentation; and
 - **P2f — named-runner overhead evidence:** the before/after artifact enforcing
-  the P0 instrumentation budget.
+  the P0 instrumentation budget. The runner now supplies a validation-only
+  control switch in the same exact image, crosses control/instrumented state
+  order with topology order in complete four-sequence blocks, retains
+  topology-v2 raw data plus every node's observed switch/count attestation for
+  both arms, and requires every CPU and wall upper confidence bound to remain
+  below the registered 2% budget. The physical campaign itself
+  remains outstanding until the named machines are idle and the image is
+  transferred.
 
 GitHub-hosted CI accepts schemas, semantics, fixed labels, state transitions,
 and physical-entry budgets. It does not claim stable multi-machine CPU,

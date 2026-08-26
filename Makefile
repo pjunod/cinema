@@ -204,6 +204,12 @@ cluster-campaign-validate: ## Validate P0c campaign (set CAMPAIGN=.../campaign.j
 	$(CARGO) run --locked -p plurx-cluster-check -- \
 	  topology-campaign-validate "$(CAMPAIGN)"
 
+.PHONY: cluster-instrumentation-validate
+cluster-instrumentation-validate: ## Validate P2f campaign (set CAMPAIGN=.../instrumentation-campaign.json)
+	test -n "$(CAMPAIGN)"
+	$(CARGO) run --locked -p plurx-cluster-check -- \
+	  instrumentation-campaign-validate "$(CAMPAIGN)"
+
 .PHONY: cluster-growth
 cluster-growth: ## Measure and gate post-coalescer one-voter compacted growth
 	$(CARGO) run --locked -p plurx-cluster-check -- growth

@@ -172,6 +172,23 @@ class OperationsContractCase(unittest.TestCase):
         self.assertNotIn("-h filter=libplacebo", dockerfile)
         self.assertNotIn("apply_dolbyvision", dockerfile)
 
+    def test_docker_build_keeps_cluster_validation_features_out_of_plurxd(self):
+        dockerfile = read("Dockerfile")
+        self.assertNotIn(
+            "cargo build --release -p plurxd -p plurx-cluster-check",
+            dockerfile,
+        )
+        self.assertIn(
+            "CARGO_TARGET_DIR=/src/target-plurxd cargo build --release -p plurxd",
+            dockerfile,
+        )
+        self.assertIn(
+            "CARGO_TARGET_DIR=/src/target-cluster-check cargo build --release -p plurx-cluster-check",
+            dockerfile,
+        )
+        self.assertIn("cargo tree --locked -p plurxd -e features", dockerfile)
+        self.assertIn("grep -q 'cluster-read-cost-validation'", dockerfile)
+
     def test_ship_routes_real_mobile_targets_through_ansible(self):
         ship = read("scripts/ship")
         project = read("clients/apple/project.yml")
