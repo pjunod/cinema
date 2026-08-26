@@ -636,7 +636,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 34);
+        assert_eq!(methods.len(), 37);
     }
 
     #[test]
