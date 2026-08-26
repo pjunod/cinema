@@ -377,6 +377,10 @@ pub mod keys {
     /// Node-local, like the transcode-cleanup stamp: an index lives on the
     /// node that built it, so when it last ran is a fact about that node.
     pub const JOB_LAST_VOD_INDEX: &str = "jobs.last_vod_index";
+    /// Last file examined by this node's bounded VOD index walk. Without a
+    /// cursor, one slow or malformed title at the front of a library consumes
+    /// every pass and later files can never become playable.
+    pub const JOB_VOD_INDEX_CURSOR: &str = "jobs.vod_index_cursor";
 }
 
 #[async_trait]
