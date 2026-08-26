@@ -104,3 +104,23 @@ caller replay finds no token and cannot mutate the worker. While the request is
 still `submitted`, the real-Raft contract verifies the token is consumed,
 finishes its forced worker, replays that accepted submission, and requires the
 ready state, file identity, and timestamp to remain unchanged.
+
+## Final review and validation
+
+The final post-test adversarial review approved `0acacf35`. It rechecked the
+balanced SQLite/Hiqlite admission predicates, Hiqlite's ordered owner/force/
+attempt placeholders, the consumed one-use handoff token, the retry claim
+object, current-schema Raft fixtures, transaction inventory, v31 sentinel, and
+regression ledger. No blocker remained.
+
+Validation then completed green:
+
+- the 19-test SQLite analysis-queue suite;
+- the authenticated status/force-analysis HTTP contract and foreground hash
+  preemption test;
+- the real three-voter handoff, ambiguous-commit, holder-repair, and stale
+  replay contract;
+- the real v11/v12-to-v13 replicated migration contract; and
+- `make check`, including catalog/history audits, 173 operations and benchmark
+  checks, formatting, workspace Clippy, the full fast Rust workspace lane, and
+  documentation tests.
