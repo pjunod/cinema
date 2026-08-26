@@ -41,7 +41,8 @@ not being counted as complete merely because its foundation has landed.
 
 ## Active slice: M3b explicit demand lease
 
-The active branch is pushed as draft PR #612. Adversarial review has driven
+The active branch is prepared locally for ready PR #612; its rebased head is
+awaiting exact review before push. Adversarial review has driven
 remediation across response ownership/commit ordering, same-id VOD
 reattachment, exact snapshot and physical-signal timing, cancellation-safe
 producer convergence, full-object Range semantics, overlay truth, Activity
