@@ -6423,9 +6423,36 @@ async function startCopyHls(v, startSec, live){
     codec, clientAudioCodecs:String(PLAY_CAPS.acodec||"").split(",").filter(Boolean),
     msePairSupported:mseCanTake(src.video_codec,codec,src.bit_depth), nativeHls:native
   });
-  const info=await openSession(PLAYER.fileId,{copy:true,aac,
-    preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
-    audio_offset_ms:PLAYER.aoffset||0});
+  let info;
+  try{
+    info=await openSession(PLAYER.fileId,{copy:true,aac,
+      preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
+      audio_offset_ms:PLAYER.aoffset||0});
+  }catch(error){
+    const fallback=PlaybackPolicy.indexPendingFallback({
+      code:error&&error.code,method:PLAYER&&PLAYER.method,nativeHls:native
+    });
+    if(fallback!=="progressive_remux") throw error;
+    if(live && !live()) return false;
+    // The immutable index is node-local and may still be catching up after a
+    // deploy. This exact browser already proved it can take the progressive
+    // remux; use that route instead of turning a background-cache miss into an
+    // unplayable title. Safari/native HLS is excluded by the policy above.
+    const from=startSec||0;
+    const base=`/api/v1/files/${PLAYER.fileId}/stream.mp4`;
+    PLAYER.method='remux'; PLAYER.copyHls=false; PLAYER.offset=from;
+    PLAYER.probeUrl=base;
+    clearStreamFailure();
+    clientLog(Object.assign({level:"warn",event:"stream_route_fallback",
+      detail:"vod_index_pending",
+      message:"fragment index is pending — using one continuous remux"},playbackContext()));
+    setLoading(true,"Preparing one continuous stream…",
+      "the HLS index is still building — remuxing without segmentation");
+    resetMediaSource(v);
+    if(live && !live()) return false;
+    v.src=remuxUrl(base,aidx,from); armStall(from,20000); v.play().catch(()=>{});
+    return true;
+  }
   if(live && !live()) return false;
   PLAYER.method='remux'; PLAYER.copyHls=true;
   armStall(attachSession(v, PLAYER, info, startSec));
