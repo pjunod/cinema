@@ -1074,7 +1074,7 @@ impl RollingLeaseSnapshot {
     }
 
     pub(crate) fn expires_at_unix_ms(&self) -> i64 {
-        self.expires_at_unix_ms_at(Instant::now(), crate::media_sessions::unix_ms())
+        self.expires_at_unix_ms_at(rolling_now(), crate::media_sessions::unix_ms())
     }
 
     fn expires_at_unix_ms_at(&self, now: Instant, now_unix_ms: i64) -> i64 {
@@ -2488,6 +2488,15 @@ mod tests {
         tokio::time::advance(ROLLING_EXPLICIT_LEASE_TIMEOUT - Duration::from_millis(1)).await;
         tokio::task::yield_now().await;
         assert!(!explicit.is_retired());
+        let before_deadline = explicit.snapshot().await.expect("live explicit snapshot");
+        assert_eq!(before_deadline.remaining, Duration::from_millis(1));
+        let advertised_remaining_ms = before_deadline
+            .expires_at_unix_ms()
+            .saturating_sub(crate::media_sessions::unix_ms());
+        assert!(
+            (0..=1).contains(&advertised_remaining_ms),
+            "wire expiry uses the same paused monotonic clock as the actor"
+        );
         {
             let producer_transition = explicit.lock_producer_transition();
             let deadline = *producer_transition;
@@ -2519,7 +2528,7 @@ mod tests {
             .expect("snapshot race enters explicit mode");
         snapshot_race
             .set_renewal_for_test(
-                Instant::now() - ROLLING_EXPLICIT_LEASE_TIMEOUT,
+                rolling_now() - ROLLING_EXPLICIT_LEASE_TIMEOUT,
                 "exact-deadline",
             )
             .await;

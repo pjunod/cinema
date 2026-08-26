@@ -48,10 +48,11 @@ producer convergence, full-object Range semantics, overlay truth, Activity
 instrumentation, and this ledger. The current work carries an opaque
 engine/incarnation token through every response; commits streamed
 lease/frontier state only at successful EOF; queues producer work outside the
-response body; and names VOD/rolling ownership correctly. A fresh review of
-the final committed remediation still precedes every test command. The
-slice's acceptance boundary is intentionally smaller than the whole actor
-migration; the exact behavior
+response body; and names VOD/rolling ownership correctly. The first complete
+post-review unit run exposed one actor/timer clock-domain failure after 1,877
+passing tests; its remediation is awaiting exact-head re-review before any
+test is rerun. The slice's acceptance boundary is intentionally smaller than
+the whole actor migration; the exact behavior
 and timer ledger are in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
 
@@ -79,11 +80,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Formal `1d229162` findings remediated on the branch; exact-head re-review pending |
-| Adversarial diff review | **Changes requested** at `1d229162`; fresh review required on the remediation head |
-| Unit/focused tests | Not run — intentionally waits for second-review approval |
-| Full local gate | Not run |
-| Hosted CI | Draft PR exists; local test gate remains closed until adversarial approval |
+| Implementation | Clock-domain and ledger findings from `6e526e60` are remediated; exact-head re-review pending |
+| Adversarial diff review | Approved at `2edeb997`; **changes requested** at `6e526e60`; next test remains gated on approval of the remediation head |
+| Unit/focused tests | `make test` at `2edeb997`: 1,877 passed, 1 failed, 3 ignored; the sole actor-timer failure drove the current clock fix |
+| Full local gate | Awaiting exact-head approval, then rerun from the beginning |
+| Hosted CI | Draft PR exists; hosted merge gates wait for the corrected local suite |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger
