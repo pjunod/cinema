@@ -1,5 +1,10 @@
 # VOD M4 — web adoption and release acceptance
 
+> **Superseded rollout boundary — 2026-08-25.** M4's default-off and safe-live-
+> fallback language no longer describes production. The accepted cutover is
+> [VOD-CUTOVER.md](VOD-CUTOVER.md): HLS creates are VOD-only, ineligible media
+> fails typed, and disabling VOD refuses HLS instead of restoring live HLS.
+
 **Status:** MERGED + DEPLOYED 2026-08-25 — feature tip `50380267`, merge
 `3d6f492d`, fleet build `v0.2.7-1551-g3d6f492d`; physical evidence remains
 below
@@ -7,10 +12,9 @@ below
 **Predecessor:** [VOD-M3-HANDOFF.md](VOD-M3-HANDOFF.md)
 **Operator workflow:** [PLAYBACK-TESTING.md](PLAYBACK-TESTING.md#film-addressed-vod--enable-it-and-prove-the-client-contract)
 
-M4 makes the shipped web player a VOD-aware client. It does not remove the
-legacy presentation, enable the server gate by default, or unlock VOD
-transcode rungs. Those changes have different evidence requirements and do
-not ride along with a web-client adoption milestone.
+M4 made the shipped web player a VOD-aware client. The subsequent cutover made
+that presentation mandatory across server and clients. Transcode-rung VOD
+remains gated and now fails explicitly instead of changing presentation.
 
 ## What changed
 
@@ -32,8 +36,8 @@ aborts. Timeout retries are explicit, and error retries continue past the
 30-second producer watchdog so a producer that cannot make bytes ends in a
 typed server failure instead of an unclassified `fragLoadError`.
 
-The server still requires `playback.vod_presentation=1`. With the setting off,
-or for an ineligible file, the existing live path is unchanged.
+The server treats an absent `playback.vod_presentation` setting as enabled. An
+explicit off value or an ineligible file returns a typed refusal.
 
 ### VOD is visible as VOD
 
@@ -64,8 +68,8 @@ A VOD copy session can now serve the existing native-subtitle multivariant
 playlist. The video child is the immutable VOD playlist, the WebVTT child
 mirrors its `MEDIA-SEQUENCE`, segment durations, `PLAYLIST-TYPE:VOD`, and
 `ENDLIST`, and each VTT segment uses the plan entry's film-time window.
-Bitmap and styled subtitles still use the burn path, which intentionally keeps
-the live presentation.
+Bitmap and styled subtitle burns return `vod_subtitle_burn_unavailable` until
+the planned VOD transcode producer exists.
 
 ### Operators can provision and enable it
 
@@ -76,9 +80,10 @@ Settings → Playback exposes:
 - the node-wide working-set budget; and
 - the producer deadline.
 
-The web client always declares the capability. The server setting remains the
-rollback switch and defaults off. An unindexed title falls back safely, so the
-index interval should be enabled before the presentation gate.
+The web client always declares the capability. The server setting is a
+maintenance kill switch and defaults on; it is not a presentation rollback.
+The index interval defaults to 15 minutes. An unindexed title reports
+`vod_index_pending` until its index exists.
 
 ## Executable browser contract
 
@@ -166,7 +171,6 @@ start/end times, and artifact paths in the evidence table below.
 
 Transcode-rung VOD remains gated on P2/D6. The hls.js half supports nominal
 EXTINF timing, but AVPlayer and Media3 have not yet supplied the device half of
-that measurement. Until they do, an explicit VOD request for a transcode rung
-keeps the live presentation and logs the reason. Durable 410 semantics across a
-node restart also remain a later milestone; this work does not rewrite that
-contract by accident.
+that measurement. Until they do, a transcode rung returns
+`vod_transcode_unavailable`. Durable 410 semantics across a node restart remain
+separately covered by M3's route resurrection and tombstone tests.

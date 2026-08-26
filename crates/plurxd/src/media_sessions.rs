@@ -319,6 +319,7 @@ pub(crate) fn worker_session_request_is_valid(request: &SessionRequest) -> bool 
             .previous_session_id
             .as_deref()
             .is_none_or(|value| uuid::Uuid::parse_str(value).is_ok())
+        && request.presentation == crate::transcode::Presentation::Vod
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -381,6 +382,7 @@ impl RemoteStartResponse {
                 .encoder
                 .bytes()
                 .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+            && self.vod
     }
 }
 
@@ -1701,7 +1703,7 @@ mod tests {
                 subtitle_burn: None,
                 audio_offset_ms: 0,
                 hdr10: false,
-                presentation: Default::default(),
+                presentation: crate::transcode::Presentation::Vod,
                 block_budget_secs: None,
             },
         }
@@ -1719,7 +1721,7 @@ mod tests {
             kind: SessionKind::Transcode { height: 720 },
             encoder: "qsv".to_owned(),
             grade: OutputGrade::Sdr,
-            vod: false,
+            vod: true,
         }
     }
 
@@ -1946,6 +1948,10 @@ mod tests {
         incompatible.protocol_version = crate::media_pool::PROTOCOL_VERSION.saturating_sub(1);
         assert!(!incompatible.is_valid());
 
+        let mut removed_presentation = request.clone();
+        removed_presentation.request.presentation = crate::transcode::Presentation::Live;
+        assert!(!removed_presentation.is_valid());
+
         let mut mismatched = request.clone();
         mismatched.request.request_id = Some("00000000-0000-4000-8000-0000000000ff".to_owned());
         assert!(!mismatched.is_valid());
@@ -1994,6 +2000,10 @@ mod tests {
     fn remote_start_response_is_bound_to_the_session_capability() {
         let response = valid_start_response();
         assert!(response.is_valid());
+
+        let mut removed_presentation = response.clone();
+        removed_presentation.vod = false;
+        assert!(!removed_presentation.is_valid());
 
         let mut wrong_path = response.clone();
         wrong_path.playlist_url = "/api/v1/hls/somebody-else/index.m3u8".to_owned();

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e1a1eb6c"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit requires the VOD-only runtime repair to retain an explicit playback-pipeline mapping whose current Rust checks exercise the typed refusal, immutable playlist, and operator activity contracts; removing this metadata commit leaves that runtime correction uncovered and fails the history-regressions gate."

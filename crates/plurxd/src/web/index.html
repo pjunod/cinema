@@ -5234,7 +5234,7 @@ function currentStreamFailureOverlay(){
   return PlaybackPolicy.streamFailureOverlay(STREAM_FAILURE,Date.now());
 }
 // Session creation fails before `attachHls`, so render its preserved typed
-// refusal here. Returning false lets callers keep their legacy handling for
+// refusal here. Returning false lets callers keep their generic handling for
 // an unstructured network/server error; true means the persistent overlay now
 // owns the verdict and must not be hidden by `setLoading(false)` or a toast.
 function showSessionOpenFailure(error){
@@ -5255,9 +5255,7 @@ function showSessionOpenFailure(error){
 // seek-restart, and audio-switch). Worker off: a wallet extension's injected
 // CSP can silently kill a blob worker; main-thread demux of one 720p stream
 // is nothing.
-// `startAt` is where to begin *inside* the playlist, and is non-zero only for a
-// VOD presentation being resumed: a live session was built at the requested
-// offset, so its own zero already is the right place.
+// `startAt` is where to begin inside the immutable film timeline.
 function vodClientContract(){
   // P3 measured this exact vendored hls.js policy. Keep the fragment request's
   // first-byte timer and the server declaration in one place: the server must
@@ -5319,11 +5317,10 @@ function attachHls(video, playlistUrl, startAt){
       maxBufferLength:tgt.fwd,
       backBufferLength:tgt.back,
       ...(tgt.budgeted?{maxBufferSize:tgt.fwdBytes}:{}),
-      // The server gate may decline the VOD declaration and return the legacy
-      // live presentation. Keep that rollback byte-for-byte at the player
-      // policy layer too: the longer retry horizon belongs only to the typed
-      // VOD materialization contract.
-      ...(PLAYER&&PLAYER.vod?{fragLoadPolicy:vodClientContract().fragLoadPolicy}:{}),
+      // Every HLS session is VOD. The old growing-playlist path is not an
+      // alternate response, so every fragment fetch uses the measured VOD
+      // materialization contract from its first request.
+      fragLoadPolicy:vodClientContract().fragLoadPolicy,
       // Told before the first fragment loads, not seeked afterwards. Seeking
       // after attach downloads the opening of the film and throws it away —
       // on a 4K cache hit that is tens of megabytes and several seconds of
@@ -5388,40 +5385,6 @@ function attachHls(video, playlistUrl, startAt){
       PLAYER._levelAt=performance.now();
       PLAYER._levelLive=!!(d&&d.details&&d.details.live);
     });
-    // The live-playlist reload keeper — the fix for the stop at the cushion
-    // edge (STUTTER-4K §5.8). hls.js reloads a live playlist on demand, not
-    // on the RFC's targetduration cadence, and it stretches the interval
-    // when playback is far behind the live edge — which is exactly where the
-    // publish gate puts every session on purpose: the first playlist IS a
-    // cushion. Measured in a headless harness against this very hls.min.js:
-    // on a 16 s initial playlist the first reload came 16 s after load, then
-    // 4 s unchanged-backoff, so the playhead reached the cushion edge before
-    // the reload that would have revealed the next segment — a several-second
-    // freeze at a fixed position, every play (bufferStalledError at 12.4 s on
-    // the reference film). Safari never stalled on the same stream:
-    // AVFoundation polls every targetduration unconditionally. So restore
-    // that cadence ourselves: while the playlist is live and hls.js has not
-    // refreshed it for ~half a target duration, ask for one. LEVEL_LOADING
-    // with levelInfo is the loader's own entry point, verified against this
-    // vendored build (without levelInfo it works but throws an
-    // internalException per poll; with it, clean). With the keeper the
-    // harness fetched every segment on the first poll after it existed and
-    // the stall was gone outright. The interval outlives nothing: it clears
-    // itself the moment this hls instance is no longer the player's.
-    {
-      const iv=setInterval(()=>{
-        const p=PLAYER;
-        if(!p || p.hls!==hls){ clearInterval(iv); return; }
-        if(!p._levelLive || !p._levelAt) return;
-        if(performance.now()-p._levelAt<=4500) return;
-        const li=hls.currentLevel<0?0:hls.currentLevel;
-        const lv=hls.levels&&hls.levels[li];
-        if(!lv) return;
-        p._keeperFires=(p._keeperFires||0)+1;
-        try{ hls.trigger(Hls.Events.LEVEL_LOADING,
-          {url:lv.url,level:li,levelInfo:lv,id:0,deliveryDirectives:null}); }catch(e){}
-      },1000);
-    }
     // The largest segment this session has actually appended, in BYTES.
     //
     // Every other figure available before this one is a derivation — seconds
@@ -5645,7 +5608,18 @@ async function openSession(fileId, opts){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
-  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
+  const info=await api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
+  if(!info || info.vod!==true){
+    const message="This server returned the removed live HLS presentation. Update every server node before playing this title.";
+    const error=new Error(message);
+    error.status=426;
+    error.code="server_vod_required";
+    error.streamFailure=PlaybackPolicy.parseStreamFailure({status:426,body:JSON.stringify({
+      code:error.code,message
+    })});
+    throw error;
+  }
+  return info;
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -5655,13 +5629,9 @@ async function openSession(fileId, opts){
 // of them is a bug that only appears on the sixth. That is exactly how seeking
 // came to drop the burned subtitle, and `vod` would have gone the same way.
 //
-// `wantSec` is where the viewer expects to be, in film time. The two kinds of
-// stream reach it differently and this is the only place that knows which:
-// a live session was *built* at that offset, so it plays from its own zero,
-// while a cached one is the whole title and has to be seeked into. Returns the
-// absolute position playback should begin at, which is what the stall watchdog
-// has to be armed with — a watchdog armed at zero on a stream that correctly
-// starts at forty minutes early-outs immediately and never diagnoses anything.
+// `wantSec` is where the viewer expects to be in film time. Every HLS response
+// is now the whole immutable title, so the media element seeks there directly.
+// The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
@@ -6233,7 +6203,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     // ordinary path, and on the forced-burn path above PLAYER is the one that
     // knows a burn is why this is a transcode at all.
     setLoading(true,"Starting the transcoder…",transcodeReason(PLAYER));
-    let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){ setLoading(false); toast(e.message); return closePlayer(); }
+    let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){
+      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      return;
+    }
     const from=attachSession(video, PLAYER, info, startSec);
     setLoading(true,"Preparing the stream…",(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
       (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments"));
@@ -6256,7 +6229,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
       why? `${why} — sending it as HLS so the player can buffer ahead`
          : "remuxing to HLS — keeping the original video");
     try{ await startCopyHls(video, startSec); }
-    catch(e){ setLoading(false); toast(e.message); return closePlayer(); }
+    catch(e){
+      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      return;
+    }
   } else {
     // Direct play, or remux for a browser that plays progressive fMP4 (Chrome).
     // A raw direct-play file gives the browser control of its mux defaults, not
@@ -7916,12 +7892,7 @@ async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
     }
     targetSec=local;
   }
-  // Two kinds of stream seek without touching the server: direct play, and a
-  // cache hit. A cached transcode is a finished asset — every segment already
-  // exists — so seeking into it is a seek, in the same fraction of a second
-  // direct play manages, and the stall watchdog's restart arm has nothing to
-  // fix. Restarting the session instead would throw a hit away and start an
-  // encoder to produce bytes that are already on the disk it is reading from.
+  // Direct play and film-addressed VOD seek without opening a new session.
   if(!forceReopen && (PLAYER.method==='direct_play' || PLAYER.vod)){
     try{ v.currentTime=Math.max(0,targetSec-(PLAYER.offset||0)); }catch(e){}
     playerActivity(); return;
@@ -8548,12 +8519,18 @@ async function switchAudio(idx){
   const curSub=PLAYER.curSub;
   [...v.querySelectorAll("track")].forEach(t=>t.remove()); // re-added below if a sub was on
   if(PLAYER.method==='transcode'){
-    let info; try{ info=await openSession(PLAYER.fileId,transcodeOpts(pos,aidx));}catch(e){ return toast(e.message); }
+    let info; try{ info=await openSession(PLAYER.fileId,transcodeOpts(pos,aidx));}catch(e){
+      if(!showSessionOpenFailure(e)) toast(e.message);
+      return;
+    }
     if(!live()) return;
     attachSession(v, PLAYER, info, pos);
   } else if(PLAYER.copyHls){
     // Copy-video HLS (Safari): re-open with the chosen audio track.
-    try{ if(!await startCopyHls(v, pos, live)) return; }catch(e){ return toast(e.message); }
+    try{ if(!await startCopyHls(v, pos, live)) return; }catch(e){
+      if(!showSessionOpenFailure(e)) toast(e.message);
+      return;
+    }
   } else {
     // Switching audio forces a remux so the chosen track is the one delivered.
     PLAYER.method='remux'; PLAYER.offset=pos;
@@ -9960,14 +9937,14 @@ function playbackPanel(settings){
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
       <h2 class="section">Film-addressed VOD</h2>
-      <p class="muted" style="margin-top:0">Present eligible remuxes as one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. Files without a current fragment index, subtitle burns, and transcode rungs keep the live presentation.</p>
-      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Enable VOD presentation for new web sessions</label>
+      <p class="muted" style="margin-top:0">Every HLS session is one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. An unindexed or unsupported title is refused explicitly and never routed through the removed growing live presentation.</p>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
       <div class="row" style="align-items:end">
         <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
-      <div class="hint">Indexing reads each eligible file once and is node-local. Turn on an interval before enabling VOD; a title falls back safely until its index exists. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
+      <div class="hint">Indexing reads each eligible file once and is node-local; 15 minutes is the default. Disabling VOD or pausing indexing can make HLS titles unavailable — neither setting restores live HLS. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets

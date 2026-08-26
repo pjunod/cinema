@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["704f9616"]
+commits = ["36cc91fb"]
 points = ["playback.pipeline", "web.experience"]
 checks = ["rust-gate", "web-static", "playback-shaping"]
 reason = "The web-policy contract pins a 1.53 Mb/s supply cliff to the sustainable 360p rung and proves the shipped persistent-stall path carries that target into its bound reopen; the server regression proves a lower measured hint is honored while a stale higher hint cannot evade the server-owned descent, and the shaping contracts retain the one-restart recovery verdict exercised by the required VOD browser lane."

@@ -822,6 +822,13 @@ struct CreateSessionRequest: Codable {
     /// Retain a source profile the server already decided this AVPlayer can
     /// decode. Omitted/false remains the safe legacy behavior.
     var preserveDolbyVision: Bool?
+    /// Immutable film-addressed HLS is the only supported presentation.
+    /// Every request states it so an older server cannot silently choose the
+    /// removed growing live playlist.
+    var presentation: String = "vod"
+    /// AVPlayer's device-specific first-byte measurement is still pending;
+    /// the server's measured conservative default applies until then.
+    var blockBudgetSecs: Double?
 }
 
 struct ProgressRequest: Codable {
