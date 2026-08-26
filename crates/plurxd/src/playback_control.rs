@@ -774,7 +774,7 @@ pub(crate) struct LocalControlResult {
     pub platform: ClientPlatform,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub(crate) struct LocalControlRequest<'a> {
     pub session_id: &'a str,
     pub generation: &'a str,
@@ -782,7 +782,87 @@ pub(crate) struct LocalControlRequest<'a> {
     pub owner_epoch: u64,
     pub client_instance_id: &'a str,
     pub sequence: u64,
-    pub platform: Option<ClientPlatform>,
+    pub snapshot: PlaybackDemandSnapshot,
+}
+
+/// The bounded client facts accepted with one control sequence.
+///
+/// The public request contains identity and mutation fences as well as these
+/// observations.  Identity remains on [`LocalControlRequest`]; this owned
+/// projection is what a rolling-session actor may retain after the HTTP
+/// request has returned.  Keeping every policy input together prevents later
+/// quality, subtitle, and handoff work from reconstructing state from media
+/// fetches or from whichever legacy watchdog happened to fire.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct PlaybackDemandSnapshot {
+    pub demand: PlaybackDemand,
+    pub position_ms: i64,
+    pub buffered_from_ms: Option<i64>,
+    pub buffered_through_ms: i64,
+    pub playback_rate: f64,
+    pub render_state: RenderState,
+    pub seek_target_ms: Option<i64>,
+    pub observed_download_bps: Option<u64>,
+    pub selection: ClientSelection,
+    pub capabilities: Option<DynamicCapabilities>,
+    pub observation: Option<ClientObservation>,
+}
+
+impl From<&ControlRequestV1> for PlaybackDemandSnapshot {
+    fn from(request: &ControlRequestV1) -> Self {
+        Self {
+            demand: request.demand,
+            position_ms: request.position_ms,
+            buffered_from_ms: request.buffered_from_ms,
+            buffered_through_ms: request.buffered_through_ms,
+            playback_rate: request.playback_rate,
+            render_state: request.render_state,
+            seek_target_ms: request.seek_target_ms,
+            observed_download_bps: request.observed_download_bps,
+            selection: request.selection.clone(),
+            capabilities: request.capabilities.clone(),
+            observation: request.observation.clone(),
+        }
+    }
+}
+
+impl PlaybackDemandSnapshot {
+    pub(crate) fn platform(&self) -> Option<ClientPlatform> {
+        self.capabilities.as_ref().map(|caps| caps.platform)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_default(platform: ClientPlatform) -> Self {
+        Self {
+            demand: PlaybackDemand::Active,
+            position_ms: 10_000,
+            buffered_from_ms: Some(9_000),
+            buffered_through_ms: 25_000,
+            playback_rate: 1.0,
+            render_state: RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: Some(8_000_000),
+            selection: ClientSelection {
+                quality: QualitySelection::Auto,
+                audio_track: Some(0),
+                subtitle: SubtitleSelection {
+                    mode: SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: CodecPolicy::Auto,
+                dynamic_range: DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(DynamicCapabilities {
+                platform,
+                max_height: 2160,
+                codecs: vec![CodecPolicy::H264, CodecPolicy::Hevc],
+                dynamic_ranges: vec![DynamicRangePolicy::Sdr, DynamicRangePolicy::Hdr10],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -913,6 +993,291 @@ impl ControlState {
     }
 }
 
+const ROLLING_ACTOR_MAILBOX_CAPACITY: usize = 128;
+const ROLLING_LEASE_TIMEOUT: Duration = Duration::from_millis(ROLLING_LEASE_TIMEOUT_MS as u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RollingLeaseMode {
+    Legacy,
+    Explicit,
+}
+
+/// One actor-owned view of a rolling generation's liveness and demand.
+///
+/// `last_renewal_kind` is retained for the existing Activity/status contract,
+/// but expiry is decided inside the actor.  Callers cannot inspect a timestamp
+/// and later retire based on that stale observation; they must atomically
+/// claim an expired lease through [`RollingControlHandle::claim_expiry`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RollingLeaseSnapshot {
+    pub mode: RollingLeaseMode,
+    pub idle_for: Duration,
+    pub remaining: Duration,
+    pub last_renewal_kind: &'static str,
+    pub demand: Option<PlaybackDemandSnapshot>,
+    pub retired: bool,
+}
+
+impl RollingLeaseSnapshot {
+    pub(crate) fn expired(&self) -> bool {
+        !self.retired && self.idle_for > ROLLING_LEASE_TIMEOUT
+    }
+
+    pub(crate) fn expires_at_unix_ms(&self) -> i64 {
+        let remaining_ms = i64::try_from(self.remaining.as_millis()).unwrap_or(i64::MAX);
+        crate::media_sessions::unix_ms().saturating_add(remaining_ms)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RollingControlOutcome {
+    pub disposition: ControlDisposition,
+    pub accepted_sequence: u64,
+    pub action: ControlAction,
+    pub platform: ClientPlatform,
+    pub lease: RollingLeaseSnapshot,
+}
+
+#[derive(Clone)]
+pub(crate) struct RollingControlHandle {
+    sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
+}
+
+struct OwnedLocalControlRequest {
+    generation: String,
+    owner_epoch: u64,
+    client_instance_id: String,
+    sequence: u64,
+    snapshot: PlaybackDemandSnapshot,
+}
+
+enum RollingControlCommand {
+    Renew {
+        kind: &'static str,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    Control {
+        request: OwnedLocalControlRequest,
+        reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
+    },
+    Snapshot {
+        reply: tokio::sync::oneshot::Sender<RollingLeaseSnapshot>,
+    },
+    ClaimExpiry {
+        reply: tokio::sync::oneshot::Sender<Option<RollingLeaseSnapshot>>,
+    },
+    Retire {
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
+    #[cfg(test)]
+    SetRenewalForTest {
+        at: Instant,
+        kind: &'static str,
+        reply: tokio::sync::oneshot::Sender<()>,
+    },
+}
+
+struct RollingControlActor {
+    control: ControlState,
+    last_renewal: Instant,
+    last_renewal_kind: &'static str,
+    mode: RollingLeaseMode,
+    demand: Option<PlaybackDemandSnapshot>,
+    retired: bool,
+}
+
+impl RollingControlActor {
+    fn new(now: Instant, initial_kind: &'static str) -> Self {
+        Self {
+            control: ControlState::default(),
+            last_renewal: now,
+            last_renewal_kind: initial_kind,
+            mode: RollingLeaseMode::Legacy,
+            demand: None,
+            retired: false,
+        }
+    }
+
+    fn snapshot_at(&self, now: Instant) -> RollingLeaseSnapshot {
+        let idle_for = now.saturating_duration_since(self.last_renewal);
+        RollingLeaseSnapshot {
+            mode: self.mode,
+            idle_for,
+            remaining: ROLLING_LEASE_TIMEOUT.saturating_sub(idle_for),
+            last_renewal_kind: self.last_renewal_kind,
+            demand: self.demand.clone(),
+            retired: self.retired,
+        }
+    }
+
+    fn renew_at(&mut self, now: Instant, kind: &'static str) -> bool {
+        if self.retired {
+            return false;
+        }
+        self.last_renewal = now;
+        self.last_renewal_kind = kind;
+        ROLLING_LEASE_RENEWALS[1].fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn control_at(
+        &mut self,
+        now: Instant,
+        request: OwnedLocalControlRequest,
+    ) -> Result<RollingControlOutcome, ControlStateError> {
+        if self.retired {
+            return Err(ControlStateError::SessionEnded);
+        }
+        let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
+            now,
+            &request.generation,
+            request.owner_epoch,
+            &request.client_instance_id,
+            request.sequence,
+            request.snapshot.platform(),
+        )?;
+        if disposition == ControlDisposition::Accepted {
+            self.last_renewal = now;
+            self.last_renewal_kind = "control";
+            self.mode = RollingLeaseMode::Explicit;
+            self.demand = Some(request.snapshot);
+            ROLLING_LEASE_RENEWALS[0].fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(RollingControlOutcome {
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease: self.snapshot_at(now),
+        })
+    }
+
+    fn claim_expiry_at(&mut self, now: Instant) -> Option<RollingLeaseSnapshot> {
+        let snapshot = self.snapshot_at(now);
+        if snapshot.expired() {
+            self.retired = true;
+            ROLLING_LEASE_EXPIRATIONS.fetch_add(1, Ordering::Relaxed);
+            Some(snapshot)
+        } else {
+            None
+        }
+    }
+
+    async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlCommand>) {
+        while let Some(command) = receiver.recv().await {
+            match command {
+                RollingControlCommand::Renew { kind, reply } => {
+                    let _ = reply.send(self.renew_at(Instant::now(), kind));
+                }
+                RollingControlCommand::Control { request, reply } => {
+                    let _ = reply.send(self.control_at(Instant::now(), request));
+                }
+                RollingControlCommand::Snapshot { reply } => {
+                    let _ = reply.send(self.snapshot_at(Instant::now()));
+                }
+                RollingControlCommand::ClaimExpiry { reply } => {
+                    let _ = reply.send(self.claim_expiry_at(Instant::now()));
+                }
+                RollingControlCommand::Retire { reply } => {
+                    if !self.retired {
+                        self.retired = true;
+                        ROLLING_LEASE_RETIREMENTS.fetch_add(1, Ordering::Relaxed);
+                    }
+                    let _ = reply.send(());
+                }
+                #[cfg(test)]
+                RollingControlCommand::SetRenewalForTest { at, kind, reply } => {
+                    self.last_renewal = at;
+                    self.last_renewal_kind = kind;
+                    let _ = reply.send(());
+                }
+            }
+        }
+    }
+}
+
+impl RollingControlHandle {
+    pub(crate) fn spawn(initial_kind: &'static str) -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
+        tokio::spawn(RollingControlActor::new(Instant::now(), initial_kind).run(receiver));
+        Self { sender }
+    }
+
+    pub(crate) async fn renew(&self, kind: &'static str) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::Renew { kind, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    pub(crate) async fn control(
+        &self,
+        request: LocalControlRequest<'_>,
+    ) -> Result<RollingControlOutcome, ControlStateError> {
+        let request = OwnedLocalControlRequest {
+            generation: request.generation.to_owned(),
+            owner_epoch: request.owner_epoch,
+            client_instance_id: request.client_instance_id.to_owned(),
+            sequence: request.sequence,
+            snapshot: request.snapshot,
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(RollingControlCommand::Control { request, reply })
+            .await
+            .map_err(|_| ControlStateError::Unavailable)?;
+        response.await.map_err(|_| ControlStateError::Unavailable)?
+    }
+
+    pub(crate) async fn snapshot(&self) -> Option<RollingLeaseSnapshot> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(RollingControlCommand::Snapshot { reply })
+            .await
+            .ok()?;
+        response.await.ok()
+    }
+
+    pub(crate) async fn claim_expiry(
+        &self,
+    ) -> Result<Option<RollingLeaseSnapshot>, ControlStateError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(RollingControlCommand::ClaimExpiry { reply })
+            .await
+            .map_err(|_| ControlStateError::Unavailable)?;
+        response.await.map_err(|_| ControlStateError::Unavailable)
+    }
+
+    pub(crate) async fn retire(&self) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::Retire { reply })
+            .await
+            .is_ok()
+        {
+            let _ = response.await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn set_renewal_for_test(&self, at: Instant, kind: &'static str) {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(RollingControlCommand::SetRenewalForTest { at, kind, reply })
+            .await
+            .expect("rolling actor available");
+        response.await.expect("rolling actor reply");
+    }
+}
+
 fn node_hash(node_id: &str) -> String {
     let digest = Sha256::digest(node_id.as_bytes());
     format!("n-{}", hex::encode(&digest[..8]))
@@ -948,6 +1313,9 @@ static CONTROL_RELAY_OUTCOMES: [AtomicU64; 3] =
 static CONTROL_RELAY_BUCKETS: [AtomicU64; RELAY_BUCKETS_MS.len() + 1] =
     [const { AtomicU64::new(0) }; RELAY_BUCKETS_MS.len() + 1];
 static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
+static ROLLING_LEASE_RENEWALS: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
+static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
+static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -1082,6 +1450,26 @@ pub(crate) fn prometheus() -> String {
         "plurx_playback_control_relay_seconds_bucket{{le=\"+Inf\"}} {cumulative}\n\
          plurx_playback_control_relay_seconds_sum {sum}\n\
          plurx_playback_control_relay_seconds_count {cumulative}\n"
+    ));
+    output.push_str(
+        "# HELP plurx_playback_rolling_lease_renewals_total Rolling-session lease renewals accepted by the single control actor.\n\
+         # TYPE plurx_playback_rolling_lease_renewals_total counter\n",
+    );
+    for (index, source) in ["control", "media"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_rolling_lease_renewals_total{{source=\"{source}\"}} {}\n",
+            ROLLING_LEASE_RENEWALS[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(&format!(
+        "# HELP plurx_playback_rolling_lease_expirations_total Rolling-session leases atomically claimed after both renewal sources stopped.\n\
+         # TYPE plurx_playback_rolling_lease_expirations_total counter\n\
+         plurx_playback_rolling_lease_expirations_total {}\n\
+         # HELP plurx_playback_rolling_lease_retirements_total Rolling-session actors retired for non-expiry lifecycle reasons.\n\
+         # TYPE plurx_playback_rolling_lease_retirements_total counter\n\
+         plurx_playback_rolling_lease_retirements_total {}\n",
+        ROLLING_LEASE_EXPIRATIONS.load(Ordering::Relaxed),
+        ROLLING_LEASE_RETIREMENTS.load(Ordering::Relaxed)
     ));
     output
 }
@@ -1414,6 +1802,94 @@ mod tests {
         }
     }
 
+    fn owned_control(request: &ControlRequestV1) -> OwnedLocalControlRequest {
+        OwnedLocalControlRequest {
+            generation: request.generation.clone(),
+            owner_epoch: request.control_epoch,
+            client_instance_id: request.client_instance_id.clone(),
+            sequence: request.sequence,
+            snapshot: PlaybackDemandSnapshot::from(request),
+        }
+    }
+
+    #[test]
+    fn rolling_actor_keeps_the_complete_demand_and_replay_never_renews() {
+        let started = Instant::now();
+        let mut actor = RollingControlActor::new(started, "session-start");
+        let request = request();
+        let accepted = actor
+            .control_at(started + Duration::from_secs(1), owned_control(&request))
+            .expect("first control accepted");
+        assert_eq!(accepted.disposition, ControlDisposition::Accepted);
+        assert_eq!(accepted.lease.mode, RollingLeaseMode::Explicit);
+        let demand = accepted.lease.demand.expect("demand snapshot");
+        assert_eq!(demand.position_ms, request.position_ms);
+        assert_eq!(demand.buffered_from_ms, request.buffered_from_ms);
+        assert_eq!(demand.buffered_through_ms, request.buffered_through_ms);
+        assert_eq!(demand.render_state, request.render_state);
+        assert_eq!(demand.selection, request.selection);
+        assert_eq!(demand.capabilities, request.capabilities);
+
+        let replay = actor
+            .control_at(started + Duration::from_secs(11), owned_control(&request))
+            .expect("equal sequence is replayed");
+        assert_eq!(replay.disposition, ControlDisposition::Replay);
+        assert_eq!(replay.lease.idle_for, Duration::from_secs(10));
+        assert_eq!(replay.lease.last_renewal_kind, "control");
+
+        let mut stale = request;
+        stale.sequence = 0;
+        assert_eq!(
+            actor.control_at(started + Duration::from_secs(12), owned_control(&stale)),
+            Err(ControlStateError::StaleSequence)
+        );
+        assert_eq!(
+            actor
+                .snapshot_at(started + Duration::from_secs(12))
+                .idle_for,
+            Duration::from_secs(11)
+        );
+    }
+
+    #[test]
+    fn rolling_actor_claims_expiry_once_and_fences_every_later_renewal() {
+        let started = Instant::now();
+        let mut actor = RollingControlActor::new(started, "session-start");
+        assert!(actor
+            .claim_expiry_at(started + ROLLING_LEASE_TIMEOUT + Duration::from_millis(1))
+            .is_some());
+        assert!(actor
+            .claim_expiry_at(started + ROLLING_LEASE_TIMEOUT + Duration::from_secs(1))
+            .is_none());
+        assert!(!actor.renew_at(started + Duration::from_secs(62), "segment"));
+        assert_eq!(
+            actor.control_at(started + Duration::from_secs(63), owned_control(&request())),
+            Err(ControlStateError::SessionEnded)
+        );
+
+        let mut renewed = RollingControlActor::new(started, "session-start");
+        assert!(renewed.renew_at(started + Duration::from_secs(59), "playlist"));
+        assert!(renewed
+            .claim_expiry_at(started + Duration::from_secs(61))
+            .is_none());
+        assert!(renewed
+            .claim_expiry_at(started + Duration::from_secs(120))
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn rolling_mailbox_orders_media_retirement_and_observation() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert!(handle.renew("playlist").await);
+        assert_eq!(
+            handle.snapshot().await.expect("snapshot").last_renewal_kind,
+            "playlist"
+        );
+        handle.retire().await;
+        assert!(!handle.renew("segment").await);
+        assert!(handle.snapshot().await.is_some_and(|lease| lease.retired));
+    }
+
     #[test]
     fn relayed_exchange_inherits_remaining_budget_instead_of_restarting_it() {
         assert_eq!(
@@ -1499,6 +1975,8 @@ mod tests {
             metrics.contains("plurx_playback_control_relays_total{outcome=\"invalid_response\"}")
         );
         assert!(metrics.contains("# TYPE plurx_playback_control_relay_seconds histogram"));
+        assert!(metrics.contains("plurx_playback_rolling_lease_renewals_total{source=\"control\"}"));
+        assert!(metrics.contains("plurx_playback_rolling_lease_expirations_total"));
     }
 
     async fn activate_route(

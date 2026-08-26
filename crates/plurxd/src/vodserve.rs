@@ -1139,7 +1139,7 @@ impl VodServe {
                 control.owner_epoch,
                 control.client_instance_id,
                 control.sequence,
-                control.platform,
+                control.snapshot.platform(),
             );
             let (disposition, accepted_sequence, action, platform) = match accepted {
                 Ok(outcome) => outcome,
@@ -3872,7 +3872,9 @@ mod tests {
             owner_epoch,
             client_instance_id: &client,
             sequence,
-            platform: Some(crate::playback_control::ClientPlatform::Apple),
+            snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Apple,
+            ),
         };
 
         let accepted = serve
