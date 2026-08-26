@@ -925,6 +925,39 @@ pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
     Ok((32u8..=34).all(|kind| present.contains(&kind)))
 }
 
+/// Validate the decoder configuration promised by an HEVC sample entry.
+///
+/// `hev1`/`dvhe` may carry parameter sets in-band, so an empty or partial
+/// hvcC remains a valid description for those entries. `hvc1`/`dvh1` make the
+/// opposite promise: every required parameter set is out of band, and the
+/// init is not publishable until hvcC contains VPS, SPS, and PPS. This ruling
+/// comes from the emitted init itself rather than probe metadata, which may be
+/// absent or stale.
+pub fn validate_hevc_decoder_configuration(init: &Init) -> Result<(), Fmp4Error> {
+    let Some(video) = init.video() else {
+        return Ok(());
+    };
+    if video.codec != Some(VideoCodec::Hevc) {
+        return Ok(());
+    }
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Err(Fmp4Error::Unsupported(
+            "the HEVC video sample entry has no hvcC box".into(),
+        ));
+    };
+    if location.parameter_sets_in_band {
+        return Ok(());
+    }
+    let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
+    if (32u8..=34).all(|kind| present.contains(&kind)) {
+        Ok(())
+    } else {
+        Err(Fmp4Error::Unsupported(
+            "the out-of-band HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
+        ))
+    }
+}
+
 fn hevc_parameter_set_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
     length_prefixed_nals(sample, length_size)
         .into_iter()
@@ -3450,6 +3483,7 @@ mod tests {
         );
 
         assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("promotion"));
+        validate_hevc_decoder_configuration(&init).expect("promoted hvc1 is publishable");
         let enriched = locate_hvcc(&init.bytes)
             .expect("locating enriched hvcC")
             .expect("hvcC");
@@ -3491,6 +3525,26 @@ mod tests {
         );
         assert_eq!(init.bytes, original, "a refused promotion must be atomic");
         assert!(!hevc_parameter_sets_complete(&init).expect("reading hvcC"));
+        let error = validate_hevc_decoder_configuration(&init)
+            .expect_err("an incomplete out-of-band hvcC is not publishable");
+        assert!(
+            error.to_string().contains("complete VPS/SPS/PPS"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn in_band_hevc_sample_entry_does_not_require_parameter_sets_in_hvcc() {
+        let mut init = minimal_hvcc_dv_init();
+        let entry = init
+            .bytes
+            .windows(4)
+            .position(|kind| kind == b"hvc1")
+            .expect("hvc1 sample entry");
+        init.bytes[entry..entry + 4].copy_from_slice(b"hev1");
+
+        validate_hevc_decoder_configuration(&init)
+            .expect("hev1 is allowed to carry its decoder configuration in band");
     }
 
     #[test]

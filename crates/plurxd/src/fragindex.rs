@@ -67,7 +67,6 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     mut src: R,
     identity: SourceIdentity,
     expected_ms: Option<i64>,
-    require_hevc_parameter_sets: bool,
 ) -> IndexOutcome {
     let mut reader = FragmentReader::new();
     let mut init: Option<Init> = None;
@@ -232,32 +231,22 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
     }
 
     let promotion = promotion.unwrap_or_default();
-    if require_hevc_parameter_sets {
-        let Some(mut served_init) = init.clone() else {
-            return IndexOutcome::Unsupported(
-                "the index pipe ended without an HEVC init to validate".into(),
-            );
-        };
-        if let Err(error) =
-            fmp4::promote_hevc_parameter_sets_from(&mut served_init, &promotion.parameter_sets)
-        {
-            return IndexOutcome::Unsupported(format!(
-                "the HEVC decoder configuration could not be completed: {error}"
-            ));
-        }
-        match fmp4::hevc_parameter_sets_complete(&served_init) {
-            Ok(true) => {}
-            Ok(false) => {
-                return IndexOutcome::Unsupported(
-                    "the HEVC decoder configuration has no complete VPS/SPS/PPS set".into(),
-                )
-            }
-            Err(error) => {
-                return IndexOutcome::Unsupported(format!(
-                    "validating the HEVC decoder configuration: {error}"
-                ))
-            }
-        }
+    let Some(mut served_init) = init.clone() else {
+        return IndexOutcome::Unsupported(
+            "the index pipe ended without an init to validate".into(),
+        );
+    };
+    if let Err(error) =
+        fmp4::promote_hevc_parameter_sets_from(&mut served_init, &promotion.parameter_sets)
+    {
+        return IndexOutcome::Unsupported(format!(
+            "the HEVC decoder configuration could not be completed: {error}"
+        ));
+    }
+    if let Err(error) = fmp4::validate_hevc_decoder_configuration(&served_init) {
+        return IndexOutcome::Unsupported(format!(
+            "validating the HEVC decoder configuration: {error}"
+        ));
     }
 
     let mut built = FragmentIndex::new(timescale, rows, init_sha, identity);
@@ -400,23 +389,14 @@ async fn build_with_args(
         });
     }
 
-    let outcome = match tokio::time::timeout(
-        budget,
-        index_stream(
-            stdout,
-            identity,
-            expected_ms,
-            video.promotes_parameter_sets(),
-        ),
-    )
-    .await
-    {
-        Ok(outcome) => outcome,
-        Err(_) => IndexOutcome::Truncated {
-            reason: format!("exceeded the {}s index budget", budget.as_secs()),
-            rows: 0,
-        },
-    };
+    let outcome =
+        match tokio::time::timeout(budget, index_stream(stdout, identity, expected_ms)).await {
+            Ok(outcome) => outcome,
+            Err(_) => IndexOutcome::Truncated {
+                reason: format!("exceeded the {}s index budget", budget.as_secs()),
+                rows: 0,
+            },
+        };
     let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     let outcome = match (outcome, status) {
         (IndexOutcome::Built(_), Ok(Ok(status))) if !status.success() => IndexOutcome::Truncated {
@@ -473,7 +453,7 @@ mod tests {
     /// The index pipe over a real fixture, read the way the daemon reads it.
     async fn index_fixture(kind: &str) -> IndexOutcome {
         let bytes = index_pipe_bytes(kind);
-        index_stream(std::io::Cursor::new(bytes), identity(), None, false).await
+        index_stream(std::io::Cursor::new(bytes), identity(), None).await
     }
 
     /// The video-only pipe's own output, cached beside the fixture.
@@ -556,15 +536,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_promotion_refuses_an_incomplete_decoder_configuration() {
+    async fn emitted_hvc1_refuses_an_incomplete_decoder_configuration_without_a_probe_hint() {
         let mut bytes = index_pipe_bytes("closed-gop");
         // Keep the hvcC structurally valid but turn its PPS array into a
         // duplicate SPS array. The ordinary fixture pipe has already removed
         // in-band sets, so there is no hidden PPS from which to "succeed".
         replace_hvcc_array_type(&mut bytes, 34, 33);
-        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None, true).await;
+        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None).await;
         let IndexOutcome::Unsupported(reason) = outcome else {
-            panic!("an incomplete required hvcC must not be indexed: {outcome:?}");
+            panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
         };
         assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
     }
@@ -576,7 +556,7 @@ mod tests {
         // per-IDR parameter-set variation. The check still has to work.
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(index) =
-            index_stream(std::io::Cursor::new(bytes), identity(), None, false).await
+            index_stream(std::io::Cursor::new(bytes), identity(), None).await
         else {
             panic!("must index");
         };
@@ -661,7 +641,6 @@ mod tests {
             std::io::Cursor::new(bytes[..half].to_vec()),
             identity(),
             None,
-            false,
         )
         .await;
         assert!(
@@ -674,7 +653,7 @@ mod tests {
     async fn a_pipe_that_stops_short_of_the_probed_duration_is_truncated() {
         let bytes = index_pipe_bytes("closed-gop");
         let IndexOutcome::Built(full) =
-            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None, false).await
+            index_stream(std::io::Cursor::new(bytes.clone()), identity(), None).await
         else {
             panic!("the full pipe indexes");
         };
@@ -685,7 +664,6 @@ mod tests {
             std::io::Cursor::new(bytes),
             identity(),
             Some(60_000 + 12_000),
-            false,
         )
         .await;
         assert!(
@@ -797,7 +775,6 @@ mod equality_tests {
                 std::io::Cursor::new(super::tests::index_pipe_bytes(kind)),
                 SourceIdentity::new(1, 1, "fingerprint"),
                 None,
-                false,
             )
             .await
             else {

@@ -10710,20 +10710,23 @@ impl TranscodeManager {
             let progress = Arc::clone(&progress);
             let runtime_cache = self.runtime_cache.clone();
             tokio::spawn(async move {
-                let outcome = copyseg::run(
-                    stdout,
-                    dir.clone(),
-                    &sid,
-                    copyseg::Limits::default(),
-                    video_options.promotes_parameter_sets(),
-                )
-                .await;
+                let outcome =
+                    copyseg::run(stdout, dir.clone(), &sid, copyseg::Limits::default()).await;
                 match outcome {
                     copyseg::Outcome::Ran(counts) => {
                         tracing::info!(
                             session = %session_log_id(&sid), build = crate::version::BUILD,
                             "{}", copyseg::summary(&counts)
                         );
+                    }
+                    copyseg::Outcome::InvalidHevcConfiguration(reason) => {
+                        tracing::error!(
+                            session = %session_log_id(&sid),
+                            "the emitted HEVC decoder configuration is invalid: {reason}"
+                        );
+                        session.fail(PlaylistError::SessionFailed(
+                            "the HEVC source's decoder configuration could not be completed".into(),
+                        ));
                     }
                     copyseg::Outcome::Unsupported(reason) => {
                         if video_options.promotes_parameter_sets() {

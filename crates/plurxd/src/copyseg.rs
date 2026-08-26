@@ -110,6 +110,11 @@ pub enum Outcome {
     /// where falling back is both possible and correct. Once the playlist is
     /// out, a respawn would rewrite a timeline a player is already holding.
     Unsupported(String),
+    /// The emitted out-of-band HEVC init is not decodable. Retrying through
+    /// ffmpeg's legacy HLS muxer would publish the same invalid decoder
+    /// configuration, so this failure is terminal even when probe metadata
+    /// did not predict that promotion would be needed.
+    InvalidHevcConfiguration(String),
     /// It ran. The counts are what it published, whether it reached the end of
     /// the film or the session was killed under it.
     ///
@@ -257,7 +262,6 @@ pub async fn run<R: AsyncRead + Unpin>(
     dir: PathBuf,
     session_id: &str,
     limits: Limits,
-    require_hevc_parameter_sets: bool,
 ) -> Outcome {
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs);
@@ -358,9 +362,13 @@ pub async fn run<R: AsyncRead + Unpin>(
                             ),
                             Ok(false) => {}
                             Err(e) => {
-                                return Outcome::Unsupported(format!(
-                                    "preparing the HLS init segment: {e}"
-                                ));
+                                let reason = format!("preparing the HLS init segment: {e}");
+                                return match fmp4::validate_hevc_decoder_configuration(&init) {
+                                    Ok(()) => Outcome::Unsupported(reason),
+                                    Err(configuration) => Outcome::InvalidHevcConfiguration(
+                                        format!("{reason}; {configuration}"),
+                                    ),
+                                };
                             }
                         }
                         match fmp4::promote_hdr10_static_metadata(&mut init, &fragment) {
@@ -375,22 +383,10 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 ));
                             }
                         }
-                        if require_hevc_parameter_sets {
-                            match fmp4::hevc_parameter_sets_complete(&init) {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    return Outcome::Unsupported(
-                                        "the HEVC decoder configuration has no complete \
-                                         VPS/SPS/PPS set"
-                                            .into(),
-                                    )
-                                }
-                                Err(error) => {
-                                    return Outcome::Unsupported(format!(
-                                        "validating the HEVC decoder configuration: {error}"
-                                    ))
-                                }
-                            }
+                        if let Err(error) = fmp4::validate_hevc_decoder_configuration(&init) {
+                            return Outcome::InvalidHevcConfiguration(format!(
+                                "validating the HEVC decoder configuration: {error}"
+                            ));
                         }
                         if let Err(e) = out.write_init(&init).await {
                             return Outcome::Unsupported(format!("writing init.mp4: {e}"));
@@ -612,7 +608,7 @@ mod tests {
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe(kind);
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits, false).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits).await;
         (dir, outcome)
     }
 
@@ -691,16 +687,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_live_promotion_refuses_an_incomplete_decoder_configuration() {
+    async fn emitted_hvc1_refuses_an_incomplete_decoder_configuration_without_a_probe_hint() {
         let mut feed = pipe("closed-gop");
         // The fixture pipe has removed in-band parameter sets. Leave hvcC
         // structurally valid but turn its PPS into a duplicate SPS so no
         // hidden sample data can complete the configuration.
         replace_hvcc_array_type(&mut feed, 34, 33);
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), true).await;
-        let Outcome::Unsupported(reason) = outcome else {
-            panic!("an incomplete required hvcC was published: {outcome:?}");
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let Outcome::InvalidHevcConfiguration(reason) = outcome else {
+            panic!("an incomplete emitted hvcC was not terminal: {outcome:?}");
         };
         assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
         assert!(!dir.path().join("init.mp4").exists());
@@ -870,14 +866,7 @@ mod tests {
         let feed = pipe("clean-cra");
         // Two thirds of the stream, which lands inside a fragment.
         let cut = feed.len() * 2 / 3;
-        let outcome = run(
-            &feed[..cut],
-            dir.path().to_path_buf(),
-            "test",
-            brisk(),
-            false,
-        )
-        .await;
+        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", brisk()).await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -907,14 +896,7 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 999;
-        let outcome = run(
-            &feed[..cut],
-            dir.path().to_path_buf(),
-            "test",
-            limits,
-            false,
-        )
-        .await;
+        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -942,14 +924,7 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 4;
-        let outcome = run(
-            &feed[..cut],
-            dir.path().to_path_buf(),
-            "test",
-            limits,
-            false,
-        )
-        .await;
+        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -1007,7 +982,7 @@ mod tests {
         // its parent, which is the malformed case, not the truncated one.
         let head = 28 + 8; // past ftyp and the moov header
         feed[head..head + 4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
         assert!(
             matches!(outcome, Outcome::Unsupported(_)),
             "a broken moov did not ask for the fallback: {outcome:?}"
@@ -1057,14 +1032,7 @@ mod tests {
         );
 
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(
-            &out.stdout[..],
-            dir.path().to_path_buf(),
-            "test",
-            brisk(),
-            false,
-        )
-        .await;
+        let outcome = run(&out.stdout[..], dir.path().to_path_buf(), "test", brisk()).await;
         match outcome {
             Outcome::Unsupported(reason) => {
                 assert!(reason.contains("never asked for"), "{reason}");
@@ -1078,7 +1046,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_pipe_asks_for_the_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk()).await;
         assert!(matches!(outcome, Outcome::Unsupported(_)), "{outcome:?}");
     }
 
@@ -1092,7 +1060,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let trickle = tokio::io::BufReader::with_capacity(1, &feed[..]);
-        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk(), false).await;
+        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk()).await;
         assert_eq!(outcome, whole_outcome);
         assert_eq!(playlist(dir.path()), playlist(whole.path()));
         assert_eq!(segment_files(dir.path()), segment_files(whole.path()));
@@ -1158,7 +1126,7 @@ mod tests {
             max_seconds: 15,
             publish_gate_secs: 0,
         };
-        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits, false).await;
+        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits).await;
         let _ = child.wait().await;
 
         let Outcome::Ran(counts) = outcome else {
