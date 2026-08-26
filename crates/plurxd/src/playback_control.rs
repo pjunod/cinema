@@ -757,6 +757,17 @@ pub(crate) struct LocalControlResult {
     pub platform: ClientPlatform,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct LocalControlRequest<'a> {
+    pub session_id: &'a str,
+    pub generation: &'a str,
+    pub owner_node_id: &'a str,
+    pub owner_epoch: u64,
+    pub client_instance_id: &'a str,
+    pub sequence: u64,
+    pub platform: Option<ClientPlatform>,
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlState {
     generation: Option<String>,

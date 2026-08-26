@@ -11028,52 +11028,39 @@ impl TranscodeManager {
     /// clock with the explicit `control` reason; replay and rejection do not.
     pub(crate) async fn hls_session_control(
         &self,
-        session_id: &str,
-        generation: &str,
-        owner_node_id: &str,
-        owner_epoch: u64,
-        client_instance_id: &str,
-        sequence: u64,
-        platform: Option<crate::playback_control::ClientPlatform>,
+        control: crate::playback_control::LocalControlRequest<'_>,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
             crate::playback_control::ControlStateError,
         >,
     > {
-        if let Some(result) = self
-            .vod
-            .control(
-                session_id,
-                generation,
-                owner_node_id,
-                owner_epoch,
-                client_instance_id,
-                sequence,
-                platform,
-            )
-            .await
-        {
+        if let Some(result) = self.vod.control(control).await {
             return Some(result);
         }
-        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .cloned()?;
         let _transition = session.child_transition.lock().await;
         if session.retired.load(Acquire)
             || !self
                 .sessions
                 .lock()
                 .await
-                .get(session_id)
+                .get(control.session_id)
                 .is_some_and(|current| Arc::ptr_eq(current, &session))
         {
             return None;
         }
         if let Err(error) = crate::playback_control::verify_authority(
             self.store.as_ref(),
-            session_id,
-            generation,
-            owner_node_id,
-            owner_epoch,
+            control.session_id,
+            control.generation,
+            control.owner_node_id,
+            control.owner_epoch,
         )
         .await
         {
@@ -11081,11 +11068,11 @@ impl TranscodeManager {
         }
         let (disposition, accepted_sequence, action, platform) =
             match session.control.lock().await.accept(
-                generation,
-                owner_epoch,
-                client_instance_id,
-                sequence,
-                platform,
+                control.generation,
+                control.owner_epoch,
+                control.client_instance_id,
+                control.sequence,
+                control.platform,
             ) {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
@@ -11109,7 +11096,7 @@ impl TranscodeManager {
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
-            session_id,
+            control.session_id,
             &session,
             limits,
             global_live_bytes,

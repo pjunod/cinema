@@ -1783,15 +1783,15 @@ async fn control_local_inner(
     }
     let result = match state
         .transcode
-        .hls_session_control(
-            &route.session_id,
-            &route.incarnation_id,
-            &route.owner_node_id,
+        .hls_session_control(crate::playback_control::LocalControlRequest {
+            session_id: &route.session_id,
+            generation: &route.incarnation_id,
+            owner_node_id: &route.owner_node_id,
             owner_epoch,
-            &request.client_instance_id,
-            request.sequence,
-            request.capabilities.as_ref().map(|caps| caps.platform),
-        )
+            client_instance_id: &request.client_instance_id,
+            sequence: request.sequence,
+            platform: request.capabilities.as_ref().map(|caps| caps.platform),
+        })
         .await
     {
         Some(Ok(result)) => result,

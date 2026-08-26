@@ -912,13 +912,7 @@ impl VodServe {
     /// the existing five-minute VOD activity clock.
     pub(crate) async fn control(
         &self,
-        session_id: &str,
-        generation: &str,
-        owner_node_id: &str,
-        owner_epoch: u64,
-        client_instance_id: &str,
-        sequence: u64,
-        platform: Option<crate::playback_control::ClientPlatform>,
+        control: crate::playback_control::LocalControlRequest<'_>,
     ) -> Option<
         Result<
             crate::playback_control::LocalControlResult,
@@ -931,10 +925,10 @@ impl VodServe {
         let lifecycle = self.shared.lifecycle.lock().await;
         if let Err(error) = crate::playback_control::verify_authority(
             self.shared.store.as_ref(),
-            session_id,
-            generation,
-            owner_node_id,
-            owner_epoch,
+            control.session_id,
+            control.generation,
+            control.owner_node_id,
+            control.owner_epoch,
         )
         .await
         {
@@ -942,16 +936,16 @@ impl VodServe {
         }
         let outcome = {
             let sessions = self.shared.sessions.lock().await;
-            let session = sessions.get(session_id)?;
+            let session = sessions.get(control.session_id)?;
             if session.tombstone.is_some() {
                 return None;
             }
             let accepted = session.control.lock().expect("control lock").accept(
-                generation,
-                owner_epoch,
-                client_instance_id,
-                sequence,
-                platform,
+                control.generation,
+                control.owner_epoch,
+                control.client_instance_id,
+                control.sequence,
+                control.platform,
             );
             let (disposition, accepted_sequence, action, platform) = match accepted {
                 Ok(outcome) => outcome,
@@ -977,7 +971,7 @@ impl VodServe {
                 Err(error) => return Some(Err(error)),
             };
         drop(lifecycle);
-        let status = self.status(session_id).await?;
+        let status = self.status(control.session_id).await?;
         Some(Ok(crate::playback_control::LocalControlResult {
             disposition,
             accepted_sequence,
