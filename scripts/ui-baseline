@@ -1096,6 +1096,49 @@ def tab_order(page, stops):
     return seen
 
 
+def stress_classic_header(page, name, layout_id):
+    """Keep a long cluster status from stealing the desktop nav's row.
+
+    The steady-state fixture has no background work, so the ordinary screenshot
+    never paints the middle activity lane. Exercise it after the shutter, when
+    it cannot perturb either baseline tier, and assert geometry in Chromium —
+    a source-string test cannot tell whether flexbox wrapped Settings.
+    """
+    if layout_id != "classic" or name != "home":
+        return
+    metrics = page.evaluate("""() => {
+      if (innerWidth < 1000) return null;
+      paintActivity([{
+        label: "Activity incomplete",
+        detail: "6b98c6cb-8388-48ba-8c2b-69c9dc6ec8a9 (unhealthy) did not answer",
+      }]);
+      const header = document.querySelector("header.top");
+      const nav = header && header.querySelector("nav");
+      const activity = header && header.querySelector(".activity");
+      const text = activity && activity.querySelector(".activitytext");
+      const links = nav ? [...nav.querySelectorAll("a")] : [];
+      const tops = links.map(link => Math.round(link.getBoundingClientRect().top));
+      return {
+        headerOverflow: header ? header.scrollWidth - header.clientWidth : 1,
+        navRows: new Set(tops).size,
+        activityWidth: activity ? activity.getBoundingClientRect().width : 0,
+        activityTextOverflow: text ? text.scrollWidth - text.clientWidth : 0,
+      };
+    }""")
+    if metrics is None:
+        return
+    if metrics["navRows"] != 1:
+        raise Fail(f"{name}: long activity wrapped the desktop nav to "
+                   f"{metrics['navRows']} rows")
+    if metrics["headerOverflow"] > 1:
+        raise Fail(f"{name}: long activity overflowed the desktop header by "
+                   f"{metrics['headerOverflow']:.1f}px")
+    if metrics["activityWidth"] <= 0:
+        raise Fail(f"{name}: activity stress fixture did not render")
+    if metrics["activityTextOverflow"] <= 0:
+        raise Fail(f"{name}: activity stress fixture did not exercise truncation")
+
+
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     page = pw_context.new_page()
     problems = []
@@ -1214,6 +1257,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         page.wait_for_timeout(args.rest_ms)
         settle(page)
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
+        stress_classic_header(page, name, layout_id)
         if problems:
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}

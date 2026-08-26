@@ -302,6 +302,49 @@ async fn wait_for_fragment_index(first: &mut Daemon, second: &mut Daemon) {
     }
 }
 
+async fn wait_for_file_id(
+    client: &reqwest::Client,
+    daemon: &mut Daemon,
+    base: &str,
+    token: &str,
+    item_id: i64,
+) -> i64 {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        daemon.assert_running("waiting for the scanned file row");
+        let observation = match client
+            .get(format!("{base}/api/v1/items/{item_id}"))
+            .bearer_auth(token)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                let status = response.status();
+                match response.json::<Value>().await {
+                    Ok(detail) => {
+                        if let Some(file_id) = detail["files"]
+                            .as_array()
+                            .and_then(|files| files.first())
+                            .and_then(|file| file["id"].as_i64())
+                        {
+                            return file_id;
+                        }
+                        format!("status={status}, detail={detail}")
+                    }
+                    Err(error) => format!("status={status}, invalid JSON: {error}"),
+                }
+            }
+            Err(error) => format!("request failed: {error}"),
+        };
+        assert!(
+            Instant::now() < deadline,
+            "scan published item {item_id} without its file row ({observation})\nnode A log:\n{}",
+            daemon.diagnostics(),
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 fn write_av_fixture(path: &Path) {
     let output = Command::new("ffmpeg")
         .args([
@@ -492,7 +535,7 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .expect("library id");
 
     let deadline = Instant::now() + Duration::from_secs(60);
-    let file_id = loop {
+    let item_id = loop {
         let page = client
             .get(format!("{a_base}/api/v1/libraries/{library_id}/items"))
             .bearer_auth(&token)
@@ -507,29 +550,18 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
             .and_then(|items| items.first())
             .and_then(|item| item["id"].as_i64())
         {
-            let detail = client
-                .get(format!("{a_base}/api/v1/items/{item_id}"))
-                .bearer_auth(&token)
-                .send()
-                .await
-                .expect("item detail")
-                .json::<Value>()
-                .await
-                .expect("item detail JSON");
-            if let Some(file_id) = detail["files"]
-                .as_array()
-                .and_then(|files| files.first())
-                .and_then(|file| file["id"].as_i64())
-            {
-                break file_id;
-            }
+            break item_id;
         }
         assert!(
             Instant::now() < deadline,
-            "library scan did not publish fixture with a file"
+            "library scan did not publish fixture"
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
+    // The item row and its file association are committed separately. Linux
+    // runners exposed the short interval where the list endpoint can publish
+    // the item before its detail has a file; wait for the actual prerequisite.
+    let file_id = wait_for_file_id(&client, &mut node_a, &a_base, &token, item_id).await;
     let b_base = format!("http://127.0.0.1:{b_http_port}");
 
     // VOD deliberately refuses to start until this prerequisite is durable.
