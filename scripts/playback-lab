@@ -1414,6 +1414,15 @@ async function api(baseUrl, route, { token, method = "GET", body, timeout = 30_0
   return value;
 }
 
+function completedFragmentIndexPass(logs) {
+  return (Array.isArray(logs) ? logs : []).find((entry) => {
+    const message = String(entry?.message || "");
+    if (!message.includes("fragment indexing pass finished")) return false;
+    const built = message.match(/\bbuilt=(\d+)\b/);
+    return built && Number(built[1]) > 0;
+  }) || null;
+}
+
 async function startServer(options, fixtureDirectory) {
   const port = await freePort();
   const runtime = await fsp.mkdtemp(path.join(os.tmpdir(), "plurx-playback-lab-"));
@@ -1493,9 +1502,7 @@ async function startServer(options, fixtureDirectory) {
     });
     await waitFor(async () => {
       const logs = await api(baseUrl, "/system/logs?level=debug&limit=500", { token });
-      return logs.find((entry) =>
-        String(entry.message || "").includes("fragment indexing pass finished"),
-      ) || null;
+      return completedFragmentIndexPass(logs);
     }, 180_000, "VOD fragment indexing pass", 1_000);
   }
   return {
@@ -3310,6 +3317,7 @@ module.exports = {
   ShapingProxy,
   TokenBucket,
   cdpBrowserArgs,
+  completedFragmentIndexPass,
   diagnosticPath,
   deviceRunCommand,
   deviceProxyCommand,

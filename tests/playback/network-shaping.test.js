@@ -49,6 +49,15 @@ function cli(args) {
   return spawnSync(process.execPath, [LAB, ...args], { encoding: "utf8", cwd: ROOT });
 }
 
+test("VOD readiness requires a pass that stored an index", () => {
+  const empty = { message: "fragment indexing pass finished attempted=1 built=0" };
+  const ready = { message: "fragment indexing pass finished attempted=2 built=1" };
+  assert.equal(lab.completedFragmentIndexPass([empty]), null,
+    "an attempted but empty pass cannot make a VOD player ready");
+  assert.equal(lab.completedFragmentIndexPass([empty, ready]), ready);
+  assert.equal(lab.completedFragmentIndexPass(null), null);
+});
+
 // ---------------------------------------------------------------- profiles
 
 test("a malformed network profile is refused, with the reason named", () => {
