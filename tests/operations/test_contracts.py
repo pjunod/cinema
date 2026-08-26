@@ -642,6 +642,7 @@ class OperationsContractCase(unittest.TestCase):
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
             ".github/workflows/release-readiness.yml",
+            ".github/workflows/rust-audit.yml",
             ".github/workflows/validation-nightly.yml",
         ):
             for name, block in workflow_job_blocks(path).items():
@@ -678,10 +679,7 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
-        for path in (
-            ".github/workflows/publish-release.yml",
-            ".github/workflows/rust-audit.yml",
-        ):
+        for path in (".github/workflows/publish-release.yml",):
             for name, block in workflow_job_blocks(path).items():
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
@@ -689,10 +687,12 @@ class OperationsContractCase(unittest.TestCase):
 
     def test_ci_runner_mode_has_one_validated_operator_switch(self):
         ci = read(".github/workflows/ci.yml")
+        audit = read(".github/workflows/rust-audit.yml")
         script = ROOT / "scripts/ci-runner-mode"
 
         self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
         self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
+        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 2)
         self.assertTrue(script.stat().st_mode & 0o111)
         subprocess.run(
             [str(script), "--help"],
