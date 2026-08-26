@@ -1999,6 +1999,7 @@ test("the raw Chromium driver is safe to launch in an unprivileged runner contai
   assert.ok(args.includes("--remote-debugging-port=0"));
   assert.ok(args.includes("--user-data-dir=/tmp/playback-lab-chrome-profile"));
   assert.equal(args.at(-1), "http://127.0.0.1:41001");
+  assert.equal(lab.CDP_DEVTOOLS_TIMEOUT_MS, 90_000, "cold shared hosts need bounded startup headroom");
 });
 
 runAll().then(() => {

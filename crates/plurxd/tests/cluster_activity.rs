@@ -296,14 +296,35 @@ async fn wait_for_remote_file(
     }
 }
 
+fn strip_ansi_control_sequences(input: &str) -> String {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(character) = chars.next() {
+        if character == '\u{1b}' && chars.next_if_eq(&'[').is_some() {
+            for control in chars.by_ref() {
+                if ('@'..='~').contains(&control) {
+                    break;
+                }
+            }
+        } else {
+            output.push(character);
+        }
+    }
+    output
+}
+
+fn fragment_index_built(diagnostics: &str) -> bool {
+    strip_ansi_control_sequences(diagnostics)
+        .lines()
+        .any(|line| line.contains("fragment indexing pass finished") && line.contains("built=1"))
+}
+
 async fn wait_for_fragment_index(daemon: &mut Daemon) {
     let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         daemon.assert_running("waiting for the fragment index");
         let diagnostics = daemon.diagnostics();
-        if diagnostics.lines().any(|line| {
-            line.contains("fragment indexing pass finished") && line.contains("built=1")
-        }) {
+        if fragment_index_built(&diagnostics) {
             return;
         }
         assert!(
@@ -312,6 +333,14 @@ async fn wait_for_fragment_index(daemon: &mut Daemon) {
         );
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
+}
+
+#[test]
+fn fragment_index_completion_tolerates_ci_ansi_color() {
+    let diagnostics = "\u{1b}[32m INFO\u{1b}[0m fragment indexing pass finished \
+        \u{1b}[3mattempted\u{1b}[0m\u{1b}[2m=\u{1b}[0m1 \
+        \u{1b}[3mbuilt\u{1b}[0m\u{1b}[2m=\u{1b}[0m1";
+    assert!(fragment_index_built(diagnostics));
 }
 
 fn write_av_fixture(path: &Path) {

@@ -22,6 +22,10 @@ const MANIFEST_PATH = path.join(ROOT, "tests", "playback", "cases.json");
 const DEFAULT_FIXTURE_DIR = path.join(ROOT, "target", "playback-lab", "fixtures");
 const DEFAULT_REPORT_DIR = path.join(ROOT, "target", "playback-lab", "reports");
 const ELEMENT_KEY = "element-6066-11e4-a52e-4f735466cecf";
+// Cold persistent runners can be compiling several Rust lanes on the same
+// host while Chromium initializes SwiftShader. Keep startup bounded, but give
+// the browser the same one-minute-plus budget used by CDP commands themselves.
+const CDP_DEVTOOLS_TIMEOUT_MS = 90_000;
 
 // How long the shaper waits, after the first presented frame, before it drops
 // the link. Long enough that a healthy session has proven itself at the high
@@ -1576,7 +1580,7 @@ class CdpDriver {
       }
       const match = stderr.match(/DevTools listening on (ws:\/\/[^\s]+)/);
       return match ? match[1] : null;
-    }, 30_000, `${this.browserName} DevTools`, 100);
+    }, CDP_DEVTOOLS_TIMEOUT_MS, `${this.browserName} DevTools`, 100);
     const parsed = new URL(devtools);
     const jsonBase = `http://${parsed.host}`;
     const target = await waitFor(async () => {
@@ -3292,6 +3296,7 @@ async function main() {
 // Required as a module by tests/playback/network-shaping.test.js, which drives
 // the shaping, scoring, and normalization logic without a browser.
 module.exports = {
+  CDP_DEVTOOLS_TIMEOUT_MS,
   NETWORK_PROFILES,
   SHAPER_SLICE_BYTES,
   ShapingProxy,
