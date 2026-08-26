@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["4eacbaa6"]
+points = []
+checks = []
+reason = "This commit only catalogued the existing regression evidence for the initial passive web-control implementation; it changed no runtime behavior."
+ignore = true
