@@ -460,7 +460,11 @@ impl VodServe {
             });
             dts += duration;
         }
-        let source_identity = SourceIdentity::new(file.size, file.mtime, "http-test");
+        let source_identity = SourceIdentity::new(
+            u64::try_from(file.size).unwrap_or_default(),
+            file.mtime,
+            "http-test",
+        );
         let index = FragmentIndex::new(16_000, rows, "http-test", source_identity);
         let policy = CutPolicy::new(6, 2, 64 * 1024 * 1024, 15, 16_000);
         let duration_ms = index_video_ms(&index);
