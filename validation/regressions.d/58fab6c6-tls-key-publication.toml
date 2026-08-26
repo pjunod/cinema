@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["58fab6c6"]
+points = ["cluster.auth"]
+checks = ["rust-gate-ci", "cluster-auth"]
+reason = "The Rust CI gate starts the P6 replicated-cluster tests concurrently, while cluster-auth starts multiple embedded and separate-process Hiqlite nodes. Both paths exercise auto-certificate initialization; the vendored OnceLock publication now accepts a losing initializer and reuses the published process key instead of panicking when healthy node starts overlap."

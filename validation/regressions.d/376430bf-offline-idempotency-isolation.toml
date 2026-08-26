@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["376430bf"]
+points = ["server.api"]
+checks = ["rust-gate"]
+reason = "The Rust gate, split into rust-gate-ci on pull requests, runs the server's offline idempotency regression. It still changes both the durable and effective rate-control policy before retrying the same request, but no longer invokes the public idle-only behavior probe after deliberately queueing encoder work; the retained assertions require recovery of the original package and its first-write VBR snapshot under the later QVBR policy without racing the package worker."

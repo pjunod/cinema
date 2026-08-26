@@ -4963,19 +4963,19 @@ mod tests {
         // request. A lost create response retried after an administrator flips
         // that policy must recover the original package and its first-write
         // snapshot, never conflict or silently retarget it.
-        let (status_code, quality) = call(
-            &app,
-            put(
-                "/api/v1/settings",
-                Some(&admin),
-                json!({
-                    "transcode_rate_mode": "quality",
-                    "transcode_quality": 22
-                }),
-            ),
-        )
-        .await;
-        assert_eq!(status_code, StatusCode::OK, "{quality}");
+        // Do not drive the public settings probe after queueing encoder work:
+        // that endpoint deliberately returns 409 unless the node is idle, so
+        // doing so races the package worker this test just woke. This scenario
+        // needs only a different durable and effective policy before the
+        // idempotent retry; publish that state through the test boundary.
+        state
+            .store
+            .put_settings(&[
+                (plurx_core::store::keys::TRANSCODE_RATE_MODE, "quality"),
+                (plurx_core::store::keys::TRANSCODE_QUALITY, "22"),
+            ])
+            .await
+            .expect("change the durable rate-control policy");
         let selected = state.transcode.test_publish_supported_quality(22).await;
         assert_eq!(
             state.transcode.effective_rate_control(selected),
