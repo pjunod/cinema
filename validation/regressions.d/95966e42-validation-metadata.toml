@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["95966e42"]
+reason = "This commit only records the retained empty-buffer recovery evidence in a regressions.d fragment."
+ignore = true

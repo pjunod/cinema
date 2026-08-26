@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["52e9b661"]
+points = ["playback.pipeline", "web.experience"]
+checks = ["web-static", "playback-smoke"]
+reason = "The retained web policy units independently present an active supply wait, near-empty runway, and a three-stall burst with optimistic bandwidth estimates, then require the single automatic restart to choose the 360p ladder floor. web-static runs those policy contracts on every CI change, while playback-smoke exercises the shipped controller and adaptive ladder end to end."

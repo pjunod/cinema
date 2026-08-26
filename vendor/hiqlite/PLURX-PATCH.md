@@ -1,7 +1,7 @@
 # Vendored Hiqlite 0.14.0
 
 This directory is the crates.io `hiqlite` 0.14.0 package, licensed under
-Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
+Apache-2.0. Plurx carries ten compatibility patches for clustered deployments:
 
 - `NodeConfig` selects the local node by `Node::id` and rejects duplicate ids.
   Raft ids are durable identities, so a roster such as `1, 3` is valid when an
@@ -12,6 +12,9 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   verification policy. Auto-generated certificates are intentionally
   self-signed, so the default Reqwest client otherwise reports
   `UnknownIssuer` on every probe.
+- Concurrent embedded-node starts share the first auto-generated TLS key
+  without panicking when more than one task reaches the process-wide key's
+  one-time publication boundary.
 - The authenticated cluster API exposes OpenRaft 0.9's election trigger on a
   selected voter. That release has no dedicated leader-transfer operation;
   Plurx uses the trigger to elect a successor before a leader commits its own
@@ -63,7 +66,7 @@ Apache-2.0. Plurx carries nine compatibility patches for clustered deployments:
   proxy-mode clients reconnect through the next configured proxy instead of
   escaping that trust boundary.
 
-Remove this vendor when an upstream Hiqlite release contains all nine patches
+Remove this vendor when an upstream Hiqlite release contains all ten patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
 `crates/plurx-core/src/cluster/migration.rs` keeps the first patch load-bearing.
 
