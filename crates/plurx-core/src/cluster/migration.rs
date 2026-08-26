@@ -580,6 +580,7 @@ async fn join_fresh_store(config: &Config, daemon_lock: File) -> Result<Selected
     );
     let membership_manager = MembershipManager::replicated(
         client.clone(),
+        replication.clone(),
         Arc::clone(&store),
         identity.clone(),
         local,
@@ -1486,6 +1487,7 @@ async fn open_active_store_with_key(
         read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
     let membership = MembershipManager::replicated(
         client.clone(),
+        replication.clone(),
         Arc::clone(&store),
         identity.clone(),
         membership_file.local,
@@ -1952,6 +1954,60 @@ async fn start_voter(
             return Err(StoreError::Identity(format!(
                 "node {} {reason} in cluster {}",
                 identity.node_id, identity.cluster_id
+            )));
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // Membership admission proves that Raft recognizes this node; it does not
+    // prove that the local state machine has installed a snapshot needed to
+    // reach the cluster's current database image. Capture one quorum-confirmed
+    // watermark and keep Store construction/listener startup behind the
+    // target-local applied watch. The deadline allows an abandoned in-flight
+    // snapshot RPC to reach its configured soft cancellation point, reconnect,
+    // and complete one clean transfer.
+    let catchup_timeout = Duration::from_secs(config.cluster.install_snapshot_timeout_secs)
+        .saturating_add(HIQLITE_START_TIMEOUT);
+    let catchup_deadline = tokio::time::Instant::now() + catchup_timeout;
+    let catchup_target = loop {
+        match client.db_quorum_watermark().await {
+            Ok(watermark) => break watermark.committed_index,
+            Err(error) if tokio::time::Instant::now() < catchup_deadline => {
+                tracing::debug!(%error, "waiting for startup quorum watermark");
+            }
+            Err(error) => {
+                let _ = shutdown_voter(&client, active_transport).await;
+                return Err(StoreError::Database(format!(
+                    "node {} could not obtain a startup quorum watermark within \
+                     {catchup_timeout:?}: {error}",
+                    identity.node_id
+                )));
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    let local_metrics = match client.local_db_raft_metrics() {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            let _ = shutdown_voter(&client, active_transport).await;
+            return Err(StoreError::Database(format!(
+                "reading target-local startup progress: {error}"
+            )));
+        }
+    };
+    loop {
+        let applied = local_metrics
+            .snapshot()
+            .last_applied_index
+            .unwrap_or_default();
+        if applied >= catchup_target {
+            break;
+        }
+        if tokio::time::Instant::now() >= catchup_deadline {
+            let _ = shutdown_voter(&client, active_transport).await;
+            return Err(StoreError::Database(format!(
+                "node {} applied only {applied} of startup quorum watermark {catchup_target} \
+                 within {catchup_timeout:?}",
+                identity.node_id
             )));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

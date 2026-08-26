@@ -2040,6 +2040,7 @@ impl MembershipManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn replicated(
         client: Client,
+        replication: ReplicationMonitor,
         store: Arc<dyn Store>,
         identity: ClusterIdentity,
         local: ClusterPeer,
@@ -2051,7 +2052,6 @@ impl MembershipManager {
         role: ClusterRole,
         storage_root: PathBuf,
     ) -> Result<Self, MembershipError> {
-        let replication = ReplicationMonitor::replicated(client.clone());
         let local_metrics = client
             .local_db_raft_metrics()
             .map_err(MembershipError::from)?;
@@ -5491,6 +5491,11 @@ impl MembershipManager {
         let now = unix_ms()?;
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let owner_fence_key = removed_job_owner_key(node_id);
+        let attempt_params = if drain_media {
+            params!(node_id, attempt_id.as_str())
+        } else {
+            params!(node_id, attempt_id.as_str(), now)
+        };
         let mut statements = vec![
             // Preserve a fence written by a binary that predates attempt
             // references. It may protect an ambiguous proposal and must
@@ -5505,10 +5510,7 @@ impl MembershipManager {
                     .to_owned(),
                 params!(node_id),
             ),
-            (
-                begin_removal_attempt_sql(drain_media),
-                params!(node_id, attempt_id.as_str(), now),
-            ),
+            (begin_removal_attempt_sql(drain_media), attempt_params),
             (
                 BEGIN_REMOVAL_INTENT_SQL.to_owned(),
                 params!(node_id, attempt_id.as_str()),
@@ -6922,7 +6924,7 @@ async fn request_learner_removal(
             MembershipChangeFailure::Rejected(MembershipError::Internal(error.to_string()))
         })?;
     let response = client
-        .post(format!("https://{leader_api}/cluster/leave/sqlite"))
+        .delete(format!("https://{leader_api}/cluster/membership/sqlite"))
         .header("X-API-SECRET", api_secret)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .json(&RemoveLearnerRequest {
@@ -8757,6 +8759,22 @@ mod tests {
         assert!(refusal.to_string().contains("node-learner"), "{refusal}");
     }
 
+    #[test]
+    fn learner_removal_uses_the_shipped_hiqlite_delete_route() {
+        let request = production_source()
+            .split_once("async fn request_learner_removal(")
+            .expect("learner removal request")
+            .1
+            .split_once("fn membership_response_failure(")
+            .expect("end of learner removal request")
+            .0
+            .to_owned();
+
+        assert!(request
+            .contains(".delete(format!(\"https://{leader_api}/cluster/membership/sqlite\"))"));
+        assert!(!request.contains("/cluster/leave/"));
+    }
+
     /// A join refused by the cluster's own rules is not a migration failure.
     ///
     /// The refusal reached operators as `schema migration failed:
@@ -9316,6 +9334,24 @@ mod tests {
                     rusqlite::params!["node-a", "admitted-attempt", 50],
                 )
                 .expect("admit removal after media drains"),
+            1
+        );
+        connection
+            .execute("DELETE FROM cluster_node_removal_attempts", [])
+            .expect("reset removal attempt");
+        connection
+            .execute(
+                "UPDATE media_sessions SET state = 'active' WHERE owner_node_id = 'node-a'",
+                [],
+            )
+            .expect("restore active media owner");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(true),
+                    rusqlite::params!["node-a", "draining-attempt"],
+                )
+                .expect("draining removal binds only the placeholders it emits"),
             1
         );
     }

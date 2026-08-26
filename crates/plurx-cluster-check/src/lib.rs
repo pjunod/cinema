@@ -942,7 +942,8 @@ async fn run_singleton_takeover_attempt() -> Result<()> {
         cluster
             .request(node_id, Request::Open)
             .await?
-            .require_ok()?;
+            .require_ok()
+            .with_context(|| format!("open initial learner-case voter {node_id}"))?;
     }
     cluster.wait_for_voters(&[1, 2, 3]).await?;
 
@@ -1801,6 +1802,34 @@ async fn wait_for_local_setting(
     }
 }
 
+/// Wait until bootstrap's replicated membership schema is visible on a node.
+///
+/// Raft membership can converge before the bootstrap DDL has applied locally.
+/// Opening the production membership manager in that window turns an ordinary
+/// follower catch-up into a misleading `no such table` harness failure.
+async fn wait_for_local_membership_schema(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    loop {
+        let last = match cluster
+            .request(node_id, Request::MembershipSchemaReady)
+            .await?
+        {
+            Response::Flag { value: true } => return Ok(()),
+            response => format!("{response:?}"),
+        };
+        if Instant::now() >= deadline {
+            bail!(
+                "voter {node_id} did not apply the bootstrap membership schema before the \
+                 convergence deadline; last response: {last}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 struct MediaChild {
     child: Child,
     _input: ChildStdin,
@@ -2357,6 +2386,7 @@ async fn run_quorum_watermark_rolling_compatibility_case() -> Result<()> {
 
     cluster.request(1, Request::Bootstrap).await?.require_ok()?;
     for node_id in 2..=3 {
+        wait_for_local_membership_schema(&mut cluster, node_id).await?;
         cluster
             .request(node_id, Request::Open)
             .await?
@@ -4843,7 +4873,8 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(OLD_BINARY_VOTER, Request::Open)
         .await?
-        .require_ok()?;
+        .require_ok()
+        .context("open upgraded learner-case voter")?;
     cluster.wait_for_voters(&[1, 2, 3]).await?;
     let leader = cluster.leader().await?;
     wait_for_protocol_pending(&mut cluster, leader, &[]).await?;
@@ -4880,7 +4911,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::RedeemJoin {
+            Request::RedeemLearnerJoin {
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
@@ -4913,7 +4944,8 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(LEARNER, Request::Open)
         .await?
-        .require_ok()?;
+        .require_ok()
+        .context("open newly admitted learner")?;
     cluster
         .request(LEARNER, Request::ForceHeartbeat)
         .await?
@@ -4921,7 +4953,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::FinalizeJoin {
+            Request::FinalizeLearnerJoin {
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&issued.token),
                     raft_id: issued.raft_id,
@@ -5058,35 +5090,69 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .wait_for_members(1, &[1, 2, 3], &[1, 2, 3, LEARNER])
         .await?;
+    let catchup_index = match cluster.request(leader, Request::Metrics).await? {
+        Response::Metrics {
+            applied_index: Some(index),
+            ..
+        } => index,
+        response => bail!("leader did not publish a catch-up index: {response:?}"),
+    };
     cluster
         .spawn_node(
             &executable,
             NodeLaunch::voter(LEARNER, cluster_root.clone(), specs.clone()).as_learner(),
         )
         .await?;
+    // Watch target-local Raft progress while SQLite is restoring. Querying the
+    // state machine during restore can legitimately hold the harness request
+    // longer than its protocol deadline; the applied-index watch is the
+    // production catch-up source and stays responsive throughout the restore.
+    let catchup_deadline = Instant::now() + Duration::from_secs(120);
+    loop {
+        match cluster.request(LEARNER, Request::Metrics).await? {
+            Response::Metrics {
+                applied_index: Some(index),
+                ..
+            } if index >= catchup_index => break,
+            Response::Metrics { .. } => {}
+            response => bail!("unexpected learner catch-up metrics: {response:?}"),
+        }
+        if Instant::now() >= catchup_deadline {
+            let learner_metrics = cluster.request(LEARNER, Request::Metrics).await?;
+            let leader_metrics = cluster.request(leader, Request::Metrics).await?;
+            let learner_raft = cluster.request(LEARNER, Request::RaftDebug).await?;
+            let leader_raft = cluster.request(leader, Request::RaftDebug).await?;
+            bail!(
+                "the restarted learner never applied the write it missed; learner metrics: \
+                 {learner_metrics:?}; leader metrics: {leader_metrics:?}; learner raft: \
+                 {learner_raft:?}; leader raft: {leader_raft:?}"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     cluster
         .request(LEARNER, Request::Open)
         .await?
-        .require_ok()?;
-    let catchup_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+        .require_ok()
+        .context("open restarted learner after snapshot catch-up")?;
+    let local_read_deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match cluster
+        let response = cluster
             .request(
                 LEARNER,
                 Request::ReadLocalSetting {
                     key: CATCHUP_KEY.to_owned(),
                 },
             )
-            .await?
-        {
+            .await?;
+        match response {
             Response::Setting { value } if value.as_deref() == Some(CATCHUP_VALUE) => break,
-            Response::Setting { .. } => {}
-            response => bail!("unexpected learner catch-up read: {response:?}"),
+            Response::Setting { .. } if Instant::now() < local_read_deadline => {}
+            response => {
+                bail!("the restarted learner did not apply the missed write: {response:?}")
+            }
         }
-        if Instant::now() >= catchup_deadline {
-            bail!("the restarted learner never applied the write it missed");
-        }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(25)).await;
     }
     match cluster
         .request(
@@ -5227,7 +5293,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::RedeemJoin {
+            Request::RedeemLearnerJoin {
                 request: RedeemJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
@@ -5257,7 +5323,8 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(PROMOTED, Request::Open)
         .await?
-        .require_ok()?;
+        .require_ok()
+        .context("open replacement learner")?;
     cluster
         .request(PROMOTED, Request::ForceHeartbeat)
         .await?
@@ -5265,7 +5332,7 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(
             leader,
-            Request::FinalizeJoin {
+            Request::FinalizeLearnerJoin {
                 request: FinalizeJoinRequest {
                     token_digest: join_token_digest(&promoted_token.token),
                     raft_id: promoted_token.raft_id,
@@ -5349,7 +5416,8 @@ async fn run_learner_membership_case() -> Result<()> {
     cluster
         .request(PROMOTED, Request::Open)
         .await?
-        .require_ok()?;
+        .require_ok()
+        .context("open promoted voter after restart")?;
     cluster
         .request(PROMOTED, Request::StartHeartbeatLoop)
         .await?
@@ -5406,10 +5474,21 @@ async fn wait_for_learner_ready(
 ) -> Result<MembershipStatus> {
     let deadline = Instant::now() + CONVERGENCE_TIMEOUT;
     loop {
-        cluster
-            .request(learner, Request::ForceHeartbeat)
-            .await?
-            .require_ok()?;
+        // Do not create another replicated heartbeat while the target-local
+        // sampler is still acquiring a fresh quorum watermark. Advancing the
+        // log on every poll can keep the proof and heartbeat loops in a stable
+        // phase where every heartbeat samples just before the next proof.
+        let passive = passive_raft_observation(cluster, learner).await?;
+        if passive.valid
+            && passive.watermark_valid
+            && passive.local_reads_supported
+            && passive.apply_lag_entries == Some(0)
+        {
+            cluster
+                .request(learner, Request::ForceHeartbeat)
+                .await?
+                .require_ok()?;
+        }
         let status = match cluster.request(observer, Request::MembershipStatus).await? {
             Response::MembershipStatus { status } => status,
             response => bail!("unexpected learner readiness status: {response:?}"),
@@ -5428,7 +5507,10 @@ async fn wait_for_learner_ready(
             return Ok(status);
         }
         if Instant::now() >= deadline {
-            bail!("learner node {learner} never published a ready proof: {status:?}");
+            bail!(
+                "learner node {learner} never published a ready proof: {status:?}; target-local \
+                 passive metrics: {passive:?}"
+            );
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -6428,10 +6510,23 @@ pub enum Request {
     RedeemJoin {
         request: RedeemJoinRequest,
     },
+    /// Exercise the wire-distinct learner redemption path. Keeping this a
+    /// separate harness request prevents the validation process from silently
+    /// routing a learner credential through the legacy voter protocol.
+    RedeemLearnerJoin {
+        request: RedeemJoinRequest,
+    },
     FinalizeJoin {
         request: FinalizeJoinRequest,
     },
+    /// Exercise the wire-distinct learner finalization path.
+    FinalizeLearnerJoin {
+        request: FinalizeJoinRequest,
+    },
     MembershipStatus,
+    /// Probe the target-local replicated membership schema without requiring
+    /// the production membership manager to have opened already.
+    MembershipSchemaReady,
     Advertisement {
         seed_name: String,
     },
@@ -6642,6 +6737,9 @@ pub enum Request {
     CatalogView,
     RebuildSearch,
     Metrics,
+    /// Full OpenRaft metrics rendered for failure diagnostics. The ordinary
+    /// metrics response stays intentionally stable for harness consumers.
+    RaftDebug,
     PassiveRaftMetrics,
     QuorumWatermark,
     PauseApply,
@@ -6659,6 +6757,18 @@ pub enum Request {
     Ping,
     ReadWithoutQuorum,
     WriteWithoutQuorum,
+}
+
+impl Request {
+    fn response_timeout(&self) -> Duration {
+        match self {
+            Self::RemoveVoter { .. }
+            | Self::RemoveNode { .. }
+            | Self::PromoteLearner { .. }
+            | Self::LeaveVoter => CONVERGENCE_TIMEOUT,
+            _ => REQUEST_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -6729,6 +6839,9 @@ pub enum Response {
         applied_index: Option<u64>,
         quorum_acknowledged: bool,
     },
+    RaftDebug {
+        summary: String,
+    },
     PassiveRaftMetrics {
         valid: bool,
         age_seconds: Option<u64>,
@@ -6739,6 +6852,7 @@ pub enum Response {
         leader_known: Option<bool>,
         is_leader: Option<bool>,
         watermark_valid: bool,
+        local_reads_supported: bool,
         watermark_age_millis: Option<u64>,
         watermark_errors: u64,
         committed_index: Option<u64>,
@@ -6894,6 +7008,7 @@ struct PassiveRaftObservation {
     leader_known: bool,
     is_leader: bool,
     watermark_valid: bool,
+    local_reads_supported: bool,
     watermark_age_millis: Option<u64>,
     watermark_errors: u64,
     committed_index: Option<u64>,
@@ -6918,6 +7033,7 @@ async fn passive_raft_observation(
             leader_known: Some(leader_known),
             is_leader: Some(is_leader),
             watermark_valid,
+            local_reads_supported,
             watermark_age_millis,
             watermark_errors,
             committed_index,
@@ -6932,6 +7048,7 @@ async fn passive_raft_observation(
             leader_known,
             is_leader,
             watermark_valid,
+            local_reads_supported,
             watermark_age_millis,
             watermark_errors,
             committed_index,
@@ -7278,7 +7395,9 @@ impl NodeProcess {
         bytes.push(b'\n');
         self.input.write_all(&bytes).await?;
         self.input.flush().await?;
-        self.read_response(REQUEST_TIMEOUT).await
+        self.read_response(request.response_timeout())
+            .await
+            .with_context(|| format!("voter {} request {request:?}", self.id))
     }
 
     async fn read_response(&mut self, timeout: Duration) -> Result<Response> {
@@ -7290,7 +7409,13 @@ impl NodeProcess {
             let status = self.child.try_wait()?;
             bail!("voter {} closed its protocol stream ({status:?})", self.id);
         }
-        serde_json::from_str(line.trim()).context("decode voter response")
+        serde_json::from_str(line.trim()).with_context(|| {
+            format!(
+                "decode voter {} response line {:?}",
+                self.id,
+                line.trim_end()
+            )
+        })
     }
 
     /// Close the request stream and wait for the voter to exit on its own.
@@ -8348,7 +8473,8 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership = membership_manager(client, opened.clone(), launch).await?;
+            let opened_membership =
+                membership_manager(client, replication, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
             *catalogue = Some(opened_catalogue);
@@ -8385,7 +8511,8 @@ async fn handle_request(
                 replication.metrics_handle(),
                 0,
             );
-            let opened_membership = membership_manager(client, opened.clone(), launch).await?;
+            let opened_membership =
+                membership_manager(client, replication, opened.clone(), launch).await?;
             tokio::spawn(opened_membership.clone().offline_source_probe_loop());
             *membership = Some(opened_membership);
             *catalogue = Some(opened_catalogue);
@@ -8461,8 +8588,18 @@ async fn handle_request(
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::RedeemLearnerJoin { request } => membership_ref(membership)?
+            .redeem_learner(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
         Request::FinalizeJoin { request } => membership_ref(membership)?
             .finalize(&request)
+            .await
+            .map(|()| Response::Ok)
+            .or_else(|error| Ok(membership_error_response(error))),
+        Request::FinalizeLearnerJoin { request } => membership_ref(membership)?
+            .finalize_learner(&request)
             .await
             .map(|()| Response::Ok)
             .or_else(|error| Ok(membership_error_response(error))),
@@ -8471,6 +8608,15 @@ async fn handle_request(
             .await
             .map(|status| Response::MembershipStatus { status })
             .or_else(|error| Ok(membership_error_response(error))),
+        Request::MembershipSchemaReady => {
+            let _ = client
+                .query_map::<MembershipTombstoneRow, _>(
+                    "SELECT removed_at FROM cluster_nodes LIMIT 1",
+                    params!(),
+                )
+                .await?;
+            Ok(Response::Flag { value: true })
+        }
         Request::Advertisement { seed_name } => {
             let name = store_ref(store)?
                 .get_or_init_setting(plurx_core::store::keys::SERVER_NAME, &seed_name)
@@ -8557,6 +8703,7 @@ async fn handle_request(
         Request::RejectDuplicateArtworkUrl { public_http_url } => {
             membership_manager_with_artwork_url(
                 client,
+                replication,
                 store
                     .as_ref()
                     .cloned()
@@ -8582,6 +8729,7 @@ async fn handle_request(
                 .saturating_add(100);
             match membership_manager_with_identity_artwork_url(
                 client,
+                replication,
                 store
                     .as_ref()
                     .cloned()
@@ -9466,6 +9614,9 @@ async fn handle_request(
                     .is_some_and(|age| age <= 1_000),
             })
         }
+        Request::RaftDebug => Ok(Response::RaftDebug {
+            summary: client.metrics_db().await?.to_string(),
+        }),
         Request::PassiveRaftMetrics => {
             let view = replication.metrics_handle().snapshot();
             Ok(Response::PassiveRaftMetrics {
@@ -9478,6 +9629,7 @@ async fn handle_request(
                 leader_known: view.sample.map(|sample| sample.leader_known),
                 is_leader: view.sample.map(|sample| sample.is_leader),
                 watermark_valid: view.watermark_valid,
+                local_reads_supported: view.watermark_local_reads_supported,
                 watermark_age_millis: view.watermark_age_millis,
                 watermark_errors: view.watermark_errors,
                 committed_index: view.watermark.map(|sample| sample.committed_index),
@@ -9917,11 +10069,13 @@ fn legacy_artwork_proof_is_valid(filename: &str, auth: &ArtworkPeerAuth) -> Resu
 
 async fn membership_manager(
     client: &Client,
+    replication: &ReplicationMonitor,
     store: Arc<HiqliteAuthStore>,
     launch: &NodeLaunch,
 ) -> Result<MembershipManager> {
     membership_manager_with_artwork_url(
         client,
+        replication,
         store,
         launch,
         format!("http://127.0.0.1:{}", 33_000 + launch.node_id),
@@ -9932,12 +10086,14 @@ async fn membership_manager(
 
 async fn membership_manager_with_artwork_url(
     client: &Client,
+    replication: &ReplicationMonitor,
     store: Arc<HiqliteAuthStore>,
     launch: &NodeLaunch,
     artwork_http: String,
 ) -> std::result::Result<MembershipManager, plurx_core::cluster::membership::MembershipError> {
     membership_manager_with_identity_artwork_url(
         client,
+        replication,
         store,
         launch,
         format!("node-{}", launch.node_id),
@@ -9949,6 +10105,7 @@ async fn membership_manager_with_artwork_url(
 
 async fn membership_manager_with_identity_artwork_url(
     client: &Client,
+    replication: &ReplicationMonitor,
     store: Arc<HiqliteAuthStore>,
     launch: &NodeLaunch,
     node_id: String,
@@ -9967,6 +10124,7 @@ async fn membership_manager_with_identity_artwork_url(
         })?;
     MembershipManager::replicated(
         client.clone(),
+        replication.clone(),
         store,
         ClusterIdentity {
             cluster_id: INSTANCE_ID.to_owned(),
