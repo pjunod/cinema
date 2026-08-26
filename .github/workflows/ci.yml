@@ -421,7 +421,7 @@ jobs:
     needs: [scope, preflight]
     if: needs.scope.outputs.android_device == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     permissions:
       contents: read
       packages: write
@@ -468,6 +468,8 @@ jobs:
       - name: Build app and instrumentation APKs in the pinned toolchain
         run: make android-instrumentation-build
       - name: Run the Compose and TV focus suite on a disposable emulator
+        id: android_instrumentation
+        continue-on-error: true
         uses: reactivecircus/android-emulator-runner@v2
         with:
           # Google's Android TV repository publishes API 36 for both x86 and
@@ -480,7 +482,31 @@ jobs:
           profile: tv_1080p
           force-avd-creation: true
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Retry a pre-test emulator boot failure once
+        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') == ''
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          # The upstream action checks boot completion and then sends one
+          # unretied unlock command. API 36 can briefly reconnect ADB between
+          # those commands. Retry the disposable AVD only when our script never
+          # started; an instrumentation failure is never retried or hidden.
+          api-level: 36
+          target: android-tv
+          arch: x86
+          profile: tv_1080p
+          force-avd-creation: true
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            mkdir -p target/validation
+            touch target/validation/android-instrumentation-started
+            PLURX_ANDROID_SERIAL="emulator-${EMULATOR_PORT}" make android-instrumentation-run
+      - name: Propagate an instrumented-test failure without retrying it
+        if: steps.android_instrumentation.outcome == 'failure' && hashFiles('target/validation/android-instrumentation-started') != ''
+        run: exit 1
       - name: Upload Android test reports
         if: always()
         continue-on-error: true

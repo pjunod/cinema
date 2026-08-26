@@ -469,6 +469,24 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("profile: tv_1080p", workflow)
         self.assertNotIn("clients/android/**/*.gradle*", workflow)
         self.assertEqual(workflow.count("clients/android/app/build.gradle.kts"), 2)
+        android_device = workflow.split("  android_device:", 1)[1].split(
+            "\n  coverage:", 1
+        )[0]
+        self.assertEqual(
+            android_device.count("uses: reactivecircus/android-emulator-runner@v2"),
+            2,
+        )
+        self.assertIn("id: android_instrumentation", android_device)
+        self.assertIn("continue-on-error: true", android_device)
+        self.assertIn("Retry a pre-test emulator boot failure once", android_device)
+        self.assertIn(
+            "hashFiles('target/validation/android-instrumentation-started') == ''",
+            android_device,
+        )
+        self.assertIn(
+            "hashFiles('target/validation/android-instrumentation-started') != ''",
+            android_device,
+        )
         self.assertIn("uninstall tv.plurx.app.test", makefile)
         self.assertIn("uninstall tv.plurx.app", makefile)
         self.assertIn("target/validation/android-instrumentation.txt", makefile)
