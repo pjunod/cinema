@@ -47,10 +47,22 @@ The request records file size and modification time at admission. A leased
 worker reopens that exact scanner identity, renews its claim during hashing,
 and records the complete digest only while the descriptor remains unchanged.
 It then derives the existing deterministic pipeline/cache identity and submits
-the fenced fragment-index job. Every claim mutation requires the exact request
-id, node, attempt fence, and unexpired lease.
+the fenced fragment-index job. The request transition and worker-job
+insert/reopen are one SQLite or Raft transaction: either both become visible or
+neither does. Every claim mutation requires the exact request id, node, attempt
+fence, source generation, and unexpired lease.
 
-Concurrent ordinary requests for one file/component/node join the active row.
+Hashing is cooperatively cancellable throughout the complete media read. Live
+playback demand or disabling the rollout gate yields the request back to the
+queue without consuming an attempt; claim loss performs no terminal write.
+I/O and replicated-store failures use typed, delayed retries and consume the
+bounded attempt budget. The status page keeps the retry code and next eligible
+time visible.
+
+Concurrent ordinary requests for one source generation/component/node join the
+active row. If a scanner update changes size or modification time, a trigger
+cancels the stale active generation and the replacement generation can be
+admitted immediately under the same file id.
 A force request does not silently replace an ordinary request already in
 flight; it returns conflict and can be made once the first generation
 finishes. Likewise, force does not delete the published artifact. It reopens a
@@ -86,13 +98,17 @@ the status page remains readable. Existing published indexes continue serving.
 ## Storage and migration
 
 SQLite schema v31 and replicated schema v13 add only the request table and its
-indexes/cleanup trigger. A partial unique index admits one active request for a
-file/component/target node. Deleting a source cancels its queued, running, or
-submitted request without deleting a previously published artifact.
+indexes/cleanup triggers. A partial unique index admits one active request for
+a source generation/component/target node. Deleting a source cancels its
+queued, running, or submitted request without deleting a previously published
+artifact.
 
 The existing worker rows now expose their bounded typed failure code through
 the store projection. New list methods keep operator reads bounded and fetch
-file/title labels in one joined query rather than an Activity-page N+1.
+file/title labels from bounded request/job inputs in one joined query rather
+than an Activity-page N+1. Terminal request history is retained for 30 days and
+capped at the 20 newest generations per file/component/target. Pruning is
+bounded to 256 rows and locally throttled to no more than once per hour.
 
 ## What this slice does not claim
 

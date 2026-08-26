@@ -9915,6 +9915,7 @@ function analysisPhase(request,job){
   if(request&&request.state==="running") return "Hashing and fencing source";
   if(job&&job.state==="running") return "Building fragment index";
   if(job&&job.state==="queued") return "Waiting for media worker";
+  if(request&&request.state==="queued"&&request.last_error_code) return "Retry scheduled";
   if(request&&request.state==="queued") return "Waiting to inspect source";
   if((job&&job.state)==="failed"||(request&&request.state)==="failed") return "Stopped with an error";
   if((job&&job.state)==="ready"||(request&&request.state)==="ready") return "Published and available";
@@ -9947,6 +9948,7 @@ function paintAnalysis(snapshot){
     const owner=(job&&job.owner_node_id)||(request&&request.owner_node_id)||(request&&request.target_node_id)||"—";
     const attempt=(job&&job.attempts)||(request&&request.attempts)||0;
     const lease=(job&&job.lease_expires_ms)||(request&&request.lease_expires_ms)||0;
+    const retryAt=(job&&job.not_before_ms)||(request&&request.not_before_ms)||0;
     const error=(job&&job.last_error_code)||(request&&request.last_error_code)||"";
     const pipeline=job&&job.pipeline_version?` · pipeline ${esc(job.pipeline_version)}`:"";
     const canRebuild=row.state==="ready"||row.state==="failed"||row.state==="cancelled";
@@ -9955,7 +9957,7 @@ function paintAnalysis(snapshot){
       <td><b>${title}</b><div class="muted" style="font-size:12px">File ${row.file_id} · ${esc(row.trigger)}${pipeline}</div></td>
       <td><b>${esc(analysisStateLabel(row.state))}</b><div class="muted" style="font-size:12px">${esc(analysisPhase(request,job))}</div></td>
       <td><span class="clid">${esc(owner)}</span>${lease?`<div class="muted" style="font-size:12px">lease ${lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"}</div>`:""}</td>
-      <td>${attempt||"—"}</td><td class="muted">${row.updated?fmtAgo(Math.floor(row.updated/1000)):"—"}${error?`<div style="color:var(--bad)">${esc(error.replace(/_/g," "))}</div>`:""}</td>
+      <td>${attempt||"—"}</td><td class="muted">${row.updated?fmtAgo(Math.floor(row.updated/1000)):"—"}${error?`<div style="color:var(--bad)">${esc(error.replace(/_/g," "))}</div>`:""}${row.state==="queued"&&retryAt>snapshot.now_ms?`<div>retry in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s</div>`:""}</td>
       <td style="text-align:right">${canRebuild?`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this)'>Rebuild</button>`:""}</td></tr>`;
   }).join("");
   const main=document.getElementById("main"); if(!main) return;

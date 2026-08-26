@@ -49,16 +49,17 @@ use plurx_core::segplan::{
     FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
     SEGPLAN_VERSION,
 };
+use plurx_core::store::{
+    cluster_fragment_index_key, ArtworkRepairFence, ClusterFragmentIndexStore, LibraryStore,
+    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
+};
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
     ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
     OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
     TraktStore, TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE,
     AUTH_SCHEMA_VERSION,
-};
-use plurx_core::store::{
-    ArtworkRepairFence, LibraryStore, MediaStore, OutboxEntry, PublicationStore, ReconcileOutcome,
-    RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -5957,6 +5958,230 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_v12_store_migrates_exactly_to_v13_on_daemon_open() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect v12 migration client");
+    let telemetry = cluster
+        ._root
+        .path()
+        .join("schema-v12-migration-telemetry.db");
+    let current = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap current schema");
+    current
+        .validation_reset_contract_state()
+        .await
+        .expect("empty v12 migration fixture");
+    current
+        .put_setting("migration.v12.proof", "survives")
+        .await
+        .expect("seed unrelated replicated row");
+    drop(current);
+
+    client
+        .txn([
+            (
+                "DROP TRIGGER analysis_requests_supersede_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX analysis_requests_status", hiqlite::params!()),
+            ("DROP INDEX analysis_requests_due", hiqlite::params!()),
+            ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "UPDATE cluster_meta SET schema_version = 12 WHERE singleton = 1",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("construct exact v12 fixture")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit exact v12 fixture");
+
+    let strict_error = match HiqliteAuthStore::open(client.clone(), &telemetry).await {
+        Ok(_) => panic!("maintenance open must not own schema migration"),
+        Err(error) => error,
+    };
+    assert!(
+        strict_error
+            .to_string()
+            .contains("schema 12 is incompatible"),
+        "{strict_error}"
+    );
+    let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
+        .await
+        .expect("daemon v12 to v13 migration");
+    assert_eq!(
+        migrated
+            .get_setting("migration.v12.proof")
+            .await
+            .expect("read v12 migration proof")
+            .as_deref(),
+        Some("survives")
+    );
+    for (sql, expected) in [
+        (
+            "SELECT schema_version AS value FROM cluster_meta WHERE singleton = 1",
+            AUTH_SCHEMA_VERSION,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'analysis_requests'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('analysis_requests_due', 'analysis_requests_status', \
+                          'analysis_requests_one_active_source')",
+            3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
+             AND name IN ('analysis_requests_cancel_source', \
+                          'analysis_requests_supersede_source')",
+            2,
+        ),
+    ] {
+        let rows: Vec<I64Value> = client
+            .query_consistent_map(sql, hiqlite::params!())
+            .await
+            .expect("inspect migrated v13 analysis schema");
+        assert_eq!(rows.len(), 1, "{sql}");
+        assert_eq!(rows[0].value, expected, "{sql}");
+    }
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn replicated_analysis_handoff_is_atomic_and_fenced() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let client = Client::remote(
+        cluster.addresses.clone(),
+        true,
+        true,
+        CONTRACT_API_SECRET.to_owned(),
+        false,
+        None,
+    )
+    .await
+    .expect("connect analysis handoff client");
+    let telemetry = cluster._root.path().join("analysis-handoff-telemetry.db");
+    let store = HiqliteAuthStore::bootstrap(client.clone(), CONTRACT_INSTANCE_ID, &telemetry)
+        .await
+        .expect("bootstrap analysis handoff store");
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("empty analysis handoff fixture");
+    client
+        .txn([
+            (
+                "INSERT INTO libraries (id, name, kind, paths) \
+                 VALUES (1, 'Films', 'movies', '[]')",
+                hiqlite::params!(),
+            ),
+            (
+                "INSERT INTO items (id, library_id, kind, title, sort_title) \
+                 VALUES (1, 1, 'movie', 'One', 'one')",
+                hiqlite::params!(),
+            ),
+            (
+                "INSERT INTO files (id, item_id, path, size, mtime) \
+                 VALUES (1, 1, '/one.mkv', 100, 10)",
+                hiqlite::params!(),
+            ),
+        ])
+        .await
+        .expect("seed analysis source")
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .expect("commit analysis source");
+
+    store
+        .enqueue_analysis_request(&NewAnalysisRequest {
+            request_id: "analysis-request".to_owned(),
+            file_id: 1,
+            source_size: 100,
+            source_mtime: 10,
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: "node-a".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        })
+        .await
+        .expect("enqueue analysis request");
+    let stale = store
+        .claim_analysis_request("node-a", 10, 20)
+        .await
+        .expect("claim stale owner")
+        .expect("stale owner");
+    let current = store
+        .claim_analysis_request("node-a", 20, 1_020)
+        .await
+        .expect("reclaim request")
+        .expect("current owner");
+    let source_sha256 = "a".repeat(64);
+    let pipeline_sha256 = "b".repeat(64);
+    let job = NewClusterFragmentIndexJob {
+        cache_key: cluster_fragment_index_key(&source_sha256, &pipeline_sha256)
+            .expect("content key"),
+        file_id: 1,
+        source_size: 100,
+        source_mtime: 10,
+        source_sha256,
+        pipeline_sha256,
+        not_before_ms: 21,
+        created_at_ms: 21,
+    };
+    assert!(!store
+        .submit_fragment_index_analysis(&stale, &job, 21)
+        .await
+        .expect("stale handoff"));
+    assert!(store
+        .cluster_fragment_index_job(&job.cache_key)
+        .await
+        .expect("read stale job")
+        .is_none());
+    assert!(store
+        .submit_fragment_index_analysis(&current, &job, 21)
+        .await
+        .expect("current handoff"));
+    let submitted = store.analysis_requests(10).await.expect("list requests");
+    assert_eq!(submitted[0].state, "submitted");
+    assert_eq!(submitted[0].result_cache_key, job.cache_key);
+    assert_eq!(
+        store
+            .cluster_fragment_index_job(&submitted[0].result_cache_key)
+            .await
+            .expect("read committed job")
+            .expect("worker job")
+            .state,
+        "queued"
+    );
 }
 
 #[cfg(feature = "hiqlite-contract-tests")]

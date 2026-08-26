@@ -833,6 +833,9 @@ pub struct JobManager {
     /// Queue execution is independent of discovery cadence. This guard keeps
     /// minute scheduler ticks from stacking drain loops on the same node.
     cluster_index_working: std::sync::atomic::AtomicBool,
+    /// Throttle bounded, replicated analysis-history pruning so an idle queue
+    /// does not produce a Raft write on every scheduler tick.
+    last_analysis_prune_ms: AtomicI64,
     /// Which title the pass is on, for the activity feed.
     ///
     /// The flag above answers "may another pass start"; this answers "what is
@@ -994,6 +997,20 @@ async fn wait_for_media_busy(transcode: &TranscodeManager) {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AnalysisResolutionError {
+    /// Ownership already moved. A stale resolver deliberately writes nothing.
+    ClaimLost,
+    /// Foreground preemption does not consume an attempt; actual I/O and
+    /// control-plane failures do.
+    Retry {
+        code: &'static str,
+        delay_ms: i64,
+        charge_attempt: bool,
+    },
+    Terminal(&'static str),
 }
 
 /// Clears [`JobManager::indexing`] however the pass ends, including the ways a
@@ -1369,6 +1386,7 @@ impl JobManager {
             producing: std::sync::atomic::AtomicBool::new(false),
             indexing: std::sync::atomic::AtomicBool::new(false),
             cluster_index_working: std::sync::atomic::AtomicBool::new(false),
+            last_analysis_prune_ms: AtomicI64::new(0),
             now_producing: Mutex::new(None),
             stop_producing: std::sync::atomic::AtomicBool::new(false),
             pretranscode_refusals: Mutex::new(HashMap::new()),
@@ -3723,8 +3741,33 @@ impl JobManager {
             return;
         }
 
-        if let Err(error) = self.store.settle_analysis_requests(clock_ms()).await {
+        let now = clock_ms();
+        if let Err(error) = self.store.settle_analysis_requests(now).await {
             tracing::warn!(%error, "settling analysis requests");
+        }
+        const ANALYSIS_PRUNE_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+        const ANALYSIS_RETENTION_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+        let last_prune = self.last_analysis_prune_ms.load(Ordering::Relaxed);
+        if now.saturating_sub(last_prune) >= ANALYSIS_PRUNE_INTERVAL_MS
+            && self
+                .last_analysis_prune_ms
+                .compare_exchange(last_prune, now, Ordering::Relaxed, Ordering::Relaxed)
+                .is_ok()
+        {
+            match self
+                .store
+                .prune_analysis_requests(now.saturating_sub(ANALYSIS_RETENTION_MS), 256)
+                .await
+            {
+                Ok(removed) if removed > 0 => {
+                    tracing::info!(removed, "pruned analysis request history")
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    self.last_analysis_prune_ms.store(0, Ordering::Relaxed);
+                    tracing::warn!(%error, "pruning analysis request history");
+                }
+            }
         }
         self.resolve_analysis_requests(Arc::clone(&transcode)).await;
 
@@ -3843,12 +3886,55 @@ impl JobManager {
                     ATTEST_TIMEOUT,
                 )
                 .await;
-            if let Err(code) = outcome {
+            if let Err(resolution_error) = outcome {
                 let now = clock_ms();
-                let _ = self
-                    .store
-                    .fail_analysis_request(&request.request_id, &node_id, request.fence, code, now)
-                    .await;
+                match resolution_error {
+                    AnalysisResolutionError::ClaimLost => {}
+                    AnalysisResolutionError::Retry {
+                        code,
+                        delay_ms,
+                        charge_attempt,
+                    } => {
+                        if let Err(error) = self
+                            .store
+                            .retry_analysis_request(
+                                &request.request_id,
+                                &node_id,
+                                request.fence,
+                                code,
+                                now,
+                                now.saturating_add(delay_ms),
+                                charge_attempt,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                request_id = request.request_id,
+                                %error,
+                                "queueing an analysis request retry"
+                            );
+                        }
+                    }
+                    AnalysisResolutionError::Terminal(code) => {
+                        if let Err(error) = self
+                            .store
+                            .fail_analysis_request(
+                                &request.request_id,
+                                &node_id,
+                                request.fence,
+                                code,
+                                now,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                request_id = request.request_id,
+                                %error,
+                                "failing an analysis request"
+                            );
+                        }
+                    }
+                }
             }
             stop.cancel();
             let _ = heartbeat.await;
@@ -3865,46 +3951,87 @@ impl JobManager {
         transcode: &TranscodeManager,
         lost: &tokio_util::sync::CancellationToken,
         attest_timeout: Duration,
-    ) -> Result<(), &'static str> {
-        let file = self
-            .store
-            .get_file(request.file_id)
-            .await
-            .ok()
-            .flatten()
-            .filter(|file| file.size == request.source_size && file.mtime == request.source_mtime)
-            .ok_or("source_superseded")?;
+    ) -> Result<(), AnalysisResolutionError> {
+        let file = match self.store.get_file(request.file_id).await {
+            Ok(Some(file))
+                if file.size == request.source_size && file.mtime == request.source_mtime =>
+            {
+                file
+            }
+            Ok(_) => return Err(AnalysisResolutionError::Terminal("source_superseded")),
+            Err(_) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    delay_ms: 10_000,
+                    charge_attempt: true,
+                })
+            }
+        };
         let object_version = crate::fragment_index_cluster::inspect_source(&file)
             .await
-            .map_err(|_| "source_unavailable")?;
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_unavailable",
+                delay_ms: 30_000,
+                charge_attempt: true,
+            })?;
         let memo = self
             .store
             .fragment_index_source(node_id, file.id, &object_version)
             .await
-            .ok()
-            .flatten();
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_catalog_read_failed",
+                delay_ms: 10_000,
+                charge_attempt: true,
+            })?;
         let attested = tokio::select! {
             result = crate::fragment_index_cluster::attest_source(node_id, &file, memo.as_ref()) => {
-                result.map_err(|_| "source_attestation_failed")?
+                result.map_err(|_| AnalysisResolutionError::Retry {
+                    code: "source_attestation_failed",
+                    delay_ms: 30_000,
+                    charge_attempt: true,
+                })?
             }
-            () = lost.cancelled() => return Err("claim_lost"),
-            () = tokio::time::sleep(attest_timeout) => return Err("source_attestation_timeout"),
+            () = self.wait_for_cluster_fragment_index_stop(transcode, lost) => {
+                if lost.is_cancelled() {
+                    return Err(AnalysisResolutionError::ClaimLost);
+                }
+                return Err(AnalysisResolutionError::Retry {
+                    code: "foreground_preempted",
+                    delay_ms: 5_000,
+                    charge_attempt: false,
+                });
+            }
+            () = tokio::time::sleep(attest_timeout) => {
+                return Err(AnalysisResolutionError::Retry {
+                    code: "source_attestation_timeout",
+                    delay_ms: 30_000,
+                    charge_attempt: true,
+                });
+            }
         };
-        if !transcode.pretranscode_worker_idle()
-            || !self.cluster_fragment_index_enabled().await
-            || lost.is_cancelled()
-        {
-            return Err("preempted");
+        if lost.is_cancelled() {
+            return Err(AnalysisResolutionError::ClaimLost);
+        }
+        if !transcode.pretranscode_worker_idle() || !self.cluster_fragment_index_enabled().await {
+            return Err(AnalysisResolutionError::Retry {
+                code: "foreground_preempted",
+                delay_ms: 5_000,
+                charge_attempt: false,
+            });
         }
         self.store
             .record_fragment_index_source(&attested.observation)
             .await
-            .map_err(|_| "source_record_failed")?;
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "source_record_failed",
+                delay_ms: 10_000,
+                charge_attempt: true,
+            })?;
         let pipeline_sha256 =
             crate::fragment_index_cluster::pipeline_digest(&file, engine_sha256, have_dovi);
         let cache_key =
             cluster_fragment_index_key(&attested.observation.source_sha256, &pipeline_sha256)
-                .ok_or("invalid_cache_identity")?;
+                .ok_or(AnalysisResolutionError::Terminal("invalid_cache_identity"))?;
         let now = clock_ms();
         let job = NewClusterFragmentIndexJob {
             cache_key: cache_key.clone(),
@@ -3917,44 +4044,24 @@ impl JobManager {
             created_at_ms: now,
         };
 
-        let current = self
+        let accepted = self
             .store
-            .cluster_fragment_index_job(&cache_key)
+            .submit_fragment_index_analysis(request, &job, now)
             .await
-            .map_err(|_| "queue_read_failed")?;
-        let accepted = if request.force_rebuild {
-            if current
-                .as_ref()
-                .is_some_and(|job| matches!(job.state.as_str(), "queued" | "running"))
-            {
-                return Err("analysis_already_running");
-            }
-            self.store
-                .force_cluster_fragment_index(&job)
-                .await
-                .map_err(|_| "queue_write_failed")?
-        } else if current
-            .as_ref()
-            .is_some_and(|job| matches!(job.state.as_str(), "queued" | "running" | "ready"))
-        {
-            true
-        } else {
-            self.store
-                .enqueue_cluster_fragment_index(&job)
-                .await
-                .map_err(|_| "queue_write_failed")?
-        };
+            .map_err(|_| AnalysisResolutionError::Retry {
+                code: "queue_write_failed",
+                delay_ms: 10_000,
+                charge_attempt: true,
+            })?;
         if !accepted {
-            return Err("queue_full_or_busy");
-        }
-        let now = clock_ms();
-        if !self
-            .store
-            .submit_analysis_request(&request.request_id, node_id, request.fence, &cache_key, now)
-            .await
-            .map_err(|_| "request_submit_failed")?
-        {
-            return Err("claim_lost");
+            if lost.is_cancelled() {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            return Err(AnalysisResolutionError::Retry {
+                code: "queue_full_or_busy",
+                delay_ms: 15_000,
+                charge_attempt: false,
+            });
         }
         let _ = self.store.settle_analysis_requests(now).await;
         Ok(())

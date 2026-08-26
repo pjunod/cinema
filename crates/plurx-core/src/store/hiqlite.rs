@@ -1636,6 +1636,23 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM analysis_requests".to_owned(), params!()),
+            (
+                "DELETE FROM cluster_fragment_index_locations".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_artifacts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_jobs".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_sources".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_playback_pointers".to_owned(), params!()),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
