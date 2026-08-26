@@ -1549,11 +1549,6 @@ struct Session {
     /// with another inside this same session. The predecessor's non-zero kill
     /// status is neither a terminal playlist verdict nor a watchdog exit.
     replacing_child: AtomicBool,
-    /// Monotonic lifetime verdict set while teardown owns `child_transition`,
-    /// before the session leaves the manager. A fallback that reaches the
-    /// same gate later must not publish into this retired session even while
-    /// its scratch directory still exists.
-    retired: AtomicBool,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
@@ -1801,13 +1796,12 @@ impl Session {
     /// check-plus-two-lock activity-clock protocol.
     async fn fence_activity(&self) {
         self.control.retire().await;
-        self.retired.store(true, Release);
     }
 
     /// Renew the actor-owned playback lease only if no serving fence
     /// linearized first.
     async fn touch_if_active(&self, kind: &'static str) -> bool {
-        self.control.renew(kind).await
+        self.control.renew_media(kind).await
     }
 
     /// Submit sequence acceptance and lease renewal as one actor command.
@@ -1827,7 +1821,7 @@ impl Session {
             crate::playback_control::ControlStateError,
         >,
     > {
-        if self.retired.load(Acquire) {
+        if self.control.is_retired() {
             return None;
         }
         let outcome = match self.control.control(request).await {
@@ -1909,7 +1903,7 @@ impl Session {
         // through the check and successor publication also prevents
         // retirement from starting between this verdict and the caller's
         // install.
-        if self.retired.load(Acquire) {
+        if self.control.is_retired() {
             return None;
         }
         self.kill_child().await;
@@ -1943,7 +1937,7 @@ impl Session {
     #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn begin_copy_child_replacement(&self) -> Option<ChildReplacement<'_>> {
         let replacement = self.begin_child_replacement().await;
-        if self.retired.load(Acquire)
+        if self.control.is_retired()
             || self.failed.load(Relaxed)
             || tokio::fs::metadata(&self.dir).await.is_err()
         {
@@ -6791,7 +6785,6 @@ impl TranscodeManager {
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -10035,7 +10028,6 @@ impl TranscodeManager {
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -10370,7 +10362,7 @@ impl TranscodeManager {
         ) {
             Ok(child) => {
                 *session.child.lock().await = Some(child);
-                let _ = session.control.renew("fallback-start").await;
+                let _ = session.control.renew_internal("fallback-start").await;
                 // The activity page must stop naming the hardware
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
@@ -10611,7 +10603,6 @@ impl TranscodeManager {
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -10729,7 +10720,7 @@ impl TranscodeManager {
                         // verdict is rechecked after acquiring the shared
                         // transition below, because scratch deletion trails
                         // manager retirement and cannot prove liveness.
-                        if session.retired.load(Acquire)
+                        if session.control.is_retired()
                             || session.failed.load(Relaxed)
                             || tokio::fs::metadata(&dir).await.is_err()
                         {
@@ -10783,7 +10774,7 @@ impl TranscodeManager {
                         ) {
                             Ok(child) => {
                                 *session.child.lock().await = Some(child);
-                                let _ = session.control.renew("fallback-start").await;
+                                let _ = session.control.renew_internal("fallback-start").await;
                                 spawn_watch_for_stall(
                                     Arc::clone(&session),
                                     dir.clone(),
@@ -11128,7 +11119,7 @@ impl TranscodeManager {
             .get(control.session_id)
             .cloned()?;
         let _transition = session.child_transition.lock().await;
-        if session.retired.load(Acquire)
+        if session.control.is_retired()
             || !self
                 .sessions
                 .lock()
@@ -11380,7 +11371,7 @@ impl TranscodeManager {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| !session.retired.load(Acquire))
+            .filter(|(_, session)| !session.control.is_retired())
             .map(|(session_id, _)| session_id.clone())
             .collect();
         // VOD sessions hold durable routes too; invisible here, the lease
@@ -11689,7 +11680,7 @@ impl TranscodeManager {
             // addressable. Re-check the monotonic retirement verdict before
             // reading or serving so a superseded stream is reported as gone
             // promptly rather than held until the startup budget expires.
-            if session.retired.load(Acquire) {
+            if session.control.is_retired() {
                 return Err(PlaylistError::SessionGone);
             }
             if session.failed.load(Relaxed) {
@@ -11757,7 +11748,7 @@ impl TranscodeManager {
                     // The playlist just told us what is published — the one
                     // moment the segment index can be refreshed for free.
                     self.flow_control(&session, session_id).await;
-                    if session.retired.load(Acquire) {
+                    if session.control.is_retired() {
                         return Err(PlaylistError::SessionGone);
                     }
                     if session.cached {
@@ -11803,7 +11794,7 @@ impl TranscodeManager {
                             .await;
                         }
                     }
-                    if session.retired.load(Acquire) {
+                    if session.control.is_retired() {
                         return Err(PlaylistError::SessionGone);
                     }
                     return Ok(served_live_playlist(
@@ -11834,7 +11825,7 @@ impl TranscodeManager {
             if self.playlist_producer_failed(&session, session_id).await {
                 return Err(session.failure_reason());
             }
-            if session.retired.load(Acquire) {
+            if session.control.is_retired() {
                 return Err(PlaylistError::SessionGone);
             }
             // Checked after the terminal verdicts, never before them: a
@@ -12449,12 +12440,12 @@ impl TranscodeManager {
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
                 match session.control.claim_expiry().await {
-                    Ok(Some(lease)) => {
-                        // Publish the process-local fence immediately after
-                        // the actor atomically wins expiry. No media renewal
-                        // can cross the claim, and cancellation cannot land
-                        // between this synchronous store and another await.
-                        session.retired.store(true, Release);
+                    Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease))
+                    | Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                        // The actor publishes the shared process-local fence
+                        // before replying. A dropped claimant is therefore
+                        // rediscovered here as Retired and cannot become an
+                        // unrenewable map/child zombie.
                         expired.push((
                             id,
                             session,
@@ -12462,11 +12453,13 @@ impl TranscodeManager {
                             lease.last_renewal_kind,
                         ));
                     }
-                    Ok(None) => live.push((id, session)),
+                    Ok(crate::playback_control::RollingExpiryClaim::Live) => {
+                        live.push((id, session));
+                    }
                     Err(_) => {
                         // A dead mailbox cannot accept another renewal. Fail
                         // closed instead of leaking an encoder forever.
-                        session.retired.store(true, Release);
+                        session.control.fence_unavailable();
                         expired.push((id, session, 0, "control-unavailable"));
                     }
                 }
@@ -13116,7 +13109,6 @@ fn test_session(dir: PathBuf) -> Session {
         child_transition: Mutex::new(()),
         watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
-        retired: AtomicBool::new(false),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -13268,6 +13260,24 @@ mod tests {
             accepted.disposition,
             crate::playback_control::ControlDisposition::Accepted
         );
+        let assert_explicit_status = |status: &HlsSessionInfo| {
+            let HlsSessionInfo::Live(status) = status else {
+                panic!("rolling control returned VOD status");
+            };
+            assert_eq!(status.lease_mode, "explicit");
+            assert_eq!(status.control_demand, Some("active"));
+            assert_eq!(status.reported_position_ms, Some(10_000));
+            assert_eq!(status.client_runway_ms, Some(15_000));
+            assert_eq!(status.render_state, Some("rendering"));
+        };
+        assert_explicit_status(&accepted.status);
+        let live_status = fixture
+            .state
+            .transcode
+            .hls_session_status(&session_id)
+            .await
+            .expect("live status");
+        assert_explicit_status(&live_status);
         let accepted_lease = fixture
             .session
             .control
@@ -13346,15 +13356,15 @@ mod tests {
         assert!(rejected_lease.idle_for >= Duration::from_secs(10));
 
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let after_cancel = fixture
+        let second_sequence = fixture
             .state
             .transcode
             .hls_session_control(request(2, 1))
             .await
             .expect("local worker")
-            .expect("cancelled sequence remains admissible");
+            .expect("next fresh sequence remains admissible");
         assert_eq!(
-            after_cancel.disposition,
+            second_sequence.disposition,
             crate::playback_control::ControlDisposition::Accepted
         );
         let renewed_lease = fixture
@@ -13382,6 +13392,53 @@ mod tests {
             .snapshot()
             .await
             .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn reap_loop_finishes_an_expiry_claim_whose_original_caller_never_tore_down() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        fixture
+            .session
+            .control
+            .set_renewal_for_test(
+                Instant::now() - Duration::from_secs(SESSION_IDLE_SECS + 1),
+                "before-expiry",
+            )
+            .await;
+        assert!(matches!(
+            fixture.session.control.claim_expiry().await,
+            Ok(crate::playback_control::RollingExpiryClaim::Claimed(_))
+        ));
+        assert!(fixture.session.control.is_retired());
+        assert!(!fixture
+            .state
+            .transcode
+            .renewable_session_ids()
+            .await
+            .contains(&session_id));
+
+        let reaper = tokio::spawn(Arc::clone(&fixture.state.transcode).reap_loop());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if !fixture
+                    .state
+                    .transcode
+                    .sessions
+                    .lock()
+                    .await
+                    .contains_key(&session_id)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("repair loop must rediscover and tear down an already-retired actor");
+        reaper.abort();
+        assert!(matches!(reaper.await, Err(error) if error.is_cancelled()));
     }
 
     #[test]
@@ -17873,7 +17930,6 @@ mod tests {
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -17981,7 +18037,7 @@ mod tests {
                     .await
                     .as_mut()
                     .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
-                if existing.retired.load(Acquire)
+                if existing.control.is_retired()
                     && stopped
                     && manager.sessions.lock().await.is_empty()
                 {
@@ -18015,7 +18071,7 @@ mod tests {
             !manager.register_session("late", Arc::clone(&late)).await,
             "a transition-racing session must not publish"
         );
-        assert!(late.retired.load(Acquire));
+        assert!(late.control.is_retired());
         assert!(manager.sessions.lock().await.is_empty());
         assert!(
             late.child
@@ -18563,7 +18619,7 @@ mod tests {
         )
         .await;
 
-        assert!(session.retired.load(Acquire));
+        assert!(session.control.is_retired());
         assert!(
             mgr.sessions.lock().await.get("retirement-first").is_none(),
             "the retired session must remain unregistered"

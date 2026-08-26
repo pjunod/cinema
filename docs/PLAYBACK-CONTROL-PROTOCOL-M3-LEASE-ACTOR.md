@@ -44,7 +44,10 @@ complete client snapshot. It does not create a second clock. Equal-sequence
 replays, stale sequences, old owners, and retired sessions do not renew or
 replace the stored demand.
 
-Media GETs and control messages enter the same mailbox. The periodic repair
+Media GETs and control messages enter the same mailbox. Retirement publishes a
+shared monotonic fence before its actor reply, so a cancelled caller cannot
+leave the mailbox retired while process teardown still considers it renewable.
+The periodic repair
 loop no longer reads a timestamp and retires later from a stale observation;
 it asks the actor to claim expiry. Claiming checks the deadline and marks the
 actor retired in one command, so a concurrent segment renewal is ordered
@@ -60,15 +63,17 @@ jitter and mixed-version behavior are proven.
 
 The live status shape adds:
 
-- `lease_mode`: `legacy`, `explicit`, or `unavailable`;
+- `lease_mode`: `legacy`, `explicit`, `unavailable`, or `vod` on the aggregated
+  immutable-delivery status shape;
 - `control_demand`;
 - `reported_position_ms`;
 - `client_runway_ms`; and
 - `render_state`.
 
-Prometheus adds rolling-lease renewals by `control` or `media` source, atomic
-expirations, and non-expiry retirements. Raw session capabilities and client
-instance IDs remain excluded.
+Prometheus adds rolling-lease renewals by bounded `control`, `media`, or
+`internal` source, atomic expirations, and non-expiry retirements. Internal
+fallback starts are never counted as authenticated media consumption. Raw
+session capabilities and client instance IDs remain excluded.
 
 ## Watchdogs and timers still present
 
