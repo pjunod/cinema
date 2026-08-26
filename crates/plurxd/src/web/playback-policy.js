@@ -332,7 +332,16 @@
       const safeIndex = safe
         ? closestRungIndex(available, safe.height)
         : currentIndex - 1;
-      const target = available[Math.min(currentIndex - 1, safeIndex)];
+      // Once supply has actually stopped with no runway left, the one allowed
+      // emergency restart must favor recovery over an intermediate rung. The
+      // transfer that proves the lower link may not complete before this
+      // decision, leaving both EWMA inputs biased by the pre-cliff rate; one
+      // rung down then restarts into the same starvation and the controller's
+      // restart budget cannot correct it. Pressure without an active empty-
+      // buffer stall keeps the normal one-rung/safe-estimate behavior.
+      const target = activeSupplyStall && nearEmpty
+        ? available[0]
+        : available[Math.min(currentIndex - 1, safeIndex)];
       const reason = supplyBurst || activeSupplyStall
         ? "supply stalls"
         : nearEmpty

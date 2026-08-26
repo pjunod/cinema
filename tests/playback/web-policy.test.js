@@ -653,6 +653,24 @@ test("an emergency downgrade ignores cooldown, dwell, and restart cost", () => {
   assert.equal(decision.emergency, true);
 });
 
+test("an empty-buffer supply stall spends its one restart on the floor", () => {
+  const decision = policy.decideRung({
+    ladder: serverLadder,
+    currentHeight: 720,
+    // The completed-fragment and stable EWMAs may both still describe the
+    // pre-cliff link when the player runs out of buffered media.
+    estimateKbps: 5_000,
+    recentEstimateKbps: 5_000,
+    recentEstimateAtMs: 9_000,
+    runwaySeconds: 0.1,
+    activeSupplyStall: true,
+    nowMs: 10_000,
+  });
+  assert.equal(decision.height, 360);
+  assert.equal(decision.reason, "supply stalls");
+  assert.equal(decision.emergency, true);
+});
+
 test("an emergency downgrade cannot be stranded by the player-height ceiling", () => {
   const input = {
     ladder: serverLadder,
