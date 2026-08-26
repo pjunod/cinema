@@ -54,6 +54,21 @@ class OperationsContractCase(unittest.TestCase):
             script.index("page.wait_for_timeout(args.settle_ms)"),
         )
 
+    def test_ui_baseline_releases_and_retries_real_player_captures(self):
+        script = read("scripts/ui-baseline")
+
+        self.assertIn("releaseSession(PLAYER.sessionId);", script)
+        cleanup = script.index(
+            "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
+        )
+        self.assertNotIn("closePlayer();", script[cleanup : cleanup + 500])
+        self.assertIn('attempts = 2 if route.get("player") else 1', script)
+        self.assertIn('print(f"RETRY   {key}: {e}"', script)
+        self.assertLess(
+            cleanup,
+            script.index("page.close()", script.index("def capture_route")),
+        )
+
     def test_rust_test_artifacts_omit_replicated_debug_information(self):
         cargo = read("Cargo.toml")
         profile = cargo.split("[profile.test]", 1)[1].split("[", 1)[0]

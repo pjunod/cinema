@@ -1312,6 +1312,26 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             counted[call] = counted.get(call, 0) + 1
         return focus, dict(sorted(counted.items())), dom
     finally:
+        # A context disappearing is not the same lifecycle as a viewer closing
+        # the player. Return an HLS capability immediately instead of leaving
+        # later layout captures to race the idle reaper, but do not call
+        # closePlayer(): its real viewer lifecycle correctly writes progress,
+        # while the baseline fixture must remain immutable across captures.
+        # The page may already have failed or closed, so cleanup is deliberately
+        # best-effort and cannot replace the verdict from the capture itself.
+        if route.get("player") and not page.is_closed():
+            try:
+                page.evaluate("""() => {
+                  if (PLAYER && PLAYER.sessionId) {
+                    releaseSession(PLAYER.sessionId);
+                    PLAYER.sessionId = null;
+                  }
+                  stopPlayerTimers();
+                  teardownHls();
+                }""")
+                page.wait_for_timeout(100)
+            except Exception:
+                pass
         page.close()
 
 
@@ -1511,19 +1531,34 @@ def run_capture(base_url, token, routes, args, out_dir):
                 (out_dir / layout_id).mkdir(parents=True, exist_ok=True)
 
             for layout_id, vp, name, route in triples:
-                context = new_context(browser, args, vp, layout_id, token, route)
                 key = f"{layout_id}|{name}@{vp_key(vp)}"
                 shot = out_dir / layout_id / f"{name}@{vp_key(vp)}.png"
-                try:
-                    focus_dump[key], request_dump[key], dom_dump[key] = capture_route(
-                        context, base_url, name, route, args, shot, layout_id)
-                    pixels[key] = hashlib.sha256(shot.read_bytes()).hexdigest()
-                    print(f"OK      {key}", flush=True)
-                except Exception as e:  # noqa: BLE001 — every failure is a gate failure
-                    failures.append(f"{key}: {e}")
-                    print(f"FAIL    {key}: {e}", flush=True)
-                finally:
-                    context.close()
+                # The player is the only capture that waits on a real media
+                # decision and decoder. A loaded one-voter fixture can lose one
+                # authority read even though the next request is healthy (CI
+                # observed exactly one miss between five successful plays).
+                # Retry the whole capture in a fresh browser context, never an
+                # individual assertion: a persistent product, accessibility,
+                # request-inventory, or frame failure still fails unchanged.
+                attempts = 2 if route.get("player") else 1
+                for attempt in range(attempts):
+                    if attempt:
+                        time.sleep(0.5)
+                    context = new_context(browser, args, vp, layout_id, token, route)
+                    try:
+                        focus_dump[key], request_dump[key], dom_dump[key] = capture_route(
+                            context, base_url, name, route, args, shot, layout_id)
+                        pixels[key] = hashlib.sha256(shot.read_bytes()).hexdigest()
+                        print(f"OK      {key}", flush=True)
+                        break
+                    except Exception as e:  # noqa: BLE001 — every failure is a gate failure
+                        if attempt + 1 < attempts:
+                            print(f"RETRY   {key}: {e}", flush=True)
+                            continue
+                        failures.append(f"{key}: {e}")
+                        print(f"FAIL    {key}: {e}", flush=True)
+                    finally:
+                        context.close()
         finally:
             browser.close()
     return {
