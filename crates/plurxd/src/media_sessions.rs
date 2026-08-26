@@ -39,7 +39,6 @@ pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_FAST_RECONCILIATION: Duration = Duration::from_secs(3);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
-const CONTROL_DEADLINE: Duration = Duration::from_secs(5);
 const LEASE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
@@ -929,7 +928,10 @@ impl MediaSessionCoordinator {
             relay_metric.invalid_response();
             return Err(PeerTransportError::InvalidResponse);
         }
-        let deadline = deadline_after(CONTROL_DEADLINE);
+        let budget =
+            crate::playback_control::inherited_exchange_budget(request.deadline_unix_ms, unix_ms())
+                .ok_or(PeerTransportError::TimedOut)?;
+        let deadline = deadline_after(budget);
         let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport

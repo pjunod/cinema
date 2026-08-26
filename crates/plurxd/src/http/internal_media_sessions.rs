@@ -247,6 +247,46 @@ pub(crate) async fn control(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let generation = request.generation.clone();
+    let owner_epoch = u64::try_from(request.expected_owner_epoch).ok();
+    let Some(budget) = crate::playback_control::inherited_exchange_budget(
+        request.deadline_unix_ms,
+        crate::media_sessions::unix_ms(),
+    ) else {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+        return super::hls::control_error(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "control_unavailable",
+            "the relayed control exchange arrived after its ingress deadline",
+            Some(generation),
+            owner_epoch,
+            Some(500),
+            None,
+        );
+    };
+    match tokio::time::timeout(budget, control_inner(state, headers, body, request)).await {
+        Ok(response) => response,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            super::hls::control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owner exceeded the inherited control deadline",
+                Some(generation),
+                owner_epoch,
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+async fn control_inner(
+    state: AppState,
+    headers: HeaderMap,
+    body: Bytes,
+    request: crate::playback_control::ControlRelayRequest,
+) -> Response {
     if let Err(status) = authorize(&state, &headers, CONTROL_PATH, &body).await {
         return status.into_response();
     }

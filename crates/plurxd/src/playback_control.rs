@@ -30,6 +30,19 @@ const MAX_CAPABILITY_VALUES: usize = 8;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
 
+/// Preserve the ingress's absolute exchange deadline across a cluster hop.
+/// The cap also prevents a malformed trusted-peer envelope from extending the
+/// public four-second contract.
+pub(crate) fn inherited_exchange_budget(
+    deadline_unix_ms: i64,
+    now_unix_ms: i64,
+) -> Option<Duration> {
+    let remaining_ms = u64::try_from(deadline_unix_ms.saturating_sub(now_unix_ms))
+        .ok()
+        .filter(|remaining| *remaining > 0)?;
+    Some(Duration::from_millis(remaining_ms).min(EXCHANGE_DEADLINE))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ControlBootstrap {
@@ -672,6 +685,9 @@ pub(crate) struct ControlRelayRequest {
     pub generation: String,
     pub expected_owner_node_id: String,
     pub expected_owner_epoch: i64,
+    /// Absolute budget inherited from the public ingress exchange. The owner
+    /// must never restart the four-second budget after routing or Store I/O.
+    pub deadline_unix_ms: i64,
     pub control: ControlRequestV1,
 }
 
@@ -686,6 +702,7 @@ impl ControlRelayRequest {
                 .bytes()
                 .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
             && self.expected_owner_epoch > 0
+            && self.deadline_unix_ms > 0
             && self.control.generation == self.generation
             && u64::try_from(self.expected_owner_epoch).ok() == Some(self.control.control_epoch)
     }
@@ -1392,8 +1409,24 @@ mod tests {
             generation: control.generation.clone(),
             expected_owner_node_id: "node-a".to_owned(),
             expected_owner_epoch: 1,
+            deadline_unix_ms: crate::media_sessions::unix_ms().saturating_add(4_000),
             control,
         }
+    }
+
+    #[test]
+    fn relayed_exchange_inherits_remaining_budget_instead_of_restarting_it() {
+        assert_eq!(
+            inherited_exchange_budget(14_000, 13_000),
+            Some(Duration::from_secs(1))
+        );
+        assert_eq!(inherited_exchange_budget(14_000, 14_000), None);
+        assert_eq!(inherited_exchange_budget(14_000, 15_000), None);
+        assert_eq!(
+            inherited_exchange_budget(60_000, 10_000),
+            Some(EXCHANGE_DEADLINE),
+            "even a malformed future deadline cannot extend the public budget"
+        );
     }
 
     #[test]

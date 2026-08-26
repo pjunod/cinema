@@ -1568,6 +1568,11 @@ struct Session {
     /// same gate later must not publish into this retired session even while
     /// its scratch directory still exists.
     retired: AtomicBool,
+    /// Couples the monotonic retirement verdict to activity-clock mutation.
+    /// Serving fences do not wait for a producer transition, but a control or
+    /// media touch can no longer land between its final retired check and the
+    /// lease renewal it publishes.
+    retirement_activity: Mutex<()>,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
@@ -1812,6 +1817,44 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    /// Fence activity renewal synchronously with the serving verdict. The
+    /// async mutex is held for only the atomic store; unlike
+    /// `child_transition`, it never waits for encoder teardown/replacement.
+    async fn fence_activity(&self) {
+        let _activity = self.retirement_activity.lock().await;
+        self.retired.store(true, Release);
+    }
+
+    /// Renew the legacy activity clock only if no serving fence linearized
+    /// first. Taking the clock before the gate gives every caller one lock
+    /// order and makes the check plus write indivisible with `fence_activity`.
+    async fn touch_if_active(&self, kind: &'static str) -> bool {
+        let mut last_request = self.last_request.lock().await;
+        let _activity = self.retirement_activity.lock().await;
+        if self.retired.load(Acquire) {
+            return false;
+        }
+        *last_request = LastRequest::now(kind);
+        true
+    }
+
+    /// Snapshot the active lease, optionally renewing it for a newly accepted
+    /// control sequence, under the same retirement/activity boundary.
+    async fn control_lease_expires_at(&self, renew: bool) -> Option<i64> {
+        let mut last_request = self.last_request.lock().await;
+        let _activity = self.retirement_activity.lock().await;
+        if self.retired.load(Acquire) {
+            return None;
+        }
+        if renew {
+            *last_request = LastRequest::now("control");
+        }
+        let remaining =
+            Duration::from_secs(SESSION_IDLE_SECS).saturating_sub(last_request.at.elapsed());
+        let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+        Some(crate::media_sessions::unix_ms().saturating_add(remaining_ms))
+    }
+
     /// Where this generation's session-relative zero sits on the durable
     /// incarnation timeline.
     ///
@@ -6705,6 +6748,7 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -9950,6 +9994,7 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -10527,6 +10572,7 @@ impl TranscodeManager {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -11080,19 +11126,11 @@ impl TranscodeManager {
         if session.retired.load(Acquire) {
             return None;
         }
-        let lease_expires_at_unix_ms = {
-            let mut last_request = session.last_request.lock().await;
-            if session.retired.load(Acquire) {
-                return None;
-            }
-            if disposition == crate::playback_control::ControlDisposition::Accepted {
-                *last_request = LastRequest::now("control");
-            }
-            let remaining =
-                Duration::from_secs(SESSION_IDLE_SECS).saturating_sub(last_request.at.elapsed());
-            let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
-            crate::media_sessions::unix_ms().saturating_add(remaining_ms)
-        };
+        let lease_expires_at_unix_ms = session
+            .control_lease_expires_at(
+                disposition == crate::playback_control::ControlDisposition::Accepted,
+            )
+            .await?;
         let limits = self.ahead_limits().await;
         let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
         let status = session_info(
@@ -11213,7 +11251,7 @@ impl TranscodeManager {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     return Err(replacement_deadline_error());
                 }
-                session.retired.store(true, Release);
+                session.fence_activity().await;
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
             }
@@ -11338,7 +11376,7 @@ impl TranscodeManager {
         let sessions = self.sessions.lock().await;
         for session_id in session_ids {
             if let Some(session) = sessions.get(session_id) {
-                session.retired.store(true, Release);
+                session.fence_activity().await;
             }
         }
     }
@@ -11355,7 +11393,7 @@ impl TranscodeManager {
             // Serving authority is lost now, not after a producer transition
             // happens to unblock. Lease renewal and every media path observe
             // this bit while detached teardown catches up.
-            session.retired.store(true, Release);
+            session.fence_activity().await;
         }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
@@ -11492,10 +11530,9 @@ impl TranscodeManager {
 
     async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if session.retired.load(Acquire) {
+        if !session.touch_if_active(kind).await {
             return None;
         }
-        *session.last_request.lock().await = LastRequest::now(kind);
         Some(session)
     }
 
@@ -13039,6 +13076,7 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
         retired: AtomicBool::new(false),
+        retirement_activity: Mutex::new(()),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -13102,6 +13140,145 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn activate_control_route(
+        store: &dyn Store,
+        session_id: &str,
+        generation: &str,
+        owner_node_id: &str,
+    ) {
+        let now_ms = crate::media_sessions::unix_ms();
+        let fingerprint = "a".repeat(64);
+        store
+            .claim_media_session_request(
+                7,
+                generation,
+                &fingerprint,
+                "player-control",
+                generation,
+                now_ms,
+                now_ms + 60_000,
+            )
+            .await
+            .expect("claim route");
+        assert!(store
+            .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
+            .await
+            .expect("assign route owner"));
+        store
+            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
+                incarnation_id: generation.to_owned(),
+                session_id: session_id.to_owned(),
+                user_id: 7,
+                playback_id: "player-control".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some(generation.to_owned()),
+                request_fingerprint: fingerprint,
+                owner_node_id: owner_node_id.to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms,
+                lease_expires_at_ms: now_ms + 60_000,
+            })
+            .await
+            .expect("activate route")
+            .expect("route accepted");
+    }
+
+    #[tokio::test]
+    async fn live_control_renews_only_fresh_sequences_and_cannot_cross_a_fence() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        {
+            let mut last = fixture.session.last_request.lock().await;
+            last.at = Instant::now() - Duration::from_secs(10);
+            last.kind = "before-control";
+        }
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, owner_epoch| crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "test-node",
+            owner_epoch,
+            client_instance_id: &client,
+            sequence,
+            platform: Some(crate::playback_control::ClientPlatform::Web),
+        };
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("accepted control");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let accepted_touch = {
+            let last = fixture.session.last_request.lock().await;
+            assert_eq!(last.kind, "control");
+            last.at
+        };
+
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("replay control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(0, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::StaleSequence
+            ))
+        ));
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2, 2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::OwnerChanged
+            ))
+        ));
+        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+
+        // Pin the clock lock so the renewal reaches the exact race window;
+        // retirement must linearize first and the late renewal must refuse.
+        let clock = fixture.session.last_request.lock().await;
+        let worker = Arc::clone(&fixture.session);
+        let renewal = tokio::spawn(async move { worker.control_lease_expires_at(true).await });
+        tokio::task::yield_now().await;
+        fixture.session.fence_activity().await;
+        drop(clock);
+        assert_eq!(renewal.await.expect("renewal task"), None);
+        assert_eq!(fixture.session.last_request.lock().await.at, accepted_touch);
+    }
 
     #[test]
     fn bearer_session_ids_are_stably_redacted_for_observability() {
@@ -17588,6 +17765,7 @@ mod tests {
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             retired: AtomicBool::new(false),
+            retirement_activity: Mutex::new(()),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]

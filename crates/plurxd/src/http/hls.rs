@@ -1384,9 +1384,12 @@ pub async fn control(
     AxPath(session): AxPath<String>,
     body: Bytes,
 ) -> Response {
+    let deadline_unix_ms = crate::media_sessions::unix_ms().saturating_add(
+        i64::try_from(crate::playback_control::EXCHANGE_DEADLINE.as_millis()).unwrap_or(i64::MAX),
+    );
     match tokio::time::timeout(
         crate::playback_control::EXCHANGE_DEADLINE,
-        control_inner(state, session, body),
+        control_inner(state, session, body, deadline_unix_ms),
     )
     .await
     {
@@ -1406,7 +1409,12 @@ pub async fn control(
     }
 }
 
-async fn control_inner(state: AppState, session: String, body: Bytes) -> Response {
+async fn control_inner(
+    state: AppState,
+    session: String,
+    body: Bytes,
+    deadline_unix_ms: i64,
+) -> Response {
     if uuid::Uuid::parse_str(&session).is_err() {
         crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
         return control_error(
@@ -1590,6 +1598,7 @@ async fn control_inner(state: AppState, session: String, body: Bytes) -> Respons
             generation: route.incarnation_id.clone(),
             expected_owner_node_id: route.owner_node_id.clone(),
             expected_owner_epoch: route.owner_epoch,
+            deadline_unix_ms,
             control: request,
         };
         return match state
@@ -3725,6 +3734,114 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+
+    #[tokio::test]
+    async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-worker").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: generation.clone(),
+            user_id: 7,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: true,
+            request: crate::transcode::SessionRequest {
+                file_id: 1,
+                playback_id: "control-transition".to_owned(),
+                request_id: Some(generation.clone()),
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10: false,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+            },
+        };
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &generation,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+        };
+        let route = MediaSessionRoute {
+            incarnation_id: generation.clone(),
+            session_id,
+            user_id: 7,
+            playback_id: "control-transition".to_owned(),
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "test-node".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms() + 60_000,
+            state: "active".to_owned(),
+            recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: serde_json::to_string(&start).expect("response"),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: unix_ms(),
+        };
+        let request = crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+        };
+
+        let response = control_local(&fixture.state, &route, request).await;
+        assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    }
 
     #[test]
     fn public_playback_ids_and_segment_ranges_are_bounded() {
