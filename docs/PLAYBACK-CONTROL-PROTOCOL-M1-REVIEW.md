@@ -104,5 +104,7 @@ workspace Clippy with warnings denied, 754 core tests, 30 Store-contract tests,
 One unrelated thumbnail-cancellation timing test failed once in an earlier
 run, passed immediately in isolation, and the complete lane then passed from
 start to finish. Later re-review remediations added the focused engine,
-endpoint, deadline, and cancellation tests described above; the final full
-lane is rerun after the last adversarial verdict.
+endpoint, deadline, and cancellation tests described above. After the final
+adversarial verdict, the complete lane passed again: formatting, workspace
+Clippy with warnings denied, 754 core tests, 30 Store-contract tests, 998 server
+tests with three ignored, and every remaining package and doc test.
