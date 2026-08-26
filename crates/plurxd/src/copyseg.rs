@@ -257,6 +257,7 @@ pub async fn run<R: AsyncRead + Unpin>(
     dir: PathBuf,
     session_id: &str,
     limits: Limits,
+    require_hevc_parameter_sets: bool,
 ) -> Outcome {
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs);
@@ -372,6 +373,23 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 return Outcome::Unsupported(format!(
                                     "preparing the HLS init segment: {e}"
                                 ));
+                            }
+                        }
+                        if require_hevc_parameter_sets {
+                            match fmp4::hevc_parameter_sets_complete(&init) {
+                                Ok(true) => {}
+                                Ok(false) => {
+                                    return Outcome::Unsupported(
+                                        "the HEVC decoder configuration has no complete \
+                                         VPS/SPS/PPS set"
+                                            .into(),
+                                    )
+                                }
+                                Err(error) => {
+                                    return Outcome::Unsupported(format!(
+                                        "validating the HEVC decoder configuration: {error}"
+                                    ))
+                                }
                             }
                         }
                         if let Err(e) = out.write_init(&init).await {
@@ -594,8 +612,32 @@ mod tests {
     async fn session(kind: &str, limits: Limits) -> (tempfile::TempDir, Outcome) {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe(kind);
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", limits, false).await;
         (dir, outcome)
+    }
+
+    fn replace_hvcc_array_type(bytes: &mut [u8], from: u8, to: u8) {
+        let kind_at = bytes
+            .windows(4)
+            .position(|window| window == b"hvcC")
+            .expect("hvcC box");
+        let payload = kind_at + 4;
+        let arrays = usize::from(bytes[payload + 22]);
+        let mut pos = payload + 23;
+        for _ in 0..arrays {
+            let array_kind = bytes[pos] & 0x3f;
+            let count = u16::from_be_bytes([bytes[pos + 1], bytes[pos + 2]]) as usize;
+            if array_kind == from {
+                bytes[pos] = (bytes[pos] & 0xc0) | to;
+                return;
+            }
+            pos += 3;
+            for _ in 0..count {
+                let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+                pos += 2 + len;
+            }
+        }
+        panic!("hvcC carried no type-{from} array");
     }
 
     fn playlist(dir: &Path) -> String {
@@ -646,6 +688,23 @@ mod tests {
         let mut init = init_with_dolby_brand(true);
         assert!(!sanitize_stale_dolby_brand(&mut init));
         assert!(init.bytes.windows(4).any(|fourcc| fourcc == b"dby1"));
+    }
+
+    #[tokio::test]
+    async fn required_live_promotion_refuses_an_incomplete_decoder_configuration() {
+        let mut feed = pipe("closed-gop");
+        // The fixture pipe has removed in-band parameter sets. Leave hvcC
+        // structurally valid but turn its PPS into a duplicate SPS so no
+        // hidden sample data can complete the configuration.
+        replace_hvcc_array_type(&mut feed, 34, 33);
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), true).await;
+        let Outcome::Unsupported(reason) = outcome else {
+            panic!("an incomplete required hvcC was published: {outcome:?}");
+        };
+        assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
+        assert!(!dir.path().join("init.mp4").exists());
+        assert!(!dir.path().join("index.m3u8").exists());
     }
 
     /// The whole point, end to end: given a source that offers clean cut
@@ -811,7 +870,14 @@ mod tests {
         let feed = pipe("clean-cra");
         // Two thirds of the stream, which lands inside a fragment.
         let cut = feed.len() * 2 / 3;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            false,
+        )
+        .await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -841,7 +907,14 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 999;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            limits,
+            false,
+        )
+        .await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -869,7 +942,14 @@ mod tests {
         let cut = feed.len() * 2 / 3;
         let mut limits = brisk();
         limits.publish_gate_secs = 4;
-        let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
+        let outcome = run(
+            &feed[..cut],
+            dir.path().to_path_buf(),
+            "test",
+            limits,
+            false,
+        )
+        .await;
         let Outcome::Ran(counts) = outcome else {
             panic!("{outcome:?}");
         };
@@ -927,7 +1007,7 @@ mod tests {
         // its parent, which is the malformed case, not the truncated one.
         let head = 28 + 8; // past ftyp and the moov header
         feed[head..head + 4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
-        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk(), false).await;
         assert!(
             matches!(outcome, Outcome::Unsupported(_)),
             "a broken moov did not ask for the fallback: {outcome:?}"
@@ -977,7 +1057,14 @@ mod tests {
         );
 
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&out.stdout[..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(
+            &out.stdout[..],
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+            false,
+        )
+        .await;
         match outcome {
             Outcome::Unsupported(reason) => {
                 assert!(reason.contains("never asked for"), "{reason}");
@@ -991,7 +1078,7 @@ mod tests {
     #[tokio::test]
     async fn an_empty_pipe_asks_for_the_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
-        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk(), false).await;
         assert!(matches!(outcome, Outcome::Unsupported(_)), "{outcome:?}");
     }
 
@@ -1005,7 +1092,7 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let feed = pipe("clean-cra");
         let trickle = tokio::io::BufReader::with_capacity(1, &feed[..]);
-        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk()).await;
+        let outcome = run(trickle, dir.path().to_path_buf(), "test", brisk(), false).await;
         assert_eq!(outcome, whole_outcome);
         assert_eq!(playlist(dir.path()), playlist(whole.path()));
         assert_eq!(segment_files(dir.path()), segment_files(whole.path()));
@@ -1071,7 +1158,7 @@ mod tests {
             max_seconds: 15,
             publish_gate_secs: 0,
         };
-        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits).await;
+        let outcome = run(stdout, dir.path().to_path_buf(), "live", limits, false).await;
         let _ = child.wait().await;
 
         let Outcome::Ran(counts) = outcome else {

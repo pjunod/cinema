@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["923baf6f"]
+reason = "This commit only registers the retained Rust evidence for the earlier minimal-HEVC runtime correction and does not change runtime behavior."
+ignore = true

@@ -26,9 +26,11 @@
 //! - [`classify`] answers the only question the cut policy asks of a
 //!   fragment: is its first frame safe to open a segment with?
 //! - [`merge`] concatenates a run of fragments back into one `styp moof mdat`
-//!   segment. It moves bytes and rewrites offsets; it never touches sample
-//!   data, which is what makes `framemd5` equality with the unsegmented
-//!   stream the licence to ship it.
+//!   segment. It moves bytes and rewrites offsets; encoded pictures stay
+//!   untouched. The sole bitstream normalization removes VPS/SPS/PPS from
+//!   `hvc1`/`dvh1` samples after those exact units have been promoted to hvcC,
+//!   which keeps the decoder configuration identical while honoring the
+//!   sample entry's out-of-band-only contract.
 
 use std::fmt::Write as _;
 use std::ops::Range;
@@ -137,8 +139,9 @@ pub struct Track {
 /// [`promote_hdr10_static_metadata`]. ffmpeg can leave decoder-wide HEVC
 /// records only in the first media sample. Apple HLS requires them in the
 /// configuration carried by this segment, so the copy session may add those
-/// exact NAL units to `hvcC` before publishing it. Sample data is never
-/// rewritten.
+/// exact NAL units to `hvcC` before publishing it. [`merge`] then removes the
+/// promoted VPS/SPS/PPS from `hvc1`/`dvh1` media samples so the published
+/// stream keeps the sample entry's out-of-band-only promise.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Init {
     pub bytes: Vec<u8>,
@@ -874,6 +877,22 @@ pub fn promote_hevc_parameter_sets_from(
         return Ok(false);
     }
 
+    // Promotion is an initialization repair, not a best-effort metadata
+    // copy. A hvc1/dvh1 decoder configuration missing even one of VPS, SPS,
+    // or PPS is still unusable, and mutating it partway would let callers
+    // publish an init that looks enriched while remaining undecodable.
+    let complete = (32u8..=34).all(|kind| {
+        present.contains(&kind)
+            || candidate_nals
+                .iter()
+                .any(|nal| hevc_nal_type(nal) == Some(kind))
+    });
+    if !complete {
+        return Err(Fmp4Error::Unsupported(
+            "HEVC init promotion requires a complete VPS/SPS/PPS set".into(),
+        ));
+    }
+
     let arrays_offset = location.payload.start + 22;
     let new_count = init.bytes[arrays_offset]
         .checked_add(added_arrays)
@@ -886,6 +905,24 @@ pub fn promote_hevc_parameter_sets_from(
         grow_box(&mut init.bytes, box_at, delta)?;
     }
     Ok(true)
+}
+
+/// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
+///
+/// The minimal legal hvcC record carries none. It is parseable, but it cannot
+/// satisfy an `hvc1`/`dvh1` sample entry until promotion supplies all three.
+pub fn hevc_parameter_sets_complete(init: &Init) -> Result<bool, Fmp4Error> {
+    let Some(video) = init.video() else {
+        return Ok(false);
+    };
+    if video.codec != Some(VideoCodec::Hevc) {
+        return Ok(false);
+    }
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Ok(false);
+    };
+    let present = hvcc_nal_array_types(&init.bytes[location.payload])?;
+    Ok((32u8..=34).all(|kind| present.contains(&kind)))
 }
 
 fn hevc_parameter_set_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
@@ -1169,6 +1206,9 @@ struct BoxAt {
 struct HvcCLocation {
     payload: Range<usize>,
     sample_entry_end: usize,
+    /// `hev1`/`dvhe` permit parameter sets in samples; `hvc1`/`dvh1` promise
+    /// that the decoder configuration is carried out of band in hvcC.
+    parameter_sets_in_band: bool,
     has_mdcv: bool,
     has_clli: bool,
     /// hvcC first, then every enclosing box through moov.
@@ -1223,6 +1263,7 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
             return Ok(Some(HvcCLocation {
                 payload,
                 sample_entry_end: extra_end,
+                parameter_sets_in_band: matches!(entry.kind(), b"hev1" | b"dvhe"),
                 has_mdcv: find_child(bytes, extra_start..extra_end, b"mdcv")?.is_some(),
                 has_clli: find_child(bytes, extra_start..extra_end, b"clli")?.is_some(),
                 ancestors: vec![
@@ -1344,7 +1385,10 @@ fn hvcc_nal_array_types(record: &[u8]) -> Result<Vec<u8>, Fmp4Error> {
                 .filter(|end| *end <= record.len())
                 .ok_or_else(|| Fmp4Error::Malformed("hvcC NAL runs past the record".into()))?;
         }
-        if !found.contains(&array_type) {
+        // A zero-count array names a type but configures nothing. Treating it
+        // as present would let a syntactically valid yet undecodable hvcC
+        // satisfy the completeness gate and suppress real promotion input.
+        if count > 0 && !found.contains(&array_type) {
             found.push(array_type);
         }
     }
@@ -1917,14 +1961,17 @@ pub struct Segment {
     pub video_ticks: u64,
 }
 
-/// A contiguous stretch of one track's sample data inside one source fragment.
-/// Copied whole into the merged `mdat`; every sample in it keeps its bytes.
+/// One sample's source bytes and the transformation the merged `mdat` needs.
 struct Slice {
     /// Index into the merged fragment list.
     fragment: usize,
     /// Byte range within that fragment's own bytes.
     start: usize,
-    len: usize,
+    source_len: usize,
+    output_len: usize,
+    /// Length-prefix width when an out-of-band HEVC sample entry requires
+    /// VPS/SPS/PPS removal; `None` means copy the sample verbatim.
+    strip_hevc_parameter_sets: Option<u8>,
 }
 
 /// One track's whole contribution to the merged segment: every sample in
@@ -1938,8 +1985,74 @@ struct Plan {
 
 impl Plan {
     fn byte_len(&self) -> usize {
-        self.slices.iter().map(|s| s.len).sum()
+        self.slices.iter().map(|s| s.output_len).sum()
     }
+}
+
+fn visit_length_prefixed_hevc_nals(
+    sample: &[u8],
+    length_size: u8,
+    mut visit: impl FnMut(&[u8], Option<u8>),
+) -> Result<(), Fmp4Error> {
+    let length_size = usize::from(length_size);
+    if !(1..=4).contains(&length_size) {
+        return malformed("HEVC sample has an invalid NAL length size");
+    }
+    let mut pos = 0usize;
+    while pos < sample.len() {
+        let prefix_end = pos
+            .checked_add(length_size)
+            .filter(|end| *end <= sample.len())
+            .ok_or_else(|| Fmp4Error::Malformed("HEVC NAL length is truncated".into()))?;
+        let mut nal_len = 0usize;
+        for byte in &sample[pos..prefix_end] {
+            nal_len = nal_len
+                .checked_mul(256)
+                .and_then(|value| value.checked_add(usize::from(*byte)))
+                .ok_or_else(|| Fmp4Error::Malformed("HEVC NAL length overflows".into()))?;
+        }
+        if nal_len == 0 {
+            return malformed("HEVC sample carries a zero-length NAL unit");
+        }
+        let end = prefix_end
+            .checked_add(nal_len)
+            .filter(|end| *end <= sample.len())
+            .ok_or_else(|| Fmp4Error::Malformed("HEVC NAL runs past its sample".into()))?;
+        let nal = &sample[prefix_end..end];
+        visit(&sample[pos..end], hevc_nal_type(nal));
+        pos = end;
+    }
+    Ok(())
+}
+
+fn hevc_sample_without_parameter_sets_len(
+    sample: &[u8],
+    length_size: u8,
+) -> Result<usize, Fmp4Error> {
+    let mut kept = 0usize;
+    visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
+        if !matches!(kind, Some(32..=34)) {
+            kept = kept.saturating_add(framed.len());
+        }
+    })?;
+    if kept == 0 {
+        return Err(Fmp4Error::Unsupported(
+            "an HEVC video sample contains parameter sets but no picture data".into(),
+        ));
+    }
+    Ok(kept)
+}
+
+fn write_hevc_sample_without_parameter_sets(
+    out: &mut Vec<u8>,
+    sample: &[u8],
+    length_size: u8,
+) -> Result<(), Fmp4Error> {
+    visit_length_prefixed_hevc_nals(sample, length_size, |framed, kind| {
+        if !matches!(kind, Some(32..=34)) {
+            out.extend_from_slice(framed);
+        }
+    })
 }
 
 /// Merge consecutive fragments into one `styp moof mdat` HLS segment.
@@ -1955,12 +2068,15 @@ impl Plan {
 /// remux down to 1080p — the exact failure this path exists to prevent, on the
 /// exact browser it exists for.
 ///
-/// So the divergence is gone. Each track's slices are copied into the merged
-/// `mdat` consecutively, which makes its whole contribution contiguous and one
-/// data offset enough for it; the `sidx` boxes are byte-for-byte the shape
-/// ffmpeg writes, `earliest_presentation_time` included. The bytes a player
-/// sees now differ from the muxer this replaced only in *where the boundaries
-/// fall*, which was always the entire point.
+/// So the structural divergence is gone. Each track's samples are written into
+/// the merged `mdat` consecutively, which makes its whole contribution
+/// contiguous and one data offset enough for it; the `sidx` boxes are
+/// byte-for-byte the shape ffmpeg writes, `earliest_presentation_time`
+/// included. One sample-level normalization is deliberate: after promotion
+/// puts VPS/SPS/PPS in hvcC, `hvc1`/`dvh1` samples shed those NALs so the
+/// stream does not violate the out-of-band-only promise that fixed the
+/// documented 4K boundary-stutter condition. `hev1`/`dvhe` samples remain
+/// byte-for-byte unchanged.
 ///
 /// The one thing still normalized rather than copied: `tfhd` carries only
 /// `default-base-is-moof` and every sample writes its own duration, size,
@@ -1973,6 +2089,14 @@ pub fn merge(fragments: &[Fragment], init: &Init, sequence: u32) -> Result<Segme
         return malformed("nothing to merge");
     }
     let mut stats = MergeStats::default();
+    let strip_hevc_track = match init.video() {
+        Some(video) if video.codec == Some(VideoCodec::Hevc) && video.nal_length_size != 0 => {
+            locate_hvcc(&init.bytes)?
+                .filter(|location| !location.parameter_sets_in_band)
+                .map(|_| (video.id, video.nal_length_size))
+        }
+        _ => None,
+    };
 
     // The UNION of the tracks in the run, in first-seen order — which is
     // ffmpeg's own interleave order, video first, so a diff against hlsenc's
@@ -2033,12 +2157,43 @@ pub fn merge(fragments: &[Fragment], init: &Init, sequence: u32) -> Result<Segme
                     continue;
                 }
                 dur += run.samples.iter().map(|s| s.duration as u64).sum::<u64>();
-                samples.extend_from_slice(&run.samples);
-                slices.push(Slice {
-                    fragment: fi,
-                    start: run.data_offset,
-                    len: run.byte_len(),
-                });
+                let strip_length_size = strip_hevc_track
+                    .filter(|(track_id, _)| *track_id == id)
+                    .map(|(_, length_size)| length_size);
+                let mut start = run.data_offset;
+                for source_sample in &run.samples {
+                    let source_len = source_sample.size as usize;
+                    let end = start
+                        .checked_add(source_len)
+                        .filter(|end| *end <= frag.bytes.len())
+                        .ok_or_else(|| {
+                            Fmp4Error::Malformed(
+                                "a sample points past the end of its fragment".into(),
+                            )
+                        })?;
+                    let output_len = match strip_length_size {
+                        Some(length_size) => hevc_sample_without_parameter_sets_len(
+                            &frag.bytes[start..end],
+                            length_size,
+                        )?,
+                        None => source_len,
+                    };
+                    let mut sample = *source_sample;
+                    sample.size = u32::try_from(output_len).map_err(|_| {
+                        Fmp4Error::Unsupported(
+                            "a normalized HEVC sample exceeds the 32-bit MP4 size".into(),
+                        )
+                    })?;
+                    samples.push(sample);
+                    slices.push(Slice {
+                        fragment: fi,
+                        start,
+                        source_len,
+                        output_len,
+                        strip_hevc_parameter_sets: strip_length_size,
+                    });
+                    start = end;
+                }
             }
             expected_next = Some(tf.base_decode_time + dur);
         }
@@ -2117,11 +2272,20 @@ pub fn merge(fragments: &[Fragment], init: &Init, sequence: u32) -> Result<Segme
     for plan in &plans {
         for slice in &plan.slices {
             let frag = &fragments[slice.fragment];
-            let end = slice.start.saturating_add(slice.len);
+            let end = slice.start.saturating_add(slice.source_len);
             if end > frag.bytes.len() {
-                return malformed("a run points past the end of its fragment");
+                return malformed("a sample points past the end of its fragment");
             }
-            out.extend_from_slice(&frag.bytes[slice.start..end]);
+            let source = &frag.bytes[slice.start..end];
+            if let Some(length_size) = slice.strip_hevc_parameter_sets {
+                let before = out.len();
+                write_hevc_sample_without_parameter_sets(&mut out, source, length_size)?;
+                if out.len() - before != slice.output_len {
+                    return malformed("HEVC sample normalization changed size between passes");
+                }
+            } else {
+                out.extend_from_slice(source);
+            }
         }
     }
 
@@ -3304,6 +3468,79 @@ mod tests {
             reader.next_unit().expect("re-parsing enriched init"),
             Some(Unit::Init(_))
         ));
+    }
+
+    #[test]
+    fn incomplete_hevc_parameter_sets_are_refused_without_mutating_init() {
+        let mut init = minimal_hvcc_dv_init();
+        let original = init.bytes.clone();
+        let video = init.video().expect("video").clone();
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let vcl = [0x26, 0x01, 0x80];
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &vcl]),
+        );
+
+        let error = promote_hevc_parameter_sets(&mut init, &fragment)
+            .expect_err("VPS plus SPS is not a decoder configuration");
+        assert!(
+            error.to_string().contains("complete VPS/SPS/PPS"),
+            "{error}"
+        );
+        assert_eq!(init.bytes, original, "a refused promotion must be atomic");
+        assert!(!hevc_parameter_sets_complete(&init).expect("reading hvcC"));
+    }
+
+    #[test]
+    fn hvc1_merge_promotes_then_removes_in_band_parameter_sets() {
+        let mut init = minimal_hvcc_dv_init();
+        let video = init.video().expect("video").clone();
+        let vps = [0x40, 0x01, 0x0c];
+        let sps = [0x42, 0x01, 0x01];
+        let pps = [0x44, 0x01, 0xc0];
+        let rpu = [0x7c, 0x01, 0x19];
+        let vcl = [0x26, 0x01, 0x80];
+        let fragment = fragment_with_first_video_sample(
+            video.id,
+            length_prefixed_hevc_nals(&[&vps, &sps, &pps, &rpu, &vcl]),
+        );
+        assert!(promote_hevc_parameter_sets(&mut init, &fragment).expect("promotion"));
+        assert!(hevc_parameter_sets_complete(&init).expect("reading promoted hvcC"));
+
+        let segment = merge(&[fragment], &init, 1).expect("merge");
+        let mut reader = FragmentReader::new();
+        reader.push(&init.bytes);
+        assert!(matches!(
+            reader.next_unit().expect("init"),
+            Some(Unit::Init(_))
+        ));
+        reader.push(&segment.bytes);
+        let emitted = loop {
+            match reader.next_unit().expect("published segment") {
+                Some(Unit::Fragment(fragment)) => break fragment,
+                Some(_) => continue,
+                None => panic!("published segment carried no fragment"),
+            }
+        };
+        let sample = first_video_sample(&emitted, &video).expect("video sample");
+        let kinds: Vec<u8> = length_prefixed_nals(sample, video.nal_length_size)
+            .into_iter()
+            .filter_map(hevc_nal_type)
+            .collect();
+        assert!(
+            !kinds.iter().any(|kind| (32..=34).contains(kind)),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.contains(&62),
+            "Dolby Vision RPU was removed: {kinds:?}"
+        );
+        assert!(
+            kinds.contains(&19),
+            "encoded picture was removed: {kinds:?}"
+        );
     }
 
     #[test]

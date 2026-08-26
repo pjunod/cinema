@@ -10710,8 +10710,14 @@ impl TranscodeManager {
             let progress = Arc::clone(&progress);
             let runtime_cache = self.runtime_cache.clone();
             tokio::spawn(async move {
-                let outcome =
-                    copyseg::run(stdout, dir.clone(), &sid, copyseg::Limits::default()).await;
+                let outcome = copyseg::run(
+                    stdout,
+                    dir.clone(),
+                    &sid,
+                    copyseg::Limits::default(),
+                    video_options.promotes_parameter_sets(),
+                )
+                .await;
                 match outcome {
                     copyseg::Outcome::Ran(counts) => {
                         tracing::info!(
