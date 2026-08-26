@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["555d2739"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The cluster-check request contract gives ForceCompaction enough time for its separately bounded 30-second snapshot-publication and 30-second purge phases while ordinary requests retain the 12-second deadline. The real learner lifecycle then forces compaction past a stopped learner, restarts it through snapshot installation, and completes removal, replacement, promotion, and promoted-voter restart; startup timeout diagnostics retain the voter identity if any process fails to answer."
