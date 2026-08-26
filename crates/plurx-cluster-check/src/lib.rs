@@ -5420,6 +5420,16 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         );
     }
     let promoted_spec = specs[(PROMOTED - 1) as usize].clone();
+    // A real replacement daemon is configured from the current roster, which
+    // excludes tombstoned node 4. Feeding the removed endpoint to Hiqlite here
+    // makes startup discovery spend its entire bounded wait on a peer the
+    // scenario has already proved cannot return. Keep the durable Raft ids
+    // sparse instead of turning a removed learner into a bootstrap peer.
+    let promoted_specs = specs
+        .iter()
+        .filter(|spec| spec.id != LEARNER)
+        .cloned()
+        .collect::<Vec<_>>();
     cluster
         .request(
             leader,
@@ -5444,7 +5454,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs.clone()).as_learner(),
         )
         .await?;
     cluster
@@ -5540,7 +5550,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs),
         )
         .await?;
     cluster
