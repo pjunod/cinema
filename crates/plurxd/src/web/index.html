@@ -3003,8 +3003,18 @@ function persistentWait(v,p,began,generation){
       `<button onclick="closePlayer()">Close</button>`);
     return;
   }
+  const estimateBps=(p.hls&&p.hls.bandwidthEstimate)||p.bandwidthSeedBps;
+  const recoveryHeight=PlaybackPolicy.stallRecoveryTargetHeight({
+    method:p.method,quality:playQuality(),kind,ladder:p.ladder,
+    currentHeight:Number((p.health&&p.health.target_height)||p.autoHeight||v.videoHeight),
+    estimateKbps:estimateBps>0?estimateBps/1000:(p.priorKbps||null),
+    recentEstimateKbps:p.abr&&p.abr.recentEstimateKbps,
+    recentEstimateAtMs:p.abr&&p.abr.recentEstimateAtMs,
+    nowMs:performance.now()
+  });
   p.stallRecoveries=(p.stallRecoveries||0)+1;
-  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom};
+  p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
+    targetHeight:recoveryHeight};
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
     message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`},
     playbackContext()));
@@ -3014,7 +3024,7 @@ function persistentWait(v,p,began,generation){
     `resuming from ${clockFromSec(position)}`);
   if(action==='transcode') startTranscodeFallback("stall-recovery",
     `switched to a transcode after a persistent ${kind} stall`);
-  else seekTo(position,true);
+  else seekTo(position,true,recoveryHeight);
 }
 function finishStallRecovery(outcome,note){
   const p=PLAYER, r=p&&p.recoveringStall; if(!r) return false;
@@ -7881,7 +7891,7 @@ function skipMarker(m){
 }
 // Seek that works for every method: direct play seeks natively; remux/transcode
 // restart the server-side stream at the new offset (the stream is one-directional).
-async function seekTo(targetSec, forceReopen=false){
+async function seekTo(targetSec, forceReopen=false, autoHeightOverride=null){
   const v=document.getElementById("video"); if(!v||!PLAYER) return;
   endWait(false);
   targetSec=Math.max(0,targetSec);
@@ -7961,7 +7971,7 @@ async function seekTo(targetSec, forceReopen=false){
   [...v.querySelectorAll("track")].forEach(t=>t.remove());
   if(PLAYER.method==='transcode'){
     const opts=PlaybackPolicy.stallReopenSessionOptions({
-      options:transcodeOpts(targetSec,aidx),forceReopen,
+      options:transcodeOpts(targetSec,aidx,autoHeightOverride),forceReopen,
       method:PLAYER.method,sessionId:PLAYER.sessionId
     });
     let info; try{ info=await openSession(PLAYER.fileId,opts);}catch(e){ return failed(e); }
