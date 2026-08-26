@@ -2389,10 +2389,20 @@ impl JobManager {
     /// here is urgent; the cost is one small query per tick. Scheduled and
     /// manual runs go through the same `trigger_*` methods, so a scheduled scan
     /// can't stack on top of a running one — `trigger` refuses, and the next
-    /// tick tries again.
+    /// tick tries again. The cluster integration feature exposes a process-
+    /// local cadence override so real-daemon tests can wait on scheduler-owned
+    /// prerequisites without adding a full minute to every fixture.
     pub async fn schedule_loop(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         self.scan_on_startup().await;
-        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(60));
+        #[cfg(feature = "cluster-integration-tests")]
+        let interval = std::env::var("PLURX_TEST_SCHEDULER_TICK_MS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|milliseconds| (10..=60_000).contains(milliseconds))
+            .map_or(Duration::from_secs(60), Duration::from_millis);
+        #[cfg(not(feature = "cluster-integration-tests"))]
+        let interval = Duration::from_secs(60);
+        let mut ticker = tokio::time::interval(interval);
         loop {
             ticker.tick().await;
             if let Err(e) = self.run_due_jobs(&transcode).await {
