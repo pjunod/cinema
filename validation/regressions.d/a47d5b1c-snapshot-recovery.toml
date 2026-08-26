@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["a47d5b1c"]
-points = ["cluster.auth"]
-checks = ["rust-gate", "cluster-auth"]
-reason = "The vendor transport regression requires a cancelled Raft RPC to request a stream reset, while the separate-process learner lifecycle stops a learner behind a compacted log, restarts it, and requires the missed setting plus snapshot marker to become locally visible before readiness. The same gate exercises read-pool rotation after restore, and the line-delimited voter protocol fails immediately if snapshot progress is written to stdout again."

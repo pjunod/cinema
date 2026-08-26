@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["1f1c52fe"]
-points = ["cluster.auth", "cluster.membership"]
-checks = ["rust-gate", "cluster-auth", "security-boundaries"]
-reason = "The separate-process learner lifecycle now redeems and finalizes only through the learner wire, waits for the follower membership schema and a target-local applied watermark after compaction, proves the restored setting from the learner's local store, and exercises removal plus replacement and promotion. The same gate catches regressions in shared replication monitoring, the shipped membership removal route and parameter binding, voter startup's local-apply barrier, and bounded membership reconfiguration waits."
