@@ -39,7 +39,9 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
-        self.assertIn('if name in {"home", "activity", "settings"}:', script)
+        self.assertIn(
+            'if name in {"home", "activity", "analysis", "settings"}:', script
+        )
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
@@ -47,6 +49,7 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("resume_activity_polling(page)", script)
         self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
         self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        self.assertIn('if name == "analysis":', script)
         self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
         self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
         self.assertLess(

@@ -1240,7 +1240,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # Slow artwork or an incremental listing can no longer spend an
         # arbitrary part of the later 4.5s polling observation window.
         page.wait_for_load_state("networkidle", timeout=args.timeout)
-        # Home, Activity and Settings expose an explicit settled phase. Start
+        # Home, Activity, Analysis and Settings expose an explicit settled phase. Start
         # the polling observation window from that phase, not merely from the
         # document's network-idle event: under a loaded runner the route's
         # async render can finish after page.goto() returns, shortening the
