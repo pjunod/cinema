@@ -58,6 +58,10 @@ class OperationsContractCase(unittest.TestCase):
         script = read("scripts/ui-baseline")
 
         self.assertIn("releaseSession(PLAYER.sessionId);", script)
+        self.assertIn(
+            'call == "GET /api/v1/files/<id>/direct"',
+            script,
+        )
         cleanup = script.index(
             "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
         )

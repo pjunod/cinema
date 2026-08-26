@@ -1309,7 +1309,15 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}
         for call in api_calls:
-            counted[call] = counted.get(call, 0) + 1
+            # Chromium is free to satisfy one direct-play video with one GET or
+            # several byte-range GETs. The baseline contract is that the real
+            # direct endpoint was used; its transport chunk count changes with
+            # decoder buffering and is not a UI or routing invariant. Control
+            # plane calls remain exact counts.
+            if route.get("player") and call == "GET /api/v1/files/<id>/direct":
+                counted[call] = 1
+            else:
+                counted[call] = counted.get(call, 0) + 1
         return focus, dict(sorted(counted.items())), dom
     finally:
         # A context disappearing is not the same lifecycle as a viewer closing
