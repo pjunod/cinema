@@ -59,7 +59,8 @@ tests. After rebasing over PR #613, the expanded suites were green again
 later lost one disposable Playwright page before `#main` attached, then
 rendered every following page and reported no golden mismatch. Commit
 `fb2128e5` adds one fresh-context retry only for that root-attachment timeout;
-all semantic and golden failures remain immediately fatal.
+non-player semantic and golden failures remain immediately fatal, while the
+pre-existing real-player capture retains its separately bounded one retry.
 The slice's acceptance boundary is intentionally smaller than the whole actor
 migration; the exact behavior
 and timer ledger are in

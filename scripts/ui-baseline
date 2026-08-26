@@ -496,6 +496,22 @@ class RetryableRootAttach(Fail):
     """A fresh page never attached its route root before the bounded deadline."""
 
 
+def root_attach_failure(name, container, problems):
+    """Preserve semantic boot evidence; otherwise classify renderer loss."""
+    if problems:
+        return Fail(f"{name}: " + "; ".join(problems[:5]))
+    return RetryableRootAttach(
+        f"{name}: {container} did not attach before the route deadline"
+    )
+
+
+def should_retry_capture(route, error, attempt, attempts):
+    """Whether this exact failed capture owns one more fresh-context attempt."""
+    return attempt + 1 < attempts and (
+        bool(route.get("player")) or isinstance(error, RetryableRootAttach)
+    )
+
+
 # ---- environment ----------------------------------------------------------
 
 
@@ -1231,13 +1247,11 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         try:
             page.wait_for_selector(container, state="attached", timeout=args.timeout)
         except PlaywrightTimeoutError as error:
-            # A persistent missing root is still a product failure. One fresh
-            # context retry covers a renderer/connection that died during
-            # navigation without weakening any later DOM, accessibility,
-            # request-inventory, or golden assertion.
-            raise RetryableRootAttach(
-                f"{name}: {container} did not attach before the route deadline"
-            ) from error
+            # A page or console exception is product evidence, even when it
+            # also prevented the root from mounting. Otherwise one fresh
+            # context retry covers renderer/connection loss. A persistent
+            # missing root is still a product failure on the second attempt.
+            raise root_attach_failure(name, container, problems) from error
         # The layout the app actually resolved, not the one localStorage asked
         # for. `layoutId()` falls back to classic on a surface a layout does not
         # declare, and the sweep already skipped those pairs — so a mismatch
@@ -1621,8 +1635,7 @@ def run_capture(base_url, token, routes, args, out_dir):
                         print(f"OK      {key}", flush=True)
                         break
                     except Exception as e:  # noqa: BLE001 — every failure is a gate failure
-                        retryable = route.get("player") or isinstance(e, RetryableRootAttach)
-                        if attempt + 1 < attempts and retryable:
+                        if should_retry_capture(route, e, attempt, attempts):
                             print(f"RETRY   {key}: {e}", flush=True)
                             continue
                         failures.append(f"{key}: {e}")
