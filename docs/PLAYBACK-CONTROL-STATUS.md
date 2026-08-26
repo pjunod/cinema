@@ -50,9 +50,9 @@ engine/incarnation token through every response; commits streamed
 lease/frontier state only at successful EOF; queues producer work outside the
 response body; and names VOD/rolling ownership correctly. The first complete
 post-review unit run exposed one actor/timer clock-domain failure after 1,877
-passing tests; its remediation is awaiting exact-head re-review before any
-test is rerun. The slice's acceptance boundary is intentionally smaller than
-the whole actor migration; the exact behavior
+passing tests; the corrected exact head then passed all 1,878 executed tests.
+The slice's acceptance boundary is intentionally smaller than the whole actor
+migration; the exact behavior
 and timer ledger are in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
 
@@ -80,11 +80,11 @@ Review and test state for M3b:
 
 | Gate | State |
 |---|---|
-| Implementation | Clock-domain and ledger findings from `6e526e60` are remediated; exact-head re-review pending |
-| Adversarial diff review | Approved at `2edeb997`; **changes requested** at `6e526e60`; next test remains gated on approval of the remediation head |
-| Unit/focused tests | `make test` at `2edeb997`: 1,877 passed, 1 failed, 3 ignored; the sole actor-timer failure drove the current clock fix |
-| Full local gate | Awaiting exact-head approval, then rerun from the beginning |
-| Hosted CI | Draft PR exists; hosted merge gates wait for the corrected local suite |
+| Implementation | Complete on `278ddff4`; final ledger-only commit pending |
+| Adversarial diff review | **Approved** on the complete exact diff at `278ddff4`; the reviewer ran no tests or compile commands |
+| Unit/focused tests | Two exact deadline regressions passed, then `make test` passed: 1,878 passed, 0 failed, 3 ignored |
+| Full local gate | Unit portion green; remaining validation targets are running next |
+| Hosted CI | Draft PR exists; hosted merge gates follow the remaining local validation |
 | Merge | Pending all gates |
 
 ## Watchdog-removal ledger
