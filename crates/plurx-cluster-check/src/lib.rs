@@ -121,6 +121,7 @@ const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_strea
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+const COMPACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
 /// The interface every harness listener binds. hiqlite composes each listener
 /// from this and the port half of the node's own `addr_raft`/`addr_api`
 /// (`hiqlite-0.14.0/src/start.rs:318`), which is why the two must agree.
@@ -6915,6 +6916,7 @@ pub enum Request {
 impl Request {
     fn response_timeout(&self) -> Duration {
         match self {
+            Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
             | Self::RemoveNode { .. }
             | Self::PromoteLearner { .. }
@@ -7537,7 +7539,11 @@ impl NodeProcess {
     }
 
     pub async fn wait_ready(&mut self) -> Result<()> {
-        match self.read_response(START_TIMEOUT).await? {
+        let response = self
+            .read_response(START_TIMEOUT)
+            .await
+            .with_context(|| format!("voter {} startup response", self.id))?;
+        match response {
             Response::Ready { node_id } if node_id == self.id => Ok(()),
             response => bail!("voter {} failed startup: {response:?}", self.id),
         }
@@ -12023,6 +12029,15 @@ mod tests {
         );
         assert!(snapshot_trigger_plan(Some(1_000), 999).is_err());
         assert!(snapshot_trigger_plan(Some(u64::MAX), u64::MAX).is_err());
+    }
+
+    #[test]
+    fn compaction_request_outlives_snapshot_publication_and_purge_bounds() {
+        let request = Request::ForceCompaction {
+            phase: "response-timeout-contract".to_owned(),
+        };
+        assert!(request.response_timeout() > Duration::from_secs(60));
+        assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);
     }
 
     fn test_launch(root: &Path, read_pool_size: usize) -> NodeLaunch {
