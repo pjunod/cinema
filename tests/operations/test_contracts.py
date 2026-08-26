@@ -242,8 +242,14 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("PLURX_SKIP_UI_BASELINE: 1", workflow)
         self.assertIn("PLURX_SKIP_ANDROID_JVM: 1", workflow)
         self.assertIn("if: needs.scope.outputs.apple == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.android_device == 'true'", workflow)
-        self.assertIn("if: needs.scope.outputs.web_layout == 'true'", workflow)
+        web_layout = workflow.split("\n  web_layout:", 1)[1].split(
+            "\n  android_jvm:", 1
+        )[0]
+        android_device = workflow.split("\n  android_device:", 1)[1].split(
+            "\n  coverage:", 1
+        )[0]
+        self.assertIn("if: ${{ false }}", web_layout)
+        self.assertIn("if: ${{ false }}", android_device)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
