@@ -3,8 +3,9 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
-attempt-fenced publication/fetch ledger; implementation and contract are local,
-not yet reviewed or tested
+attempt-fenced publication/fetch ledger; the first exact-head review requested
+changes and its concurrency findings are locally remediated, not yet re-reviewed
+or tested
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -60,16 +61,18 @@ renew or advance its successor.
 Existing `SegmentIndex`, `playlist_published`, `high_segment`, and
 `fetched_end_ms` values remain compatibility projections for pruning, byte
 accounting, legacy pacing, and old watchdogs. Rolling status reads the combined
-actor snapshot when available. No process action or recovery policy changes in
-this slice. Its full ordering and rollback contract is in
+actor snapshot when available. No process action or recovery policy is added
+or removed; the existing pre-publication fallback must now obtain actor
+admission before touching its predecessor. Its full ordering and rollback
+contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md).
 
 Review and test state for M3c1:
 
 | Gate | State |
 |---|---|
-| Implementation | Local and in progress on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
-| Adversarial diff review | Pending exact-head review; no tests will run first |
+| Implementation | Initial `fe73efaa` plus local remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
+| Adversarial diff review | `fe73efaa` requested changes: playlist attempt pinning, destructive fallback ordering, same-Arc EOF projection, transition-gate storage I/O, pending-end resolution, and typed rejection truth. All are locally remediated, along with a locally found mixed predecessor-scratch/successor-attempt refresh race; exact-head re-review is pending and no tests will run first. |
 | Unit/focused tests | Not run yet, by required review-before-test ordering |
 | Full local gate | Not run yet |
 | Hosted CI | No PR yet |

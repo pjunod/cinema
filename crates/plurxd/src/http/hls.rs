@@ -2288,7 +2288,7 @@ async fn subtitle_playlist_local(
     session: &str,
     index: i64,
 ) -> Result<Response, ApiError> {
-    let (_, file, owner) = session_file(state, session).await?;
+    let (_, file, _) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2308,6 +2308,10 @@ async fn subtitle_playlist_local(
             .map_err(|err| playlist_error(session, err))?,
     };
     let response = subtitle_media_playlist(&video).into_bytes();
+    // The video-playlist wait may span a valid pre-publication producer
+    // replacement. Bind the subtitle response to the attempt that supplied
+    // those bytes, not to the attempt observed before that wait began.
+    let (_, _, owner) = session_file(state, session).await?;
     commit_resolved_media(state, session, &owner, "subtitle-playlist", None, true).await?;
     Ok(playlist_response(response))
 }
@@ -4124,6 +4128,67 @@ mod tests {
         assert!(!range_covers_object(Some((1, 99)), 100));
     }
 
+    #[tokio::test]
+    async fn subtitle_playlist_commit_rebinds_after_video_attempt_handoff() {
+        let dir = crate::test_tempdir().expect("session directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
+        let (_, _, predecessor_owner) = session_file(&fixture.state, "subtitle-handoff")
+            .await
+            .expect("predecessor context");
+        let transcode = Arc::clone(&fixture.state.transcode);
+        let waiting = tokio::spawn(async move { transcode.playlist("subtitle-handoff").await });
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiting.is_finished(),
+            "video playlist is waiting on predecessor"
+        );
+
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
+            .await
+            .expect("segment zero");
+        tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
+            .await
+            .expect("segment one");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
+        )
+        .await
+        .expect("successor playlist");
+        let video = waiting
+            .await
+            .expect("playlist task")
+            .expect("successor playlist");
+        assert!(String::from_utf8(video)
+            .expect("playlist text")
+            .contains("seg00001.ts"));
+
+        assert!(commit_resolved_media(
+            &fixture.state,
+            "subtitle-handoff",
+            &predecessor_owner,
+            "subtitle-playlist",
+            None,
+            true,
+        )
+        .await
+        .is_err());
+        let (_, _, successor_owner) = session_file(&fixture.state, "subtitle-handoff")
+            .await
+            .expect("successor context");
+        commit_resolved_media(
+            &fixture.state,
+            "subtitle-handoff",
+            &successor_owner,
+            "subtitle-playlist",
+            None,
+            true,
+        )
+        .await
+        .expect("subtitle response commits against successor owner");
+    }
+
     #[test]
     fn delayed_resolved_replay_rechecks_the_current_lease_boundary() {
         let mut route = MediaSessionRoute {
@@ -4794,7 +4859,7 @@ mod tests {
         )
         .await
         .expect("response opened on attempt zero");
-        assert_eq!(fixture.begin_producer_attempt().await, Some(1));
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
         let renewal_after_replacement = fixture.last_renewal_kind().await;
 
         assert_eq!(
@@ -4809,6 +4874,41 @@ mod tests {
             renewal_after_replacement,
             "predecessor EOF cannot renew the successor attempt"
         );
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
+    }
+
+    #[tokio::test]
+    async fn accepted_predecessor_eof_cannot_project_after_successor_reset() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "projection-race").await;
+        let body = vec![5_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("projection-race".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("predecessor response");
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_response_projection(Arc::clone(&pause));
+        let drain = tokio::spawn(async move {
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("predecessor body")
+        });
+        pause.wait().await;
+        assert_eq!(
+            fixture.begin_producer_attempt().await,
+            Ok(1),
+            "successor admission resets the compatibility projection"
+        );
+        pause.wait().await;
+        assert_eq!(drain.await.expect("body task").len(), body.len());
         assert_eq!(fixture.fetched_segment(), -1);
         assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
     }

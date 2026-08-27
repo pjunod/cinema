@@ -1097,6 +1097,14 @@ pub(crate) struct RollingPublicationObservation {
     pub resolved_fetched_end_ms: Option<i64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProducerAttemptRejection {
+    SessionEnded,
+    PlaylistPublished,
+    AttemptExhausted,
+    ControlUnavailable,
+}
+
 impl RollingLeaseSnapshot {
     pub(crate) fn expired(&self) -> bool {
         !self.retired && self.remaining.is_zero()
@@ -1237,7 +1245,7 @@ enum RollingControlCommand {
         reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
     },
     BeginProducerAttempt {
-        reply: tokio::sync::oneshot::Sender<Option<u64>>,
+        reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
     },
     ObservePublication {
         observation: RollingPublicationObservation,
@@ -1403,19 +1411,24 @@ impl RollingControlActor {
         })
     }
 
-    fn begin_producer_attempt_at(&mut self, now: Instant) -> Option<u64> {
-        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live)
-            || self.delivery.playlist_ready
-        {
-            return None;
+    fn begin_producer_attempt_at(&mut self, now: Instant) -> Result<u64, ProducerAttemptRejection> {
+        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
+            return Err(ProducerAttemptRejection::SessionEnded);
         }
-        let attempt = self.delivery.producer_attempt.checked_add(1)?;
+        if self.delivery.playlist_ready {
+            return Err(ProducerAttemptRejection::PlaylistPublished);
+        }
+        let attempt = self
+            .delivery
+            .producer_attempt
+            .checked_add(1)
+            .ok_or(ProducerAttemptRejection::AttemptExhausted)?;
         self.delivery = RollingDeliverySnapshot {
             producer_attempt: attempt,
             ..RollingDeliverySnapshot::default()
         };
         self.producer_attempt.store(attempt, Ordering::Release);
-        Some(attempt)
+        Ok(attempt)
     }
 
     fn observe_publication_at(
@@ -1473,12 +1486,19 @@ impl RollingControlActor {
         let Some(segment_index) = segment_index else {
             return true;
         };
-        if self
-            .delivery
-            .fetched_segment
-            .is_some_and(|current| segment_index <= current)
-        {
-            return true;
+        if let Some(current) = self.delivery.fetched_segment {
+            if segment_index < current {
+                return true;
+            }
+            if segment_index == current {
+                if self.delivery.pending_fetched_segment == Some(segment_index) {
+                    if let Some(end_ms) = segment_end_ms {
+                        self.delivery.fetched_end_ms = self.delivery.fetched_end_ms.max(end_ms);
+                        self.delivery.pending_fetched_segment = None;
+                    }
+                }
+                return true;
+            }
         }
         self.delivery.fetched_segment = Some(segment_index);
         if let Some(end_ms) = segment_end_ms {
@@ -1711,13 +1731,15 @@ impl RollingControlHandle {
         self.producer_attempt.load(Ordering::Acquire)
     }
 
-    pub(crate) async fn begin_producer_attempt(&self) -> Option<u64> {
+    pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.sender
             .send(RollingControlCommand::BeginProducerAttempt { reply })
             .await
-            .ok()?;
-        response.await.ok().flatten()
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        response
+            .await
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
     pub(crate) async fn observe_publication(
@@ -2563,12 +2585,38 @@ mod tests {
         assert_eq!(actor.delivery.published_segment, Some(1));
         assert_eq!(actor.delivery.published_end_ms, Some(4_000));
         assert_eq!(actor.delivery.next_media_sequence, 2);
-        assert!(
-            actor
-                .begin_producer_attempt_at(started + Duration::from_secs(3))
-                .is_none(),
-            "client-visible publication fences in-place attempt replacement"
+        assert_eq!(
+            actor.begin_producer_attempt_at(started + Duration::from_secs(3)),
+            Err(ProducerAttemptRejection::PlaylistPublished),
+            "client-visible publication returns an exact rejection cause"
         );
+    }
+
+    #[test]
+    fn rolling_equal_fetch_resolves_its_pending_end() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(1),
+            "segment",
+            attempt,
+            Some(3),
+            None,
+        ));
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(2),
+            "segment",
+            attempt,
+            Some(3),
+            Some(9_000),
+        ));
+        assert_eq!(actor.delivery.fetched_segment, Some(3));
+        assert_eq!(actor.delivery.fetched_end_ms, 9_000);
+        assert_eq!(actor.delivery.pending_fetched_segment, None);
     }
 
     #[test]

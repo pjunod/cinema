@@ -1,7 +1,9 @@
 # Playback control M3c1 — attempt-fenced delivery ledger
 
 This slice moves rolling publication and completed-fetch facts into the M3
-actor without changing producer recovery behavior. It follows the explicit
+actor without changing which producer recovery actions are selected. It also
+orders the existing pre-publication fallback so actor admission must succeed
+before that action can touch its predecessor. It follows the explicit
 demand lease in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md)
 and is a prerequisite for the remaining producer progress/exit events and the
@@ -33,6 +35,12 @@ The actor allocates every rolling producer attempt. Initial copy/transcode
 starts and every allowed pre-publication fallback reset ffmpeg progress to
 that same attempt before spawning the child. An attempt cannot be replaced
 after its usable playlist has entered actor state.
+
+Attempt admission returns an exact rejection: the session ended, a playlist
+was already published, the attempt counter was exhausted, or the actor mailbox
+was unavailable. Fallback logs that cause and leaves the predecessor process,
+scratch, admission class, telemetry, and compatibility frontiers unchanged on
+every rejection.
 
 ```text
  producer start/replacement
@@ -68,6 +76,13 @@ attempt replacement crosses it. Streamed EOF commits revalidate both the
 registry identity and the captured attempt; therefore bytes from a predecessor
 that finish after replacement cannot renew or advance its successor.
 
+The actor commit and temporary compatibility frontier use a short,
+attempt-tagged projection gate. It never waits for process or filesystem I/O.
+If successor admission races after a predecessor EOF was accepted, either the
+old projection lands first and the successor reset overwrites it, or the reset
+lands first and the old projection is skipped. This preserves the M3b contract
+that response EOF never waits behind `child_transition`.
+
 Playlist readiness becomes authoritative before a playlist response commits.
 A pre-response fallback may win the compatibility child-transition gate after
 the old playlist was read but before its actor observation. In that ordering
@@ -95,11 +110,22 @@ status and joined playback evidence.
 |---|---|---|
 | `SegmentIndex` | Still updated, sized, and pruned | It owns the compatibility playlist catalog, byte totals, and retained files until actor catalog ownership lands. |
 | `playlist_published` | Still gates the first usable response | The existing HTTP startup contract remains unchanged; its value is also projected into the actor. |
-| `high_segment`, `fetched_end_ms` | Still projected after an accepted actor commit | Legacy pacing, pruning, and compatibility tests still consume them. Status no longer samples them when the actor is available. |
+| `high_segment`, `fetched_end_ms` | Still projected after an accepted actor commit, behind an attempt-tagged synchronous gate | Legacy pacing, pruning, and compatibility tests still consume them. Successor admission resets them without blocking EOF on process I/O; status no longer samples them when the actor is available. |
 | `child_transition` | Still orders old fallback/retirement paths | M4 removes it only after child start, exit, progress, signal, and retirement are actor actions. |
 | first-segment/software grace and progress watcher | Unchanged | Progress and child exit become actor observations in M3c2; M4 then replaces competing recovery with one producer progress deadline. |
 | playlist/segment wait budgets | Unchanged | These are bounded HTTP waits, not recovery owners. Their wakeup state moves to the actor later. |
 | 15-second repair/flow tick | Unchanged | It still schedules index refresh, pruning, compatibility flow, metrics, and cleanup. |
+
+Playlist parsing and file metadata reads happen outside `child_transition`.
+Only the prepared in-memory merge crosses that gate after revalidating the
+attempt. A slow NAS metadata operation can delay one observation, but cannot
+block control, stop, replacement, or resume signaling.
+
+Actor admission intentionally precedes predecessor teardown, so the current
+attempt may already name the successor while predecessor files still exist.
+The replacement marker fences playlist reads, segment opens, and index refresh
+preparation throughout that interval. No observation can attribute those old
+files to the new attempt and merge them after the transition reopens.
 
 ## Instrumentation
 
@@ -127,7 +153,8 @@ final diff proves:
 3. a predecessor body completing after replacement cannot renew or mutate the
    successor;
 4. publication and fetch frontiers never move backward;
-5. fetch-before-`EXTINF` resolves only against its exact pending segment;
+5. fetch-before-`EXTINF` resolves only against its exact pending segment, and
+   a later equal-segment commit with known timing resolves it too;
 6. complete objects, full-span ranges, and `304` advance the frontier while
    partial, dropped, failed, and invalid responses do not;
 7. retirement rejects every late publication and fetch mutation;
