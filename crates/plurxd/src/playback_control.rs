@@ -1662,8 +1662,8 @@ pub struct RollingProducerOperationalSnapshot {
     /// Immutable producer decision identity, when one has been retained.
     pub decision_sequence: Option<u64>,
     pub decision_reason: Option<&'static str>,
-    /// Bounded observation of the passive executor task. This slice never
-    /// reports a DecisionApplied acknowledgement.
+    /// Bounded executor/lifecycle state. Actor-side terminal settlement is
+    /// included, but this slice never reports a DecisionApplied acknowledgement.
     pub executor_state: &'static str,
     pub executor_pending_decision_age_ms: Option<i64>,
     pub executor_last_observed_sequence: u64,

@@ -6,12 +6,13 @@
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `ceb8c74d3f078c194769c780e8bb1b39e4b0461a`
-(round 1 requested changes; not approved)
+**Last reviewed exact head:** `ff6ba47d45c9c0101e9675b503fcf1efe7aa9410`
+(round 2 requested changes; not approved)
 **Current implementation:** behavior-neutral decision transport committed at
-`c04898e2`, with round-1 liveness/compile repairs at `732d3442`: one immutable
-actor slot, non-consuming actor polling, one move-only bounded executor inbox,
-a passive weak-reference executor, and status projection
+`c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
+repairs at `91486148`: one immutable actor slot, non-consuming actor polling,
+one move-only bounded executor inbox, a passive weak-reference executor, and
+status projection
 **Test state:** no tests or builds run for the active slice; exact-head
 adversarial approval is required first
 
@@ -392,9 +393,9 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `732d3442` and deliberately untested. Continue in this order:
+committed through `91486148` and deliberately untested. Continue in this order:
 
-1. Bind the round-1 repair commit to the regression catalog, commit this
+1. Bind the round-2 repair commit to the regression catalog, commit this
    truthful review ledger, and freeze one exact head without running tests.
 2. Obtain independent adversarial concurrency/lifecycle, contract/ordering,
    and static/test/inventory reviews of that exact head. Fix every actionable
@@ -429,7 +430,7 @@ earlier shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-The active code is committed through `732d3442` but has not been built or
+The active runtime is committed through `91486148` but has not been built or
 tested. Root static review found and removed an initial cycle in which the
 actor retained a transport containing a sender back into its own mailbox.
 Round 1 at exact head `ceb8c74d` returned one approval and two change requests.
@@ -438,12 +439,24 @@ loss was invisible, mailbox loss could hide a committed terminal cause, two
 test-only enums would fail warnings-as-errors, one `Arc` map would not compile,
 and the tests did not prove their liveness claims. Repair `732d3442` adds a
 post-cutoff wake, actor-side executor-closure monitoring, a committed terminal-
-cause projection, the compile/lint repairs, and deterministic cancellation,
-retained-notify/full-inbox, timer expiry, executor loss, actor loss, and weak-
-ownership regressions. The executor cursor remains explicitly an observation,
-not an application acknowledgement, and terminal transition settles the
-retained slot. Legacy watchdogs, direct replacement/action paths, response
-admission, cleanup, and process ownership remain active.
+cause projection and the compile/lint repairs, with authored coverage for
+cancellation, retained notification, bounded inbox, timer expiry, executor
+loss, actor loss, terminal cause, and weak ownership.
+
+Round 2 at exact head `ff6ba47d45c9c0101e9675b503fcf1efe7aa9410`
+returned one approval and two change requests. Actor loss after an executor
+poll began could still be reported as an authority fence even though no
+terminal transition had committed; a racing terminal transition could obscure
+previously observed executor loss; and the timer, actor-abort, and full-inbox
+tests still relied on scheduler timing. Repair `91486148` gives uncommitted
+actor loss its own `Unavailable` poll result, retains committed terminal truth
+in a shared projection, settles terminal status without overwriting prior
+`lost` evidence, and replaces scheduling assumptions with explicit actor-start
+and executor-poll barriers plus standalone retained-Notify and capacity-one
+inbox checks. The executor cursor remains explicitly an observation, not an
+application acknowledgement, and terminal transition settles the retained
+slot. Legacy watchdogs, direct replacement/action paths, response admission,
+cleanup, and process ownership remain active.
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
 there is no `DecisionApplied` acknowledgement, retry cutover, or transparent
