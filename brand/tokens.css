@@ -163,7 +163,7 @@
 
   /* surfaces — pure black root, warm-grey tiers */
   --noirr-oled:        #000000;
-  --noirr-bg:          #0a0a0a;
+  --noirr-bg:          #000000;
   --noirr-surface:     #181818;
   --noirr-raised:      #242424;
   --noirr-line:        rgba(255, 255, 255, 0.06);
