@@ -620,12 +620,6 @@ owns = ["startup timeout", "progress timeout", "failure", "replacement"]
 replacement = "one due-first actor ProducerProgressDeadline and immutable ProducerDecision"
 
 [[entrypoints]]
-id = "producer-decision-transport"
-anchor = "async fn poll_producer_decision"
-owns = ["decision polling", "executor wake", "executor inbox"]
-replacement = "one retained actor decision slot and one passive weak-reference executor task; no action authority in this slice"
-
-[[entrypoints]]
 id = "request-verdict"
 anchor = "async fn playlist_producer_failed("
 owns = ["request-side exit inference", "failure"]
