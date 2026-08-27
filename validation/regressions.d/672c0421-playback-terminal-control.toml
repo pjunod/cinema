@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["672c0421", "619765ab"]
+commits = ["672c0421", "619765ab", "2f7953c5"]
 points = ["playback.pipeline", "server.api"]
 checks = ["rust-gate"]
 reason = "The Rust gate retains the corrected M3c3 terminal-control contracts: accepted rolling and VOD demand=end requests atomically enter terminal state, preserve an exact replicated acknowledgement after response loss and route settlement, survive HTTP cancellation through independently owned exchange and VOD cleanup tasks, validate ended responses through the cluster relay, never renew the playback lease, and reject every non-exact later mutation; terminal mailbox commands claim an already-due monotonic expiry before End or AuthorityFence can relabel it; manager, VOD, HTTP, relay, and backend-neutral Store tests prove terminal status joining, reader detach, bounded durable replay, and immutable first-winner outcomes; and the 5,040-order state model exercises the production control-End and expiry-claim transitions."
