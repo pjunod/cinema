@@ -15,14 +15,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.catalog = tomllib.loads(MANIFEST.read_text(encoding="utf-8"))
         cls.source_path = ROOT / cls.catalog["source"]
-        source = cls.source_path.read_text(encoding="utf-8")
-        end_anchor = cls.catalog["production_end_anchor"]
-        if source.count(end_anchor) != 1:
-            raise AssertionError(
-                f"production boundary {end_anchor!r} must occur exactly once in "
-                f"{cls.catalog['source']}"
-            )
-        cls.production_source = source.split(end_anchor, 1)[0]
+        cls.source = cls.source_path.read_text(encoding="utf-8")
         module_root = ROOT / cls.catalog["module_root"]
         cls.module_paths = tuple(sorted(module_root.rglob("*.rs")))
         cls.module_source = "\n".join(
@@ -33,15 +26,37 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertEqual(self.catalog.get("version"), 1)
         symbols = self.catalog["symbols"]
         module_symbols = self.catalog["module_symbols"]
+        module_structures = self.catalog["module_structures"]
         entries = self.catalog["entrypoints"]
         symbol_ids = [entry["id"] for entry in symbols]
         module_symbol_ids = [entry["id"] for entry in module_symbols]
+        module_structure_ids = [entry["id"] for entry in module_structures]
         entry_ids = [entry["id"] for entry in entries]
         self.assertEqual(len(symbol_ids), len(set(symbol_ids)))
         self.assertEqual(len(module_symbol_ids), len(set(module_symbol_ids)))
+        self.assertEqual(len(module_structure_ids), len(set(module_structure_ids)))
         self.assertEqual(len(entry_ids), len(set(entry_ids)))
-        self.assertGreaterEqual(len(symbols), 27)
+        self.assertEqual(
+            {
+                "namespaced-task-spawn",
+                "method-spawn",
+                "bare-task-spawn",
+                "namespaced-time-constructor",
+                "bare-time-constructor",
+                "tokio-time-import",
+                "process-command-construction",
+                "low-level-process-start",
+                "process-lifecycle-method",
+                "kill-on-drop-construction",
+                "rolling-supervisor-construction",
+                "forbidden-timer-or-task-alias",
+                "forbidden-command-alias",
+            },
+            set(module_structure_ids),
+        )
+        self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
+        self.assertGreaterEqual(len(module_structures), 13)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
@@ -71,6 +86,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 )
                 self.assertGreaterEqual(row["expected_occurrences"], 0)
 
+        for row in module_structures:
+            with self.subTest(module_structure=row["id"]):
+                self.assertEqual(
+                    {"id", "pattern", "expected_occurrences"}, set(row)
+                )
+                self.assertGreaterEqual(row["expected_occurrences"], 0)
+
         for row in entries:
             with self.subTest(entrypoint=row["id"]):
                 self.assertEqual(
@@ -79,14 +101,14 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertTrue(row["owns"])
                 self.assertTrue(row["replacement"].strip())
 
-    def test_every_tracked_symbol_has_the_reviewed_production_count(self) -> None:
+    def test_every_tracked_symbol_has_the_reviewed_source_count(self) -> None:
         for row in self.catalog["symbols"]:
             with self.subTest(symbol=row["id"]):
                 try:
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid pattern for {row['id']}: {error}")
-                actual = len(pattern.findall(self.production_source))
+                actual = len(pattern.findall(self.source))
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
@@ -109,11 +131,27 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     "update the module-wide owner allowlist in the same reviewed change",
                 )
 
+    def test_module_wide_task_timer_and_process_shapes_have_reviewed_counts(self) -> None:
+        for row in self.catalog["module_structures"]:
+            with self.subTest(module_structure=row["id"]):
+                try:
+                    pattern = re.compile(row["pattern"])
+                except re.error as error:
+                    self.fail(f"invalid structural pattern for {row['id']}: {error}")
+                actual = len(pattern.findall(self.module_source))
+                self.assertEqual(
+                    actual,
+                    row["expected_occurrences"],
+                    f"{row['id']} changed anywhere under {self.catalog['module_root']}; "
+                    "new task, timer, process, or alias shapes require an explicit "
+                    "ownership review and allowlist update",
+                )
+
     def test_every_named_entrypoint_is_live_and_unique(self) -> None:
         for row in self.catalog["entrypoints"]:
             with self.subTest(entrypoint=row["id"]):
                 self.assertEqual(
-                    self.production_source.count(row["anchor"]),
+                    self.source.count(row["anchor"]),
                     1,
                     f"{row['id']} lost or duplicated {row['anchor']!r}",
                 )

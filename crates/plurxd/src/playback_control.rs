@@ -4895,6 +4895,90 @@ mod tests {
         );
     }
 
+    #[test]
+    fn producer_progress_watermark_resets_for_successor_and_rejects_late_predecessor() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 50_000, 900, 800, started)),
+            false,
+            started,
+        );
+        let predecessor_blocks = ingress.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(predecessor)] = predecessor_blocks.as_slice()
+        else {
+            panic!("predecessor progress batch");
+        };
+        assert_eq!(
+            predecessor
+                .latest_progress
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(50_000)
+        );
+
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                2,
+                100,
+                1_000,
+                900,
+                started + Duration::from_secs(1),
+            )),
+            false,
+            started + Duration::from_secs(1),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                60_000,
+                2_000,
+                1_900,
+                started + Duration::from_secs(2),
+            )),
+            false,
+            started + Duration::from_secs(2),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                2,
+                200,
+                1_100,
+                1_000,
+                started + Duration::from_secs(3),
+            )),
+            false,
+            started + Duration::from_secs(3),
+        );
+        let successor_blocks = ingress.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(successor)] = successor_blocks.as_slice() else {
+            panic!("successor progress batch");
+        };
+        assert_eq!(successor.producer_attempt, 2);
+        assert_eq!(
+            successor
+                .first_advancing
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(100),
+            "a successor's restarted timeline initializes fresh coverage"
+        );
+        assert_eq!(
+            successor
+                .covered_last
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(200),
+            "late predecessor output cannot evict or extend the successor batch"
+        );
+        let state = ingress
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(state.progress_watermark_attempt, 2);
+        assert_eq!(state.progress_watermark_out_time_ms, Some(200));
+    }
+
     #[tokio::test]
     async fn producer_ingress_survives_a_full_actor_mailbox_with_command_causality() {
         let handle = RollingControlHandle::spawn("session-start");

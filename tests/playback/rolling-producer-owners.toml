@@ -1,12 +1,11 @@
 version = 1
 source = "crates/plurxd/src/transcode.rs"
-production_end_anchor = "/// A live HLS session published into a real"
 module_root = "crates/plurxd/src"
 
-# This catalog is intentionally mechanical.  Each count is taken only from
-# the production half of transcode.rs.  Removing a legacy owner must update
-# both the source and this ledger in the same change; adding a new occurrence
-# fails validation until its ownership and M4 replacement are named here.
+# This catalog is intentionally mechanical and scans the whole Rust source,
+# including test-only references. Removing a legacy owner must update both the
+# source and this ledger in the same change; adding an occurrence fails
+# validation until its ownership and M4 replacement are named here.
 
 [[symbols]]
 id = "startup-and-lifetime-watchdog"
@@ -18,56 +17,56 @@ replacement = "RollingControlActor::ProducerProgressDeadline"
 [[symbols]]
 id = "hardware-startup-grace"
 pattern = "FIRST_SEGMENT_GRACE"
-expected_occurrences = 4
+expected_occurrences = 6
 kind = "recovery_timer"
 replacement = "ProducerProgressDeadline mode=starting with the admitted hardware policy"
 
 [[symbols]]
 id = "software-startup-grace"
 pattern = "SOFTWARE_GRACE"
-expected_occurrences = 5
+expected_occurrences = 8
 kind = "recovery_timer"
 replacement = "ProducerProgressDeadline mode=starting with the admitted software policy"
 
 [[symbols]]
 id = "advancing-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 4
+expected_occurrences = 10
 kind = "recovery_timer"
 replacement = "ProducerProgressDeadline mode=advancing"
 
 [[symbols]]
 id = "watchdog-poll-cadence"
 pattern = "WATCHDOG_POLL"
-expected_occurrences = 5
+expected_occurrences = 11
 kind = "recovery_timer"
 replacement = "deleted; actor sleeps directly to its exact monotonic deadline"
 
 [[symbols]]
 id = "detached-watchdog-launch"
 pattern = "spawn_watch_for_stall"
-expected_occurrences = 3
+expected_occurrences = 4
 kind = "recovery_owner"
 replacement = "RollingControlActor decision wake to the session executor"
 
 [[symbols]]
 id = "watchdog-election-flag"
 pattern = "watchdog_active"
-expected_occurrences = 6
+expected_occurrences = 11
 kind = "recovery_election"
 replacement = "the actor's single optional producer deadline"
 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 21
+expected_occurrences = 32
 kind = "recovery_election"
 replacement = "exact producer attempt identity and actor disposition"
 
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 11
+expected_occurrences = 14
 kind = "mixed_ownership_lock"
 replacement = "specific actor, attempt, response-admission, resource, or catalog-revision fences"
 
@@ -81,70 +80,70 @@ replacement = "one actor-authorized prepublication retry action"
 [[symbols]]
 id = "replacement-kill"
 pattern = "kill_child_for_replacement"
-expected_occurrences = 2
+expected_occurrences = 12
 kind = "replacement_owner"
 replacement = "the exact-attempt supervisor executing one actor decision"
 
 [[symbols]]
 id = "replacement-install"
 pattern = "install_replacement_child"
-expected_occurrences = 3
+expected_occurrences = 5
 kind = "replacement_owner"
 replacement = "the session executor installing one actor-authorized attempt"
 
 [[symbols]]
 id = "hardware-downgrade"
 pattern = "downgrade_one_step"
-expected_occurrences = 2
+expected_occurrences = 6
 kind = "replacement_policy"
 replacement = "an immutable ValidatedRetryRecipe consumed once by the actor"
 
 [[symbols]]
 id = "request-side-exit-verdict"
 pattern = "playlist_producer_failed"
-expected_occurrences = 3
+expected_occurrences = 4
 kind = "recovery_owner"
 replacement = "the actor's exact-attempt exit/classification disposition"
 
 [[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 13
+expected_occurrences = 15
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only its prepublication failure projects Session::failed"
 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 3
+expected_occurrences = 18
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
 [[symbols]]
 id = "physical-flow-signal"
 pattern = "child\\.signal\\("
-expected_occurrences = 1
+expected_occurrences = 3
 kind = "process_action"
 replacement = "retained behind exact actor attempt/revision authorization and acknowledgement"
 
 [[symbols]]
 id = "child-termination"
 pattern = "child\\.kill\\(\\)\\.await"
-expected_occurrences = 7
+expected_occurrences = 12
 kind = "process_action"
 replacement = "the sole supervisor command path, with candidate cleanup registered before spawn"
 
 [[symbols]]
 id = "raw-child-wait"
 pattern = "child\\.wait\\(\\)\\.await"
-expected_occurrences = 3
+expected_occurrences = 8
 kind = "process_action"
 replacement = "the sole supervisor reap path; rejected candidates use the same cleanup registry"
 
 [[symbols]]
 id = "response-publication-observation"
 pattern = "\\.observe_publication\\("
-expected_occurrences = 2
+expected_occurrences = 3
 kind = "response_admission"
 replacement = "AuthorizeResponsePublication sets generation publication before visibility"
 
@@ -158,7 +157,7 @@ replacement = "retained as response-EOF fetched-frontier evidence, not retry aut
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 13
+expected_occurrences = 54
 kind = "structural_task_scan"
 replacement = "every new detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
 
@@ -172,7 +171,7 @@ replacement = "every new runtime-owned detached task requires ownership-catalog 
 [[symbols]]
 id = "all-async-sleeps"
 pattern = "tokio::time::sleep\\("
-expected_occurrences = 17
+expected_occurrences = 43
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; producer recovery polls are deleted in favor of exact actor deadlines"
 
@@ -182,6 +181,13 @@ pattern = "tokio::time::interval\\("
 expected_occurrences = 3
 kind = "structural_timer_scan"
 replacement = "intervals remain only for named sampling, repair, or lifecycle work and cannot decide producer recovery"
+
+[[symbols]]
+id = "all-async-interval-at"
+pattern = "tokio::time::interval_at\\("
+expected_occurrences = 1
+kind = "structural_timer_scan"
+replacement = "the rate-control refresh schedule remains a named lifecycle timer and cannot decide producer recovery"
 
 [[symbols]]
 id = "all-ffmpeg-process-starts"
@@ -250,6 +256,77 @@ expected_occurrences = 17
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
+expected_occurrences = 0
+
+# Whole-module structural sentinels use broad call shapes rather than a list
+# of today's helper names. They include tests deliberately: a new task, timer,
+# process construction, or direct process action anywhere under plurxd/src
+# must change one of these reviewed counts. Aliasing the standard spellings is
+# forbidden so a renamed import cannot bypass the scan.
+
+[[module_structures]]
+id = "namespaced-task-spawn"
+pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
+expected_occurrences = 254
+
+[[module_structures]]
+id = "method-spawn"
+pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
+expected_occurrences = 32
+
+[[module_structures]]
+id = "bare-task-spawn"
+pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
+expected_occurrences = 1
+
+[[module_structures]]
+id = "namespaced-time-constructor"
+pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
+expected_occurrences = 321
+
+[[module_structures]]
+id = "bare-time-constructor"
+pattern = "(?<![:.\\w])(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
+expected_occurrences = 1
+
+[[module_structures]]
+id = "tokio-time-import"
+pattern = "use\\s+tokio::time"
+expected_occurrences = 1
+
+[[module_structures]]
+id = "process-command-construction"
+pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
+expected_occurrences = 59
+
+[[module_structures]]
+id = "low-level-process-start"
+pattern = "(?<![.\\w])(?:(?:[A-Za-z_]\\w*::)+)?(?:fork|vfork|posix_spawn|posix_spawnp)\\s*\\("
+expected_occurrences = 0
+
+[[module_structures]]
+id = "process-lifecycle-method"
+pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
+expected_occurrences = 237
+
+[[module_structures]]
+id = "kill-on-drop-construction"
+pattern = "kill_on_drop\\s*\\("
+expected_occurrences = 31
+
+[[module_structures]]
+id = "rolling-supervisor-construction"
+pattern = "AttemptChild::new\\s*\\("
+expected_occurrences = 18
+
+[[module_structures]]
+id = "forbidden-timer-or-task-alias"
+pattern = "use\\s+[^;]*(?:spawn|spawn_blocking|spawn_local|sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s+as\\s+"
+expected_occurrences = 0
+
+[[module_structures]]
+id = "forbidden-command-alias"
+pattern = "use\\s+(?:tokio|std)[^;]*Command\\s+as\\s+"
 expected_occurrences = 0
 
 [[module_symbols]]
