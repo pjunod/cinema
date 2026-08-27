@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["dafb2b9f"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The validation catalog exact-counts every legacy rolling producer recovery, replacement, transition, failure, process-action, and response-admission symbol and names the production entrypoints plus their M4 replacement invariants. The Rust producer-ingress regressions retain constant-space first/covered/gap/latest deadline evidence, prove a timely delayed A-to-B-to-C chain, prevent later telemetry from bridging the first missed horizon, seal progress into the exact exit barrier, preserve nonblocking mailbox behavior and telemetry projection, and keep post-exit progress terminal."
