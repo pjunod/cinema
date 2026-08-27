@@ -1,27 +1,19 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `48ea494c` (PR #619)
-**Current work:** [PR #621](https://github.com/pjunod/plurx/pull/621) on
-`codex/playback-control-m4-deadline-cutoff` — exact-head round 9 at
-`86502718f12fc4fc0a49c20438aa0777feb572ed` received three **APPROVE** verdicts.
-The 67 focused tests remain green. `make check` is fully green: catalog/history,
-Python suites (121 and 52), formatting, Clippy, and 1,970 Rust/doc tests passed
-with 3 ignored. `make cluster-check` is fully green across the vendor
-snapshot/WAL, 63 store contracts (2 ignored), compacted-growth, topology/failure
-drills, activation (7), and activity (2) evidence. Hosted run `33106815012`
-attempt 3 is green across fast policy, fast Rust, WAL, cluster daemon,
-replicated store/topology, and PR validation; attempts 1 and 2 failed only at
-checkout with EACCES before repository commands. This final status snapshot
-requires exact-head round 10 and the latest hosted checks before merge.
-The action-passive actor deadline consumes the merged constant-space progress
-proof and records one exact provisional due coordinate without starting a
-recovery retry, killing, or replacing anything. Producer facts use the shared
-transition-plus-ingress fence; exact physical hold/resume acknowledgements are
-bounded ordered barriers that preserve preceding progress and wait before the
-syscall when ingress is full. Lifecycle commands do not yet share the ingress
-sequence, so terminal state revokes the non-production observation and the
-legacy watchdog remains the only recovery action owner.
+**Merged baseline:** `origin/main` at `8e331672` (PR #621)
+**Current work:** `codex/playback-control-m4-command-sequencing` — PR number
+pending; implementation is unreviewed and untested.
+PR #621 merged as `8e331672` after exact-head round 10 received unanimous
+**APPROVE** verdicts and hosted run `33109297301` passed. The active branch
+adds bounded shared command/producer sequencing, publication-time ordering,
+stale-exit fencing, a partial observation-only actor projection in
+`SessionInfo` and telemetry, and bounded command/deadline metrics. Runtime is
+committed at `383d62d8`, with regression mapping at `de23104d`. These are
+groundwork only: legacy watchdogs and recovery actions remain active, and there is no
+decision, executor, response-admission, or watchdog-deletion cutover yet.
+The active branch must receive its own exact-head adversarial review before any
+unit or full gate is run.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -42,7 +34,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; round-9 exact-head review approved at `86502718f12fc4fc0a49c20438aa0777feb572ed`; 67 focused tests, `make check`, and `make cluster-check` passed; hosted run `33106815012` attempt 3 passed | Obtain exact-head round-10 approval and latest hosted-check confirmation, then merge; the passive cutoff remains provisional until command sequencing, operational projection, and the action executor land; remove detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; PR #621 merged as `8e331672` after unanimous round-10 approval and hosted run `33109297301`; the active command-sequencing branch adds bounded shared command/producer ordering, publication-time ordering, stale-exit fencing, partial observation-only projection, and bounded command/deadline metrics | Review and test the active branch; then move decisions, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -67,6 +59,7 @@ not being counted as complete merely because its foundation has landed.
 | [#617](https://github.com/pjunod/plurx/pull/617) | M3c3 typed actor-owned End, authority fence, and lease expiry; atomic durable terminal acknowledgement and exact replay; cancellation-safe settlement and exhaustive event ordering | Exact-head adversarial approval at `6f127463`; `make check`, `make cluster-check`, and every hosted job green; merged as `9cd16d05` |
 | [#618](https://github.com/pjunod/plurx/pull/618) | M4 watchdog-removal ownership, deadline ordering, executor, cleanup, process-capacity, and post-publication proposal contract | Seven exact-head adversarial passes resolved 31 findings; final approval at `96799e60`; `make check`, `make cluster-check`, and hosted PR gate green; merged as `f9cef83b` |
 | [#619](https://github.com/pjunod/plurx/pull/619) | Constant-space cutoff-safe producer progress coverage plus checked whole-module legacy owner/task/timer/process inventory | Thirteen exact-head reviews; final approval at `11315987`; focused tests, `make check`, `make cluster-check`, and hosted PR gate green; merged as `48ea494c` |
+| [#621](https://github.com/pjunod/plurx/pull/621) | Passive producer deadline, cutoff-safe ingress/fencing, and process-flow barriers | Ten exact-head rounds ended unanimously **APPROVED**; hosted run `33109297301` green; merged as `8e331672` |
 
 ## Active slice: M4 watchdog removal
 
@@ -74,6 +67,16 @@ PR #618 merged the complete M4 implementation contract at `f9cef83b`, after
 seven adversarial passes and green local, cluster, and hosted gates. The actor
 already owns explicit End, authority fence, and exact lease expiry; this slice
 starts moving producer recovery evidence through that same owner.
+
+PR #621 then merged the passive deadline and cutoff-safe ingress foundation as
+`8e331672`, after unanimous round-10 approval and hosted run `33109297301`.
+The active branch, `codex/playback-control-m4-command-sequencing`, is a new
+unreviewed and untested implementation slice. It adds bounded shared
+command/producer sequencing, publication-time ordering, stale-exit fencing,
+partial observation-only actor projection in `SessionInfo` and telemetry, and
+bounded command/deadline metrics. It does not yet move decisions, response admission,
+retry, cleanup, or process actions behind an executor, and it does not delete
+the legacy watchdogs or action owners.
 
 M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
@@ -93,17 +96,23 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Round-9 runtime approved; focused, full, cluster, and hosted evidence green; merge review pending.** Producer facts fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, preserve progress around bounded sequenced physical-flow barriers, fail closed when the actor/mailbox disappears, serialize actor-task exit fencing with producer transitions, and wait/re-authorize the exact attempt before a full-capacity STOP/CONT syscall. Duplicate pre-drain exits are coalesced and accounted, while stale flow revisions/attempts are rejected. Exact-head round 9 approved the runtime and Clippy repair; 67 focused tests, `make check`, `make cluster-check`, and hosted attempt 3 are green. The result remains provisional until command sequencing lands and emits no recovery action. |
-| Operational projection | **Deferred, explicitly.** Armed deadline mode/coordinate, provisional due, process-exit due, flow revision, and physical-flow state remain actor-private and absent from lease snapshots, Activity/status, and Prometheus. Only `plurx_playback_rolling_producer_flow_deferrals_total` is exported. Add the bounded projection in the decision/action slice before watchdog removal. |
-| Adversarial implementation review | **Round 9 approved; round 10 required before merge.** Exact head `86502718f12fc4fc0a49c20438aa0777feb572ed` received three **APPROVE** verdicts. The 67 focused tests passed; the final local and cluster gates passed; hosted run `33106815012` attempt 3 passed after attempts 1 and 2 failed only at checkout with EACCES. Obtain exact-head round 10 approval and confirm the latest hosted checks before merge. |
-| Unit/focused tests | **67 focused tests passed.** The playback-control suite passed 63 tests, the deferred flow-signal set passed 2, actor-task-exit passed 1, and producer-signal/retirement passed 1. The full Rust/doc gate passed 1,970 tests with 3 ignored; no rerun is pending for this evidence. |
-| Full/cluster/hosted gates | **Passed for this slice; merge gate still pending.** `make check` and `make cluster-check` passed; hosted run `33106815012` attempt 3 passed all listed jobs. Confirm the latest hosted checks and obtain exact-head round-10 approval before merge. |
+| Passive deadline/cutoff | **Merged in #621; active branch extends the foundation.** The merged slice folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. The active branch adds shared command/producer ordering and publication-time barriers, but has not been adversarially reviewed or tested. It still emits no recovery action. |
+| Operational projection | **Partial and observation-only.** The active branch exposes bounded actor producer truth through `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry, including deadline/due, process-exit, physical-flow, and last-applied-sequence observations. It does not expose a decision, action, retry, executor, or response-admission verdict. The bounded deadline and command metrics are instrumentation, not recovery authority. |
+| Adversarial implementation review | **Active branch pending.** PR #621’s ten exact-head rounds ended unanimously **APPROVED** at its merged head, and hosted run `33109297301` passed. The new `codex/playback-control-m4-command-sequencing` head is unreviewed; obtain exact-head approval before running any unit or full gate. |
+| Unit/focused tests | **Not run for the active branch.** The merged #621 head had 67 focused tests plus full/cluster evidence, but those results do not transfer to the new implementation head. |
+| Full/cluster/hosted gates | **Not run for the active branch.** The merged #621 evidence is historical; rerun only after exact-head adversarial approval, and bind results to the unchanged reviewed head. |
 
 ## Watchdog-removal ledger
 
 The target is not zero timers. The target is no overlapping recovery owners.
 The detailed symbol-by-symbol contract is in the plan's
 [deadline inventory](PLAYBACK-CONTROL-PROTOCOL-PLAN.md#7-deadlines-and-watchdog-inventory).
+
+The active command-sequencing branch has not reached that target: every legacy
+watchdog, replacement path, action owner, and response-admission compatibility
+path remains active. The new sequencing and projection are observational
+foundations; they do not authorize a retry, kill, replacement, cleanup, or
+transparent handoff.
 
 ### Server mechanisms still present on merged `main`
 
@@ -145,7 +154,8 @@ playback, replacement, restart, or failure decision. It is not a watchdog.
 
 ## Remaining delivery order
 
-1. Complete M4 and prove the old server watchdog/replacement symbols are gone.
+1. Adversarially review and test the active command-sequencing branch, then
+   complete M4 and prove the old server watchdog/replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
 3. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
