@@ -1636,6 +1636,7 @@ pub(crate) enum ProducerDecisionPoll {
     Idle,
     Decision(Arc<ProducerDecision>),
     Terminal(RollingTerminalCause),
+    Unavailable,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -2635,6 +2636,8 @@ pub(crate) struct RollingControlHandle {
     #[cfg(test)]
     executor_abort: Option<tokio::task::AbortHandle>,
     #[cfg(test)]
+    actor_run_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
     actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
 
@@ -2799,7 +2802,7 @@ struct RollingDecisionTransport {
     executor_observation: Arc<RollingExecutorObservation>,
     terminal_projection: Arc<AtomicU8>,
     #[cfg(test)]
-    decision_wake: Weak<RollingDecisionWake>,
+    executor_poll_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 impl RollingDecisionTransport {
@@ -2812,9 +2815,9 @@ impl RollingDecisionTransport {
         let permit = match self.sender.reserve().await {
             Ok(permit) => permit,
             Err(_) => {
-                return ProducerDecisionPoll::Terminal(
-                    self.committed_terminal()
-                        .unwrap_or(RollingTerminalCause::AuthorityFence),
+                return self.committed_terminal().map_or(
+                    ProducerDecisionPoll::Unavailable,
+                    ProducerDecisionPoll::Terminal,
                 );
             }
         };
@@ -2831,9 +2834,9 @@ impl RollingDecisionTransport {
         permit.send(envelope);
         drop(transition);
         response.await.unwrap_or_else(|_| {
-            ProducerDecisionPoll::Terminal(
-                self.committed_terminal()
-                    .unwrap_or(RollingTerminalCause::AuthorityFence),
+            self.committed_terminal().map_or(
+                ProducerDecisionPoll::Unavailable,
+                ProducerDecisionPoll::Terminal,
             )
         })
     }
@@ -2845,6 +2848,8 @@ impl RollingDecisionTransport {
         mut inbox: RollingSessionExecutorInbox,
     ) -> tokio::task::JoinHandle<()> {
         let observation = Arc::clone(&self.executor_observation);
+        #[cfg(test)]
+        let executor_poll_pause = Arc::clone(&self.executor_poll_pause);
         tokio::spawn(async move {
             let mut observed_sequence = 0_u64;
             loop {
@@ -2868,6 +2873,18 @@ impl RollingDecisionTransport {
                     break;
                 }
                 observation.state.store(2, Ordering::Release);
+                #[cfg(test)]
+                let poll_pause = {
+                    executor_poll_pause
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                };
+                #[cfg(test)]
+                if let Some(pause) = poll_pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
                 match transport.poll_after(observed_sequence).await {
                     ProducerDecisionPoll::Idle => observation.state.store(1, Ordering::Release),
                     ProducerDecisionPoll::Decision(decision) => {
@@ -2884,24 +2901,13 @@ impl RollingDecisionTransport {
                         observation.state.store(3, Ordering::Release);
                         break;
                     }
+                    ProducerDecisionPoll::Unavailable => {
+                        observation.state.store(4, Ordering::Release);
+                        break;
+                    }
                 }
             }
         })
-    }
-
-    #[cfg(test)]
-    fn publish_duplicate_wake_for_test(&self) -> bool {
-        let Some(wake) = self.decision_wake.upgrade() else {
-            return false;
-        };
-        wake.decision_notify.notify_one();
-        let first = wake.executor_wake.try_send(()).is_ok();
-        wake.decision_notify.notify_one();
-        let second_was_coalesced = matches!(
-            wake.executor_wake.try_send(()),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(()))
-        );
-        first && second_was_coalesced
     }
 }
 
@@ -2921,6 +2927,8 @@ struct RollingActorRuntime {
     decision_wake: Arc<RollingDecisionWake>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    actor_run_started: Arc<tokio::sync::Notify>,
     #[cfg(test)]
     actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
@@ -2984,6 +2992,8 @@ struct RollingControlActor {
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
+    actor_run_started: Arc<tokio::sync::Notify>,
+    #[cfg(test)]
     actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
 
@@ -3011,6 +3021,7 @@ impl RollingControlActor {
                     terminal_projection: Arc::new(AtomicU8::new(0)),
                 }),
                 producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
+                actor_run_started: Arc::new(tokio::sync::Notify::new()),
                 actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
             },
         )
@@ -3030,6 +3041,8 @@ impl RollingControlActor {
             decision_wake,
             #[cfg(test)]
             producer_attempt_reply_pause,
+            #[cfg(test)]
+            actor_run_started,
             #[cfg(test)]
             actor_exit_fence_started,
         } = runtime;
@@ -3063,6 +3076,8 @@ impl RollingControlActor {
             last_flow_ticket: 0,
             #[cfg(test)]
             producer_attempt_reply_pause,
+            #[cfg(test)]
+            actor_run_started,
             #[cfg(test)]
             actor_exit_fence_started,
         }
@@ -3470,9 +3485,17 @@ impl RollingControlActor {
     }
 
     fn wake_executor_after_transition(&self, had_pending_decision: bool, was_retired: bool) {
-        if (!had_pending_decision && self.pending_decision.is_some())
-            || (!was_retired && self.retired)
-        {
+        let became_terminal = !was_retired && self.retired;
+        if became_terminal {
+            // Executor loss is useful pre-terminal evidence and wins this
+            // status projection. Otherwise terminal settlement is actor truth
+            // even if the task disappears between commit and wake delivery.
+            let executor_state = &self.decision_wake.executor_observation.state;
+            if executor_state.load(Ordering::Acquire) != 4 {
+                executor_state.store(3, Ordering::Release);
+            }
+        }
+        if (!had_pending_decision && self.pending_decision.is_some()) || became_terminal {
             self.decision_wake.wake();
         }
     }
@@ -4138,23 +4161,19 @@ impl RollingControlActor {
             drop(transition);
             self.producer_events
                 .release_sealed_flow_barriers(sealed_flow_barriers);
-            let wake_executor = (!had_pending_decision && self.pending_decision.is_some())
-                || (!was_retired && self.retired);
             #[cfg(test)]
             let deferred_result = deferred_begin_reply;
             #[cfg(not(test))]
             let deferred_result = std::marker::PhantomData::<()>;
-            (deferred_result, wake_executor)
+            (deferred_result, had_pending_decision, was_retired)
         };
         #[cfg(test)]
-        let (deferred_begin_reply, wake_executor) = _deferred_begin_reply;
+        let (deferred_begin_reply, had_pending_decision, was_retired) = _deferred_begin_reply;
         #[cfg(not(test))]
-        let (_, wake_executor) = _deferred_begin_reply;
-        if wake_executor {
-            // The actor state is committed and all actor/ingress locks are
-            // released before notifying the passive executor.
-            self.decision_wake.wake();
-        }
+        let (_, had_pending_decision, was_retired) = _deferred_begin_reply;
+        // The actor state is committed and all actor/ingress locks are
+        // released before settling/notifying the passive executor.
+        self.wake_executor_after_transition(had_pending_decision, was_retired);
         #[cfg(test)]
         if let Some(DeferredProducerAttemptReply {
             reply,
@@ -4226,6 +4245,8 @@ impl RollingControlActor {
             #[cfg(test)]
             started: Arc::clone(&self.actor_exit_fence_started),
         };
+        #[cfg(test)]
+        self.actor_run_started.notify_one();
         loop {
             if self.retired {
                 let producer_events = Arc::clone(&self.producer_events);
@@ -4323,6 +4344,8 @@ impl RollingControlHandle {
         let executor_observation = Arc::new(RollingExecutorObservation::default());
         let decision_notify = Arc::new(tokio::sync::Notify::new());
         let terminal_projection = Arc::new(AtomicU8::new(0));
+        #[cfg(test)]
+        let executor_poll_pause = Arc::new(std::sync::Mutex::new(None));
         let decision_wake = Arc::new(RollingDecisionWake {
             decision_notify: Arc::clone(&decision_notify),
             executor_wake,
@@ -4336,12 +4359,14 @@ impl RollingControlHandle {
             executor_observation,
             terminal_projection,
             #[cfg(test)]
-            decision_wake: Arc::downgrade(&decision_wake),
+            executor_poll_pause,
         });
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
         let actor_exit_fence_started = Arc::new(tokio::sync::Notify::new());
+        #[cfg(test)]
+        let actor_run_started = Arc::new(tokio::sync::Notify::new());
         let actor = RollingControlActor::with_runtime(
             now,
             initial_kind,
@@ -4354,6 +4379,8 @@ impl RollingControlHandle {
                 decision_wake,
                 #[cfg(test)]
                 producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
+                #[cfg(test)]
+                actor_run_started: Arc::clone(&actor_run_started),
                 #[cfg(test)]
                 actor_exit_fence_started: Arc::clone(&actor_exit_fence_started),
             },
@@ -4385,6 +4412,8 @@ impl RollingControlHandle {
             #[cfg(test)]
             executor_abort,
             #[cfg(test)]
+            actor_run_started,
+            #[cfg(test)]
             actor_exit_fence_started,
         }
     }
@@ -4404,7 +4433,7 @@ impl RollingControlHandle {
             producer_events: Arc::clone(&producer_events),
             executor_observation: Arc::new(RollingExecutorObservation::default()),
             terminal_projection: Arc::new(AtomicU8::new(0)),
-            decision_wake: Weak::new(),
+            executor_poll_pause: Arc::new(std::sync::Mutex::new(None)),
         });
         Self {
             sender,
@@ -4417,6 +4446,7 @@ impl RollingControlHandle {
             producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
             actor_abort: None,
             executor_abort: None,
+            actor_run_started: Arc::new(tokio::sync::Notify::new()),
             actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
         }
     }
@@ -4551,8 +4581,12 @@ impl RollingControlHandle {
     }
 
     #[cfg(test)]
-    pub(crate) fn publish_duplicate_executor_wake_for_test(&self) -> bool {
-        self.decision_transport.publish_duplicate_wake_for_test()
+    pub(crate) fn pause_executor_poll_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .decision_transport
+            .executor_poll_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
     #[cfg(test)]
@@ -4793,6 +4827,11 @@ impl RollingControlHandle {
             .as_ref()
             .expect("spawned executor abort handle")
             .abort();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_actor_start_for_test(&self) {
+        self.actor_run_started.notified().await;
     }
 
     #[cfg(test)]
@@ -8989,14 +9028,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn retained_notify_and_full_inbox_coalesce_into_one_passive_poll() {
-        let handle = RollingControlHandle::spawn("session-start");
+    async fn retained_notify_and_full_inbox_wakes_are_bounded() {
+        let notify = tokio::sync::Notify::new();
+        notify.notify_one();
+        notify.notified().await;
 
-        assert!(
-            handle.publish_duplicate_executor_wake_for_test(),
-            "the first wake must fill the capacity-one inbox and the second must coalesce"
+        let (sender, mut inbox) = RollingSessionExecutorInbox::new();
+        assert!(sender.try_send(()).is_ok());
+        assert!(matches!(
+            sender.try_send(()),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(()))
+        ));
+        assert_eq!(
+            inbox.receiver.recv().await,
+            Some(()),
+            "one coalesced wake remains available"
         );
-        wait_for_executor_observation(&handle, "idle", Some(0)).await;
     }
 
     #[tokio::test]
@@ -9071,6 +9118,7 @@ mod tests {
     async fn timer_only_lease_expiry_wakes_the_passive_executor() {
         let handle = RollingControlHandle::spawn("session-start");
 
+        handle.wait_for_actor_start_for_test().await;
         tokio::time::advance(ROLLING_LEGACY_LEASE_TIMEOUT + Duration::from_millis(1)).await;
         wait_for_executor_observation(&handle, "terminal", None).await;
 
@@ -9107,12 +9155,22 @@ mod tests {
             ProducerDecisionPoll::Decision(Arc::new(decision))
         );
         assert_eq!(handle.executor_observation_for_test().0, "lost");
+        assert_eq!(
+            handle.end().await,
+            Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
+        );
+        assert_eq!(
+            handle.executor_observation_for_test().0,
+            "lost",
+            "committed terminal state must preserve earlier executor-loss evidence"
+        );
     }
 
     #[tokio::test]
     async fn unexpected_actor_exit_is_not_reported_as_a_committed_terminal_cause() {
         let handle = RollingControlHandle::spawn("session-start");
 
+        handle.wait_for_actor_start_for_test().await;
         handle.abort_actor_for_test();
         handle.wait_for_actor_exit_fence_for_test().await;
         handle.sender.closed().await;
@@ -9121,8 +9179,38 @@ mod tests {
         assert_eq!(handle.decision_transport.committed_terminal(), None);
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Terminal(RollingTerminalCause::AuthorityFence)
+            ProducerDecisionPoll::Unavailable
         );
+    }
+
+    #[tokio::test]
+    async fn actor_loss_during_executor_poll_is_reported_as_lost_not_terminal() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_executor_poll_for_test(Arc::clone(&pause));
+        assert!(
+            handle
+                .install_producer_decision_for_test(ProducerDecision::Fail {
+                    decision_sequence: 16,
+                    failed_attempt: 1,
+                    reason: ProducerDecisionReason::ExecutorLost,
+                    proposal: None,
+                    cleanup: ProducerFailureCleanup {
+                        kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                        cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                    },
+                })
+                .await
+        );
+        pause.wait().await;
+
+        handle.abort_actor_for_test();
+        handle.wait_for_actor_exit_fence_for_test().await;
+        handle.sender.closed().await;
+        pause.wait().await;
+        wait_for_executor_observation(&handle, "lost", None).await;
+
+        assert_eq!(handle.decision_transport.committed_terminal(), None);
     }
 
     #[tokio::test]

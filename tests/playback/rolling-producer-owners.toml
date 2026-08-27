@@ -272,7 +272,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-executor-inbox"
 pattern = "RollingSessionExecutorInbox"
-expected_occurrences = 5
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-decision-transport"
@@ -282,7 +282,7 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "m4-decision-wake"
 pattern = "RollingDecisionWake"
-expected_occurrences = 7
+expected_occurrences = 6
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
