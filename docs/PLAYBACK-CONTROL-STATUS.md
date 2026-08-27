@@ -3,15 +3,17 @@
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `48ea494c` (PR #619)
 **Current work:** [PR #621](https://github.com/pjunod/plurx/pull/621) on
-`codex/playback-control-m4-deadline-cutoff` — exact-head round 8 at
-`5a9a62dbfedfcc4af08912c971c4289084781f04` received three **APPROVE** verdicts.
-The 67 focused tests remain green. The resumed `make check` passed the catalog
-(22 points, 27 checks, 9,410 files), history (1,002 corrective commits), Python
-suites (121 and 52), and formatting, then Clippy stopped on four test-only
-helpers across three dead-code reports. Repair commit `6333b065` adds the
-test-only gates; evidence mapping is `aa7e12e4`. Both repairs passed static
-pre-commit review, and exact-head round 9 is required before rerunning the
-gate. Hosted results are not claimed.
+`codex/playback-control-m4-deadline-cutoff` — exact-head round 9 at
+`86502718f12fc4fc0a49c20438aa0777feb572ed` received three **APPROVE** verdicts.
+The 67 focused tests remain green. `make check` is fully green: catalog/history,
+Python suites (121 and 52), formatting, Clippy, and 1,970 Rust/doc tests passed
+with 3 ignored. `make cluster-check` is fully green across the vendor
+snapshot/WAL, 63 store contracts (2 ignored), compacted-growth, topology/failure
+drills, activation (7), and activity (2) evidence. Hosted run `33106815012`
+attempt 3 is green across fast policy, fast Rust, WAL, cluster daemon,
+replicated store/topology, and PR validation; attempts 1 and 2 failed only at
+checkout with EACCES before repository commands. This final status snapshot
+requires exact-head round 10 and the latest hosted checks before merge.
 The action-passive actor deadline consumes the merged constant-space progress
 proof and records one exact provisional due coordinate without starting a
 recovery retry, killing, or replacing anything. Producer facts use the shared
@@ -40,7 +42,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; round-8 exact-head review approved at `5a9a62dbfedfcc4af08912c971c4289084781f04`; 67 focused tests passed; catalog/history/Python/format stages passed before Clippy found four test-only helpers; repair `6333b065` is mapped by `aa7e12e4` | Obtain exact-head round-9 approval, rerun `make check`, and prove the passive cutoff, then add sequenced commands/decisions, operational projection, and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; round-9 exact-head review approved at `86502718f12fc4fc0a49c20438aa0777feb572ed`; 67 focused tests, `make check`, and `make cluster-check` passed; hosted run `33106815012` attempt 3 passed | Obtain exact-head round-10 approval and latest hosted-check confirmation, then merge; the passive cutoff remains provisional until command sequencing, operational projection, and the action executor land; remove detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -91,11 +93,11 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Round-8 runtime approved; 67 focused tests passed; full check paused at Clippy.** Producer facts fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, preserve progress around bounded sequenced physical-flow barriers, fail closed when the actor/mailbox disappears, serialize actor-task exit fencing with producer transitions, and wait/re-authorize the exact attempt before a full-capacity STOP/CONT syscall. Duplicate pre-drain exits are coalesced and accounted, while stale flow revisions/attempts are rejected. Exact-head round 8 approved the runtime and history repair; `make check` passed catalog/history/Python/format stages, then found four test-only helpers in three Clippy dead-code reports. Repair `6333b065`, mapped by `aa7e12e4`, is statically approved and not rerun. The result remains provisional until command sequencing lands and emits no recovery action. |
+| Passive deadline/cutoff | **Round-9 runtime approved; focused, full, cluster, and hosted evidence green; merge review pending.** Producer facts fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, preserve progress around bounded sequenced physical-flow barriers, fail closed when the actor/mailbox disappears, serialize actor-task exit fencing with producer transitions, and wait/re-authorize the exact attempt before a full-capacity STOP/CONT syscall. Duplicate pre-drain exits are coalesced and accounted, while stale flow revisions/attempts are rejected. Exact-head round 9 approved the runtime and Clippy repair; 67 focused tests, `make check`, `make cluster-check`, and hosted attempt 3 are green. The result remains provisional until command sequencing lands and emits no recovery action. |
 | Operational projection | **Deferred, explicitly.** Armed deadline mode/coordinate, provisional due, process-exit due, flow revision, and physical-flow state remain actor-private and absent from lease snapshots, Activity/status, and Prometheus. Only `plurx_playback_rolling_producer_flow_deferrals_total` is exported. Add the bounded projection in the decision/action slice before watchdog removal. |
-| Adversarial implementation review | **Round 8 approved; round 9 required after Clippy repair.** Exact head `5a9a62dbfedfcc4af08912c971c4289084781f04` received three **APPROVE** verdicts. The 67 focused tests, catalog/history/Python/format stages passed; Clippy then reported four test-only helpers in three dead-code reports. Repair `6333b065` and evidence mapping `aa7e12e4` passed two static pre-commit reviews. No rerun or hosted result is claimed. Exact-head round 9 is required next. |
-| Unit/focused tests | **67 focused tests passed; full gate incomplete.** The playback-control suite passed 63 tests, the deferred flow-signal set passed 2, actor-task-exit passed 1, and producer-signal/retirement passed 1. `make check` passed catalog/history/Python/format stages but stopped at Clippy before workspace tests; after `6333b065`/`aa7e12e4`, obtain round-9 approval before rerunning. |
-| Full/cluster/hosted gates | **Pending for this slice.** After approval: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
+| Adversarial implementation review | **Round 9 approved; round 10 required before merge.** Exact head `86502718f12fc4fc0a49c20438aa0777feb572ed` received three **APPROVE** verdicts. The 67 focused tests passed; the final local and cluster gates passed; hosted run `33106815012` attempt 3 passed after attempts 1 and 2 failed only at checkout with EACCES. Obtain exact-head round 10 approval and confirm the latest hosted checks before merge. |
+| Unit/focused tests | **67 focused tests passed.** The playback-control suite passed 63 tests, the deferred flow-signal set passed 2, actor-task-exit passed 1, and producer-signal/retirement passed 1. The full Rust/doc gate passed 1,970 tests with 3 ignored; no rerun is pending for this evidence. |
+| Full/cluster/hosted gates | **Passed for this slice; merge gate still pending.** `make check` and `make cluster-check` passed; hosted run `33106815012` attempt 3 passed all listed jobs. Confirm the latest hosted checks and obtain exact-head round-10 approval before merge. |
 
 ## Watchdog-removal ledger
 

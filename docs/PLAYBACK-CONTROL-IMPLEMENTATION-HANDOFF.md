@@ -6,16 +6,13 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `5a9a62dbfedfcc4af08912c971c4289084781f04`
-(round 8 **APPROVED**)
-**Current repair implementation:**
-`6333b0656bf553ffe1fe7016bb98880df9a01ab8`, with history binding
-`aa7e12e48218e339e7ad8b247a5dac1db63fb122`; this documentation snapshot
-follows them, so resolve the immutable branch tip before requesting round 9
-**Test state:** 67 focused tests passed. The second `make check` passed catalog,
-history, 173 policy/contract tests, and formatting, then Clippy stopped on
-test-only dead code. The repair is committed but unverified; round 9 must
-approve before the gate resumes.
+**Last reviewed exact head:** `86502718f12fc4fc0a49c20438aa0777feb572ed`
+(round 9 **APPROVED**)
+**Current repair:** final documentation-only gate evidence in this snapshot;
+resolve the immutable branch tip before requesting round 10
+**Test state:** 67 focused tests, `make check`, `make cluster-check`, and hosted
+PR validation are green on the round-9 runtime head. This documentation-only
+head requires exact-head round 10 and its latest hosted checks before merge.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -286,6 +283,28 @@ is test-only and no production path or ownership count changes. Commit
 `aa7e12e48218e339e7ad8b247a5dac1db63fb122` maps the correction. The gate has
 not been rerun; exact-head round 9 is required first.
 
+Round 9 reviewed exact head
+`86502718f12fc4fc0a49c20438aa0777feb572ed`; all three passes **APPROVED**.
+Validation then completed:
+
+- 67 focused playback-control and process-supervisor tests passed;
+- `make check` passed catalog/history, the 121- and 52-test Python suites,
+  formatting, Clippy, and 1,970 Rust/doc tests with three intentional ignores;
+- `make cluster-check` passed vendor snapshot/WAL recovery, the serialized
+  replicated-store contracts, compacted-growth, membership/leader/learner and
+  singleton/serving failure drills, three/four-voter topology, and seven
+  activation plus two activity integration tests; and
+- hosted run `33106815012` attempt 3 passed policy, fast Rust, WAL recovery,
+  cluster daemon, replicated store/topology, mobile version, and the aggregate
+  PR validation gate.
+
+Hosted attempts 1 and 2 failed before repository commands because the
+self-hosted fast-Rust runner could not unlink a stale root-owned
+`target/.rustc_info.json` during checkout. Attempt 3 used a healthy checkout
+and the real format/Clippy/unit/SQLite command passed. This final evidence
+snapshot changes documentation only; round 10 must approve its exact head and
+the latest hosted checks must be green before merge.
+
 ### PR #619 adversarial review chronology
 
 Thirteen exact-head reviews ran. No tests were run during them.
@@ -360,17 +379,16 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 8 **APPROVED**
-exact head `5a9a62dbfedfcc4af08912c971c4289084781f04`. The 67 focused tests remain green;
-`make check` passed through policy, history, and formatting before Clippy found
-test-only dead code. Commits `6333b065` and `aa7e12e4` repair and map it, pending
-exact-head round 9.
+The action-passive deadline slice is in PR #621. Review round 9 **APPROVED**
+exact head `86502718f12fc4fc0a49c20438aa0777feb572ed`. Focused, full, cluster, and hosted
+gates are green on that runtime head. This final documentation-only evidence
+snapshot awaits exact-head round 10 and latest hosted validation.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-9 review of that exact commit.
-- Do not run unit tests until that review approves. After approval, run focused
-  deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
-  CI. Fix every failure and re-review any changed head before merge.
+  adversarial round-10 review of that exact commit.
+- Confirm every required hosted check on that exact head is green, then merge
+  PR #621. Any correction requires another exact-head review before a test or
+  merge gate is reused.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
@@ -439,8 +457,8 @@ Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
 
-Committed implementation and review-repair sequence through the Clippy-fix
-binding preceding this documentation snapshot:
+Committed implementation and review-repair sequence through the final runtime
+head preceding this documentation snapshot:
 
 The documentation commit containing this list and any later metadata-only
 binding are intentionally resolved with `git log`; a commit cannot list its
@@ -471,6 +489,8 @@ db158bd6 docs(playback): record focused gate evidence
 5a9a62db chore(validation): bind focused gate evidence
 6333b065 fix(playback): gate test-only deadline helpers
 aa7e12e4 chore(validation): register deadline helper evidence
+6f9676a5 docs(playback): record clippy gate repair
+86502718 chore(validation): bind clippy gate evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
