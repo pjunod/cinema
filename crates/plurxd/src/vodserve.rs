@@ -551,6 +551,9 @@ struct Shared {
     /// the session-owned detach fence.
     #[cfg(test)]
     terminal_replay_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous immediately before terminal reader detach.
+    #[cfg(test)]
+    terminal_detach_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 pub struct VodServe {
@@ -731,6 +734,8 @@ impl VodServe {
                 completed_cache: AtomicU64::new(0),
                 #[cfg(test)]
                 terminal_replay_pause: StdMutex::new(None),
+                #[cfg(test)]
+                terminal_detach_pause: StdMutex::new(None),
             }),
         })
     }
@@ -1227,6 +1232,17 @@ impl VodServe {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
             let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
+            #[cfg(test)]
+            let terminal_detach_pause = shared
+                .terminal_detach_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            #[cfg(test)]
+            if let Some(pause) = terminal_detach_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
             rendition.detach_reader(&session_id).await;
             rendition.kick();
             let serve = VodServe { shared };
@@ -5080,9 +5096,16 @@ mod tests {
             expires_at_unix_ms: crate::media_sessions::unix_ms().saturating_add(60_000),
         });
 
-        // Pin the exact detach lock so the session-owned cleanup task cannot
-        // finish before the request future is cancelled.
-        let readers = rendition.readers.lock().await;
+        // Pause the session-owned task at the exact pre-detach point. Status
+        // preparation is therefore free to inspect the reader registry before
+        // End publishes its cleanup marker.
+        let terminal_detach_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .terminal_detach_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&terminal_detach_pause));
         let pending = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -5127,6 +5150,7 @@ mod tests {
         })
         .await
         .expect("terminal commit publishes session-owned cleanup");
+        terminal_detach_pause.wait().await;
         assert!(!cleanup.is_finished());
         pending.abort();
         let cancellation = match pending.await {
@@ -5173,7 +5197,8 @@ mod tests {
             "a replacement waiter at the cleanup fence cannot expose terminal settlement while detach is pinned"
         );
         terminal_replay_pause.wait().await;
-        drop(readers);
+        assert!(rendition.readers.lock().await.contains_key(&session_id));
+        terminal_detach_pause.wait().await;
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
             .expect("detached cleanup survives request cancellation");

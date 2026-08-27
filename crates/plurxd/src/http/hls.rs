@@ -4581,7 +4581,7 @@ mod tests {
             generation: generation.clone(),
             control_epoch: 1,
             client_instance_id: uuid::Uuid::new_v4().to_string(),
-            sequence: 7,
+            sequence: 1,
             demand: crate::playback_control::PlaybackDemand::End,
             position_ms: 1_000,
             buffered_from_ms: Some(0),
@@ -4697,7 +4697,7 @@ mod tests {
         })
         .await
         .expect("accepted End continuation must commit after HTTP cancellation");
-        assert_eq!(acknowledgement.sequence, 7);
+        assert_eq!(acknowledgement.sequence, 1);
         assert_eq!(
             fixture
                 .store
