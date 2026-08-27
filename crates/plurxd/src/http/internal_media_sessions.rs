@@ -404,5 +404,5 @@ async fn control_inner(
             None,
         );
     }
-    super::hls::control_local(&state, &route, request.control).await
+    super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
 }

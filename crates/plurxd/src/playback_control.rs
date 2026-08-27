@@ -1339,6 +1339,15 @@ pub(crate) struct RollingControlOutcome {
     pub flow_ticket: u64,
 }
 
+/// A session-owned continuation installed synchronously by the rolling actor
+/// after it has accepted (or exactly replayed) `demand=end`, but before the
+/// actor attempts to answer the request waiter.  This is the terminal
+/// ownership boundary: losing the HTTP future or its oneshot reply cannot
+/// leave an accepted End without a cleanup and durable-ack owner.
+pub(crate) trait RollingTerminalAdmission: Send + Sync {
+    fn accepted(&self, outcome: RollingControlOutcome);
+}
+
 struct RollingFlowSync {
     requested: AtomicU64,
     applied: AtomicU64,
@@ -1599,6 +1608,8 @@ enum RollingControlCommand {
     },
     Control {
         request: Box<OwnedLocalControlRequest>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
         reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
     },
     BeginProducerAttempt {
@@ -2107,16 +2118,38 @@ impl RollingControlActor {
                 }
                 let _ = reply.send(renewed);
             }
-            RollingControlCommand::Control { request, reply } => {
+            RollingControlCommand::Control {
+                request,
+                deadline_unix_ms,
+                terminal_admission,
+                reply,
+            } => {
+                // A queued nonterminal command is not permission to mutate
+                // after its caller has gone away or its inherited exchange
+                // deadline has expired.  The final closed check and mutation
+                // are consecutive actor operations with no suspension point.
+                if reply.is_closed() {
+                    return;
+                }
                 let transition = Arc::clone(&self.producer_transition);
                 let mut transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let outcome = self.control_at(rolling_now(), *request);
+                let outcome = if crate::media_sessions::unix_ms() >= deadline_unix_ms {
+                    Err(ControlStateError::Unavailable)
+                } else {
+                    self.control_at(rolling_now(), *request)
+                };
                 if outcome.as_ref().is_ok_and(|outcome| {
                     outcome.disposition == ControlDisposition::Accepted && !outcome.lease.retired
                 }) {
                     *transition = self.deadline();
+                }
+                if let (Some(admission), Ok(outcome)) = (terminal_admission, outcome.as_ref()) {
+                    if outcome.lease.terminal == Some(RollingTerminalCause::End) {
+                        // Transfer ownership before the fallible reply send.
+                        admission.accepted(outcome.clone());
+                    }
                 }
                 let _ = reply.send(outcome);
             }
@@ -2522,9 +2555,19 @@ impl RollingControlHandle {
         response.await.unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub(crate) async fn control(
         &self,
         request: LocalControlRequest<'_>,
+    ) -> Result<RollingControlOutcome, ControlStateError> {
+        self.control_before(request, i64::MAX, None).await
+    }
+
+    pub(crate) async fn control_before(
+        &self,
+        request: LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
     ) -> Result<RollingControlOutcome, ControlStateError> {
         let request = OwnedLocalControlRequest {
             generation: request.generation.to_owned(),
@@ -2537,6 +2580,8 @@ impl RollingControlHandle {
         self.sender
             .send(RollingControlCommand::Control {
                 request: Box::new(request),
+                deadline_unix_ms,
+                terminal_admission,
                 reply,
             })
             .await
@@ -2777,21 +2822,6 @@ pub(crate) fn record_platform(outcome: MetricOutcome, platform: ClientPlatform) 
     CONTROL_PLATFORMS[outcome_index][platform_index].fetch_add(1, Ordering::Relaxed);
 }
 
-#[cfg(test)]
-pub(crate) fn platform_count(outcome: MetricOutcome, platform: ClientPlatform) -> u64 {
-    let outcome_index = match outcome {
-        MetricOutcome::Accepted => 0,
-        MetricOutcome::Replay => 1,
-        _ => return 0,
-    };
-    let platform_index = match platform {
-        ClientPlatform::Web => 0,
-        ClientPlatform::Apple => 1,
-        ClientPlatform::Android => 2,
-    };
-    CONTROL_PLATFORMS[outcome_index][platform_index].load(Ordering::Relaxed)
-}
-
 fn hold_reason_index(reason: crate::transcode::AheadHoldReason) -> usize {
     match reason {
         crate::transcode::AheadHoldReason::Demand => 0,
@@ -2960,6 +2990,28 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct DropReplyOnTerminalAdmission {
+        receiver: std::sync::Mutex<
+            Option<
+                tokio::sync::oneshot::Receiver<Result<RollingControlOutcome, ControlStateError>>,
+            >,
+        >,
+        accepted: AtomicUsize,
+    }
+
+    impl RollingTerminalAdmission for DropReplyOnTerminalAdmission {
+        fn accepted(&self, _outcome: RollingControlOutcome) {
+            self.accepted.fetch_add(1, Ordering::AcqRel);
+            drop(
+                self.receiver
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take(),
+            );
+        }
+    }
 
     fn request() -> ControlRequestV1 {
         ControlRequestV1 {
@@ -4571,15 +4623,17 @@ mod tests {
         );
 
         let (reply, dropped) = tokio::sync::oneshot::channel();
+        drop(dropped);
         control
             .sender
             .send(RollingControlCommand::Control {
                 request: Box::new(owned_control(&request)),
+                deadline_unix_ms: i64::MAX,
+                terminal_admission: None,
                 reply,
             })
             .await
             .expect("control command queued");
-        drop(dropped);
         tokio::time::sleep(MIN_CONTROL_INTERVAL).await;
         let replay = control
             .control(LocalControlRequest {
@@ -4592,8 +4646,30 @@ mod tests {
                 snapshot: PlaybackDemandSnapshot::from(&request),
             })
             .await
-            .expect("committed request replays");
-        assert_eq!(replay.disposition, ControlDisposition::Replay);
+            .expect("request remains admissible");
+        assert_eq!(replay.disposition, ControlDisposition::Accepted);
+
+        let expired = RollingControlHandle::spawn("session-start");
+        let (reply, response) = tokio::sync::oneshot::channel();
+        expired
+            .sender
+            .send(RollingControlCommand::Control {
+                request: Box::new(owned_control(&request)),
+                deadline_unix_ms: crate::media_sessions::unix_ms(),
+                terminal_admission: None,
+                reply,
+            })
+            .await
+            .expect("expired control command queued");
+        assert_eq!(
+            response.await.expect("expired control reply"),
+            Err(ControlStateError::Unavailable)
+        );
+        assert_eq!(
+            expired.snapshot().await.expect("expired snapshot").mode,
+            RollingLeaseMode::Legacy,
+            "a queued control cannot mutate after its inherited deadline"
+        );
 
         let terminal_control = RollingControlHandle::spawn("session-start");
         let mut end = request.clone();
@@ -4601,22 +4677,28 @@ mod tests {
         end.playback_rate = 0.0;
         end.render_state = RenderState::Ended;
         let (reply, dropped) = tokio::sync::oneshot::channel();
+        let admission = Arc::new(DropReplyOnTerminalAdmission {
+            receiver: std::sync::Mutex::new(Some(dropped)),
+            accepted: AtomicUsize::new(0),
+        });
         terminal_control
             .sender
             .send(RollingControlCommand::Control {
                 request: Box::new(owned_control(&end)),
+                deadline_unix_ms: i64::MAX,
+                terminal_admission: Some(admission.clone()),
                 reply,
             })
             .await
             .expect("terminal control queued");
-        drop(dropped);
         tokio::time::timeout(Duration::from_secs(1), async {
             while !terminal_control.is_retired() {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("accepted end publishes its terminal fence after reply loss");
+        .expect("actor transfers accepted End before its reply send");
+        assert_eq!(admission.accepted.load(Ordering::Acquire), 1);
         let recovered = terminal_control
             .control(LocalControlRequest {
                 session_id: "unused",

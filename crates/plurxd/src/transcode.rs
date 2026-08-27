@@ -2219,6 +2219,53 @@ struct PreparedSharedCacheRead {
     manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
 }
 
+#[derive(Clone)]
+struct RollingTerminalResultReceipt {
+    result: tokio::sync::watch::Receiver<
+        Option<
+            Result<
+                crate::playback_control::LocalControlResult,
+                crate::playback_control::ControlStateError,
+            >,
+        >,
+    >,
+}
+
+impl RollingTerminalResultReceipt {
+    fn pending() -> (
+        Self,
+        tokio::sync::watch::Sender<
+            Option<
+                Result<
+                    crate::playback_control::LocalControlResult,
+                    crate::playback_control::ControlStateError,
+                >,
+            >,
+        >,
+    ) {
+        let (sender, result) = tokio::sync::watch::channel(None);
+        (Self { result }, sender)
+    }
+
+    async fn wait(
+        &self,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let mut result = self.result.clone();
+        loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return outcome;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
+        }
+    }
+}
+
 struct Session {
     dir: PathBuf,
     /// The ffmpeg producing this session's segments — `None` for a cache hit,
@@ -2260,15 +2307,14 @@ struct Session {
     /// command while the HTTP-owned transition guard is still held.
     #[cfg(test)]
     control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Set while an accepted rolling End is being handed from the actor to
-    /// the replicated terminal commit. The reaper observes it under
-    /// `child_transition`, so it cannot remove the session between those two
-    /// linearization points.
+    /// Set synchronously by the actor's accepted-End callback and cleared only
+    /// after the replicated terminal commit settles. The reaper observes it
+    /// under `child_transition`, so no actor-to-continuation reply gap exists.
     terminal_response_pending: Arc<AtomicBool>,
-    /// The one durable terminal continuation shared by exact rolling End
-    /// retries. Keeping it here prevents simultaneous retries from inventing
-    /// different response timestamps for the same immutable sequence.
-    terminal_commit: std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>,
+    /// One actor-installed terminal operation shared by the original request
+    /// and every exact retry. It owns physical convergence, response
+    /// projection and the durable acknowledgement receipt.
+    terminal_control: std::sync::Mutex<Option<RollingTerminalResultReceipt>>,
     /// Test-only seam after producer policy is applied but before the flow
     /// ticket is completed back to a waiting control response.
     #[cfg(test)]
@@ -2765,6 +2811,8 @@ impl Session {
     async fn accept_control(
         &self,
         request: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn crate::playback_control::RollingTerminalAdmission>>,
     ) -> Option<
         Result<
             (
@@ -2781,7 +2829,11 @@ impl Session {
             crate::playback_control::ControlStateError,
         >,
     > {
-        let outcome = match self.control.control(request).await {
+        let outcome = match self
+            .control
+            .control_before(request, deadline_unix_ms, terminal_admission)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
@@ -6284,6 +6336,70 @@ impl TranscodeMetrics {
     }
 }
 
+struct RollingTerminalAdmission {
+    manager: Arc<TranscodeManager>,
+    session_id: String,
+    session: Arc<Session>,
+    terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    #[cfg(test)]
+    control_pause: Option<Arc<tokio::sync::Barrier>>,
+}
+
+impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmission {
+    fn accepted(&self, outcome: crate::playback_control::RollingControlOutcome) {
+        if outcome.lease.terminal != Some(crate::playback_control::RollingTerminalCause::End) {
+            return;
+        }
+        let (receipt, sender) = RollingTerminalResultReceipt::pending();
+        let handoff = {
+            let mut shared = self
+                .session
+                .terminal_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if shared.is_some() {
+                return;
+            }
+            let handoff = crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
+                &self.session.terminal_response_pending,
+            ));
+            *shared = Some(receipt);
+            handoff
+        };
+        let manager = Arc::clone(&self.manager);
+        let session_id = self.session_id.clone();
+        let session = Arc::clone(&self.session);
+        let terminal_committer = self.terminal_committer.clone();
+        #[cfg(test)]
+        let control_pause = self.control_pause.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    outcome.disposition,
+                    outcome.accepted_sequence,
+                    outcome.action,
+                    outcome.platform,
+                    outcome.lease.expires_at_unix_ms(),
+                    outcome.lease.timeout_ms(),
+                    outcome.flow_ticket,
+                    outcome.lease.terminal.map_or(
+                        "active",
+                        crate::playback_control::RollingTerminalCause::status,
+                    ),
+                    true,
+                    Some(handoff),
+                    terminal_committer,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await;
+            let _ = sender.send(Some(result));
+        });
+    }
+}
+
 impl TranscodeManager {
     /// `pipeline` is the tone-map graph this node proved at boot — see
     /// [`crate::pipeprobe`]. It is fixed for the manager's life because it is
@@ -8195,7 +8311,7 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
-            terminal_commit: std::sync::Mutex::new(None),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -11496,7 +11612,7 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
-            terminal_commit: std::sync::Mutex::new(None),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12155,7 +12271,7 @@ impl TranscodeManager {
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
-            terminal_commit: std::sync::Mutex::new(None),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12733,12 +12849,14 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.hls_session_control_with_terminal(control, None).await
+        self.hls_session_control_with_terminal(control, i64::MAX, None)
+            .await
     }
 
     pub(crate) async fn hls_session_control_with_terminal(
         self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
     ) -> Option<
         Result<
@@ -12748,7 +12866,11 @@ impl TranscodeManager {
     > {
         if let Some(result) = self
             .vod
-            .control_with_terminal(control.clone(), terminal_committer.clone())
+            .control_with_terminal(
+                control.clone(),
+                deadline_unix_ms,
+                terminal_committer.clone(),
+            )
             .await
         {
             return Some(result);
@@ -12785,6 +12907,23 @@ impl TranscodeManager {
         // the request future is cancelled after mailbox admission, the actor
         // can still publish a ticket that this session-owned worker applies.
         self.ensure_flow_worker(&session_id, Arc::clone(&session));
+        #[cfg(test)]
+        let control_pause = session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let terminal_admission =
+            (control.snapshot.demand == crate::playback_control::PlaybackDemand::End).then(|| {
+                Arc::new(RollingTerminalAdmission {
+                    manager: Arc::clone(self),
+                    session_id: session_id.clone(),
+                    session: Arc::clone(&session),
+                    terminal_committer: terminal_committer.clone(),
+                    #[cfg(test)]
+                    control_pause: control_pause.clone(),
+                }) as Arc<dyn crate::playback_control::RollingTerminalAdmission>
+            });
         let (
             disposition,
             accepted_sequence,
@@ -12795,62 +12934,46 @@ impl TranscodeManager {
             flow_ticket,
             lease_state,
             acknowledged_end,
-        ) = match session.accept_control(control).await? {
+        ) = match session
+            .accept_control(control, deadline_unix_ms, terminal_admission)
+            .await?
+        {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        let terminal_handoff = (acknowledged_end
-            && session
-                .terminal_commit
+        drop(transition);
+        if acknowledged_end {
+            let terminal = session
+                .terminal_control
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_none())
-        .then(|| {
-            crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
-                &session.terminal_response_pending,
-            ))
-        });
-        #[cfg(test)]
-        let control_pause = session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        drop(transition);
-        let finish = Arc::clone(self).finish_hls_session_control(
-            session_id,
-            session,
-            disposition,
-            accepted_sequence,
-            action,
-            platform,
-            lease_expires_at_unix_ms,
-            lease_timeout_ms,
-            flow_ticket,
-            lease_state,
-            acknowledged_end,
-            terminal_handoff.clone(),
-            terminal_committer,
-            #[cfg(test)]
-            control_pause,
-        );
-        if acknowledged_end {
-            // The mutation has already linearized in the actor. From this
-            // point one session-owned continuation completes physical join,
-            // durable acknowledgement and exact-route settlement even if the
-            // HTTP future is cancelled.
-            let rescue = terminal_handoff;
-            return Some(match tokio::spawn(finish).await {
-                Ok(result) => result,
-                Err(_) => {
-                    if let Some(handoff) = rescue {
-                        handoff.complete();
-                    }
-                    Err(crate::playback_control::ControlStateError::Unavailable)
-                }
+                .clone();
+            return Some(match terminal {
+                Some(terminal) => terminal.wait().await,
+                None => Err(crate::playback_control::ControlStateError::Unavailable),
             });
         }
-        Some(finish.await)
+        Some(
+            Arc::clone(self)
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms,
+                    lease_timeout_ms,
+                    flow_ticket,
+                    lease_state,
+                    false,
+                    None,
+                    None,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -12932,16 +13055,8 @@ impl TranscodeManager {
                 terminal_commit: None,
             };
             if acknowledged_end {
-                let mut shared = session
-                    .terminal_commit
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                if let Some(commit) = shared.as_ref() {
-                    result.terminal_commit = Some(commit.clone());
-                } else if let Some(committer) = terminal_committer {
-                    let commit = committer.start(&result);
-                    result.terminal_commit = Some(commit.clone());
-                    *shared = Some(commit);
+                if let Some(committer) = terminal_committer {
+                    result.terminal_commit = Some(committer.start(&result));
                 } else if let Some(handoff) = &result.terminal_handoff {
                     handoff.complete();
                 }
@@ -15727,7 +15842,7 @@ fn test_session(dir: PathBuf) -> Session {
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
         terminal_response_pending: Arc::new(AtomicBool::new(false)),
-        terminal_commit: std::sync::Mutex::new(None),
+        terminal_control: std::sync::Mutex::new(None),
         flow_completion_pause: std::sync::Mutex::new(None),
         playlist_publication_pause: std::sync::Mutex::new(None),
         producer_install_pause: std::sync::Mutex::new(None),
@@ -22687,7 +22802,7 @@ mod tests {
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
-            terminal_commit: std::sync::Mutex::new(None),
+            terminal_control: std::sync::Mutex::new(None),
             flow_completion_pause: std::sync::Mutex::new(None),
             playlist_publication_pause: std::sync::Mutex::new(None),
             producer_install_pause: std::sync::Mutex::new(None),

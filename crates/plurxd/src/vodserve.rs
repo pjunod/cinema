@@ -427,6 +427,13 @@ impl Drop for TerminalCleanupGuard {
     }
 }
 
+struct DeferredTerminalCommit {
+    committer: Arc<dyn crate::playback_control::TerminalControlCommitter>,
+    result: crate::playback_control::LocalControlResult,
+    sender:
+        tokio::sync::watch::Sender<Option<Result<crate::playback_control::ControlResponseV1, ()>>>,
+}
+
 fn terminal_reason(cause: Terminal) -> &'static str {
     match cause {
         Terminal::Deleted => "client_released",
@@ -1165,6 +1172,7 @@ impl VodServe {
         height: i64,
         kind: SessionKind,
         cause: Terminal,
+        terminal_commit: Option<Box<DeferredTerminalCommit>>,
     ) {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
@@ -1185,6 +1193,10 @@ impl VodServe {
                 rendition = %rendition.key,
                 "vod session ended for good: {cause:?}"
             );
+            if let Some(terminal_commit) = terminal_commit {
+                let receipt = terminal_commit.committer.start(&terminal_commit.result);
+                let _ = terminal_commit.sender.send(Some(receipt.wait().await));
+            }
         });
     }
 
@@ -1239,6 +1251,7 @@ impl VodServe {
                 height,
                 kind,
                 cause,
+                None,
             );
         }
         cleanup.wait().await;
@@ -1451,12 +1464,13 @@ impl VodServe {
             crate::playback_control::ControlStateError,
         >,
     > {
-        self.control_with_terminal(control, None).await
+        self.control_with_terminal(control, i64::MAX, None).await
     }
 
     pub(crate) async fn control_with_terminal(
         &self,
         control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
         terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
     ) -> Option<
         Result<
@@ -1546,6 +1560,7 @@ impl VodServe {
         enum AppliedControl {
             End {
                 result: crate::playback_control::LocalControlResult,
+                terminal_commit: Option<Box<DeferredTerminalCommit>>,
                 cleanup: Arc<TerminalCleanup>,
                 rendition: Arc<Rendition>,
                 file_id: i64,
@@ -1565,6 +1580,9 @@ impl VodServe {
             let session = sessions.get_mut(control.session_id)?;
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) || session.tombstone.is_some() {
                 return None;
+            }
+            if crate::media_sessions::unix_ms() >= deadline_unix_ms {
+                return Some(Err(crate::playback_control::ControlStateError::Unavailable));
             }
             let accepted = session.control.lock().expect("control lock").accept(
                 control.generation,
@@ -1594,15 +1612,25 @@ impl VodServe {
                     terminal_handoff: None,
                     terminal_commit: None,
                 };
-                if let Some(committer) = &terminal_committer {
-                    result.terminal_commit = Some(committer.start(&result));
-                }
+                let terminal_commit = terminal_committer.as_ref().map(|committer| {
+                    let (receipt, sender) =
+                        crate::playback_control::TerminalCommitReceipt::pending();
+                    result.terminal_commit = Some(receipt);
+                    (Arc::clone(committer), sender)
+                });
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
                 session.tombstone = Some(Terminal::Deleted);
                 session.control_end = Some(result.clone());
                 session.control_end_snapshot = Some(control.snapshot.clone());
                 Ok::<_, crate::playback_control::ControlStateError>(AppliedControl::End {
+                    terminal_commit: terminal_commit.map(|(committer, sender)| {
+                        Box::new(DeferredTerminalCommit {
+                            committer,
+                            result: result.clone(),
+                            sender,
+                        })
+                    }),
                     result,
                     cleanup,
                     rendition: Arc::clone(&session.rendition),
@@ -1635,6 +1663,7 @@ impl VodServe {
             match outcome {
                 AppliedControl::End {
                     result,
+                    terminal_commit,
                     cleanup,
                     rendition,
                     file_id,
@@ -1649,6 +1678,7 @@ impl VodServe {
                         height,
                         kind,
                         Terminal::Deleted,
+                        terminal_commit,
                     );
                     cleanup.wait().await;
                     return Some(Ok(result));
@@ -3555,6 +3585,32 @@ mod tests {
 
     use crate::fragindex::IndexOutcome;
 
+    struct CleanupObservingCommitter {
+        rendition: Arc<Rendition>,
+        session_id: String,
+        started: AtomicBool,
+        reader_detached: AtomicBool,
+    }
+
+    impl crate::playback_control::TerminalControlCommitter for CleanupObservingCommitter {
+        fn start(
+            &self,
+            _result: &crate::playback_control::LocalControlResult,
+        ) -> crate::playback_control::TerminalCommitReceipt {
+            self.started.store(true, Release);
+            let detached = self
+                .rendition
+                .readers
+                .try_lock()
+                .ok()
+                .is_some_and(|readers| !readers.contains_key(&self.session_id));
+            self.reader_detached.store(detached, Release);
+            let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
+            let _ = sender.send(Some(Err(())));
+            receipt
+        }
+    }
+
     fn fixture_file() -> MediaFile {
         media_file_at(testfixtures::source("clean-cra"), 12_000)
     }
@@ -4728,8 +4784,14 @@ mod tests {
             }
         };
 
+        let committer = Arc::new(CleanupObservingCommitter {
+            rendition: Arc::clone(&rendition),
+            session_id: session_id.clone(),
+            started: AtomicBool::new(false),
+            reader_detached: AtomicBool::new(false),
+        });
         let accepted = serve
-            .control(request(1))
+            .control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
             .await
             .expect("VOD registry owner")
             .expect("end accepted");
@@ -4752,6 +4814,20 @@ mod tests {
         );
         assert!(!rendition.readers.lock().await.contains_key(&session_id));
         assert!(serve.status(&session_id).await.is_none());
+        assert!(committer.started.load(Acquire));
+        assert!(
+            committer.reader_detached.load(Acquire),
+            "the durable terminal commit cannot start before VOD reader detach"
+        );
+        assert!(matches!(
+            accepted
+                .terminal_commit
+                .as_ref()
+                .expect("deferred terminal receipt")
+                .wait()
+                .await,
+            Err(())
+        ));
 
         let replay = serve
             .control(request(1))

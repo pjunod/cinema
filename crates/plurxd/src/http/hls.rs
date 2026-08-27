@@ -18,7 +18,7 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
@@ -1463,6 +1463,95 @@ struct DurableTerminalCommitter {
     request: crate::playback_control::ControlRequestV1,
 }
 
+const TERMINAL_COMMIT_RETRY_BUDGET: Duration = Duration::from_secs(5);
+const TERMINAL_COMMIT_RETRY_MIN: Duration = Duration::from_millis(25);
+const TERMINAL_COMMIT_RETRY_MAX: Duration = Duration::from_millis(500);
+
+fn terminal_ack_matches(
+    stored: &MediaSessionTerminalAck,
+    acknowledgement: &MediaSessionTerminalAck,
+) -> bool {
+    stored.incarnation_id == acknowledgement.incarnation_id
+        && stored.session_id == acknowledgement.session_id
+        && stored.owner_node_id == acknowledgement.owner_node_id
+        && stored.owner_epoch == acknowledgement.owner_epoch
+        && stored.client_instance_id == acknowledgement.client_instance_id
+        && stored.sequence == acknowledgement.sequence
+        && stored.request_fingerprint == acknowledgement.request_fingerprint
+        && stored.response_json == acknowledgement.response_json
+}
+
+async fn terminal_ack_is_visible(
+    store: &dyn plurx_core::store::Store,
+    acknowledgement: &MediaSessionTerminalAck,
+) -> bool {
+    store
+        .media_session_terminal_ack(&acknowledgement.session_id, unix_ms())
+        .await
+        .ok()
+        .flatten()
+        .as_ref()
+        .is_some_and(|stored| terminal_ack_matches(stored, acknowledgement))
+}
+
+async fn persist_terminal_ack(
+    store: Arc<dyn plurx_core::store::Store>,
+    acknowledgement: MediaSessionTerminalAck,
+) -> bool {
+    persist_terminal_ack_with_failures(store, acknowledgement, None).await
+}
+
+async fn persist_terminal_ack_with_failures(
+    store: Arc<dyn plurx_core::store::Store>,
+    acknowledgement: MediaSessionTerminalAck,
+    forced_failures: Option<&std::sync::atomic::AtomicUsize>,
+) -> bool {
+    let deadline = tokio::time::Instant::now() + TERMINAL_COMMIT_RETRY_BUDGET;
+    let mut delay = TERMINAL_COMMIT_RETRY_MIN;
+    loop {
+        let forced_failure = forced_failures.is_some_and(|failures| {
+            failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::AcqRel,
+                    std::sync::atomic::Ordering::Acquire,
+                    |remaining| remaining.checked_sub(1),
+                )
+                .is_ok()
+        });
+        let write = if forced_failure {
+            None
+        } else {
+            Some(
+                store
+                    .record_media_session_terminal_ack(&acknowledgement)
+                    .await,
+            )
+        };
+        match write {
+            None => {}
+            Some(Ok(true)) => return true,
+            Some(Ok(false)) => {
+                // `false` is normally a definitive route/identity conflict,
+                // but first resolve an earlier unknown commit of these exact
+                // immutable bytes.
+                return terminal_ack_is_visible(store.as_ref(), &acknowledgement).await;
+            }
+            Some(Err(_)) if terminal_ack_is_visible(store.as_ref(), &acknowledgement).await => {
+                // The write may have committed before its answer was lost.
+                // Read-after-unknown prevents a second outcome from replacing
+                // the accepted terminal response.
+                return true;
+            }
+            Some(Err(_)) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(delay).await;
+        delay = delay.saturating_mul(2).min(TERMINAL_COMMIT_RETRY_MAX);
+    }
+}
+
 impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommitter {
     fn start(
         &self,
@@ -1511,12 +1600,7 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         };
         let store = Arc::clone(&self.store);
         tokio::spawn(async move {
-            let persisted = matches!(
-                store
-                    .record_media_session_terminal_ack(&acknowledgement)
-                    .await,
-                Ok(true)
-            );
+            let persisted = persist_terminal_ack(store, acknowledgement).await;
             if let Some(handoff) = handoff {
                 handoff.complete();
             }
@@ -1837,7 +1921,7 @@ async fn control_inner(
             }
         };
     }
-    control_local(&state, &route, request).await
+    control_local(&state, &route, request, deadline_unix_ms).await
 }
 
 fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {
@@ -1877,18 +1961,20 @@ pub(crate) async fn control_local(
     state: &AppState,
     route: &MediaSessionRoute,
     request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
 ) -> Response {
     // Public ingress and the internal relay both own the absolute exchange
     // deadline. Keep admission and every nonterminal mutation in that caller
     // future; only an already-accepted End receives a detached continuation
     // below for its durable acknowledgement.
-    control_local_inner(state, route, request).await
+    control_local_inner(state, route, request, deadline_unix_ms).await
 }
 
 async fn control_local_inner(
     state: &AppState,
     route: &MediaSessionRoute,
     request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
 ) -> Response {
     let owner_epoch = match u64::try_from(route.owner_epoch)
         .ok()
@@ -2011,6 +2097,7 @@ async fn control_local_inner(
                 sequence: request.sequence,
                 snapshot: crate::playback_control::PlaybackDemandSnapshot::from(&request),
             },
+            deadline_unix_ms,
             terminal_committer,
         )
         .await
@@ -4317,7 +4404,7 @@ mod tests {
             acknowledgement: None,
         };
 
-        let response = control_local(&fixture.state, &route, request).await;
+        let response = control_local(&fixture.state, &route, request, i64::MAX).await;
         assert_eq!(response.status(), StatusCode::TOO_EARLY);
     }
 
@@ -4436,7 +4523,12 @@ mod tests {
 
         // A future discarded before owner-local admission must not enqueue or
         // mutate anything later.
-        drop(control_local(&fixture.state, &route, request.clone()));
+        drop(control_local(
+            &fixture.state,
+            &route,
+            request.clone(),
+            i64::MAX,
+        ));
         assert_eq!(
             fixture
                 .store
@@ -4459,18 +4551,45 @@ mod tests {
             let state = fixture.state.clone();
             let route = route.clone();
             let request = request.clone();
-            async move { control_local(&state, &route, request).await }
+            async move { control_local(&state, &route, request, i64::MAX).await }
         });
         pause.wait().await;
 
+        let retry_a = tokio::spawn({
+            let state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move { control_local(&state, &route, request, i64::MAX).await }
+        });
+        let retry_b = tokio::spawn({
+            let state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move { control_local(&state, &route, request, i64::MAX).await }
+        });
+        tokio::task::yield_now().await;
+
         // Run the production reaper verdict after actor End but before the
-        // final status join. It must join the pending acknowledgement instead
-        // of treating the retired actor as abandoned cleanup.
+        // final status join, with two exact retries also attached. All three
+        // waiters must share the one actor-installed continuation, and the
+        // reaper must not mistake the retired actor for abandoned cleanup.
         assert!(fixture.reaper_pass_keeps_worker(&session_id).await);
         assert!(fixture.worker_is_registered(&session_id).await);
         control.abort();
         assert!(matches!(control.await, Err(error) if error.is_cancelled()));
         pause.wait().await;
+
+        let retry_a = retry_a.await.expect("first retry task");
+        let retry_b = retry_b.await.expect("second retry task");
+        assert_eq!(retry_a.status(), StatusCode::OK);
+        assert_eq!(retry_b.status(), StatusCode::OK);
+        let retry_a = axum::body::to_bytes(retry_a.into_body(), 64 * 1024)
+            .await
+            .expect("first retry body");
+        let retry_b = axum::body::to_bytes(retry_b.into_body(), 64 * 1024)
+            .await
+            .expect("second retry body");
+        assert_eq!(retry_a, retry_b, "exact retries share one terminal result");
 
         let acknowledgement = tokio::time::timeout(Duration::from_secs(2), async {
             loop {
@@ -4666,31 +4785,53 @@ mod tests {
                 },
                 action: crate::playback_control::ControlAction::None,
             };
-            assert!(fixture
-                .store
-                .record_media_session_terminal_ack(&MediaSessionTerminalAck {
-                    incarnation_id: generation.clone(),
-                    session_id: session_id.clone(),
-                    owner_node_id: route.owner_node_id.clone(),
-                    owner_epoch: route.owner_epoch,
-                    client_instance_id,
-                    sequence: i64::try_from(request.sequence).expect("bounded sequence"),
-                    request_fingerprint: request
-                        .fingerprint()
-                        .expect("valid terminal request fingerprint"),
-                    response_json: serde_json::to_string(&RetainedTerminalResponse {
-                        platform: crate::playback_control::ClientPlatform::Apple,
-                        response: terminal.clone(),
-                    })
-                    .expect("terminal response"),
-                    expires_at_ms: terminal_time_ms.saturating_add(60_000),
-                    updated_at_ms: terminal_time_ms,
+            let acknowledgement = MediaSessionTerminalAck {
+                incarnation_id: generation.clone(),
+                session_id: session_id.clone(),
+                owner_node_id: route.owner_node_id.clone(),
+                owner_epoch: route.owner_epoch,
+                client_instance_id,
+                sequence: i64::try_from(request.sequence).expect("bounded sequence"),
+                request_fingerprint: request
+                    .fingerprint()
+                    .expect("valid terminal request fingerprint"),
+                response_json: serde_json::to_string(&RetainedTerminalResponse {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    response: terminal.clone(),
                 })
-                .await
-                .expect("record terminal acknowledgement"));
-            let replay_platform_before = crate::playback_control::platform_count(
-                crate::playback_control::MetricOutcome::Replay,
-                crate::playback_control::ClientPlatform::Apple,
+                .expect("terminal response"),
+                expires_at_ms: terminal_time_ms.saturating_add(60_000),
+                updated_at_ms: terminal_time_ms,
+            };
+            let forced_failures = std::sync::atomic::AtomicUsize::new(1);
+            let terminal_store: Arc<dyn plurx_core::store::Store> = fixture.store.clone();
+            assert!(
+                persist_terminal_ack_with_failures(
+                    terminal_store,
+                    acknowledgement,
+                    Some(&forced_failures),
+                )
+                .await,
+                "{label} terminal acknowledgement retries one transient Store failure"
+            );
+            assert_eq!(
+                forced_failures.load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "{label} consumed the injected first-attempt failure"
+            );
+            let retained = terminal_ack_replay(
+                &fixture.state,
+                &route,
+                &request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await
+            .expect("terminal acknowledgement lookup")
+            .expect("exact terminal acknowledgement");
+            assert_eq!(
+                retained.platform,
+                Some(crate::playback_control::ClientPlatform::Apple),
+                "{label} replay must retain the originally accepted platform"
             );
             let body = Bytes::from(serde_json::to_vec(&request).expect("terminal request"));
             let response = control_inner(
@@ -4712,14 +4853,6 @@ mod tests {
                 terminal,
                 "{label} replay must return the exact durable acknowledgement"
             );
-            assert!(
-                crate::playback_control::platform_count(
-                    crate::playback_control::MetricOutcome::Replay,
-                    crate::playback_control::ClientPlatform::Apple,
-                ) > replay_platform_before,
-                "{label} replay must attribute the originally accepted platform"
-            );
-
             let mut changed_payload = request.clone();
             changed_payload.position_ms += 1;
             let changed_response = control_inner(
