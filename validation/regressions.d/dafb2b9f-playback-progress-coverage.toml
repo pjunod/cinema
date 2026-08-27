@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["dafb2b9f"]
+commits = ["dafb2b9f", "12ed2ff3"]
 points = ["playback.pipeline", "validation.framework"]
 checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
 reason = "The validation catalog pins the known legacy rolling producer recovery, replacement, transition, failure, process-action, and response-admission owners; exact-counts all production detached-task, sleep, interval, and ffmpeg-start shapes; and applies module-wide legacy/deadline sentinels so unreviewed structural drift fails before the final M4 deletion check drives legacy counts to zero. The Rust producer-ingress regressions retain constant-space first/covered/gap/latest deadline evidence, use a persistent exact-attempt watermark so a repeated timestamp across drains cannot manufacture a deadline link, prove a timely delayed A-to-B-to-C chain, prevent later telemetry from bridging the first missed horizon while preserving latest visible progress, seal progress into the exact exit barrier, preserve nonblocking mailbox behavior, and keep post-exit progress terminal."
