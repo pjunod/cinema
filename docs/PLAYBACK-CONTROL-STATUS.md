@@ -2,10 +2,11 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `46c08439` (PR #615)
-**Current work:** `codex/playback-control-m3-producer-events` — M3c2 passive,
-nonblocking producer progress and exact-attempt process-exit observations. The
-implementation and model tests are being prepared for the required
-pre-test adversarial review; no unit or full gate has run on this slice yet
+**Current work:** PR [#616](https://github.com/pjunod/plurx/pull/616),
+`codex/playback-control-m3-producer-events` — M3c2 passive, nonblocking producer
+progress and exact-attempt process-exit observations. Adversarial review of
+initial head `405f6d3e` requested changes; all findings are being remediated
+before any local unit or full-gate run
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -69,11 +70,11 @@ Review and test state for M3c2:
 
 | Gate | State |
 |---|---|
-| Implementation | In progress on `codex/playback-control-m3-producer-events` from merged `46c08439`. The coalesced ingress, actor state, process supervisor, status projection, metrics, and adversarial model tests are present in the worktree. |
-| Adversarial diff review | Pending exact-head review. This must complete before any unit or full test runs. |
-| Unit/focused tests | Not run, by design, until adversarial approval. Planned cases cover coalescing under mailbox pressure, stale-attempt eviction, monotonic progress, exit terminality/idempotence, retirement, immediate exit supervision, and predecessor exit after successor admission. |
+| Implementation | Remediation in progress on PR #616 from merged `46c08439`. Initial head `405f6d3e` added the coalesced ingress, actor state, process observation, status, metrics, and model tests. The repair head makes one supervisor the sole child signal/wait/reap owner and closes ingress/status truth gaps. |
+| Adversarial diff review | **Changes requested** on exact head `405f6d3e`: three compile/Clippy blockers, cached-PID reuse risk, held masking exit, equal-attempt exit replacement, false actor-unavailable status, verification gaps, and this stale status row. A new exact-head review is required after remediation. |
+| Unit/focused tests | **Not run**, by design, until the remediated exact head passes adversarial review. Added cases cover a genuinely full command mailbox, same-attempt progress regression, contradictory exits, supervised signals/kill/drop/reap, actor-unavailable status, terminal-over-held priority, joined status fields, and metric names. |
 | Full local gate | Not run. After review: focused tests, `make test`, `make check`, unrestricted `make validate`, and applicable browser contracts. |
-| Hosted CI | Not started. Every required job must be green on the final reviewed head. |
+| Hosted CI | GitHub automatically started run `33040710196` when PR #616 opened, before review finished. It failed at compile/Clippy on the initial head (missing `SessionInfo` test fields, an old child-method reference, and an eight-argument helper); it did not provide behavioral test evidence. Those blockers are included in the current remediation. Every required job must be green on the final reviewed head. |
 | Merge | Not ready. Requires exact-head approval, local green, hosted green, and no unresolved review findings. |
 
 ## Watchdog-removal ledger

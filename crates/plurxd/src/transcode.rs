@@ -1278,13 +1278,49 @@ struct FfmpegDescriptors {
     subtitle: Option<std::os::fd::RawFd>,
 }
 
+#[derive(Clone)]
+struct FfmpegProgressObserver {
+    progress: Arc<Progress>,
+    generation: u64,
+    control: Option<crate::playback_control::RollingControlHandle>,
+}
+
+impl FfmpegProgressObserver {
+    fn offline(progress: Arc<Progress>, generation: u64) -> Self {
+        Self {
+            progress,
+            generation,
+            control: None,
+        }
+    }
+
+    fn rolling(
+        progress: Arc<Progress>,
+        generation: u64,
+        control: crate::playback_control::RollingControlHandle,
+    ) -> Self {
+        Self {
+            progress,
+            generation,
+            control: Some(control),
+        }
+    }
+
+    fn apply_line(&self, line: &str) {
+        apply_and_observe_progress_line(
+            &self.progress,
+            self.control.as_ref(),
+            self.generation,
+            line,
+        );
+    }
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
-    control: Option<crate::playback_control::RollingControlHandle>,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
 ) -> Result<Child, String> {
@@ -1351,7 +1387,7 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                apply_and_observe_progress_line(&progress, control.as_ref(), generation, &line);
+                progress_observer.apply_line(&line);
             }
         });
     }
@@ -1390,9 +1426,7 @@ fn spawn_ffmpeg(
 fn spawn_ffmpeg_pipe(
     args: &[String],
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
-    control: crate::playback_control::RollingControlHandle,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
 ) -> Result<(Child, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
@@ -1419,7 +1453,7 @@ fn spawn_ffmpeg_pipe(
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if is_progress_line(&line) {
-                    apply_and_observe_progress_line(&progress, Some(&control), generation, &line);
+                    progress_observer.apply_line(&line);
                 } else {
                     log_ffmpeg_stderr(&sid, "copy", &line);
                 }
@@ -1842,13 +1876,32 @@ struct AttemptChild {
     producer_attempt: u64,
     pid: Option<u32>,
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
-    terminal_notify: Arc<tokio::sync::Notify>,
+    commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
 }
 
 #[derive(Clone)]
 enum AttemptChildTerminal {
-    Exited(std::process::ExitStatus),
+    Exited(std::process::ExitStatus, Instant),
     WaitFailed(std::io::ErrorKind, String),
+}
+
+enum AttemptChildCommand {
+    Signal {
+        signal: libc::c_int,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
+    },
+    Terminate {
+        reply: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
+    },
+}
+
+impl AttemptChildTerminal {
+    fn wait_result(&self) -> std::io::Result<()> {
+        match self {
+            Self::Exited(_, _) => Ok(()),
+            Self::WaitFailed(kind, message) => Err(std::io::Error::new(*kind, message.clone())),
+        }
+    }
 }
 
 impl AttemptChild {
@@ -1859,35 +1912,109 @@ impl AttemptChild {
     ) -> Self {
         let pid = child.id();
         let terminal = Arc::new(std::sync::Mutex::new(None));
-        let terminal_notify = Arc::new(tokio::sync::Notify::new());
-        let waiter_terminal = Arc::clone(&terminal);
-        let waiter_notify = Arc::clone(&terminal_notify);
+        let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let supervisor_terminal = Arc::clone(&terminal);
         tokio::spawn(async move {
-            let result = child.wait().await;
-            let terminal = match result {
-                Ok(status) => {
-                    Self::observe_status(&control, producer_attempt, &status);
-                    AttemptChildTerminal::Exited(status)
-                }
+            let mut child_exits = match tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::child(),
+            ) {
+                Ok(signal) => Some(signal),
                 Err(error) => {
                     tracing::error!(
                         producer_attempt,
                         %error,
-                        "producer process exit could not be observed"
+                        "SIGCHLD listener unavailable; producer supervisor using bounded reap polling"
                     );
-                    AttemptChildTerminal::WaitFailed(error.kind(), error.to_string())
+                    None
                 }
             };
-            *waiter_terminal
+            let mut command_open = true;
+            let mut terminate_replies = Vec::new();
+            let terminal = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        Self::observe_status(&control, producer_attempt, &status);
+                        break AttemptChildTerminal::Exited(status, Instant::now());
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        tracing::error!(
+                            producer_attempt,
+                            %error,
+                            "producer process exit could not be observed"
+                        );
+                        break AttemptChildTerminal::WaitFailed(error.kind(), error.to_string());
+                    }
+                }
+
+                let wait_for_exit = async {
+                    if let Some(child_exits) = child_exits.as_mut() {
+                        let _ = child_exits.recv().await;
+                    } else {
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                };
+                if !command_open {
+                    wait_for_exit.await;
+                    continue;
+                }
+                tokio::select! {
+                    command = command_receiver.recv() => {
+                        let Some(command) = command else {
+                            command_open = false;
+                            continue;
+                        };
+                        match command {
+                            AttemptChildCommand::Signal { signal, reply } => {
+                                let authorized = {
+                                    let transition = control.lock_producer_transition();
+                                    control.current_producer_attempt() == producer_attempt
+                                        && control.producer_transition_is_live(&transition)
+                                };
+                                let result = if authorized {
+                                    signal_owned_child(&child, producer_attempt, signal)
+                                } else {
+                                    Ok(false)
+                                };
+                                let _ = reply.send(result);
+                            }
+                            AttemptChildCommand::Terminate { reply } => {
+                                match signal_owned_child(&child, producer_attempt, libc::SIGKILL) {
+                                    Ok(_) => {
+                                        if let Some(reply) = reply {
+                                            terminate_replies.push(reply);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if let Some(reply) = reply {
+                                            let _ = reply.send(Err(error));
+                                        } else {
+                                            tracing::error!(
+                                                producer_attempt,
+                                                %error,
+                                                "dropped producer could not be terminated"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ = wait_for_exit => {}
+                }
+            };
+            *supervisor_terminal
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal);
-            waiter_notify.notify_waiters();
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal.clone());
+            for reply in terminate_replies {
+                let _ = reply.send(terminal.wait_result());
+            }
         });
         Self {
             producer_attempt,
             pid,
             terminal,
-            terminal_notify,
+            commands,
         }
     }
 
@@ -1921,7 +2048,7 @@ impl AttemptChild {
             .clone()
         {
             None => Ok(None),
-            Some(AttemptChildTerminal::Exited(status)) => Ok(Some(status)),
+            Some(AttemptChildTerminal::Exited(status, _)) => Ok(Some(status)),
             Some(AttemptChildTerminal::WaitFailed(kind, message)) => {
                 Err(std::io::Error::new(kind, message))
             }
@@ -1937,67 +2064,139 @@ impl AttemptChild {
             .flatten()
     }
 
-    #[cfg(unix)]
-    fn signal(&self, signal: libc::c_int) -> std::io::Result<()> {
-        let Some(pid) = self.id() else {
-            return Ok(());
-        };
-        let pid = i32::try_from(pid).map_err(|_| {
-            std::io::Error::other(format!(
-                "producer attempt {} pid does not fit pid_t",
-                self.producer_attempt
-            ))
-        })?;
-        // SAFETY: the pid came from the child this supervisor owns and the
-        // caller supplies an OS signal constant.
-        if unsafe { libc::kill(pid, signal) } == 0 {
-            return Ok(());
+    async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(false);
         }
-        let error = std::io::Error::last_os_error();
-        if error.raw_os_error() == Some(libc::ESRCH) {
-            Ok(())
-        } else {
-            Err(error)
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Signal { signal, reply })
+            .is_err()
+        {
+            return self.signal_result_or_broken_pipe("producer exited before signal request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => self
+                .signal_result_or_broken_pipe("producer supervisor stopped before signaling"),
         }
     }
 
     async fn kill(&mut self) -> std::io::Result<()> {
-        #[cfg(unix)]
-        self.signal(libc::SIGKILL)?;
-        #[cfg(not(unix))]
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Unsupported,
-            "producer supervision requires Unix process signals",
-        ));
-
-        loop {
-            let notified = self.terminal_notify.notified();
-            tokio::pin!(notified);
-            notified.as_mut().enable();
-            if let Some(terminal) = self
-                .terminal
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone()
-            {
-                return match terminal {
-                    AttemptChildTerminal::Exited(_) => Ok(()),
-                    AttemptChildTerminal::WaitFailed(kind, message) => {
-                        Err(std::io::Error::new(kind, message))
-                    }
-                };
-            }
-            notified.await;
+        if let Some(terminal) = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return terminal.wait_result();
         }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: Some(reply) })
+            .is_err()
+        {
+            return self.terminal_result_or_broken_pipe("producer exited before terminate request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.terminal_result_or_broken_pipe("producer supervisor stopped before reaping")
+            }
+        }
+    }
+
+    fn terminal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<()> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or_else(
+                || Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message)),
+                |terminal| terminal.wait_result(),
+            )
+    }
+
+    fn signal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            Ok(false)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message))
+        }
+    }
+
+    fn terminal_exit_snapshot(
+        &self,
+    ) -> Option<crate::playback_control::RollingProducerExitSnapshot> {
+        let terminal = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let AttemptChildTerminal::Exited(status, observed_at) = terminal else {
+            return None;
+        };
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        Some(crate::playback_control::RollingProducerExitSnapshot {
+            success: status.success(),
+            code: status.code(),
+            signal,
+            observed_idle_ms: observed_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        })
     }
 }
 
 impl Drop for AttemptChild {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        {
-            let _ = self.signal(libc::SIGKILL);
-        }
+        let _ = self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: None });
+    }
+}
+
+/// Signal a child only from its supervisor task. Until that same task reaps
+/// it, the OS cannot reuse its pid; no other task ever performs this call.
+fn signal_owned_child(
+    child: &Child,
+    producer_attempt: u64,
+    signal: libc::c_int,
+) -> std::io::Result<bool> {
+    let Some(pid) = child.id() else {
+        return Ok(false);
+    };
+    let pid = i32::try_from(pid).map_err(|_| {
+        std::io::Error::other(format!(
+            "producer attempt {producer_attempt} pid does not fit pid_t"
+        ))
+    })?;
+    // SAFETY: this runs only in the task that owns the unreaped Child. The pid
+    // cannot be reused until this task's later try_wait returns a status.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
     }
 }
 
@@ -3156,21 +3355,49 @@ async fn session_info(
     } else {
         None
     };
-    let producer_exit = delivery.and_then(|delivery| delivery.producer_exit.as_ref());
+    let current_producer_attempt = s.control.current_producer_attempt();
+    let (child_is_running, fallback_exit) = {
+        let child = s.child.lock().await;
+        child.as_ref().map_or((false, None), |child| {
+            if child.producer_attempt != current_producer_attempt {
+                return (false, None);
+            }
+            (child.id().is_some(), child.terminal_exit_snapshot())
+        })
+    };
+    let producer_exit = delivery
+        .and_then(|delivery| delivery.producer_exit.clone())
+        .or(fallback_exit);
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
     } else if s.cached {
         "complete"
-    } else if suspended {
-        "held"
-    } else if producer_exit.is_some_and(|exit| exit.success) {
+    } else if producer_exit.as_ref().is_some_and(|exit| exit.success) {
         "complete"
     } else if producer_exit.is_some() {
         "exited"
-    } else if s.child.lock().await.is_some() {
+    } else if suspended {
+        "held"
+    } else if child_is_running {
         "running"
     } else {
         "complete"
+    };
+    let compatibility_progress_is_exact = s.progress.generation() == current_producer_attempt;
+    let (
+        compatibility_speed,
+        compatibility_recent_speed,
+        compatibility_out_time_ms,
+        compatibility_progress_idle_ms,
+    ) = if compatibility_progress_is_exact {
+        (
+            s.progress.speed(),
+            s.progress.recent_speed(),
+            s.progress.out_time_ms(),
+            s.progress.stalled_for().as_millis().min(i64::MAX as u128) as i64,
+        )
+    } else {
+        (None, None, None, -1)
     };
     SessionInfo {
         id: id.to_owned(),
@@ -3202,16 +3429,22 @@ async fn session_info(
         pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
         speed: delivery
             .and_then(|delivery| delivery.producer_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0),
+            .map(|speed| speed as f64 / 1_000.0)
+            .or(compatibility_speed),
         recent_speed: delivery
             .and_then(|delivery| delivery.producer_recent_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0),
-        out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
-        progress_idle_ms: delivery.map_or(0, |delivery| delivery.producer_progress_idle_ms),
-        producer_exit_success: producer_exit.map(|exit| exit.success),
-        producer_exit_code: producer_exit.and_then(|exit| exit.code),
-        producer_exit_signal: producer_exit.and_then(|exit| exit.signal),
-        producer_exit_idle_ms: producer_exit.map(|exit| exit.observed_idle_ms),
+            .map(|speed| speed as f64 / 1_000.0)
+            .or(compatibility_recent_speed),
+        out_time_ms: delivery
+            .and_then(|delivery| delivery.producer_out_time_ms)
+            .or(compatibility_out_time_ms),
+        progress_idle_ms: delivery.map_or(compatibility_progress_idle_ms, |delivery| {
+            delivery.producer_progress_idle_ms
+        }),
+        producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
+        producer_exit_code: producer_exit.as_ref().and_then(|exit| exit.code),
+        producer_exit_signal: producer_exit.as_ref().and_then(|exit| exit.signal),
+        producer_exit_idle_ms: producer_exit.as_ref().map(|exit| exit.observed_idle_ms),
         published_end_ms,
         fetched_end_ms,
         fetched_segment: lease.as_ref().map_or_else(
@@ -4079,7 +4312,8 @@ pub struct SessionInfo {
     pub out_time_ms: Option<i64>,
     /// Wall time since ffmpeg's output timestamp last advanced. Unlike
     /// `recent_speed`, this remains decisive when the producer has stopped
-    /// emitting samples entirely.
+    /// emitting samples entirely. `-1` is explicit unknown when neither an
+    /// actor snapshot nor an exact-attempt compatibility projection exists.
     pub progress_idle_ms: i64,
     /// Exact process terminal facts for the actor attempt above. `code` is
     /// present for ordinary exits; `signal` is present for Unix signal exits.
@@ -9100,9 +9334,7 @@ impl TranscodeManager {
                 &args,
                 encoder.label(),
                 hash,
-                Arc::clone(&progress),
-                generation,
-                None,
+                FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
                 &self.runtime_cache,
                 FfmpegDescriptors {
                     source: bound_source_fd,
@@ -11177,9 +11409,7 @@ impl TranscodeManager {
             &args,
             encoder.label(),
             &session_id,
-            Arc::clone(&progress),
-            generation,
-            Some(control.clone()),
+            FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
             &self.runtime_cache,
             FfmpegDescriptors {
                 subtitle: subtitle_handle
@@ -11568,9 +11798,11 @@ impl TranscodeManager {
             &sw_args,
             retry_encoder.label(),
             sid,
-            Arc::clone(&session.progress),
-            generation,
-            Some(session.control.clone()),
+            FfmpegProgressObserver::rolling(
+                Arc::clone(&session.progress),
+                generation,
+                session.control.clone(),
+            ),
             runtime_cache,
             FfmpegDescriptors {
                 subtitle: session
@@ -11788,9 +12020,7 @@ impl TranscodeManager {
             match spawn_ffmpeg_pipe(
                 &args,
                 &session_id,
-                Arc::clone(&progress),
-                generation,
-                control.clone(),
+                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
                 &self.runtime_cache,
             ) {
                 Ok((child, stdout)) => (child, Some(stdout)),
@@ -11811,9 +12041,11 @@ impl TranscodeManager {
                         &args,
                         "copy",
                         &session_id,
-                        Arc::clone(&progress),
-                        generation,
-                        Some(control.clone()),
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            control.clone(),
+                        ),
                         &self.runtime_cache,
                         FfmpegDescriptors::default(),
                     )?;
@@ -11831,9 +12063,7 @@ impl TranscodeManager {
                 &args,
                 "copy",
                 &session_id,
-                Arc::clone(&progress),
-                generation,
-                Some(control.clone()),
+                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
                 &self.runtime_cache,
                 FfmpegDescriptors::default(),
             )?;
@@ -12093,9 +12323,11 @@ impl TranscodeManager {
                             &args,
                             "copy",
                             &sid,
-                            progress,
-                            generation,
-                            Some(session.control.clone()),
+                            FfmpegProgressObserver::rolling(
+                                progress,
+                                generation,
+                                session.control.clone(),
+                            ),
                             &runtime_cache,
                             FfmpegDescriptors::default(),
                         ) {
@@ -14036,25 +14268,12 @@ impl TranscodeManager {
         };
         let sent = {
             let child = session.child.lock().await;
-            // The actor's exact timer can fire without entering the async
-            // compatibility gate. Its short synchronous transition fence
-            // makes the expiry/control/retirement verdict and this one
-            // kill(2) call strictly ordered without holding it across an
-            // await. A signal that wins is before the fence; a fence that
-            // wins makes this decision a no-op.
-            let producer_transition = session.control.lock_producer_transition();
-            if !session
-                .control
-                .producer_transition_is_live(&producer_transition)
-            {
-                return;
-            }
-            match child.as_ref().and_then(|c| c.id()) {
-                // SAFETY: `kill(2)` with a pid this process owns and a signal
-                // constant. The child is alive as far as we know; a race with
-                // its exit yields ESRCH, which the return check handles.
-                Some(pid) => unsafe { libc::kill(pid as libc::pid_t, signal) == 0 },
-                None => false, // already reaped
+            match child.as_ref() {
+                // The sole process owner rechecks the actor's exact attempt
+                // and deadline fence immediately before signaling. No caller
+                // can race its cached pid against reaping or reuse.
+                Some(child) => child.signal(signal).await.unwrap_or(false),
+                None => false,
             }
         };
         if !sent {
@@ -17916,6 +18135,161 @@ mod tests {
             successor_delivery.producer_exit, None,
             "a reaped predecessor cannot terminate its already-admitted successor"
         );
+    }
+
+    #[tokio::test]
+    async fn process_supervisor_owns_signals_termination_and_reaping() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-signal");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+
+        assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert!(child
+            .signal(libc::SIGCONT)
+            .await
+            .expect("supervised continue"));
+        child.kill().await.expect("supervised kill waits for reap");
+        let status = child
+            .try_wait()
+            .expect("reaped status")
+            .expect("terminal status");
+        assert_eq!(child.id(), None, "a reaped owner never exposes its old pid");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        let exit = control
+            .snapshot()
+            .await
+            .expect("actor snapshot")
+            .delivery
+            .producer_exit
+            .expect("exact attempt exit");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+        drop(child);
+
+        let exit = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(exit) = control
+                    .snapshot()
+                    .await
+                    .and_then(|lease| lease.delivery.producer_exit)
+                {
+                    break exit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered supervisor reap");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_falls_back_to_exact_process_facts_when_actor_is_unavailable() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let mut session = test_session(dir.path().to_owned());
+        if let Some(child) = session.child.get_mut().take() {
+            let mut child = child;
+            child.kill().await.expect("remove fixture child");
+        }
+        session.control = crate::playback_control::RollingControlHandle::unavailable_for_test();
+        session.progress.note_out_time(2_500);
+        session.progress.speed_milli.store(1_250, Relaxed);
+        session.progress.recent_milli.store(1_100, Relaxed);
+        session.suspended.store(true, Relaxed);
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn terminal producer");
+        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if session
+                    .child
+                    .get_mut()
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor terminal observation");
+
+        let status = session_info(
+            "actor-unavailable",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(status.lease_state, "unavailable");
+        assert_eq!(status.producer_state, "exited", "terminal precedes held");
+        assert_eq!(status.producer_exit_success, Some(false));
+        assert_eq!(status.producer_exit_code, Some(1));
+        assert_eq!(status.speed, Some(1.25));
+        assert_eq!(status.recent_speed, Some(1.1));
+        assert_eq!(status.out_time_ms, Some(2_500));
+
+        session.progress.generation.store(1, Relaxed);
+        let unknown_progress = session_info(
+            "actor-unavailable",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(unknown_progress.speed, None);
+        assert_eq!(unknown_progress.recent_speed, None);
+        assert_eq!(unknown_progress.out_time_ms, None);
+        assert_eq!(unknown_progress.progress_idle_ms, -1);
     }
 
     /// Cumulative speed hides a slowdown behind a fast start; the recent rate
@@ -22581,7 +22955,7 @@ mod tests {
             .lock()
             .await
             .as_ref()
-            .and_then(tokio::process::Child::id)
+            .and_then(AttemptChild::id)
             .expect("placeholder process id");
         let predecessor_generation = session.progress.generation();
         mgr.sessions

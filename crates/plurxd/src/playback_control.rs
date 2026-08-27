@@ -1323,22 +1323,47 @@ impl RollingProducerIngress {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let metric_index = usize::from(is_exit);
         ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
-        let pending_attempt = if is_exit {
-            state
-                .exit
-                .as_ref()
-                .map(|pending| pending.event.producer_attempt())
-        } else {
-            state
-                .progress
-                .as_ref()
-                .map(|pending| pending.event.producer_attempt())
-        };
-        if pending_attempt.is_some_and(|pending| pending > event.producer_attempt()) {
-            return;
-        }
-        if pending_attempt.is_some() {
+        let incoming_attempt = event.producer_attempt();
+        if is_exit {
+            if let Some(pending) = state.exit.as_ref() {
+                // An attempt has exactly one terminal outcome. Preserve the
+                // first observation even if a contradictory waiter or test
+                // source reports another; only a later attempt can replace
+                // a pending predecessor.
+                if pending.event.producer_attempt() >= incoming_attempt {
+                    return;
+                }
+                ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
+            }
+        } else if let Some(pending) = state.progress.as_mut() {
+            let pending_attempt = pending.event.producer_attempt();
+            if pending_attempt > incoming_attempt {
+                return;
+            }
             ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
+            if pending_attempt == incoming_attempt {
+                let RollingProducerEvent::Progress(incoming) = event else {
+                    unreachable!("progress slot accepts only progress events");
+                };
+                let RollingProducerEvent::Progress(current) = &mut pending.event else {
+                    unreachable!("progress slot contains only progress events");
+                };
+                let advanced = match (current.out_time_ms, incoming.out_time_ms) {
+                    (Some(current), Some(incoming)) => incoming > current,
+                    (None, Some(_)) => true,
+                    _ => false,
+                };
+                if advanced {
+                    current.out_time_ms = incoming.out_time_ms;
+                    current.observed_at = incoming.observed_at;
+                }
+                current.speed_milli = incoming.speed_milli.or(current.speed_milli);
+                current.recent_speed_milli =
+                    incoming.recent_speed_milli.or(current.recent_speed_milli);
+                drop(state);
+                self.notify.notify_one();
+                return;
+            }
         }
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
@@ -2051,6 +2076,24 @@ impl RollingControlHandle {
             producer_events,
             #[cfg(test)]
             producer_attempt_reply_pause,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn unavailable_for_test() -> Self {
+        let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
+        drop(receiver);
+        let now = rolling_now();
+        Self {
+            sender,
+            retired: Arc::new(AtomicBool::new(false)),
+            producer_attempt: Arc::new(AtomicU64::new(0)),
+            producer_transition: Arc::new(std::sync::Mutex::new(
+                now + ROLLING_LEGACY_LEASE_TIMEOUT,
+            )),
+            flow_sync: Arc::new(RollingFlowSync::new()),
+            producer_events: Arc::new(RollingProducerIngress::new()),
+            producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -3238,8 +3281,22 @@ mod tests {
         for out_time_ms in 101..=10_000 {
             ingress.publish_progress(producer_progress(2, out_time_ms, 900, 800, started));
         }
+        ingress.publish_progress(producer_progress(
+            2,
+            9_000,
+            700,
+            600,
+            started + Duration::from_secs(1),
+        ));
         ingress.publish_progress(producer_progress(1, 99_999, 9_000, 9_000, started));
         ingress.publish_exit(producer_exit(2, false, Some(7), None, started));
+        ingress.publish_exit(producer_exit(
+            2,
+            true,
+            Some(0),
+            None,
+            started + Duration::from_secs(1),
+        ));
 
         let events = ingress.next().await;
         assert_eq!(events.len(), 2, "one progress slot and one exit slot");
@@ -3248,6 +3305,8 @@ mod tests {
             RollingProducerEvent::Progress(RollingProducerProgressObservation {
                 producer_attempt: 2,
                 out_time_ms: Some(10_000),
+                speed_milli: Some(700),
+                recent_speed_milli: Some(600),
                 ..
             })
         ));
@@ -3255,10 +3314,58 @@ mod tests {
             &events[1],
             RollingProducerEvent::Exit(RollingProducerExitObservation {
                 producer_attempt: 2,
+                success: false,
                 code: Some(7),
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn producer_ingress_survives_a_full_actor_mailbox_with_command_causality() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_producer_attempt_reply(Arc::clone(&pause));
+        let begin = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.begin_producer_attempt().await })
+        };
+        pause.wait().await;
+        let attempt = handle.current_producer_attempt();
+        assert!(attempt > 0, "attempt admission precedes its paused reply");
+
+        for _ in 0..ROLLING_ACTOR_MAILBOX_CAPACITY {
+            let (reply, _response) = tokio::sync::oneshot::channel();
+            handle
+                .sender
+                .try_send(RollingControlCommand::Snapshot { reply })
+                .expect("paused actor mailbox has the advertised bounded capacity");
+        }
+        let (overflow_reply, _overflow_response) = tokio::sync::oneshot::channel();
+        assert!(matches!(
+            handle.sender.try_send(RollingControlCommand::Snapshot {
+                reply: overflow_reply
+            }),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
+        ));
+
+        handle.observe_producer_progress(attempt, Some(5_000), Some(1_250), Some(1_100));
+        handle.observe_producer_progress(attempt, Some(6_000), Some(1_200), Some(1_050));
+        pause.wait().await;
+        assert_eq!(
+            begin.await.expect("attempt task"),
+            Ok(attempt),
+            "the command establishing the attempt remains ordered before its events"
+        );
+        let delivery = tokio::time::timeout(Duration::from_secs(2), handle.snapshot())
+            .await
+            .expect("actor drains bounded commands")
+            .expect("actor snapshot")
+            .delivery;
+        assert_eq!(delivery.producer_attempt, attempt);
+        assert_eq!(delivery.producer_out_time_ms, Some(6_000));
+        assert_eq!(delivery.producer_speed_milli, Some(1_200));
+        assert_eq!(delivery.producer_recent_speed_milli, Some(1_050));
     }
 
     #[test]
@@ -3884,6 +3991,13 @@ mod tests {
         assert!(metrics.contains("plurx_playback_rolling_lease_expirations_total"));
         assert!(metrics.contains(
             "plurx_playback_rolling_producer_transitions_total{transition=\"hold\",reason=\"demand\"}"
+        ));
+        assert!(metrics
+            .contains("plurx_playback_rolling_producer_event_ingress_total{event=\"progress\"}"));
+        assert!(metrics
+            .contains("plurx_playback_rolling_producer_event_coalesced_total{event=\"exit\"}"));
+        assert!(metrics.contains(
+            "plurx_playback_rolling_producer_event_outcomes_total{event=\"exit\",outcome=\"rejected\"}"
         ));
     }
 

@@ -54,7 +54,7 @@ The implementation must preserve all of these invariants:
 ```text
 ffmpeg progress pipe                 installed ffmpeg process
         |                                      |
-        | parse exact attempt                  | supervisor owns wait()
+        | parse exact attempt                  | supervisor owns Child
         v                                      v
 latest-progress slot                     exact exit slot
         \                                      /
@@ -75,8 +75,11 @@ latest-progress slot                     exact exit slot
 The producer ingress is separate from the bounded control-command mailbox. It
 contains exactly two optional slots: latest progress and latest exit. A short
 synchronous mutex linearizes publication and a `Notify` wakes the actor.
-Publishing never awaits. Repeated progress overwrites repeated progress; it
-cannot grow a queue.
+Publishing never awaits. Repeated progress is merged into repeated progress;
+it cannot grow a queue. For one attempt, output time keeps its monotonic
+maximum and speed retains the newest available sample. The first pending exit
+for an attempt is immutable; only an exit from a later attempt can replace a
+pending predecessor.
 
 The slots retain their own sequence numbers. A drain orders the two retained
 facts before applying them. Slot replacement also compares monotonic producer
@@ -113,16 +116,22 @@ as a producer that moves and later wedges.
 ## Process supervision
 
 Every installed ffmpeg child is converted to an `AttemptChild` only after actor
-authorization. The supervisor permanently captures that installation attempt,
-owns the sole `wait()` future, and publishes the normalized exit immediately.
-Compatibility readers consult the supervisor's terminal cell instead of
-calling `Child::try_wait()` themselves.
+authorization. One supervisor task permanently captures that installation
+attempt and exclusively owns the `Child` from installation through signaling,
+waiting, and reaping. Other paths send typed signal or terminate commands and
+never act on a cached PID. Immediately before a requested signal, the
+supervisor rechecks the actor's exact-attempt and live-transition fence while
+the owned child is still unreaped. Compatibility readers consult the
+supervisor's terminal cell instead of calling `Child::try_wait()` themselves.
 
-On Unix, explicit kill, hold, and resume operations address the supervised PID.
-The wait owner remains responsible for reaping and for publishing the final
-status. Dropping a live session sends `SIGKILL`; the supervisor still reaps it.
-This preserves the existing kill-on-drop guarantee while separating process
-lifecycle observation from recovery policy.
+On Unix, the supervisor reacts to `SIGCHLD` and reaps with `try_wait`. If a
+`SIGCHLD` listener cannot be installed, it logs that fault and uses a bounded
+100 ms reap fallback; this fallback detects process lifecycle only and never
+evaluates health or chooses recovery. Explicit kill, hold, and resume are typed
+commands to that same owner. Dropping a live session requests `SIGKILL`; the
+supervisor still reaps it and publishes the final status. This prevents a
+waiter from reaping a process between another task's PID lookup and signal,
+which could otherwise signal an unrelated process after PID reuse.
 
 The actor accepts an exit only for its current attempt. Replacement admission
 can therefore advance from N to N+1 before killing N: the N supervisor will
@@ -140,10 +149,15 @@ The rolling delivery snapshot adds:
 - exit signal; and
 - exit observation age.
 
-Rolling Activity/status projects those actor fields directly. `producer_state`
-reports `complete` for a successful supervised exit and `exited` for another
-terminal status unless an existing explicit session failure has the stronger
-`failed` verdict.
+Rolling Activity/status projects those actor fields directly. If the actor is
+unavailable, status uses compatibility progress and the supervisor terminal
+cell only when their attempt still equals the exact current attempt; it does
+not fabricate zero motion or a running child. An unavailable, mismatched
+progress source is explicit as `progress_idle_ms = -1` with null rates and
+output time. `producer_state` reports
+`complete` for a successful supervised exit and `exited` for another terminal
+status unless an existing explicit session failure has the stronger `failed`
+verdict. A terminal process verdict also precedes a stale `held` projection.
 
 Prometheus adds bounded counters for:
 
@@ -167,12 +181,13 @@ M3c2 removes no recovery mechanism. Exact inventory after this slice:
 | `watchdog_active` | Still prevents duplicate lifetime watchers | Delete with the watcher |
 | `replacing_child` | Still masks intentional predecessor exit and path replacement | Delete after actor replacement state owns that interval |
 | playlist/segment wait limits | Still bound individual HTTP waits | Retain as request deadlines, not recovery owners |
-| process supervisor | Delivers exact exit once; never decides an action | Retain as the producer lifecycle event source |
+| process supervisor | Sole child signal/wait/reap owner; delivers exact exit once and never decides an action | Retain as the producer lifecycle event source |
 | VOD materialization deadline | Unchanged | Retain as an approved progress deadline |
 
-The process supervisor is not a watchdog. It has no timer, polling loop,
-health threshold, or recovery action; it is the asynchronous equivalent of
-collecting a process return value.
+The process supervisor is not a health watchdog. Its normal path is event
+driven by `SIGCHLD`; its platform-listener failure path polls only for process
+termination. It has no progress threshold and chooses no recovery action: it
+is the asynchronous equivalent of collecting a process return value.
 
 ## Failure behavior
 
@@ -204,8 +219,12 @@ head must cover:
 7. retirement rejects both event types;
 8. a current child exit reaches the actor without a watchdog or request;
 9. a delayed predecessor exit after successor admission is rejected;
-10. Activity/status and Prometheus expose the new facts; and
-11. focused tests, full local gates, browser contracts, and every required
+10. hold/resume/kill/drop cannot signal outside the supervised unreaped child;
+11. a full real command mailbox cannot block or reorder accepted progress;
+12. contradictory same-attempt exits preserve the first outcome;
+13. actor-unavailable and held-terminal status remains truthful;
+14. Activity/status and Prometheus expose the new facts; and
+15. focused tests, full local gates, browser contracts, and every required
     hosted job pass on the final reviewed head.
 
 ## Rollout and rollback
