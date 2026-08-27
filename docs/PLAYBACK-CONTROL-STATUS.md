@@ -2,7 +2,8 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `48ea494c` (PR #619)
-**Current work:** `codex/playback-control-m4-deadline-cutoff` — an
+**Current work:** [PR #621](https://github.com/pjunod/plurx/pull/621) on
+`codex/playback-control-m4-deadline-cutoff` — an
 action-passive actor deadline now consumes the merged constant-space progress
 proof, records one exact due coordinate, and performs lifecycle-first cutoff
 without retrying, killing, or replacing anything. The legacy watchdog remains
@@ -79,7 +80,7 @@ Review and test state for M4:
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Implemented locally; not yet reviewed or tested.** `starting`, `advancing`, and `classifying_exit` share one actor-private deadline. Timely coverage rearms from fenced `published_at`; late/gapped progress cannot rescue; the actor records one immutable due coordinate and gives lease terminal state priority. It emits no recovery action. |
-| Adversarial implementation review | **Pending for this slice.** PR #619 received final approval at `11315987` and merged as `48ea494c`; the new branch must be committed, pushed, opened as a PR, and reviewed before tests. |
+| Adversarial implementation review | **Pending for PR #621.** PR #619 received final approval at `11315987` and merged as `48ea494c`; the new exact PR head must be reviewed before tests. |
 | Unit/focused tests | **Not run for this slice.** Deterministic tests are authored but wait for exact-head adversarial approval. |
 | Full/cluster/hosted gates | **Pending for this slice.** After approval: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 

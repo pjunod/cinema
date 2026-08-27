@@ -2,12 +2,13 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `48ea494c` (PR #619)
-**Active PR:** not opened yet
+**Active PR:** [#621](https://github.com/pjunod/plurx/pull/621)
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Current exact head:** local validation-mapping successor of `6b602d6c`;
-resolve after commit and push
+**Current exact head:** resolve
+`origin/codex/playback-control-m4-deadline-cutoff`; it contains the initial
+runtime commit, validation mapping, and this PR handoff update
 **Test state:** no tests, builds, or checks have run for the current slice;
 the adversarial PR review must happen first
 
@@ -179,12 +180,10 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is implemented locally but unreviewed and
+The action-passive deadline slice is pushed in PR #621 but unreviewed and
 untested.
 
-- Finish the owner-count, regression-history, handoff, and status updates.
-- Commit and push, open the PR, then request adversarial review of that exact
-  immutable head.
+- Request adversarial review of the exact immutable PR head.
 - Do not run unit tests until the review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -236,6 +235,7 @@ Committed implementation sequence:
 
 ```text
 6b602d6c feat(playback): record actor producer deadlines
+dbf12d87 chore(validation): map passive deadline evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
