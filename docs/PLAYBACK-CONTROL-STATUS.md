@@ -1,14 +1,14 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `46c08439` (PR #615)
-**Current work:** PR [#616](https://github.com/pjunod/plurx/pull/616),
-`codex/playback-control-m3-producer-events` — M3c2 passive, nonblocking producer
-progress and exact-attempt process-exit observations. The first four adversarial
-passes requested changes on `405f6d3e`, `79d9460b`, `e3924882`, and `1d056c2c`.
-The fifth pass approved exact runtime head `a5a3b195`; focused tests, all local
-gates, and every required hosted job are green at that head. This final
-evidence-only status update changes no runtime or test code
+**Merged baseline:** `origin/main` at `8c6ccdf7` (PR #616)
+**Current work:** PR [#617](https://github.com/pjunod/plurx/pull/617),
+`codex/playback-control-m3-terminal-events` — M3c3 typed, actor-owned session
+end and authority/cluster-fence events, replicated terminal acknowledgements,
+and an exhaustive event-order model.
+This is the final behavior-passive M3 ownership slice before M4 moves recovery
+decisions into the actor and deletes the old server watchdog and in-place
+replacement machinery.
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -24,7 +24,7 @@ not being counted as complete merely because its foundation has landed.
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
-| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, and the merged M3c1 attempt-fenced delivery ledger; M3c2 producer events are validated and merge-ready in #616 | Merge M3c2, then add end and cluster-fence event ownership |
+| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, the M3c1 attempt-fenced delivery ledger, and M3c2 nonblocking progress/exact-exit observations | Merge typed end and authority/cluster-fence ownership with exhaustive ordering and durable replay evidence |
 | M4 — server watchdog removal | **Not started** | — | One producer deadline; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
@@ -46,38 +46,46 @@ not being counted as complete merely because its foundation has landed.
 | [#613](https://github.com/pjunod/plurx/pull/613) | Preserved an empty Dolby Vision `hvcC` record when copying parameter sets upstream | Adversarial review, local gates, and hosted CI green |
 | [#614](https://github.com/pjunod/plurx/pull/614) | M3b explicit demand lease, response-commit ownership, demand-based pacing, and operator instrumentation | Exact-head adversarial approval, full local gate, and all required hosted jobs green |
 | [#615](https://github.com/pjunod/plurx/pull/615) | M3c1 actor-owned, exact-attempt publication/fetch ledger and fenced producer installation | Exact-head adversarial approval at `7dffa5f3`; full local gate and every required hosted job green; merged as `46c08439` |
+| [#616](https://github.com/pjunod/plurx/pull/616) | M3c2 constant-space producer progress/exit ingress, exact-attempt actor facts, and one cancel-safe process supervisor | Exact-head adversarial approval at `4b818d39`; 12 focused tests, 1,927 full-workspace tests, every local gate, the long cluster gate, and all required hosted jobs green; merged as `8c6ccdf7` |
 
-## Active slice: M3c2 producer events
+## Active slice: M3c3 terminal events
 
-M3c1 merged as PR #615 at `46c08439`. It gives the actor the ordered,
-attempt-fenced publication and completed-fetch coordinates described in
-[`PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md).
+M3c2 merged as PR #616 at `8c6ccdf7`. It gives the actor nonblocking,
+exact-attempt producer progress and process-exit facts without changing any
+recovery action.
 
-The active M3c2 slice remains behavior-passive: it moves observations, not
-recovery actions. ffmpeg progress enters a two-slot coalescer independent of
-the bounded command mailbox, so a full control queue cannot stop stdout or
-stderr drainage. The actor accepts only monotonic progress for its exact
-attempt and treats process exit as terminal. Each installed process is owned
-by a small supervisor that waits for exit immediately and reports its immutable
-attempt, so exit detection no longer depends on any old watchdog poll.
+The active M3c3 slice replaces the actor's undifferentiated `Retire` command
+with typed `End` and `AuthorityFence` events. Lease expiry is the third bounded
+terminal cause. The first terminal event linearized by the actor wins once,
+publishes the immediate serving fence once, and remains immutable while late
+end, fence, control, media, publication, progress, and exit events receive
+truthful terminal verdicts. A newly accepted protocol `demand=end` now enters
+that same terminal transition atomically and can replay its exact terminal
+acknowledgement after response loss. VOD applies the equivalent tombstone and
+reader detach under its lifecycle gate. The exact accepted End response is
+retained in replicated storage for a bounded 60-second idempotency window, so
+rolling cleanup, VOD tombstoning, route settlement, client disconnect, and a
+cluster relay cannot erase the reply. Physical rolling-child teardown remains
+in the existing manager until M4.
 
-Rolling Activity/status reads rate, output position, progress age, and exit
-code/signal from the actor snapshot. Prometheus exposes producer-event ingress,
-coalescing, and accepted/rejected outcomes. The existing recovery watchdogs and
-actions remain unchanged until M4 can delete them in one reviewed cutover. The
-full ordering, supervision, instrumentation, and rollback contract is in
-[`PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md`](PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md).
+Activity/status will expose the winning terminal cause and Prometheus will
+count each bounded cause as `won` or `already_terminal`. An exhaustive small
+model will explore permutations of producer exit, expiry, explicit end,
+authority fence, publication, control acceptance, and replacement admission;
+real async tests cover reply cancellation and concurrent terminal calls.
+The full contract is in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md`](PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md).
 
-Review and test state for M3c2:
+Review and test state for M3c3:
 
 | Gate | State |
 |---|---|
-| Implementation | **Complete for M3c2** on PR #616 from merged `46c08439`. The implementation has constant-space event ingress, actor-owned facts, a cancel-safe targeted process supervisor, one guarded signal linearization, single-attempt status projection, bounded metrics, and regression mapping. Its actor constructor receives one named runtime bundle, and cached/successful-exit completion is one predicate. |
-| Adversarial diff review | **Approved on the fifth pass at exact runtime head `a5a3b195`.** Earlier heads exposed compile blockers, cached-PID reuse, ordering and terminal-state gaps, signal linearization, history recursion, mixed-attempt status, per-child `SIGCHLD` fan-out, relay schema, and nondeterministic race evidence. The final review found no remaining correctness, concurrency, PID/process ownership, boundedness, relay/status, telemetry, history, or documentation issue. |
-| Unit/focused tests | **Green.** Twelve focused tests cover a genuinely full command mailbox, exact-attempt and terminal ordering, supervised signals/kill/drop/reap, direct held-mutex contention evidence, actor-unavailable status, replacement-during-status `waiting`, and relay `exited` validation. `make test` also passed the full workspace with no failures. |
-| Full local gate | **Green.** `make test`, `make check`, and unrestricted `make validate` passed. Validation reported 13 checks passed, 0 failed, and 2 Playwright-only browser checks skipped because the optional Python module is absent; no browser/runtime source changed in this slice. |
-| Hosted CI | **Green at reviewed runtime head `a5a3b195`.** Run `33043935332` passed validation scope, history/contract preflight, fast Rust, WAL recovery, daemon cluster, replicated store/topology, and the aggregate PR validation gate. The platform, browser, release, and image lanes outside this Rust/docs slice were skipped by the repository's change classifier. |
-| Merge | **Ready.** Exact runtime review, focused tests, every local gate, and every required hosted job are green with no unresolved finding. |
+| Implementation | **Complete on PR #617** from merged `8c6ccdf7`. Terminal reply insertion, exact-owner route shutdown, lease clamp, pointer removal, and cache-pin removal are one Store transaction. The actor installs one session-owned End operation before its fallible reply send; exact retries attach to it, the reaper observes it immediately, and queued controls cannot mutate after their inherited deadline or a pre-admission cancellation. Each settlement attempt bounds every Store write/read/backoff by both one five-second attempt deadline and the exact prepared acknowledgement expiry. Starts, completions, and waiters fail at or after that boundary. Rolling retention derives from the prepared receipt; VOD releases the response/Store graph after expiry but keeps the small owner tombstone. Every VOD outer retry crosses the session-owned reader-detach cleanup before settlement can start. Replay disposition and platform telemetry remain per-request truthful. |
+| Adversarial diff review | **Approved** at exact code head `57d46e59` with no P0-P3 findings. The review covered the cumulative implementation, deterministic cancellation/expiry proofs, the v32 migration sentinel, all 30 replicated durable-table plans, and all 41 classified SQLite transaction sites. |
+| Unit/focused tests | **Pass.** The exact terminal expiry, VOD cancellation/detach, VOD cleanup identity, rolling contention/retention, and HTTP cancellation/reaper tests pass individually. The complete permission-capable `plurxd` suite passes with **1,087 passed, 0 failed, 3 ignored**. |
+| Full local gate | **Pass** at `57d46e59`. `make check` passed the 22-point/27-check validation catalog, corrective-history audit, formatting, strict workspace Clippy, **121** operations tests, **52** benchmark tests, **784** `plurx-core` unit tests, **31** Store-contract tests, **1,087** `plurxd` tests, supporting crate tests, and doc tests. |
+| Hosted CI | **Pending the final push.** GitHub must run the required jobs against the reviewed implementation plus this status-only update. |
+| Merge | **Awaiting hosted CI.** |
 
 ## Watchdog-removal ledger
 
@@ -119,21 +127,23 @@ HTTP/relay limits, admission waits, and control rate windows also remain, but
 they are named lifecycle/network bounds rather than competing playback
 recovery watchdogs.
 
+The 60-second terminal-ack retention window introduced by M3c3 is likewise an
+idempotency bound: it retains one immutable accepted reply and triggers no
+playback, replacement, restart, or failure decision. It is not a watchdog.
+
 ## Remaining delivery order
 
-1. Complete, adversarially review, validate, and merge M3c2 nonblocking
-   producer progress and exact-attempt process-exit observations.
-2. Finish end and cluster-fence event ownership with model tests over event
+1. Finish end and cluster-fence event ownership with model tests over event
    reorderings.
-3. Complete Apple and Android M2 reporters and record timer/alternate-ingress
+2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
-4. Complete M4 and prove the old server watchdog/replacement symbols are gone.
-5. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
+3. Complete M4 and prove the old server watchdog/replacement symbols are gone.
+4. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
    node placement use the same prepare/commit/abort transaction.
-6. Complete semantic indexing: exact intro/credits destinations with
+5. Complete semantic indexing: exact intro/credits destinations with
    provenance/confidence, manual overrides, subtitle readiness, queue metrics,
    and marker-destination prewarm.
-7. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
+6. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
    deletion, playback-lab fault injection, and physical web/Apple/Android
    acceptance.
 

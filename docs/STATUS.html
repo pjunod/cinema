@@ -185,6 +185,20 @@
     </details>
   </section>
 
+  <!-- ══════════ Playback control rewrite ══════════ -->
+  <section>
+    <h2>Playback control rewrite <span class="chip prog">🚧 PR #617 local green</span> <span class="ev">PLAYBACK-CONTROL-STATUS.md · updated 2026-08-27</span></h2>
+    <div class="meter"><div class="track"><div class="fill" style="width:36%"></div></div><div class="n">M1 merged · M2 partial · M3c3 reviewed and locally green · hosted CI pending · M4–M9 remain</div></div>
+    <details open><summary>Current exact state</summary>
+      <ul class="items">
+        <li class="done-item"><span class="m done">✓ merged</span><span class="t">PRs #600, #602, #605, and #611–#616 established the reviewed protocol, passive web reporter, bounded rolling actor, explicit demand/pacing, exact-attempt delivery ledger, and constant-space producer progress/exit events.</span></li>
+        <li><span class="m partial">◐ PR #617</span><span class="t">M3c3 makes End, authority loss, and lease expiry typed actor-owned terminal events. The current correction makes terminal reply persistence and exact-route shutdown one replicated transaction; installs one session-owned End operation inside the actor before its fallible reply; rejects queued mutation after the inherited deadline or pre-admission cancellation; lets an exact retry reuse one immutable response; caps Store I/O by both the attempt deadline and the prepared acknowledgement expiry; refuses starts, completions, and waiters at or after that boundary; derives rolling retention from the prepared receipt; releases expired VOD operation state while keeping its owner tombstone; gates every VOD retry on reader detach; and reports replay disposition and platform truthfully.</span></li>
+        <li class="done-item"><span class="m done">✓ review + local gate</span><span class="t">Adversarial review approved exact code head <code>57d46e59</code> with no P0-P3 findings, including the v32 migration, all 30 durable import plans, and all 41 SQLite transaction sites. <code>make check</code> is green: validation/history, formatting, strict Clippy, <b>121 operations tests</b>, <b>52 benchmark tests</b>, <b>784 core tests</b>, <b>31 Store-contract tests</b>, <b>1,087 server tests with 0 failures and 3 ignored</b>, supporting crates, and doc tests.</span></li>
+        <li><span class="m todo">○ next</span><span class="t">Push the reviewed implementation plus this status-only evidence update, require every hosted job to pass, merge #617, then M4 removes the old server watchdog and in-place replacement owners. Apple/Android control reporters, prepared quality/HDR/track/node handoff, semantic intro/credits indexing, and clustered takeover remain later milestones.</span></li>
+      </ul>
+    </details>
+  </section>
+
   <!-- ══════════ Performance ══════════ -->
   <section>
     <h2>Performance — start latency, 4K, pre-cache <span class="chip prog">🚧 in progress</span> <span class="ev">PERF-PLAN.md · PERF2-PLAN.md · STUTTER-4K.md · SEGMENTER-PLAN.md · VOD-PRESENTATION-PLAN.md</span></h2>

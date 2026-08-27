@@ -5,7 +5,8 @@ use super::SqliteStore;
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, OwnedMediaSessionLease,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTerminalAck,
+    OwnedMediaSessionLease,
 };
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
@@ -19,6 +20,7 @@ const MAX_TAKEOVER_CANDIDATES: usize = 64;
 const MAX_OWNED: i64 = 4_096;
 const MAINTENANCE_BATCH: i64 = 256;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+const MAX_TERMINAL_ACK_BYTES: usize = 64 * 1024;
 const TAKEOVER_RECOVERY_MS: i64 = 60 * 1_000;
 const FAILED_RETENTION_MS: i64 = 60 * 60 * 1_000;
 const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -49,8 +51,38 @@ fn route_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionRoute> {
     })
 }
 
+fn terminal_ack_from_row(row: &Row<'_>) -> rusqlite::Result<MediaSessionTerminalAck> {
+    Ok(MediaSessionTerminalAck {
+        incarnation_id: row.get(0)?,
+        session_id: row.get(1)?,
+        owner_node_id: row.get(2)?,
+        owner_epoch: row.get(3)?,
+        client_instance_id: row.get(4)?,
+        sequence: row.get(5)?,
+        request_fingerprint: row.get(6)?,
+        response_json: row.get(7)?,
+        expires_at_ms: row.get(8)?,
+        updated_at_ms: row.get(9)?,
+    })
+}
+
 fn valid_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn valid_terminal_ack(ack: &MediaSessionTerminalAck) -> bool {
+    valid_uuid(&ack.incarnation_id)
+        && valid_uuid(&ack.session_id)
+        && !ack.owner_node_id.is_empty()
+        && ack.owner_node_id.len() <= 256
+        && ack.owner_epoch > 0
+        && valid_uuid(&ack.client_instance_id)
+        && ack.sequence > 0
+        && valid_fingerprint(&ack.request_fingerprint)
+        && !ack.response_json.is_empty()
+        && ack.response_json.len() <= MAX_TERMINAL_ACK_BYTES
+        && ack.updated_at_ms > 0
+        && ack.expires_at_ms > ack.updated_at_ms
 }
 
 fn valid_fingerprint(value: &str) -> bool {
@@ -702,6 +734,162 @@ impl MediaSessionStore for SqliteStore {
         .await
     }
 
+    async fn record_media_session_terminal_ack(
+        &self,
+        acknowledgement: &MediaSessionTerminalAck,
+    ) -> Result<bool, StoreError> {
+        if !valid_terminal_ack(acknowledgement) {
+            return Err(StoreError::Task(
+                "invalid media-session terminal acknowledgement".to_owned(),
+            ));
+        }
+        let acknowledgement = acknowledgement.clone();
+        self.with_conn(move |conn| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO media_session_terminal_acks
+                    (incarnation_id, session_id, owner_node_id, owner_epoch,
+                     client_instance_id, sequence, request_fingerprint, response_json,
+                     expires_at_ms, updated_at_ms)
+                 SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10
+                   WHERE EXISTS (SELECT 1 FROM media_sessions
+                     WHERE incarnation_id = ?1 AND session_id = ?2
+                       AND owner_node_id = ?3 AND owner_epoch = ?4
+                       AND state IN ('active', 'ended'))",
+                params![
+                    acknowledgement.incarnation_id.as_str(),
+                    acknowledgement.session_id.as_str(),
+                    acknowledgement.owner_node_id.as_str(),
+                    acknowledgement.owner_epoch,
+                    acknowledgement.client_instance_id.as_str(),
+                    acknowledgement.sequence,
+                    acknowledgement.request_fingerprint.as_str(),
+                    acknowledgement.response_json.as_str(),
+                    acknowledgement.expires_at_ms,
+                    acknowledgement.updated_at_ms,
+                ],
+            )?;
+            let stored = tx
+                .query_row(
+                    "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                            client_instance_id, sequence, request_fingerprint, response_json,
+                            expires_at_ms, updated_at_ms
+                       FROM media_session_terminal_acks WHERE session_id = ?1",
+                    [acknowledgement.session_id.as_str()],
+                    terminal_ack_from_row,
+                )
+                .optional()?;
+            let exact = stored.as_ref() == Some(&acknowledgement);
+            if exact {
+                let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
+                tx.execute(
+                    "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = ?1,
+                            updated_at_ms = ?1
+                      WHERE incarnation_id = ?2 AND session_id = ?3
+                        AND owner_node_id = ?4 AND owner_epoch = ?5
+                        AND state IN ('active', 'ended')
+                        AND EXISTS (SELECT 1 FROM media_session_terminal_acks
+                          WHERE session_id = ?3 AND incarnation_id = ?2
+                            AND owner_node_id = ?4 AND owner_epoch = ?5
+                            AND client_instance_id = ?6 AND sequence = ?7
+                            AND request_fingerprint = ?8 AND response_json = ?9
+                            AND expires_at_ms = ?10 AND updated_at_ms = ?1)",
+                    params![
+                        acknowledgement.updated_at_ms,
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.client_instance_id,
+                        acknowledgement.sequence,
+                        acknowledgement.request_fingerprint,
+                        acknowledgement.response_json,
+                        acknowledgement.expires_at_ms,
+                    ],
+                )?;
+                tx.execute(
+                    "UPDATE job_leases
+                        SET expires_at_ms = CASE
+                              WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
+                            revision = revision + 1, updated_at_ms = ?1
+                      WHERE resource = ?2 AND owner_node_id = ?3 AND fence = ?4
+                        AND revision < 9223372036854775807
+                        AND expires_at_ms > ?1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?5 AND session_id = ?6
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?1)",
+                    params![
+                        acknowledgement.updated_at_ms,
+                        lease_resource,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM media_playback_pointers
+                      WHERE current_incarnation_id = ?1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?1 AND session_id = ?2
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?5)",
+                    params![
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms,
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM cache_consumer_pins
+                      WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?1 AND session_id = ?2
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?5)",
+                    params![
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(exact)
+        })
+        .await
+    }
+
+    async fn media_session_terminal_ack(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionTerminalAck>, StoreError> {
+        if !valid_uuid(session_id) || now_ms <= 0 {
+            return Ok(None);
+        }
+        let session_id = session_id.to_owned();
+        self.with_read(move |conn| {
+            Ok(conn
+                .query_row(
+                    "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                            client_instance_id, sequence, request_fingerprint, response_json,
+                            expires_at_ms, updated_at_ms
+                       FROM media_session_terminal_acks
+                      WHERE session_id = ?1 AND expires_at_ms > ?2",
+                    params![session_id, now_ms],
+                    terminal_ack_from_row,
+                )
+                .optional()?)
+        })
+        .await
+    }
+
     async fn renew_media_sessions(
         &self,
         owner_node_id: &str,
@@ -1102,6 +1290,16 @@ impl MediaSessionStore for SqliteStore {
                     WHERE session.state = 'ended' AND session.updated_at_ms < ?1
                     ORDER BY session.updated_at_ms, lease.rowid LIMIT ?2)",
                 params![retained_cutoff, MAINTENANCE_BATCH],
+            )?;
+            tx.execute(
+                "DELETE FROM media_session_terminal_acks WHERE rowid IN (
+                   SELECT acknowledgement.rowid FROM media_session_terminal_acks acknowledgement
+                    WHERE acknowledgement.expires_at_ms <= ?1
+                       OR NOT EXISTS (SELECT 1 FROM media_sessions session
+                            WHERE session.session_id = acknowledgement.session_id
+                              AND session.incarnation_id = acknowledgement.incarnation_id)
+                    ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT ?2)",
+                params![now_ms, MAINTENANCE_BATCH],
             )?;
             tx.execute(
                 "DELETE FROM media_sessions WHERE rowid IN (

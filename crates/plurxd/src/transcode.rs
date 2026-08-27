@@ -983,13 +983,7 @@ fn flow_event_extra(
         crate::playback_control::RollingLeaseMode::Legacy => "legacy",
         crate::playback_control::RollingLeaseMode::Explicit => "explicit",
     };
-    let lease_state = if lease.expiration_claimed {
-        "expired"
-    } else if lease.retired {
-        "retired"
-    } else {
-        "active"
-    };
+    let lease_state = lease.terminal.map_or("active", |cause| cause.status());
     let demand = lease.demand.as_ref();
     serde_json::json!({
         "lease_mode": lease_mode,
@@ -2225,6 +2219,111 @@ struct PreparedSharedCacheRead {
     manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
 }
 
+#[derive(Clone)]
+struct RollingTerminalResultReceipt {
+    result: tokio::sync::watch::Receiver<
+        Option<
+            Result<
+                crate::playback_control::LocalControlResult,
+                crate::playback_control::ControlStateError,
+            >,
+        >,
+    >,
+}
+
+impl RollingTerminalResultReceipt {
+    fn pending() -> (
+        Self,
+        tokio::sync::watch::Sender<
+            Option<
+                Result<
+                    crate::playback_control::LocalControlResult,
+                    crate::playback_control::ControlStateError,
+                >,
+            >,
+        >,
+    ) {
+        let (sender, result) = tokio::sync::watch::channel(None);
+        (Self { result }, sender)
+    }
+
+    async fn wait(
+        &self,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let mut result = self.result.clone();
+        loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return outcome;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
+        }
+    }
+}
+
+#[derive(Clone)]
+struct RollingTerminalIdentity {
+    generation: String,
+    owner_node_id: String,
+    owner_epoch: u64,
+    client_instance_id: String,
+    sequence: u64,
+    snapshot: crate::playback_control::PlaybackDemandSnapshot,
+}
+
+impl RollingTerminalIdentity {
+    fn from_request(control: &crate::playback_control::LocalControlRequest<'_>) -> Self {
+        Self {
+            generation: control.generation.to_owned(),
+            owner_node_id: control.owner_node_id.to_owned(),
+            owner_epoch: control.owner_epoch,
+            client_instance_id: control.client_instance_id.to_owned(),
+            sequence: control.sequence,
+            snapshot: control.snapshot.clone(),
+        }
+    }
+
+    fn matches(&self, control: &crate::playback_control::LocalControlRequest<'_>) -> bool {
+        self.generation == control.generation
+            && self.owner_node_id == control.owner_node_id
+            && self.owner_epoch == control.owner_epoch
+            && self.client_instance_id == control.client_instance_id
+            && self.sequence == control.sequence
+            && self.snapshot == control.snapshot
+    }
+}
+
+#[derive(Clone)]
+struct RollingTerminalOperation {
+    identity: RollingTerminalIdentity,
+    result: RollingTerminalResultReceipt,
+    /// Zero while the actor-owned result is still being prepared. Once the
+    /// terminal committer returns, this becomes its exact immutable durable
+    /// acknowledgement expiry rather than a separately guessed admission TTL.
+    expires_at_unix_ms: Arc<AtomicI64>,
+    exact_commit: Arc<std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>>,
+}
+
+impl RollingTerminalOperation {
+    fn expired(&self, now_unix_ms: i64) -> bool {
+        if let Some(commit) = self
+            .exact_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return commit.is_expired();
+        }
+        let expires_at_unix_ms = self.expires_at_unix_ms.load(Acquire);
+        expires_at_unix_ms > 0 && now_unix_ms >= expires_at_unix_ms
+    }
+}
+
 struct Session {
     dir: PathBuf,
     /// The ffmpeg producing this session's segments — `None` for a cache hit,
@@ -2266,6 +2365,14 @@ struct Session {
     /// command while the HTTP-owned transition guard is still held.
     #[cfg(test)]
     control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Set synchronously by the actor's accepted-End callback and cleared only
+    /// after the replicated terminal commit settles. The reaper observes it
+    /// under `child_transition`, so no actor-to-continuation reply gap exists.
+    terminal_response_pending: Arc<AtomicBool>,
+    /// One actor-installed terminal operation shared by the original request
+    /// and every exact retry. It owns physical convergence, response
+    /// projection and the durable acknowledgement receipt.
+    terminal_control: std::sync::Mutex<Option<RollingTerminalOperation>>,
     /// Test-only seam after producer policy is applied but before the flow
     /// ticket is completed back to a waiting control response.
     #[cfg(test)]
@@ -2494,6 +2601,17 @@ struct Session {
     first_slide_logged: AtomicBool,
 }
 
+enum SessionReapVerdict {
+    Live(String, Arc<Session>),
+    Expired {
+        id: String,
+        session: Arc<Session>,
+        idle_seconds: u64,
+        last_request: &'static str,
+        cleanup_reason: &'static str,
+    },
+}
+
 /// Keeps the replacement marker true across every await between actor
 /// admission and publishing (or terminally failing) its successor.
 ///
@@ -2557,8 +2675,7 @@ impl ChildReplacement<'_> {
         let control = self.session.control.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                control.retire().await;
-                if !control.is_retired() {
+                if control.end().await.is_err() || !control.is_retired() {
                     control.fence_unavailable();
                 }
             });
@@ -2718,8 +2835,25 @@ impl Session {
     /// Fence every later renewal in the control actor before publishing the
     /// process-local serving verdict. Actor ordering replaces the old
     /// check-plus-two-lock activity-clock protocol.
-    async fn fence_activity(&self) {
-        self.control.retire().await;
+    async fn end_activity(&self) {
+        match self.control.end().await {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling session end observed");
+            }
+            Err(_) => self.control.fence_unavailable(),
+        }
+    }
+
+    /// Fence this generation because the node can no longer prove durable or
+    /// cluster serving authority. This cause must survive later cleanup so
+    /// failover is never misreported as an ordinary lifecycle end.
+    async fn fence_authority(&self) {
+        match self.control.authority_fence().await {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling authority fence observed");
+            }
+            Err(_) => self.control.fence_unavailable(),
+        }
     }
 
     /// Renew the actor-owned playback lease only if no serving fence
@@ -2735,6 +2869,8 @@ impl Session {
     async fn accept_control(
         &self,
         request: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn crate::playback_control::RollingTerminalAdmission>>,
     ) -> Option<
         Result<
             (
@@ -2745,17 +2881,29 @@ impl Session {
                 i64,
                 u32,
                 u64,
+                &'static str,
+                bool,
             ),
             crate::playback_control::ControlStateError,
         >,
     > {
-        if self.control.is_retired() {
-            return None;
-        }
-        let outcome = match self.control.control(request).await {
+        let outcome = match self
+            .control
+            .control_before(request, deadline_unix_ms, terminal_admission)
+            .await
+        {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        let acknowledged_end = outcome.lease.terminal
+            == Some(crate::playback_control::RollingTerminalCause::End)
+            && outcome.lease.demand.as_ref().is_some_and(|demand| {
+                demand.demand == crate::playback_control::PlaybackDemand::End
+            });
+        let lease_state = outcome.lease.terminal.map_or(
+            "active",
+            crate::playback_control::RollingTerminalCause::status,
+        );
         Some(Ok((
             outcome.disposition,
             outcome.accepted_sequence,
@@ -2764,6 +2912,8 @@ impl Session {
             outcome.lease.expires_at_unix_ms(),
             outcome.lease.timeout_ms(),
             outcome.flow_ticket,
+            lease_state,
+            acknowledged_end,
         )))
     }
 
@@ -3335,9 +3485,7 @@ async fn session_info(
         None => "unavailable",
     };
     let lease_state = match lease.as_ref() {
-        Some(lease) if lease.expiration_claimed => "expired",
-        Some(lease) if lease.retired => "retired",
-        Some(_) => "active",
+        Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
         None => "unavailable",
     };
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
@@ -6122,6 +6270,10 @@ pub struct TranscodeManager {
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Bounded terminal operations outlive rolling-session cleanup so an
+    /// exact End can retry the original immutable durable acknowledgement
+    /// after one Store-attempt window expires.
+    terminal_controls: std::sync::Mutex<HashMap<String, RollingTerminalOperation>>,
     cluster_replacement_gates: Arc<ClusterReplacementGates>,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
@@ -6246,6 +6398,103 @@ impl TranscodeMetrics {
     }
 }
 
+struct RollingTerminalAdmission {
+    manager: Arc<TranscodeManager>,
+    session_id: String,
+    session: Arc<Session>,
+    identity: RollingTerminalIdentity,
+    terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    #[cfg(test)]
+    control_pause: Option<Arc<tokio::sync::Barrier>>,
+}
+
+impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmission {
+    fn accepted(&self, outcome: crate::playback_control::RollingControlOutcome) {
+        if outcome.lease.terminal != Some(crate::playback_control::RollingTerminalCause::End) {
+            return;
+        }
+        let (receipt, sender) = RollingTerminalResultReceipt::pending();
+        let expires_at_unix_ms = Arc::new(AtomicI64::new(0));
+        let exact_commit = Arc::new(std::sync::Mutex::new(None));
+        let operation = RollingTerminalOperation {
+            identity: self.identity.clone(),
+            result: receipt,
+            expires_at_unix_ms: Arc::clone(&expires_at_unix_ms),
+            exact_commit: Arc::clone(&exact_commit),
+        };
+        let handoff = {
+            let mut shared = self
+                .session
+                .terminal_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if shared.is_some() {
+                return;
+            }
+            let handoff = crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
+                &self.session.terminal_response_pending,
+            ));
+            *shared = Some(operation.clone());
+            handoff
+        };
+        self.manager
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.session_id.clone(), operation);
+        let manager = Arc::clone(&self.manager);
+        let session_id = self.session_id.clone();
+        let session = Arc::clone(&self.session);
+        let terminal_committer = self.terminal_committer.clone();
+        #[cfg(test)]
+        let control_pause = self.control_pause.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    outcome.disposition,
+                    outcome.accepted_sequence,
+                    outcome.action,
+                    outcome.platform,
+                    outcome.lease.expires_at_unix_ms(),
+                    outcome.lease.timeout_ms(),
+                    outcome.flow_ticket,
+                    outcome.lease.terminal.map_or(
+                        "active",
+                        crate::playback_control::RollingTerminalCause::status,
+                    ),
+                    true,
+                    Some(handoff),
+                    terminal_committer,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await;
+            let prepared_commit = result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.terminal_commit.as_ref())
+                .cloned();
+            let exact_expiry = prepared_commit
+                .as_ref()
+                .and_then(|commit| commit.expires_at_unix_ms())
+                // Tests and embedders may intentionally omit durable commit;
+                // still start their bound after result preparation, never at
+                // actor admission before the immutable result exists.
+                .unwrap_or_else(|| {
+                    crate::media_sessions::unix_ms()
+                        .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS)
+                });
+            *exact_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared_commit;
+            expires_at_unix_ms.store(exact_expiry, Release);
+            let _ = sender.send(Some(result));
+        });
+    }
+}
+
 impl TranscodeManager {
     /// `pipeline` is the tone-map graph this node proved at boot — see
     /// [`crate::pipeprobe`]. It is fixed for the manager's life because it is
@@ -6291,6 +6540,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            terminal_controls: std::sync::Mutex::new(HashMap::new()),
             cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
@@ -8156,6 +8406,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -11455,6 +11707,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12112,6 +12366,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12676,9 +12932,32 @@ impl TranscodeManager {
             .map(|status| HlsSessionInfo::Live(Box::new(status)))
     }
 
+    fn rolling_terminal_operation(
+        &self,
+        control: &crate::playback_control::LocalControlRequest<'_>,
+    ) -> Result<Option<RollingTerminalOperation>, crate::playback_control::ControlStateError> {
+        let mut terminal = self
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(operation) = terminal.get(control.session_id).cloned() else {
+            return Ok(None);
+        };
+        if operation.expired(crate::media_sessions::unix_ms()) {
+            terminal.remove(control.session_id);
+            return Ok(None);
+        }
+        if operation.identity.matches(control) {
+            Ok(Some(operation))
+        } else {
+            Err(crate::playback_control::ControlStateError::SessionEnded)
+        }
+    }
+
     /// Fenced behavior-neutral control for either HLS presentation. A newly
     /// accepted sequence renews the selected engine's established activity
     /// clock with the explicit `control` reason; replay and rejection do not.
+    #[cfg(test)]
     pub(crate) async fn hls_session_control(
         self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
@@ -12688,7 +12967,45 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
-        if let Some(result) = self.vod.control(control.clone()).await {
+        self.hls_session_control_with_terminal(control, i64::MAX, None)
+            .await
+    }
+
+    pub(crate) async fn hls_session_control_with_terminal(
+        self: &Arc<Self>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        match self.rolling_terminal_operation(&control) {
+            Ok(Some(operation)) => {
+                let mut result = match operation.result.wait().await {
+                    Ok(result) => result,
+                    Err(error) => return Some(Err(error)),
+                };
+                result.disposition = crate::playback_control::ControlDisposition::Replay;
+                if let Some(commit) = &result.terminal_commit {
+                    commit.retry();
+                }
+                return Some(Ok(result));
+            }
+            Err(error) => return Some(Err(error)),
+            Ok(None) => {}
+        }
+        if let Some(result) = self
+            .vod
+            .control_with_terminal(
+                control.clone(),
+                deadline_unix_ms,
+                terminal_committer.clone(),
+            )
+            .await
+        {
             return Some(result);
         }
         let session = self
@@ -12698,13 +13015,12 @@ impl TranscodeManager {
             .get(control.session_id)
             .cloned()?;
         let transition = session.child_transition.lock().await;
-        if session.control.is_retired()
-            || !self
-                .sessions
-                .lock()
-                .await
-                .get(control.session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
         {
             return None;
         }
@@ -12724,6 +13040,24 @@ impl TranscodeManager {
         // the request future is cancelled after mailbox admission, the actor
         // can still publish a ticket that this session-owned worker applies.
         self.ensure_flow_worker(&session_id, Arc::clone(&session));
+        #[cfg(test)]
+        let control_pause = session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let terminal_admission =
+            (control.snapshot.demand == crate::playback_control::PlaybackDemand::End).then(|| {
+                Arc::new(RollingTerminalAdmission {
+                    manager: Arc::clone(self),
+                    session_id: session_id.clone(),
+                    session: Arc::clone(&session),
+                    identity: RollingTerminalIdentity::from_request(&control),
+                    terminal_committer: terminal_committer.clone(),
+                    #[cfg(test)]
+                    control_pause: control_pause.clone(),
+                }) as Arc<dyn crate::playback_control::RollingTerminalAdmission>
+            });
         let (
             disposition,
             accepted_sequence,
@@ -12732,82 +13066,155 @@ impl TranscodeManager {
             lease_expires_at_unix_ms,
             lease_timeout_ms,
             flow_ticket,
-        ) = match session.accept_control(control).await? {
+            lease_state,
+            acknowledged_end,
+        ) = match session
+            .accept_control(control, deadline_unix_ms, terminal_admission)
+            .await?
+        {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
-        #[cfg(test)]
-        let control_pause = session
-            .control_applied_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take();
-        #[cfg(test)]
-        if let Some(pause) = control_pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
         drop(transition);
-        // The actor also tickets replayed sequences. A caller whose first
-        // response was lost can therefore wait for physical convergence
-        // without relying on the periodic repair pass.
-        session.control.wait_for_flow(flow_ticket).await;
-        let limits = self.ahead_limits().await;
-        let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
-        // Convergence is not enough if retirement or replacement won while
-        // this response waited. Re-enter the exact physical-transition gate,
-        // revalidate this Arc against the registry, and keep the gate through
-        // the status join so an active success cannot describe a stale child.
-        let _final_transition = session.child_transition.lock().await;
-        if session.control.is_retired() {
-            return Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded,
-            ));
+        if acknowledged_end {
+            let terminal = session
+                .terminal_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            return Some(match terminal {
+                Some(terminal) => match terminal.result.wait().await {
+                    Ok(mut result) => {
+                        result.disposition = disposition;
+                        if disposition == crate::playback_control::ControlDisposition::Replay {
+                            if let Some(commit) = &result.terminal_commit {
+                                commit.retry();
+                            }
+                        }
+                        Ok(result)
+                    }
+                    Err(error) => Err(error),
+                },
+                None => Err(crate::playback_control::ControlStateError::Unavailable),
+            });
         }
-        if !self
-            .sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &session))
-        {
-            return Some(Err(
-                crate::playback_control::ControlStateError::OwnerTransition,
-            ));
-        }
-        let status = session_info(
-            &session_id,
-            &session,
-            limits,
-            global_live_bytes,
-            global_ahead_bytes,
+        Some(
+            Arc::clone(self)
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms,
+                    lease_timeout_ms,
+                    flow_ticket,
+                    lease_state,
+                    false,
+                    None,
+                    None,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await,
         )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_hls_session_control(
+        self: Arc<Self>,
+        session_id: String,
+        session: Arc<Session>,
+        disposition: crate::playback_control::ControlDisposition,
+        accepted_sequence: u64,
+        action: crate::playback_control::ControlAction,
+        platform: crate::playback_control::ClientPlatform,
+        lease_expires_at_unix_ms: i64,
+        lease_timeout_ms: u32,
+        flow_ticket: u64,
+        lease_state: &'static str,
+        acknowledged_end: bool,
+        terminal_handoff: Option<crate::playback_control::TerminalResponseHandoff>,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        #[cfg(test)] control_pause: Option<Arc<tokio::sync::Barrier>>,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let rescue = terminal_handoff.clone();
+        let outcome = async {
+            #[cfg(test)]
+            if let Some(pause) = control_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            // The actor also tickets replayed sequences. A caller whose first
+            // response was lost can therefore wait for physical convergence.
+            session.control.wait_for_flow(flow_ticket).await;
+            let limits = self.ahead_limits().await;
+            let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+            let _final_transition = session.child_transition.lock().await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let status = session_info(
+                &session_id,
+                &session,
+                limits,
+                global_live_bytes,
+                global_ahead_bytes,
+            )
+            .await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let mut result = crate::playback_control::LocalControlResult {
+                disposition,
+                accepted_sequence,
+                action,
+                lease_expires_at_unix_ms,
+                lease_timeout_ms,
+                lease_state,
+                status: HlsSessionInfo::Live(Box::new(status)),
+                platform,
+                terminal_handoff,
+                terminal_commit: None,
+            };
+            if acknowledged_end {
+                if let Some(committer) = terminal_committer {
+                    result.terminal_commit = Some(committer.start(&result));
+                } else if let Some(handoff) = &result.terminal_handoff {
+                    handoff.complete();
+                }
+            }
+            Ok(result)
+        }
         .await;
-        if session.control.is_retired() {
-            return Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded,
-            ));
+        if outcome.is_err() {
+            if let Some(handoff) = rescue {
+                handoff.complete();
+            }
         }
-        if !self
-            .sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &session))
-        {
-            return Some(Err(
-                crate::playback_control::ControlStateError::OwnerTransition,
-            ));
-        }
-        Some(Ok(crate::playback_control::LocalControlResult {
-            disposition,
-            accepted_sequence,
-            action,
-            lease_expires_at_unix_ms,
-            lease_timeout_ms,
-            status: HlsSessionInfo::Live(Box::new(status)),
-            platform,
-        }))
+        outcome
     }
 
     async fn emit_session_event(
@@ -12906,7 +13313,7 @@ impl TranscodeManager {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     return Err(replacement_deadline_error());
                 }
-                session.fence_activity().await;
+                session.end_activity().await;
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
             }
@@ -12979,7 +13386,10 @@ impl TranscodeManager {
         // Rejection occurred before registry publication, so ordinary
         // retire_session cannot find this Arc. Tear it down explicitly and
         // promptly; Child::kill_on_drop is only the last-resort backstop.
-        session.fence_activity().await;
+        match rejection {
+            SessionRegistrationRejection::ServingFence => session.fence_authority().await,
+            SessionRegistrationRejection::Producer(_) => session.end_activity().await,
+        }
         session.release_hardware();
         session.release_software();
         session.kill_child().await;
@@ -13075,7 +13485,7 @@ impl TranscodeManager {
         let sessions = self.sessions.lock().await;
         for session_id in session_ids {
             if let Some(session) = sessions.get(session_id) {
-                session.fence_activity().await;
+                session.fence_authority().await;
             }
         }
     }
@@ -13092,7 +13502,7 @@ impl TranscodeManager {
             // Serving authority is lost now, not after a producer transition
             // happens to unblock. Lease renewal and every media path observe
             // this bit while detached teardown catches up.
-            session.fence_activity().await;
+            session.fence_authority().await;
         }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
@@ -14575,6 +14985,11 @@ impl TranscodeManager {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         loop {
             ticker.tick().await;
+            let now_unix_ms = crate::media_sessions::unix_ms();
+            self.terminal_controls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, operation| !operation.expired(now_unix_ms));
             let limits = self.ahead_limits().await;
             let mut expired = Vec::new();
             let mut live = Vec::new();
@@ -14586,58 +15001,15 @@ impl TranscodeManager {
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
-                // Serialize the actor's expiry fence with every producer
-                // signal and child transition. After a claim wins, no stale
-                // flow snapshot can resume the child before teardown takes
-                // this gate again.
-                let transition = session.child_transition.lock().await;
-                let claim = session.control.claim_expiry().await;
-                drop(transition);
-                match claim {
-                    Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
-                        // The actor publishes the shared process-local fence
-                        // before replying, so this claim owns ordinary idle
-                        // teardown even if the task is cancelled later.
-                        expired.push((
-                            id,
-                            session,
-                            lease.idle_for.as_secs(),
-                            lease.last_renewal_kind,
-                            "idle",
-                        ));
-                    }
-                    Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
-                        // A prior explicit retirement or expiry claimant died
-                        // before process teardown. Preserve that distinction
-                        // instead of inventing a second idle verdict.
-                        let reason = if lease.expiration_claimed {
-                            "idle"
-                        } else {
-                            "retired_recovery"
-                        };
-                        expired.push((
-                            id,
-                            session,
-                            lease.idle_for.as_secs(),
-                            lease.last_renewal_kind,
-                            reason,
-                        ));
-                    }
-                    Ok(crate::playback_control::RollingExpiryClaim::Live) => {
-                        live.push((id, session));
-                    }
-                    Err(_) => {
-                        // A dead mailbox cannot accept another renewal. Fail
-                        // closed instead of leaking an encoder forever.
-                        session.control.fence_unavailable();
-                        expired.push((
-                            id,
-                            session,
-                            0,
-                            "control-unavailable",
-                            "control_unavailable",
-                        ));
-                    }
+                match self.session_reap_verdict(id, session).await {
+                    SessionReapVerdict::Live(id, session) => live.push((id, session)),
+                    SessionReapVerdict::Expired {
+                        id,
+                        session,
+                        idle_seconds,
+                        last_request,
+                        cleanup_reason,
+                    } => expired.push((id, session, idle_seconds, last_request, cleanup_reason)),
                 }
             }
             for (id, session, idle_seconds, last_request, cleanup_reason) in expired {
@@ -14695,6 +15067,57 @@ impl TranscodeManager {
             for (id, session) in &live {
                 self.apply_ahead_window(session, id, limits, global_live, global_ahead)
                     .await;
+            }
+        }
+    }
+
+    async fn session_reap_verdict(&self, id: String, session: Arc<Session>) -> SessionReapVerdict {
+        // Serialize the actor's expiry fence with every producer signal and
+        // child transition. A pending accepted-End handoff is live only for
+        // cleanup purposes: the actor is terminal, but removing its Arc before
+        // the replicated acknowledgement lands would discard the winner.
+        let transition = session.child_transition.lock().await;
+        if session.terminal_response_pending.load(Acquire) {
+            drop(transition);
+            return SessionReapVerdict::Live(id, session);
+        }
+        let claim = session.control.claim_expiry().await;
+        drop(transition);
+        match claim {
+            Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: "idle",
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: if lease.expiration_claimed {
+                        "idle"
+                    } else {
+                        "retired_recovery"
+                    },
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Live) => {
+                SessionReapVerdict::Live(id, session)
+            }
+            Err(_) => {
+                session.control.fence_unavailable();
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: 0,
+                    last_request: "control-unavailable",
+                    cleanup_reason: "control_unavailable",
+                }
             }
         }
     }
@@ -15457,6 +15880,44 @@ impl HlsDeliveryFixture {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
+    pub(crate) fn pause_control_after_acceptance(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
+        self.state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .contains_key(session_id)
+    }
+
+    pub(crate) async fn reaper_pass_keeps_worker(&self, session_id: &str) -> bool {
+        let Some(session) = self
+            .state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+        else {
+            return false;
+        };
+        matches!(
+            self.state
+                .transcode
+                .session_reap_verdict(session_id.to_owned(), session)
+                .await,
+            SessionReapVerdict::Live(_, _)
+        )
+    }
+
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
@@ -15530,6 +15991,8 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
+        terminal_response_pending: Arc::new(AtomicBool::new(false)),
+        terminal_control: std::sync::Mutex::new(None),
         flow_completion_pause: std::sync::Mutex::new(None),
         playlist_publication_pause: std::sync::Mutex::new(None),
         producer_install_pause: std::sync::Mutex::new(None),
@@ -15814,13 +16277,17 @@ mod tests {
 
         // Retirement is another command on the same mailbox. Once it wins,
         // neither a later control nor a later media request can renew.
-        fixture.session.fence_activity().await;
-        assert!(fixture
-            .state
-            .transcode
-            .hls_session_control(request(3, 1))
-            .await
-            .is_none());
+        fixture.session.end_activity().await;
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(3, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
         assert!(
             !fixture
                 .session
@@ -15836,6 +16303,222 @@ mod tests {
             .snapshot()
             .await
             .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = crate::playback_control::PlaybackDemand::End;
+            snapshot.playback_rate = 0.0;
+            snapshot.render_state = crate::playback_control::RenderState::Ended;
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+        let retry_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let committer = crate::playback_control::RecoveringTerminalCommitter::with_retry_pause(
+            Arc::clone(&retry_pause),
+        );
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .await
+            .expect("local worker")
+            .expect("end accepted");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        assert_eq!(accepted.lease_state, "ended");
+        let HlsSessionInfo::Live(status) = &accepted.status else {
+            panic!("rolling end returned VOD status");
+        };
+        assert_eq!(status.lease_state, "ended");
+        assert_eq!(status.control_demand, Some("end"));
+        assert_eq!(
+            fixture
+                .session
+                .control
+                .snapshot()
+                .await
+                .expect("terminal lease")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::End)
+        );
+        assert!(matches!(
+            accepted
+                .terminal_commit
+                .as_ref()
+                .expect("rolling terminal receipt")
+                .wait()
+                .await,
+            Err(())
+        ));
+        assert_eq!(committer.attempts(), 1);
+        assert!(
+            fixture
+                .state
+                .transcode
+                .retire_session(&session_id, &fixture.session)
+                .await,
+            "rolling cleanup may remove the retired worker after a bounded failed attempt"
+        );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .sessions
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the retry proof must use the manager terminal tombstone, not the live session"
+        );
+
+        let (replay_a, replay_b, ()) = tokio::join!(
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            ),
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            ),
+            async {
+                // The first replay has marked the one shared receipt running
+                // and entered the second durable attempt. The other replay
+                // now has a deterministic interval in which to contend.
+                retry_pause.wait().await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    committer.attempts(),
+                    2,
+                    "both waiters must share one in-flight retry attempt"
+                );
+                retry_pause.wait().await;
+            }
+        );
+        let replay_a = replay_a
+            .expect("first local terminal worker")
+            .expect("first exact end replay");
+        let replay_b = replay_b
+            .expect("second local terminal worker")
+            .expect("second exact end replay");
+        assert_eq!(
+            replay_a.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(
+            replay_b.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(replay_a.lease_state, "ended");
+        assert_eq!(replay_b.lease_state, "ended");
+        assert_eq!(committer.attempts(), 2);
+        let committed_a = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("first retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("first recovered terminal response");
+        let committed_b = replay_b
+            .terminal_commit
+            .as_ref()
+            .expect("second retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("second recovered terminal response");
+        assert_eq!(committed_a, committed_b);
+        assert_eq!(committed_a.server_time_unix_ms, 1);
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+        let terminal_deadline = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("rolling terminal receipt")
+            .deadline_for_test();
+        tokio::time::advance(
+            terminal_deadline
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .expect("rolling operation retained before expiry")
+                .expect("exact rolling replay before expiry")
+                .disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert!(fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .is_none(),
+            "the rolling manager must drop the exact retained operation at acknowledgement expiry"
+        );
+        assert!(!fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(fixture
+            .state
+            .transcode
+            .hls_session_control(request(1))
+            .await
+            .is_none());
     }
 
     #[tokio::test]
@@ -16115,7 +16798,7 @@ mod tests {
         // retirement but before it entered manager teardown. The actor-level
         // regression drops the actual oneshot reply; this exercises the real
         // repair loop that must recover the committed fence.
-        fixture.session.control.retire().await;
+        fixture.session.control.end().await.expect("end verdict");
         assert!(fixture.session.control.is_retired());
         assert!(!fixture
             .state
@@ -20618,7 +21301,7 @@ mod tests {
         let install = session.install_replacement_child(producer_attempt, candidate);
         let retire = async {
             pause.wait().await;
-            session.control.retire().await;
+            session.control.end().await.expect("end verdict");
             pause.wait().await;
         };
         let (result, ()) = tokio::join!(install, retire);
@@ -22400,6 +23083,8 @@ mod tests {
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
             flow_completion_pause: std::sync::Mutex::new(None),
             playlist_publication_pause: std::sync::Mutex::new(None),
             producer_install_pause: std::sync::Mutex::new(None),
@@ -22591,7 +23276,7 @@ mod tests {
             !registration.is_finished(),
             "the fixture must actually wait behind the registry lock"
         );
-        session.control.retire().await;
+        session.control.end().await.expect("end verdict");
         drop(registry);
 
         assert_eq!(
@@ -23090,6 +23775,15 @@ mod tests {
 
         manager.fence_sessions(&["fenced-renewal".to_owned()]).await;
         assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("authority-fenced snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        );
+        assert_eq!(
             manager.active_session_ids().await,
             vec!["fenced-renewal".to_owned()],
             "the teardown barrier keeps the worker discoverable for cleanup"
@@ -23100,6 +23794,16 @@ mod tests {
         );
         drop(transition);
         assert!(manager.stop_session("fenced-renewal", "test").await);
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("cleanup preserves terminal snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence),
+            "later cleanup cannot relabel authority loss as an ordinary end"
+        );
     }
 
     /// The inverse transition ordering matters too: a hardware fallback can

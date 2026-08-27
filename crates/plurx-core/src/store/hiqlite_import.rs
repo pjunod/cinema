@@ -650,6 +650,26 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "media_session_terminal_acks",
+        columns: &[
+            "incarnation_id",
+            "session_id",
+            "owner_node_id",
+            "owner_epoch",
+            "client_instance_id",
+            "sequence",
+            "request_fingerprint",
+            "response_json",
+            "expires_at_ms",
+            "updated_at_ms",
+        ],
+        order_by: "session_id",
+        minimum_schema: 32,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "pretranscode_jobs",
         columns: &[
             "id",
@@ -2067,13 +2087,14 @@ mod tests {
         assert!(names.contains(&"media_session_requests"));
         assert!(names.contains(&"media_playback_pointers"));
         assert!(names.contains(&"media_sessions"));
+        assert!(names.contains(&"media_session_terminal_acks"));
         assert!(names.contains(&"cache_storage_members"));
         assert!(names.contains(&"cache_consumer_pins"));
         assert!(names.contains(&"cluster_fragment_index_sources"));
         assert!(names.contains(&"cluster_fragment_index_jobs"));
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
-        assert_eq!(names.len(), 29, "review every imported durable table");
+        assert_eq!(names.len(), 30, "review every imported durable table");
     }
 
     #[test]

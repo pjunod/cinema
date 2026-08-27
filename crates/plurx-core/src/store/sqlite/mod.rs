@@ -826,6 +826,23 @@ const MIGRATIONS: &[&str] = &[
     // v31: durable operator analysis requests. The source hash is deliberately
     // resolved by a leased worker after the HTTP request has committed.
     crate::store::fragment_index_cluster::ANALYSIS_REQUESTS_SCHEMA,
+    // v32: bounded terminal-control acknowledgements. These outlive ordinary
+    // owner cleanup and route settlement just long enough for an exact End
+    // retry, then maintenance removes them independently of route retention.
+    "CREATE TABLE media_session_terminal_acks (
+        incarnation_id   TEXT NOT NULL UNIQUE,
+        session_id       TEXT PRIMARY KEY,
+        owner_node_id    TEXT NOT NULL,
+        owner_epoch      INTEGER NOT NULL CHECK (owner_epoch > 0),
+        client_instance_id TEXT NOT NULL,
+        sequence         INTEGER NOT NULL CHECK (sequence > 0),
+        request_fingerprint TEXT NOT NULL,
+        response_json    TEXT NOT NULL,
+        expires_at_ms    INTEGER NOT NULL,
+        updated_at_ms    INTEGER NOT NULL
+    ) STRICT;
+    CREATE INDEX media_session_terminal_acks_expiry
+        ON media_session_terminal_acks(expires_at_ms, session_id);",
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1756,7 +1773,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 31,
+            version, 32,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2820,6 +2837,58 @@ mod tests {
                 .expect("schema object"),
                 1,
                 "missing v31 schema object {object}"
+            );
+        }
+    }
+
+    #[test]
+    fn v32_adds_terminal_control_acknowledgements_without_losing_v31_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(31) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 31)
+                .expect("v31 marker");
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.proof', 'survives-v31')",
+                [],
+            )
+            .expect("seed v31 state");
+        }
+
+        SqliteStore::open(&db).expect("migrate v31 to v32");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'migration.proof'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("migration proof"),
+            "survives-v31"
+        );
+        for object in [
+            "media_session_terminal_acks",
+            "media_session_terminal_acks_expiry",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [object],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("schema object"),
+                1,
+                "missing v32 schema object {object}"
             );
         }
     }
