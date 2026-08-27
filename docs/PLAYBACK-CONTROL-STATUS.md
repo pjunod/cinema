@@ -1,12 +1,12 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
-**Current work:** `codex/playback-control-m4-actor-deadline` — the first M4
-runtime slice replaces lossy producer-progress coalescing with the reviewed
-constant-space deadline-chain proof and establishes the production/module-wide
-legacy-owner baseline before the actor deadline is allowed to make recovery
-decisions. The final zero-legacy-owner §8 check lands with deletion.
+**Merged baseline:** `origin/main` at `48ea494c` (PR #619)
+**Current work:** `codex/playback-control-m4-deadline-cutoff` — an
+action-passive actor deadline now consumes the merged constant-space progress
+proof, records one exact due coordinate, and performs lifecycle-first cutoff
+without retrying, killing, or replacing anything. The legacy watchdog remains
+the only recovery action owner until command sequencing and decisions land.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -27,7 +27,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Adversarially reviewed deletion/replacement contract merged in #618; first runtime slice has a checked legacy-owner catalog and deadline-chain ingress in review | Add the active actor deadline/action executor; remove detached recovery loops, in-place post-publication fallback, and child-transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; action-passive actor deadline implemented locally | Review and prove the passive cutoff, then add sequenced commands/decisions and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -51,6 +51,7 @@ not being counted as complete merely because its foundation has landed.
 | [#616](https://github.com/pjunod/plurx/pull/616) | M3c2 constant-space producer progress/exit ingress, exact-attempt actor facts, and one cancel-safe process supervisor | Exact-head adversarial approval at `4b818d39`; 12 focused tests, 1,927 full-workspace tests, every local gate, the long cluster gate, and all required hosted jobs green; merged as `8c6ccdf7` |
 | [#617](https://github.com/pjunod/plurx/pull/617) | M3c3 typed actor-owned End, authority fence, and lease expiry; atomic durable terminal acknowledgement and exact replay; cancellation-safe settlement and exhaustive event ordering | Exact-head adversarial approval at `6f127463`; `make check`, `make cluster-check`, and every hosted job green; merged as `9cd16d05` |
 | [#618](https://github.com/pjunod/plurx/pull/618) | M4 watchdog-removal ownership, deadline ordering, executor, cleanup, process-capacity, and post-publication proposal contract | Seven exact-head adversarial passes resolved 31 findings; final approval at `96799e60`; `make check`, `make cluster-check`, and hosted PR gate green; merged as `f9cef83b` |
+| [#619](https://github.com/pjunod/plurx/pull/619) | Constant-space cutoff-safe producer progress coverage plus checked whole-module legacy owner/task/timer/process inventory | Thirteen exact-head reviews; final approval at `11315987`; focused tests, `make check`, `make cluster-check`, and hosted PR gate green; merged as `48ea494c` |
 
 ## Active slice: M4 watchdog removal
 
@@ -75,11 +76,12 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Interim baseline implemented on the active branch.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans the whole compatibility source plus every Rust module under `plurxd/src`. Structural matching removes comments, literals, and turbofish payloads first, then covers namespaced, method, and bare task/timer calls; command construction plus method/bare-or-namespaced-UFCS launches; low-level process start and lifecycle forms; and import, namespace, type, local-callable, or parenthesized-callable bypasses. Synthetic contract snippets pin every promised spelling. The final §8 check drives every legacy sentinel to zero when deletion lands. |
-| Progress ingress | **Review corrections implemented locally.** One constant-space `ProgressCoverageBatch` retains first advancing progress, the contiguous covered tail/deadline, the first gap, latest progress, and latest telemetry. A persistent exact-attempt ingress watermark prevents a repeated/regressing timestamp after a drain from manufacturing a new deadline link; exit seals the preceding batch. |
-| Adversarial implementation review | **Implementation approved on pass 11 at `10c95e6d`; no P1/P2/P3 findings.** Pass 12 confirmed the implementation remained unchanged and every gate claim was truthful, but found one stale next-step sentence in the handoff. Its documentation-only correction requires final exact-head review before merge. |
-| Unit/focused tests | **Green.** The Python ownership-inventory suite passed 7/7 and the focused Rust producer-progress regressions passed 5/5 after exact-head approval. |
-| Full/cluster/hosted gates | **Local gates green.** `make check` passed validation/history/operations, formatting, Clippy, and workspace tests. `make cluster-check` passed vendor recovery, replicated-store, failure-drill, three-/four-voter topology, and daemon-integration contracts. Hosted checks are pending on the final evidence head. |
+| Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
+| Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
+| Passive deadline/cutoff | **Implemented locally; not yet reviewed or tested.** `starting`, `advancing`, and `classifying_exit` share one actor-private deadline. Timely coverage rearms from fenced `published_at`; late/gapped progress cannot rescue; the actor records one immutable due coordinate and gives lease terminal state priority. It emits no recovery action. |
+| Adversarial implementation review | **Pending for this slice.** PR #619 received final approval at `11315987` and merged as `48ea494c`; the new branch must be committed, pushed, opened as a PR, and reviewed before tests. |
+| Unit/focused tests | **Not run for this slice.** Deterministic tests are authored but wait for exact-head adversarial approval. |
+| Full/cluster/hosted gates | **Pending for this slice.** After approval: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 
 ## Watchdog-removal ledger
 

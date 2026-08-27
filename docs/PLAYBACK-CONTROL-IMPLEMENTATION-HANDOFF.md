@@ -1,18 +1,15 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
-**Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
-**Active branch:** `codex/playback-control-m4-actor-deadline`
-**Approved implementation head:** `10c95e6d4fbc7e56079bef336b7c806658ed2673`
-(no P1/P2/P3 findings)
-**Last reviewed head:** `8818b82ae8c771a4188044ea7ad7254c9a97b9c3`
-(documentation-only P3; implementation unchanged)
-**Current exact head:** resolve
-`origin/codex/playback-control-m4-actor-deadline`; the review successor fixes
-one stale handoff instruction and requires final exact-head review
-**Test state:** focused tests, `make check`, and `make cluster-check` green;
-hosted checks pending on the final evidence head
+**Merged baseline:** `origin/main` at `48ea494c` (PR #619)
+**Active PR:** not opened yet
+**Active branch:** `codex/playback-control-m4-deadline-cutoff`
+**Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
+(approved on review pass 13; merged as `48ea494c`)
+**Current exact head:** local action-passive deadline candidate; resolve after
+the initial commit and push
+**Test state:** no tests, builds, or checks have run for the current slice;
+the adversarial PR review must happen first
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -53,29 +50,31 @@ The rewrite is not starting from scratch:
 - PR #618: complete M4 one-deadline/watchdog-removal implementation contract,
   merged at `f9cef83b` after seven exact-head adversarial passes and green
   local, cluster, and hosted gates.
+- PR #619: cutoff-safe progress coverage plus a checked whole-module legacy
+  owner inventory, merged at `48ea494c` after thirteen exact-head reviews,
+  focused tests, `make check`, `make cluster-check`, and hosted CI all passed.
 
 The merged actor is behavior-neutral for recovery. Legacy rolling watchdogs
-and in-place replacement still operate until later M4 slices activate the
-actor deadline/executor and then delete the old owners.
+and in-place replacement still operate until later M4 slices transfer action
+authority to the actor/executor and then delete the old owners.
 
-## 3. PR #619 — exact current state
+## 3. PR #619 — merged delivery
 
 ### Intended slice
 
-This PR does two prerequisite jobs without changing recovery decisions:
+PR #619 did two prerequisite jobs without changing recovery decisions:
 
 1. retain a constant-space, cutoff-safe chain of producer-progress evidence;
 2. establish a checked baseline inventory of every old recovery owner and all
    task, timer, process-start, lifecycle, and alias shapes that could recreate
    one.
 
-The actor still receives one behavior-neutral projection. No
-`ProducerProgressDeadline` is armed and no legacy watchdog is removed in this
-PR.
+At the merged baseline the actor still receives one behavior-neutral
+projection. No legacy watchdog was removed in PR #619.
 
 ### Committed implementation
 
-The pushed branch contains:
+The merged branch contains:
 
 - `ProgressCoverageBatch`, retaining first advancing progress, contiguous
   covered tail/deadline, first gap, latest progress, and latest telemetry;
@@ -108,7 +107,7 @@ b918fdfd test(validation): specify callable ownership contexts
 
 ### Adversarial review chronology
 
-Twelve exact-head reviews have run. No tests were run during them.
+Thirteen exact-head reviews ran. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
    coverage; latest progress was hidden by first-gap projection; inventory and
@@ -141,10 +140,12 @@ Twelve exact-head reviews have run. No tests were run during them.
 12. `8818b82a`: the gate evidence was truthful and implementation unchanged,
     but the immediate continuation list still instructed a successor to push
     the evidence commit that was already on the remote.
+13. `11315987`: approved the documentation-only correction, confirmed every
+    runtime/validation blob remained byte-identical to the approved
+    implementation, and found no P1/P2/P3 issue.
 
-The reviewer has consistently confirmed the producer-ingress and successor
-watermark behavior after the first corrections. The remaining work is the
-static structural contract, not runtime semantics.
+All #619 findings are closed. The final exact head passed focused, full,
+cluster, and hosted gates and merged as `48ea494c`.
 
 ### Approved implementation head
 
@@ -178,26 +179,24 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The current implementation is approved and all local gates are green. The
-documentation-only evidence commit needs a final exact-head adversarial
-review while hosted CI runs.
+The action-passive deadline slice is implemented locally but unreviewed and
+untested.
 
-- Await final exact-head review of the documentation-only successor.
-- Require every hosted check green. Investigate and fix any failure; any
-  changed head requires another exact-head review and affected local gates.
-- Record exact SHAs and test counts here and in status, merge PR #619,
-  fast-forward the disposable clone to merged `main`, create the next
-  `codex/` branch, and continue M4.
+- Finish the owner-count, regression-history, handoff, and status updates.
+- Commit and push, open the PR, then request adversarial review of that exact
+  immutable head.
+- Do not run unit tests until the review approves. After approval, run focused
+  deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
+  CI. Fix every failure and re-review any changed head before merge.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
 review before local unit tests and full verification before merge.
 
-## 5. Next bounded M4 slice after #619
+## 5. Current bounded M4 slice after #619
 
 A read-only Luna scout inspected the contract and current code without editing
-or testing. Its recommended smallest slice is an action-passive activation of
-the actor's producer deadline and due-first cutoff:
+or testing. Its recommended smallest slice is now implemented locally:
 
 - add actor-private `ProducerProgressDeadline` state beside producer facts in
   `RollingControlActor`;
@@ -209,6 +208,14 @@ the actor's producer deadline and due-first cutoff:
   due-first cutoff rather than relying only on `tokio::select!` bias; and
 - emit no retry/kill/replace action yet.
 
+The local candidate also retains the exact armed instant in an immutable
+action-passive due record, applies exact-boundary progress before cutoff,
+gives lease terminal state priority on a deadline tie, and disarms the passive
+deadline after one verdict so it cannot spin. The temporary starting budget is
+the conservative 30-second compatibility value until the next policy-admission
+slice supplies the existing 12-second hardware or 30-second software/copy
+budget. No recovery behavior consults this passive verdict.
+
 Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
 
 - `ProgressCoverageBatch` and ingress drain near lines 1787–1904;
@@ -218,10 +225,12 @@ Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
 - `observe_producer_exit_at` near lines 2462–2483; and
 - actor `run` near lines 2810–2861.
 
-Focused evidence must cover exact starting expiry, rearm from fenced
-publication time, late-progress cutoff, contiguous versus gapped A/B/C
-coverage, command/exit barriers, classification mode, lease-terminal priority,
-deadline-versus-ready-event ties, and scheduler-delayed dispatch.
+Authored but not yet run focused evidence covers exact starting expiry,
+scheduler-delayed dispatch, rearm from fenced publication time, late-progress
+cutoff, exact-boundary progress, contiguous versus gapped A/B/C coverage, the
+exit barrier and classification mode, and lease-terminal priority. Command
+publication sequencing remains deliberately outside this action-passive slice;
+it must land before a producer deadline is allowed to emit a decision.
 
 Leave all compatibility owners unchanged and active in that slice:
 `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`,

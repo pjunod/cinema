@@ -256,7 +256,7 @@ expected_occurrences = 17
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
-expected_occurrences = 0
+expected_occurrences = 27
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
