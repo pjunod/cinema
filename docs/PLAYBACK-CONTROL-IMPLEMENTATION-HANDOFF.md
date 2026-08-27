@@ -6,12 +6,12 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `16723536fce2e4362f0945c4f1b1e1eb3841a311`
-(round 2 returned **REQUEST CHANGES**)
+**Last reviewed exact head:** `3827037aac069e5d212c5e1e2861f2461457bfbc`
+(round 3 returned **REQUEST CHANGES**)
 **Current repair implementation:**
-`77d90a8eb621d687ca3febe6306dbc7f7c651a83` (the documentation refresh follows
+`728abc86888c06fe7ebf420e06b6e5383b6f780a` (the documentation refresh follows
 it; resolve the immutable branch tip with `git rev-parse HEAD` before requesting
-round 3)
+round 4)
 **Test state:** no tests, builds, or checks have run for the current slice;
 the adversarial PR review must happen first
 
@@ -151,9 +151,40 @@ re-authorizes the exact attempt under the transition fence. The bounded
 backpressure. Dispatch time is sampled only after transition and ingress are
 owned, local flow application claims lifecycle expiry first, timely and late
 holds retain their distinct meanings, and duplicate exit stays idempotent
-while counting as rejected.
+after actor delivery. A duplicate removed before actor delivery is instead
+counted as coalesced because it never became a rejected actor observation.
 
-A fresh exact-head round-3 adversarial review is still required before any
+Round 3 reviewed exact head
+`3827037aac069e5d212c5e1e2861f2461457bfbc` and returned **REQUEST CHANGES**.
+The primary and independent passes found five remaining obligations:
+
+1. A full-capacity producer-flow waiter could remain asleep forever when
+   control became unavailable or the actor mailbox closed.
+2. Unexpected actor-task exit could race after a signal was authorized and a
+   flow barrier reserved but before the process syscall, because actor closure
+   was not serialized by the producer-transition fence.
+3. There was no direct deterministic regression for stale flow revisions and
+   stale attempts while the producer was physically held.
+4. A same-attempt exit deduplicated before actor drain had ingress accounting
+   but no coalesced-or-rejected outcome accounting.
+5. This handoff overstated the capacity/re-authorization tests: the original
+   low-level ingress test did not invoke the process supervisor or prove
+   successor/retirement behavior.
+
+Commit `728abc86888c06fe7ebf420e06b6e5383b6f780a` repairs all five findings.
+Capacity waiters now race bounded-capacity notification against retirement
+and actor-mailbox closure, every terminal/unavailable path wakes them, and a
+closed mailbox fences the control handle fail-closed. An actor-local drop
+fence publishes unexpected actor unavailability while holding the same
+producer-transition mutex as process signals, so a signal either linearizes
+entirely before retirement or is denied before PID access. Process-level
+regressions now exercise the real `AttemptChild` supervisor across capacity
+exhaustion, successor-attempt replacement, explicit retirement, actor abort,
+post-fence denial, and cleanup progress. Direct state tests pin stale
+revision/attempt rejection, and pre-drain duplicate exits increment the
+coalesced counter while preserving the first exact terminal observation.
+
+A fresh exact-head round-4 adversarial review is still required before any
 test, build, or check. Until shared command sequencing lands, the deadline is
 an observation/proof surface only and must not trigger recovery retry, kill,
 replacement, hold, resume, or another recovery action.
@@ -232,14 +263,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 2 returned
+The action-passive deadline slice is in PR #621. Review round 3 returned
 **REQUEST CHANGES** at exact head
-`16723536fce2e4362f0945c4f1b1e1eb3841a311`. The repair implementation is
-committed at `77d90a8eb621d687ca3febe6306dbc7f7c651a83`; it and this documentation
-refresh remain untested pending exact-head round 3.
+`3827037aac069e5d212c5e1e2861f2461457bfbc`. The repair implementation is
+committed at `728abc86888c06fe7ebf420e06b6e5383b6f780a`; it and this documentation
+refresh remain untested pending exact-head round 4.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-3 review of that exact commit.
+  adversarial round-4 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -298,10 +329,14 @@ idempotent settlement, scheduler-delayed dispatch, rearm from fenced
 publication time, late/duplicate progress, exact-boundary progress and
 non-success exit, contiguous versus gapped A/B/C coverage, capture while
 blocked on the transition fence, stale-exit/successor-progress ordering,
-successful-exit classification and duplicate rejection, progress sealed around
+successful-exit classification and actor-delivered duplicate rejection,
+pre-drain duplicate coalescing, stale physical-flow revision/attempt rejection,
+progress sealed around
 ordered physical hold/resume barriers, timely versus late hold, capacity
-deferral/wakeup with exact-attempt re-authorization, exact lifecycle-expiry
-precedence, process-owner flow publication, and lifecycle commands
+deferral/wakeup through the real process supervisor with exact-attempt
+re-authorization against successor and retirement, unexpected actor-exit
+serialization, post-fence signal denial, cleanup progress, exact
+lifecycle-expiry precedence, process-owner flow publication, and lifecycle commands
 before/at/after the provisional producer due coordinate.
 Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
@@ -316,6 +351,8 @@ dbf12d87 chore(validation): map passive deadline evidence
 a409a194 fix(playback): fence passive producer cutoff
 16723536 docs(playback): record passive cutoff review repairs
 77d90a8e fix(playback): sequence physical flow barriers
+3827037a docs(playback): record flow barrier review repairs
+728abc86 fix(playback): fence deferred flow on actor exit
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
