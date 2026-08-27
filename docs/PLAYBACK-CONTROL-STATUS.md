@@ -68,11 +68,11 @@ Review and test state for M4:
 
 | Gate | State |
 |---|---|
-| Implementation contract | **Sixth adversarial correction complete on the exact merged M3 baseline.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
+| Implementation contract | **Adversarially approved at `1925ab69` on the exact merged M3 baseline.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **In progress.** The first pass found the first-segment task, lifetime watcher, copy continuation, request-side exit verdict, direct copy failures, initial install paths, and every non-replacement duty hidden by `child_transition`. Implementation starts by generating a checked callsite catalog. |
-| Adversarial design review | **Sixth correction ready for exact-head re-review.** The first thirty findings were addressed through `f956c4d3`; the sixth pass accepted the progress-only coverage proof, action settlements, and hard process limit and found one remaining ordering race. This correction makes exit, physical flow acknowledgement, and classifier/probe results bounded barriers too, so progress can never coalesce across a hold, resume, exit, or classification state change. No implementation or tests begin until this PR head is approved. |
-| Implementation | **Pending corrected-design approval.** Actor deadline/decision state, session executor and exact-attempt supervisor integration, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
-| Unit/focused tests | **Not run by instruction.** They begin only after the cumulative implementation receives adversarial diff review. |
+| Adversarial design review | **Approved.** Seven exact-head passes resolved thirty-one findings. The final pass approved `1925ab69`: command, exit, physical-flow, and classifier/probe facts all fence contiguous progress coverage; every action deadline settles; cleanup and process permits survive until confirmed reap; and no P1/P2 implementation blocker remains. |
+| Implementation | **Pending contract merge.** Actor deadline/decision state, session executor and exact-attempt supervisor integration, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
+| Unit/focused tests | **Now authorized by exact-PR-head adversarial approval; not yet run on this documentation PR.** |
 | Full/cluster/hosted gates | **Pending implementation and review.** |
 
 ## Watchdog-removal ledger
