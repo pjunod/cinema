@@ -1,14 +1,12 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `8c6ccdf7` (PR #616)
-**Current work:** PR [#617](https://github.com/pjunod/plurx/pull/617),
-`codex/playback-control-m3-terminal-events` — M3c3 typed, actor-owned session
-end and authority/cluster-fence events, replicated terminal acknowledgements,
-and an exhaustive event-order model.
-This is the final behavior-passive M3 ownership slice before M4 moves recovery
-decisions into the actor and deletes the old server watchdog and in-place
-replacement machinery.
+**Merged baseline:** `origin/main` at `9cd16d05` (PR #617)
+**Current work:** `codex/playback-control-m4-watchdog-removal` — M4 replaces
+the detached startup/lifetime recovery tasks with one actor-owned producer
+deadline, one exact-attempt action stream, and one stable post-publication
+proposal. The detailed slice contract is in
+[`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -24,8 +22,8 @@ not being counted as complete merely because its foundation has landed.
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
-| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, the M3c1 attempt-fenced delivery ledger, and M3c2 nonblocking progress/exact-exit observations | Merge typed end and authority/cluster-fence ownership with exhaustive ordering and durable replay evidence |
-| M4 — server watchdog removal | **Not started** | — | One producer deadline; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
+| M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
+| M4 — server watchdog removal | **In progress** | Exact deletion and replacement contract frozen on merged M3 baseline | Add one producer deadline/action executor; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -47,45 +45,34 @@ not being counted as complete merely because its foundation has landed.
 | [#614](https://github.com/pjunod/plurx/pull/614) | M3b explicit demand lease, response-commit ownership, demand-based pacing, and operator instrumentation | Exact-head adversarial approval, full local gate, and all required hosted jobs green |
 | [#615](https://github.com/pjunod/plurx/pull/615) | M3c1 actor-owned, exact-attempt publication/fetch ledger and fenced producer installation | Exact-head adversarial approval at `7dffa5f3`; full local gate and every required hosted job green; merged as `46c08439` |
 | [#616](https://github.com/pjunod/plurx/pull/616) | M3c2 constant-space producer progress/exit ingress, exact-attempt actor facts, and one cancel-safe process supervisor | Exact-head adversarial approval at `4b818d39`; 12 focused tests, 1,927 full-workspace tests, every local gate, the long cluster gate, and all required hosted jobs green; merged as `8c6ccdf7` |
+| [#617](https://github.com/pjunod/plurx/pull/617) | M3c3 typed actor-owned End, authority fence, and lease expiry; atomic durable terminal acknowledgement and exact replay; cancellation-safe settlement and exhaustive event ordering | Exact-head adversarial approval at `6f127463`; `make check`, `make cluster-check`, and every hosted job green; merged as `9cd16d05` |
 
-## Active slice: M3c3 terminal events
+## Active slice: M4 watchdog removal
 
-M3c2 merged as PR #616 at `8c6ccdf7`. It gives the actor nonblocking,
-exact-attempt producer progress and process-exit facts without changing any
-recovery action.
+PR #617 completed M3 at merge `9cd16d05`: the actor now owns explicit End,
+authority fence, and exact lease expiry, and durable terminal replay survives
+request cancellation and cleanup.
 
-The active M3c3 slice replaces the actor's undifferentiated `Retire` command
-with typed `End` and `AuthorityFence` events. Lease expiry is the third bounded
-terminal cause. The first terminal event linearized by the actor wins once,
-publishes the immediate serving fence once, and remains immutable while late
-end, fence, control, media, publication, progress, and exit events receive
-truthful terminal verdicts. A newly accepted protocol `demand=end` now enters
-that same terminal transition atomically and can replay its exact terminal
-acknowledgement after response loss. VOD applies the equivalent tombstone and
-reader detach under its lifecycle gate. The exact accepted End response is
-retained in replicated storage for a bounded 60-second idempotency window, so
-rolling cleanup, VOD tombstoning, route settlement, client disconnect, and a
-cluster relay cannot erase the reply. Physical rolling-child teardown remains
-in the existing manager until M4.
+M4 makes the same actor the sole recovery decision owner. It replaces hardware
+startup grace, software startup/lifetime polling, and copy-segmenter fallback
+with one exact-attempt `ProducerProgressDeadline`. One pre-publication retry is
+allowed only when the actor supplies the validated recipe. After publication,
+failure retains published bytes and produces one stable
+`prepare_replacement` proposal; it never swaps the child in place. A single
+session process executor performs actor-authorized OS child actions. The full
+contract is
+[`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 
-Activity/status will expose the winning terminal cause and Prometheus will
-count each bounded cause as `won` or `already_terminal`. An exhaustive small
-model will explore permutations of producer exit, expiry, explicit end,
-authority fence, publication, control acceptance, and replacement admission;
-real async tests cover reply cancellation and concurrent terminal calls.
-The full contract is in
-[`PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md`](PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md).
-
-Review and test state for M3c3:
+Review and test state for M4:
 
 | Gate | State |
 |---|---|
-| Implementation | **Complete on PR #617** from merged `8c6ccdf7`. Terminal reply insertion, exact-owner route shutdown, lease clamp, pointer removal, and cache-pin removal are one Store transaction. The actor installs one session-owned End operation before its fallible reply send; exact retries attach to it, the reaper observes it immediately, and queued controls cannot mutate after their inherited deadline or a pre-admission cancellation. Each settlement attempt bounds every Store write/read/backoff by both one five-second attempt deadline and the exact prepared acknowledgement expiry. Starts, completions, and waiters fail at or after that boundary. Rolling retention derives from the prepared receipt; VOD releases the response/Store graph after expiry but keeps the small owner tombstone. Every VOD outer retry crosses the session-owned reader-detach cleanup before settlement can start. Replay disposition and platform telemetry remain per-request truthful. |
-| Adversarial diff review | **Approved** at exact code head `57d46e59` with no P0-P3 findings. The review covered the cumulative implementation, deterministic cancellation/expiry proofs, the v32 migration sentinel, all 30 replicated durable-table plans, and all 41 classified SQLite transaction sites. |
-| Unit/focused tests | **Pass.** The exact terminal expiry, VOD cancellation/detach, VOD cleanup identity, rolling contention/retention, and HTTP cancellation/reaper tests pass individually. The complete permission-capable `plurxd` suite passes with **1,087 passed, 0 failed, 3 ignored**. |
-| Full local gate | **Pass** at `57d46e59`. `make check` passed the 22-point/27-check validation catalog, corrective-history audit, formatting, strict workspace Clippy, **121** operations tests, **52** benchmark tests, **784** `plurx-core` unit tests, **31** Store-contract tests, **1,087** `plurxd` tests, supporting crate tests, and doc tests. |
-| Hosted CI | **Pending the final push.** GitHub must run the required jobs against the reviewed implementation plus this status-only update. |
-| Merge | **Awaiting hosted CI.** |
+| Implementation contract | **Drafted on the exact merged M3 baseline.** It defines deadline policy, arm/disarm and event ordering, the one-retry invariant, process-executor ownership, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
+| Static owner inventory | **Complete.** Current recovery authority is split among the first-segment task, lifetime watcher, copy `Unsupported` continuation, `downgrade_one_step`, `child_transition`, `watchdog_active`, and `replacing_child`; M4 maps every one to actor state or the single process executor. |
+| Adversarial design review | **Pending.** The exact implementation contract will be reviewed and corrected before code proceeds. |
+| Implementation | **Pending review.** Actor deadline/decision state, process executor, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
+| Unit/focused tests | **Not run by instruction.** They begin only after the cumulative implementation receives adversarial diff review. |
+| Full/cluster/hosted gates | **Pending implementation and review.** |
 
 ## Watchdog-removal ledger
 
@@ -133,17 +120,15 @@ playback, replacement, restart, or failure decision. It is not a watchdog.
 
 ## Remaining delivery order
 
-1. Finish end and cluster-fence event ownership with model tests over event
-   reorderings.
+1. Complete M4 and prove the old server watchdog/replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
-3. Complete M4 and prove the old server watchdog/replacement symbols are gone.
-4. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
+3. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
    node placement use the same prepare/commit/abort transaction.
-5. Complete semantic indexing: exact intro/credits destinations with
+4. Complete semantic indexing: exact intro/credits destinations with
    provenance/confidence, manual overrides, subtitle readiness, queue metrics,
    and marker-destination prewarm.
-6. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
+5. Complete clustered planned/hard handoff, mixed-fleet cutover, compatibility
    deletion, playback-lab fault injection, and physical web/Apple/Android
    acceptance.
 
