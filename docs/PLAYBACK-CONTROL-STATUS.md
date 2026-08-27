@@ -2,8 +2,8 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `8e331672` (PR #621)
-**Current work:** `codex/playback-control-m4-command-sequencing` — PR number
-pending; implementation is unreviewed and untested.
+**Current work:** PR #624 on `codex/playback-control-m4-command-sequencing`;
+implementation is unreviewed and untested.
 PR #621 merged as `8e331672` after exact-head round 10 received unanimous
 **APPROVE** verdicts and hosted run `33109297301` passed. The active branch
 adds bounded shared command/producer sequencing, publication-time ordering,

@@ -392,8 +392,8 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The active branch is `codex/playback-control-m4-command-sequencing`; its PR
-number is pending. PR #621 is already merged as `8e331672` after unanimous
+The active branch is `codex/playback-control-m4-command-sequencing` in PR
+#624. PR #621 is already merged as `8e331672` after unanimous
 round-10 approval and hosted run `33109297301` passed. The active branch adds
 behavioral sequencing and projection code, so the merged #621 evidence cannot
 be reused as its validation.
