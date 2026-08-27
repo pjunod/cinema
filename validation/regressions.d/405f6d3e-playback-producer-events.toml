@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["405f6d3e", "e18837c3", "38aac17e"]
+commits = ["405f6d3e", "e18837c3", "38aac17e", "f31448f8"]
 points = ["playback.pipeline", "server.api"]
 checks = ["rust-gate"]
-reason = "The Rust gate retains the M3c2 producer-event contracts: progress uses a constant-space ingress that cannot block on a full actor mailbox; attempts fence monotonic motion and immutable first-exit facts; one supervisor exclusively owns the cancel-safe child wait plus signals and reaping so PID reuse cannot redirect a control action; the exact transition guard spans authorization through the signal syscall; status never combines actor, process, or progress facts from different attempts and makes unavailable progress explicit; and bounded Prometheus plus joined server telemetry expose the resulting state without moving recovery policy out of the compatibility engine."
+reason = "The Rust gate retains the M3c2 producer-event contracts: progress uses a constant-space ingress that cannot block on a full actor mailbox; attempts fence monotonic motion, immutable first-exit facts, and post-exit publication order; cluster relay accepts the truthful bounded exit state; one supervisor exclusively owns the cancel-safe child wait plus signals and reaping so PID reuse cannot redirect a control action; the exact transition guard spans authorization through the signal syscall; status never combines actor, process, or progress facts from different attempts, uses waiting during replacement, and makes unavailable progress explicit; and bounded Prometheus plus joined server telemetry expose the resulting state without moving recovery policy out of the compatibility engine."
