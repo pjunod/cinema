@@ -139,8 +139,20 @@ files to the new attempt and merge them after the transition reopens. Each
 reader samples the compatibility attempt before the actor attempt and checks
 the marker on both sides; a complete false→true→false replacement therefore
 cannot masquerade as an unchanged path owner. If a replacement task is
-cancelled after admission, its phase-aware guard leaves paths fenced, records
-a terminal failure, and retires the actor for ordinary cleanup.
+cancelled after the admission command is sent—even after the actor mutates but
+before its reply is delivered—its phase-aware guard leaves paths fenced,
+records a terminal failure, and retires the actor for ordinary cleanup. A
+typed final-install rejection uses a separate terminal settlement: it keeps
+paths fenced and preserves actor-owned expiry/retirement causality instead of
+misreporting task cancellation.
+
+Replacement scratch clearing is verified before a candidate can be spawned.
+Enumeration, entry removal, and the final empty-directory check all propagate
+their concrete storage error. Any failure records that cause and terminally
+fences the admitted attempt; old playlist/init/segment names can never reopen
+as successor-owned paths merely because a NAS removal failed. The predecessor
+catalog may be hidden at admission, but its bytes stay in the hard scratch
+total until that verified clear succeeds.
 
 Concurrent refreshes within one attempt also capture the in-memory index
 revision before reading the playlist bytes. If another refresh or retention
@@ -155,8 +167,14 @@ are reused by a successor, so this bounded handoff is required: a replacement
 that won first makes the retention sample stale, while one that arrives later
 cannot seed successor bytes until no predecessor cleanup still names a served
 path. Rename failures leave the source path and accounting intact; unlink
-failures remain confined to unservable garbage names. M4 replaces these shared
-paths with attempt-owned actor state.
+failures remain confined to unservable garbage names. Renamed bytes remain in
+the hard scratch total until unlink or confirmed absence, and failed items stay
+queued for a later repair tick. Each session has exactly one cleanup owner and
+refuses another handoff batch while cleanup is active or retry work remains, so
+a slow filesystem cannot accumulate detached workers. A worker attempts each
+queued path once per pass, releasing successful tail entries while rotating a
+failed path for the next repair cadence. M4 replaces these shared paths with
+attempt-owned actor state.
 
 A replacement is authorized twice: actor admission before the predecessor is
 touched, and exact-attempt authorization after the candidate process is spawned

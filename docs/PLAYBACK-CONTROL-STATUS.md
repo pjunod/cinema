@@ -3,11 +3,11 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
-attempt-fenced publication/fetch ledger; four exact-head adversarial reviews
+attempt-fenced publication/fetch ledger; six exact-head adversarial reviews
 have driven production-build, validation-history, cancellation, path-ownership,
-retention, and exact-publication corrections. The fourth review's findings are
-locally remediated and await another exact-head review; no tests have run before
-that approval
+scratch accounting, bounded cleanup, terminal-cause, and exact-publication
+corrections. The sixth review's finding is locally remediated and awaits
+another exact-head review; no tests have run before that approval
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -73,8 +73,8 @@ Review and test state for M3c1:
 
 | Gate | State |
 |---|---|
-| Implementation | `fe73efaa`, `fbae4eb9`, `9e0f6c4a`, `af4b8e35`, and `2fbb8a4b`, plus local fourth-review remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
-| Adversarial diff review | Reviews 1–3 drove thirteen ordering/correctness changes. Review 4 caught a production-only `cfg` compile break, its required history mapping, cancellation reopening predecessor paths after actor admission, unbounded retention deletes under the path gate, playlist readiness depending on a fallible second read, and a false→true→false attempt/path sampling ABA across playlist, segment, and refresh. The local remediation is fail-closed, batch-bounds retention handoff, deletes garbage outside the gate, commits exact returned playlist bytes, and adds real-path race tests. Exact-head re-review is pending and no tests will run first. |
+| Implementation | `fe73efaa`, `fbae4eb9`, `9e0f6c4a`, `af4b8e35`, `2fbb8a4b`, `7c375425`, and `3470a0f5`, plus local fifth/sixth-review remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
+| Adversarial diff review | Reviews 1–4 drove production-build, history-mapping, ordering, cancellation, retention, exact-publication, and false→true→false path-ownership corrections. Review 5 found the actor-mutation/reply cancellation gap, silent predecessor cleanup failures, detached-garbage under-accounting, unbounded per-session cleanup workers, and final actor rejections mislabeled as cancellation. Review 6 found that one permanent unlink failure could strand an otherwise deletable cleanup tail. The local remediation marks admission pending before the await, verifies scratch clearing, keeps only genuinely failed garbage charged/retryable behind one coalesced owner, attempts every item once per repair pass, preserves typed terminal causality, and adds deterministic race/storage/accounting tests. Exact-head re-review is pending and no tests will run first. |
 | Unit/focused tests | Not run yet, by required review-before-test ordering |
 | Full local gate | Not run yet |
 | Hosted CI | No PR yet |

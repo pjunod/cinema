@@ -1225,6 +1225,8 @@ pub(crate) struct RollingControlHandle {
     producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    #[cfg(test)]
+    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 struct OwnedLocalControlRequest {
@@ -1294,6 +1296,8 @@ struct RollingControlActor {
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
     last_flow_ticket: u64,
+    #[cfg(test)]
+    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 impl RollingControlActor {
@@ -1306,6 +1310,7 @@ impl RollingControlActor {
             Arc::new(AtomicU64::new(0)),
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
             Arc::new(RollingFlowSync::new()),
+            Arc::new(std::sync::Mutex::new(None)),
         )
     }
 
@@ -1316,6 +1321,9 @@ impl RollingControlActor {
         producer_attempt: Arc<AtomicU64>,
         producer_transition: Arc<std::sync::Mutex<Instant>>,
         flow_sync: Arc<RollingFlowSync>,
+        #[cfg(test)] producer_attempt_reply_pause: Arc<
+            std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+        >,
     ) -> Self {
         Self {
             control: ControlState::default(),
@@ -1331,6 +1339,8 @@ impl RollingControlActor {
             producer_transition,
             flow_sync,
             last_flow_ticket: 0,
+            #[cfg(test)]
+            producer_attempt_reply_pause,
         }
     }
 
@@ -1547,7 +1557,7 @@ impl RollingControlActor {
         }
     }
 
-    fn handle_command(&mut self, command: RollingControlCommand) {
+    async fn handle_command(&mut self, command: RollingControlCommand) {
         match command {
             RollingControlCommand::Renew {
                 kind,
@@ -1583,11 +1593,25 @@ impl RollingControlActor {
                 // child/registry publication. A newer attempt must not pass
                 // that linearization point and make the just-published owner
                 // stale before the publication itself completes.
-                let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
+                let outcome = {
+                    let transition = Arc::clone(&self.producer_transition);
+                    let _transition = transition
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.begin_producer_attempt_at(rolling_now())
+                };
+                #[cfg(test)]
+                let reply_pause = self
+                    .producer_attempt_reply_pause
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = reply.send(self.begin_producer_attempt_at(rolling_now()));
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                #[cfg(test)]
+                if let Some(reply_pause) = reply_pause {
+                    reply_pause.wait().await;
+                    reply_pause.wait().await;
+                }
+                let _ = reply.send(outcome);
             }
             RollingControlCommand::AuthorizeProducerInstall {
                 producer_attempt,
@@ -1688,7 +1712,7 @@ impl RollingControlActor {
                 let Some(command) = receiver.recv().await else {
                     break;
                 };
-                self.handle_command(command);
+                self.handle_command(command).await;
                 continue;
             }
             let deadline = self.deadline();
@@ -1697,7 +1721,7 @@ impl RollingControlActor {
                     let Some(command) = command else {
                         break;
                     };
-                    self.handle_command(command);
+                    self.handle_command(command).await;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     // The timer itself is the exact actor-owned deadline. Use
@@ -1723,6 +1747,8 @@ impl RollingControlHandle {
         let producer_transition =
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
         let flow_sync = Arc::new(RollingFlowSync::new());
+        #[cfg(test)]
+        let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         tokio::spawn(
             RollingControlActor::with_producer_transition(
                 now,
@@ -1731,6 +1757,8 @@ impl RollingControlHandle {
                 Arc::clone(&producer_attempt),
                 Arc::clone(&producer_transition),
                 Arc::clone(&flow_sync),
+                #[cfg(test)]
+                Arc::clone(&producer_attempt_reply_pause),
             )
             .run(receiver),
         );
@@ -1740,6 +1768,8 @@ impl RollingControlHandle {
             producer_attempt,
             producer_transition,
             flow_sync,
+            #[cfg(test)]
+            producer_attempt_reply_pause,
         }
     }
 
@@ -1781,6 +1811,14 @@ impl RollingControlHandle {
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_producer_attempt_reply(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .producer_attempt_reply_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
     pub(crate) async fn authorize_producer_install(
@@ -3083,7 +3121,9 @@ mod tests {
         // independent of timer scheduling and fails if the handler ever
         // returns a zero-remaining live lease instead of claiming expiry.
         let (reply, response) = tokio::sync::oneshot::channel();
-        actor.handle_command(RollingControlCommand::Snapshot { reply });
+        actor
+            .handle_command(RollingControlCommand::Snapshot { reply })
+            .await;
         let deadline_snapshot = response.await.expect("snapshot command reply");
         assert!(deadline_snapshot.retired, "snapshot linearizes expiry");
         assert!(deadline_snapshot.expiration_claimed);
