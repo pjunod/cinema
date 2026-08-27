@@ -4,12 +4,13 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
 **Active branch:** `codex/playback-control-m4-actor-deadline`
-**Last reviewed head:** `11e997cd1dfcaa030462830038e01ee9b8e62408`
-(changes requested)
+**Last reviewed head:** `10c95e6d4fbc7e56079bef336b7c806658ed2673`
+(approved; no P1/P2/P3 findings)
 **Current exact head:** resolve
-`origin/codex/playback-control-m4-actor-deadline`; the tenth-review
-successor includes the tenth-pass correction and this handoff
-**Test state:** no unit, full, or cluster tests have run for this PR
+`origin/codex/playback-control-m4-actor-deadline`; the approval successor is
+documentation-only gate evidence and requires final exact-head review
+**Test state:** focused tests, `make check`, and `make cluster-check` green;
+hosted checks pending on the final evidence head
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -100,11 +101,12 @@ df2389a7 chore(validation): catalog callable construction paths
 b918fdfd test(validation): specify callable ownership contexts
 61f7d230 test(validation): specify nested callable groups
 11e997cd test(validation): specify labeled expression calls
+10c95e6d test(validation): distinguish raw keyword owners
 ```
 
 ### Adversarial review chronology
 
-Ten exact-head reviews have run. No tests were run during them.
+Eleven exact-head reviews have run. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
    coverage; latest progress was hidden by first-gap projection; inventory and
@@ -130,12 +132,16 @@ Ten exact-head reviews have run. No tests were run during them.
 10. `11e997cd`: a raw identifier such as `r#in` could be mistaken for an
     expression-prefix keyword, manufacturing a structural owner from an
     ordinary callable argument.
+11. `10c95e6d`: approved with no P1/P2/P3 findings. The reviewer confirmed
+    the raw-identifier boundary, labeled-break and for-in positives, all
+    wrapper and alias distinctions, exact 22/33/3 contract sets, source
+    routing and counts, documentation chronology, and runtime ingress logic.
 
 The reviewer has consistently confirmed the producer-ingress and successor
 watermark behavior after the first corrections. The remaining work is the
 static structural contract, not runtime semantics.
 
-### Eleventh-review candidate
+### Approved implementation head
 
 The candidate:
 
@@ -159,24 +165,21 @@ The candidate:
 - has zero real-source structural count mismatches under a read-only static
   count check.
 
-No unit-test runner has exercised these cases yet because exact-head approval
-is still required first. After pushing, the active remote ref is the source of
-truth for the immutable review SHA.
+After exact-head approval, the focused ownership-inventory suite passed 7/7;
+the focused producer-progress set passed 5/5; `make check` passed validation,
+history, operations, formatting, Clippy, and the workspace tests; and
+`make cluster-check` passed its vendor recovery, replicated-store, failure,
+topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The current exact remote head's next gate is an adversarial verdict. Do not
-run tests while that verdict is pending.
+The current implementation is approved and all local gates are green. The
+documentation-only evidence commit needs a final exact-head adversarial
+review while hosted CI runs.
 
-- If review requests changes, batch every finding into one correction,
-  update this handoff/status, perform formatting and non-test static checks,
-  commit and push, then request a fresh immutable exact-head review.
-- If review approves, run the focused Python ownership-inventory test and
-  focused Rust producer-ingress tests.
-- Correct any test failure. A changed head requires a fresh exact-head review
-  before merge.
-- After focused evidence is green, run `make check`, then
-  `make cluster-check`, then require every hosted check green.
+- Push the gate-evidence commit and request final exact-head review.
+- Require every hosted check green. Investigate and fix any failure; any
+  changed head requires another exact-head review and affected local gates.
 - Record exact SHAs and test counts here and in status, merge PR #619,
   fast-forward the disposable clone to merged `main`, create the next
   `codex/` branch, and continue M4.
