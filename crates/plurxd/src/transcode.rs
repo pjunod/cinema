@@ -1873,6 +1873,8 @@ struct AttemptChild {
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
     #[cfg(test)]
     signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
+    #[cfg(test)]
+    signal_after_flow_reservation_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
 }
 
 #[derive(Clone)]
@@ -1915,6 +1917,11 @@ impl AttemptChild {
             Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
         #[cfg(test)]
         let supervisor_signal_pause = Arc::clone(&signal_after_authorization_pause);
+        #[cfg(test)]
+        let signal_after_flow_reservation_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
+        #[cfg(test)]
+        let supervisor_flow_reservation_pause = Arc::clone(&signal_after_flow_reservation_pause);
         tokio::spawn(async move {
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
@@ -1938,25 +1945,77 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let transition = control.lock_producer_transition();
-                                let result = if control.current_producer_attempt()
-                                    == producer_attempt
-                                    && control.producer_transition_is_live(&transition)
-                                {
-                                    #[cfg(test)]
-                                    if let Some(pause) = supervisor_signal_pause
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .take()
-                                    {
-                                        pause.wait();
-                                        pause.wait();
+                                let flow_signal =
+                                    signal == libc::SIGSTOP || signal == libc::SIGCONT;
+                                let result = loop {
+                                    let deferred = {
+                                        let transition = control.lock_producer_transition();
+                                        if control.current_producer_attempt() != producer_attempt
+                                            || !control
+                                                .producer_transition_is_live(&transition)
+                                        {
+                                            break Ok(false);
+                                        }
+                                        #[cfg(test)]
+                                        if let Some(pause) = supervisor_signal_pause
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .take()
+                                        {
+                                            pause.wait();
+                                            pause.wait();
+                                        }
+                                        if flow_signal
+                                            && !control.reserve_producer_flow_applied(
+                                                &transition,
+                                                producer_attempt,
+                                            )
+                                        {
+                                            // Attempt changes and retirement
+                                            // use this same fence, so after
+                                            // the liveness check `false`
+                                            // means only bounded capacity.
+                                            true
+                                        } else {
+                                            #[cfg(test)]
+                                            if flow_signal {
+                                                if let Some(pause) = supervisor_flow_reservation_pause
+                                                    .lock()
+                                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                    .take()
+                                                {
+                                                    pause.wait();
+                                                    pause.wait();
+                                                }
+                                            }
+                                            // The syscall and successful
+                                            // acknowledgement publication are
+                                            // one exact-attempt transaction.
+                                            // A failed syscall only releases
+                                            // the reserved barrier slot.
+                                            let result =
+                                                signal_owned_pid(pid, producer_attempt, signal);
+                                            if flow_signal {
+                                                control.finish_producer_flow_applied(
+                                                    &transition,
+                                                    producer_attempt,
+                                                    signal == libc::SIGSTOP,
+                                                    matches!(&result, Ok(true)),
+                                                );
+                                            }
+                                            break result;
+                                        }
+                                    };
+                                    debug_assert!(deferred);
+                                    // Never wait while holding the transition
+                                    // fence: the actor needs that fence to
+                                    // drain the barriers that make capacity.
+                                    // After waking, re-authorize the attempt;
+                                    // retirement or replacement may have won.
+                                    if !control.wait_for_producer_flow_capacity().await {
+                                        break Ok(false);
                                     }
-                                    signal_owned_pid(pid, producer_attempt, signal)
-                                } else {
-                                    Ok(false)
                                 };
-                                drop(transition);
                                 let _ = reply.send(result);
                             }
                             AttemptChildCommand::Terminate { reply } => {
@@ -1997,6 +2056,8 @@ impl AttemptChild {
             commands,
             #[cfg(test)]
             signal_after_authorization_pause,
+            #[cfg(test)]
+            signal_after_flow_reservation_pause,
         }
     }
 
@@ -2071,6 +2132,14 @@ impl AttemptChild {
     fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
         *self
             .signal_after_authorization_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    fn pause_signal_after_flow_reservation(&self, pause: Arc<std::sync::Barrier>) {
+        *self
+            .signal_after_flow_reservation_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
@@ -18838,11 +18907,26 @@ mod tests {
         let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
         let pid = child.id().expect("running producer pid");
 
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            None,
+            "a newly admitted producer has no physical-flow acknowledgement"
+        );
         assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "SIGSTOP is acknowledged for this attempt only after the supervisor's successful syscall"
+        );
         assert!(child
             .signal(libc::SIGCONT)
             .await
             .expect("supervised continue"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, false)),
+            "SIGCONT replaces the held acknowledgement with a running acknowledgement"
+        );
         child.kill().await.expect("supervised kill waits for reap");
         let status = child
             .try_wait()
@@ -18868,6 +18952,131 @@ mod tests {
             .expect("exact attempt exit");
         assert!(!exit.success);
         assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn deferred_flow_signal_reauthorizes_attempt_before_touching_pid() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-capacity");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            let successor = control
+                .begin_producer_attempt()
+                .await
+                .expect("successor attempt");
+            assert!(successor > attempt);
+            control.release_producer_flow_capacity_for_test();
+            assert!(
+                !signal.await.expect("deferred signal verdict"),
+                "the predecessor signal must fail after exact-attempt re-authorization"
+            );
+            assert_eq!(
+                control.producer_flow_applied_for_test(),
+                None,
+                "a deferred predecessor cannot fabricate a physical acknowledgement"
+            );
+        }
+        control.release_producer_flow_capacity_for_test();
+        child.kill().await.expect("reap predecessor child");
+    }
+
+    #[tokio::test]
+    async fn deferred_flow_signal_wakes_fail_closed_when_control_is_fenced() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-unavailable");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            control.fence_unavailable();
+            assert!(
+                !signal.await.expect("fenced deferred signal verdict"),
+                "retirement must wake a capacity waiter before PID access"
+            );
+        }
+        control.release_producer_flow_capacity_for_test();
+        control.release_producer_flow_capacity_for_test();
+        child
+            .kill()
+            .await
+            .expect("cleanup command reaches supervisor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-actor-exit");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = Arc::new(AttemptChild::new(
+            attempt,
+            long_running_child(),
+            control.clone(),
+        ));
+        let pause = Arc::new(std::sync::Barrier::new(2));
+        child.pause_signal_after_flow_reservation(Arc::clone(&pause));
+        let signal = {
+            let child = Arc::clone(&child);
+            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+        };
+
+        pause.wait();
+        assert!(
+            control.producer_transition_guard_is_held_for_test(),
+            "the reserved signal owns the transition fence before its syscall"
+        );
+        control.abort_actor_for_test();
+        control.wait_for_actor_exit_fence_for_test().await;
+        assert!(
+            !control.is_retired(),
+            "actor-exit retirement waits behind the already-authorized signal"
+        );
+        pause.wait();
+        assert!(signal
+            .await
+            .expect("reserved signal task")
+            .expect("pre-fence signal verdict"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor-exit fence publishes retirement");
+        let sent = child.signal(libc::SIGCONT).await.expect("signal verdict");
+        assert!(
+            !sent,
+            "no process signal can linearize after actor-task retirement"
+        );
+
+        let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
+        child
+            .kill()
+            .await
+            .expect("cleanup command reaches exited actor's process supervisor");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -18918,17 +19127,32 @@ mod tests {
             .await
             .expect("signal task")
             .expect("supervised signal"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "the successful SIGSTOP publishes the held flow for the authorized attempt"
+        );
         observed
             .recv_timeout(Duration::from_secs(1))
             .expect("retirement follows the physical signal");
         fence.join().expect("fence thread");
         assert!(control.is_retired());
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "retirement does not fabricate a flow acknowledgement"
+        );
         assert!(
             !child
                 .signal(libc::SIGCONT)
                 .await
                 .expect("retired signal verdict"),
             "no signal can land after the newer retirement fence"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "a stale SIGCONT cannot publish a running acknowledgement"
         );
 
         let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));

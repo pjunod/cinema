@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["16723536", "3827037a", "ba1280ba", "d3d5703b", "40160841", "c4d01713", "db158bd6", "6f9676a5", "ef300034"]
+reason = "These commits only synchronize the playback-control implementation handoff and Markdown/HTML status pages with exact-head adversarial findings and repairs; they change no runtime or validation behavior."
+ignore = true
