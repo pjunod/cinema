@@ -18,7 +18,7 @@ enum-warning, and strong lifetime-owner lint repairs are committed through
 `f463d4d4`
 **Test state:** focused Rust playback control passed 85/85 twice without
 warnings; ownership inventory passed 7/7; `make check` and
-`make cluster-check` passed; PR #626 hosted run `33127267123` is queued
+`make cluster-check` passed; PR #626 hosted run `33127427163` is in progress
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -69,7 +69,9 @@ The rewrite is not starting from scratch:
   projection, merged as `dba35f98` after unanimous exact-head review, green
   local full/cluster gates, and hosted run `33118301414`.
 
-The active branch builds on #624 but has no reusable validation evidence yet.
+The active branch builds on #624 with reusable local evidence: focused
+playback-control tests, the ownership inventory, `make check`, and
+`make cluster-check` are green. Hosted PR evidence is still in progress.
 Legacy watchdogs, recovery actions, response admission, and compatibility
 owners remain active; no decision/action cutover has happened.
 
@@ -516,7 +518,7 @@ head `1a0c48cd2e4591a12c9869468031b9a8cf044a73`. The rerun of `make check`
 passed catalog/history, Clippy with warnings denied, the full workspace suite,
 and doc tests. `make cluster-check` then passed vendor WAL/recovery,
 replicated-store, topology, failure-drill, activation, and activity integration
-contracts. PR #626 is open; hosted run `33127267123` is queued.
+contracts. PR #626 is open; hosted run `33127427163` is in progress.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
