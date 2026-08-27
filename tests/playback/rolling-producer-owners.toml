@@ -555,6 +555,11 @@ id = "referenced-ordinary-call-argument"
 source = "identity(&(tokio::spawn::<Ready<()>>))(future);"
 must_not_trigger = ["namespaced-task-spawn"]
 
+[[negative_cases]]
+id = "raw-keyword-call-argument"
+source = "r#in(tokio::spawn::<Ready<()>>)(future);"
+must_not_trigger = ["namespaced-task-spawn"]
+
 [[module_symbols]]
 id = "future-rolling-action-deadline"
 pattern = "ProducerActionDeadline"

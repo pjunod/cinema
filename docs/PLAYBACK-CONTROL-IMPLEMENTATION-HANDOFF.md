@@ -4,11 +4,11 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
 **Active branch:** `codex/playback-control-m4-actor-deadline`
-**Last reviewed head:** `61f7d23040d38acdcc21bd906c8e060f0b576ff7`
+**Last reviewed head:** `11e997cd1dfcaa030462830038e01ee9b8e62408`
 (changes requested)
 **Current exact head:** resolve
-`origin/codex/playback-control-m4-actor-deadline`; the ninth-review
-successor includes the ninth-pass corrections and this handoff
+`origin/codex/playback-control-m4-actor-deadline`; the tenth-review
+successor includes the tenth-pass correction and this handoff
 **Test state:** no unit, full, or cluster tests have run for this PR
 
 This is the resumable execution ledger for the playback-control rewrite. Read
@@ -99,11 +99,12 @@ df2389a7 chore(validation): catalog callable construction paths
 5824c8cc test(validation): specify wrapped ownership syntax
 b918fdfd test(validation): specify callable ownership contexts
 61f7d230 test(validation): specify nested callable groups
+11e997cd test(validation): specify labeled expression calls
 ```
 
 ### Adversarial review chronology
 
-Nine exact-head reviews have run. No tests were run during them.
+Ten exact-head reviews have run. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
    coverage; latest progress was hidden by first-gap projection; inventory and
@@ -126,12 +127,15 @@ Nine exact-head reviews have run. No tests were run during them.
    in this handoff were stale.
 9. `61f7d230`: labeled `break 'label` and `for ... in` expression prefixes
    could hide an otherwise valid wrapped invocation.
+10. `11e997cd`: a raw identifier such as `r#in` could be mistaken for an
+    expression-prefix keyword, manufacturing a structural owner from an
+    ordinary callable argument.
 
 The reviewer has consistently confirmed the producer-ingress and successor
 watermark behavior after the first corrections. The remaining work is the
 static structural contract, not runtime semantics.
 
-### Tenth-review candidate
+### Eleventh-review candidate
 
 The candidate:
 
@@ -144,11 +148,13 @@ The candidate:
   owned by a preceding callable remains untouched;
 - recognizes expression-prefix keywords and `break 'label` token context so
   label and `for ... in` syntax cannot hide a wrapped call;
+- distinguishes raw identifiers such as `r#in` from expression-prefix
+  keywords so a callable argument cannot manufacture an owner;
 - accepts recursively interleaved parenthesis/reference/dereference wrappers
   in forbidden local aliases;
 - catches grouped/absolute `Command` import aliases, absolute `Command` type
   aliases, and `extern crate libc|nix|rustix as ...`;
-- carries 22 exact structural rows, 33 positive syntax-contract cases, two
+- carries 22 exact structural rows, 33 positive syntax-contract cases, three
   negative ordinary-argument cases, and exact required-ID assertions; and
 - has zero real-source structural count mismatches under a read-only static
   count check.

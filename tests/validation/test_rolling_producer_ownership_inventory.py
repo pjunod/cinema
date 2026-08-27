@@ -36,6 +36,13 @@ EXPRESSION_PREFIX_KEYWORDS = frozenset(
 )
 
 
+def _is_raw_identifier_prefix(source: str, index_before_word: int) -> bool:
+    return (
+        index_before_word >= 1
+        and source[index_before_word - 1 : index_before_word + 1] == "r#"
+    )
+
+
 def _blank_non_newlines(chars: list[str], start: int, end: int) -> None:
     for index in range(start, end):
         if chars[index] not in "\r\n":
@@ -56,7 +63,9 @@ def _preceded_by_callable(source: str, start: int) -> bool:
     while index >= 0 and (source[index].isalnum() or source[index] == "_"):
         index -= 1
     word = source[index + 1 : end]
-    if word in EXPRESSION_PREFIX_KEYWORDS:
+    if word in EXPRESSION_PREFIX_KEYWORDS and not _is_raw_identifier_prefix(
+        source, index
+    ):
         return False
     if index >= 0 and source[index] == "'":
         index -= 1
@@ -65,7 +74,10 @@ def _preceded_by_callable(source: str, start: int) -> bool:
         label_owner_end = index + 1
         while index >= 0 and (source[index].isalnum() or source[index] == "_"):
             index -= 1
-        if source[index + 1 : label_owner_end] in {"break", "continue"}:
+        if source[index + 1 : label_owner_end] in {
+            "break",
+            "continue",
+        } and not _is_raw_identifier_prefix(source, index):
             return False
     return True
 
@@ -259,7 +271,11 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
             set(contract_case_ids),
         )
         self.assertEqual(
-            {"ordinary-call-argument", "referenced-ordinary-call-argument"},
+            {
+                "ordinary-call-argument",
+                "referenced-ordinary-call-argument",
+                "raw-keyword-call-argument",
+            },
             set(negative_case_ids),
         )
         self.assertEqual(
@@ -293,7 +309,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(module_symbols), 13)
         self.assertGreaterEqual(len(module_structures), 22)
         self.assertGreaterEqual(len(contract_cases), 33)
-        self.assertGreaterEqual(len(negative_cases), 2)
+        self.assertGreaterEqual(len(negative_cases), 3)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
