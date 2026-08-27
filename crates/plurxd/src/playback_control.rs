@@ -2031,6 +2031,7 @@ impl RollingProducerIngressBlock {
         }
     }
 
+    #[cfg(test)]
     fn into_events(self) -> Vec<RollingProducerEvent> {
         match self {
             Self::Progress(batch) => batch
@@ -2328,6 +2329,7 @@ impl RollingProducerIngress {
         blocks
     }
 
+    #[cfg(test)]
     fn drain(&self) -> Vec<RollingProducerEvent> {
         self.drain_blocks()
             .into_iter()
@@ -2657,6 +2659,7 @@ impl RollingControlActor {
 
     /// Session lifecycle is always the higher-priority clock. Only a live
     /// session may record an action-passive producer deadline observation.
+    #[cfg(test)]
     fn settle_due_deadlines_at(&mut self, now: Instant) -> Option<ProducerDeadlineDue> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return None;
@@ -3138,6 +3141,7 @@ impl RollingControlActor {
         }
     }
 
+    #[cfg(test)]
     fn handle_producer_event(&mut self, event: RollingProducerEvent) {
         let now = rolling_now();
         let (metric_index, accepted) = match event {
