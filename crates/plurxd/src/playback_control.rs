@@ -1058,10 +1058,52 @@ pub(crate) struct RollingLeaseSnapshot {
     deadline: Instant,
     pub last_renewal_kind: &'static str,
     pub demand: Option<PlaybackDemandSnapshot>,
+    pub delivery: RollingDeliverySnapshot,
     pub retired: bool,
     /// True only when the playback deadline, rather than an explicit
     /// lifecycle fence, performed the actor's terminal transition.
     pub expiration_claimed: bool,
+}
+
+/// Actor-owned delivery facts for one rolling producer attempt.
+///
+/// These are observations only in M3c: the compatibility segment index still
+/// drives pruning and flow actions until every producer event has entered the
+/// actor. Keeping the frontiers here first makes status and later decisions a
+/// single ordered snapshot instead of a collection of independently sampled
+/// atomics.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct RollingDeliverySnapshot {
+    pub producer_attempt: u64,
+    pub playlist_ready: bool,
+    pub published_segment: Option<i64>,
+    pub published_end_ms: Option<i64>,
+    pub next_media_sequence: i64,
+    pub fetched_segment: Option<i64>,
+    pub fetched_end_ms: i64,
+    pub pending_fetched_segment: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RollingPublicationObservation {
+    pub producer_attempt: u64,
+    pub playlist_ready: bool,
+    pub published_segment: Option<i64>,
+    pub published_end_ms: Option<i64>,
+    pub next_media_sequence: i64,
+    /// End time for the actor's currently pending fetched segment, when the
+    /// refreshed playlist has now supplied its EXTINF.
+    pub resolved_fetched_segment: Option<i64>,
+    pub resolved_fetched_end_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProducerAttemptRejection {
+    SessionEnded,
+    PlaylistPublished,
+    StaleAttempt,
+    AttemptExhausted,
+    ControlUnavailable,
 }
 
 impl RollingLeaseSnapshot {
@@ -1180,8 +1222,11 @@ impl RollingFlowSync {
 pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
     retired: Arc<AtomicBool>,
+    producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    #[cfg(test)]
+    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 struct OwnedLocalControlRequest {
@@ -1193,6 +1238,7 @@ struct OwnedLocalControlRequest {
 }
 
 enum RollingControlCommand {
+    #[cfg(test)]
     Renew {
         kind: &'static str,
         source: RollingRenewalSource,
@@ -1201,6 +1247,24 @@ enum RollingControlCommand {
     Control {
         request: Box<OwnedLocalControlRequest>,
         reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
+    },
+    BeginProducerAttempt {
+        reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+    },
+    AuthorizeProducerInstall {
+        producer_attempt: u64,
+        reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
+    },
+    ObservePublication {
+        observation: RollingPublicationObservation,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
+    CommitMedia {
+        kind: &'static str,
+        producer_attempt: u64,
+        segment_index: Option<i64>,
+        segment_end_ms: Option<i64>,
+        reply: tokio::sync::oneshot::Sender<bool>,
     },
     Snapshot {
         reply: tokio::sync::oneshot::Sender<RollingLeaseSnapshot>,
@@ -1225,12 +1289,16 @@ struct RollingControlActor {
     last_renewal_kind: &'static str,
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
+    delivery: RollingDeliverySnapshot,
     retired: bool,
     expiration_claimed: bool,
     retired_fence: Arc<AtomicBool>,
+    producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
     last_flow_ticket: u64,
+    #[cfg(test)]
+    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 impl RollingControlActor {
@@ -1240,8 +1308,10 @@ impl RollingControlActor {
             now,
             initial_kind,
             retired_fence,
+            Arc::new(AtomicU64::new(0)),
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
             Arc::new(RollingFlowSync::new()),
+            Arc::new(std::sync::Mutex::new(None)),
         )
     }
 
@@ -1249,8 +1319,12 @@ impl RollingControlActor {
         now: Instant,
         initial_kind: &'static str,
         retired_fence: Arc<AtomicBool>,
+        producer_attempt: Arc<AtomicU64>,
         producer_transition: Arc<std::sync::Mutex<Instant>>,
         flow_sync: Arc<RollingFlowSync>,
+        #[cfg(test)] producer_attempt_reply_pause: Arc<
+            std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+        >,
     ) -> Self {
         Self {
             control: ControlState::default(),
@@ -1258,12 +1332,16 @@ impl RollingControlActor {
             last_renewal_kind: initial_kind,
             mode: RollingLeaseMode::Legacy,
             demand: None,
+            delivery: RollingDeliverySnapshot::default(),
             retired: false,
             expiration_claimed: false,
             retired_fence,
+            producer_attempt,
             producer_transition,
             flow_sync,
             last_flow_ticket: 0,
+            #[cfg(test)]
+            producer_attempt_reply_pause,
         }
     }
 
@@ -1278,6 +1356,7 @@ impl RollingControlActor {
             deadline,
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
+            delivery: self.delivery.clone(),
             retired: self.retired,
             expiration_claimed: self.expiration_claimed,
         }
@@ -1348,6 +1427,118 @@ impl RollingControlActor {
         })
     }
 
+    fn begin_producer_attempt_at(&mut self, now: Instant) -> Result<u64, ProducerAttemptRejection> {
+        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
+        if self.delivery.playlist_ready {
+            return Err(ProducerAttemptRejection::PlaylistPublished);
+        }
+        let attempt = self
+            .delivery
+            .producer_attempt
+            .checked_add(1)
+            .ok_or(ProducerAttemptRejection::AttemptExhausted)?;
+        self.delivery = RollingDeliverySnapshot {
+            producer_attempt: attempt,
+            ..RollingDeliverySnapshot::default()
+        };
+        self.producer_attempt.store(attempt, Ordering::Release);
+        Ok(attempt)
+    }
+
+    fn authorize_producer_install_at(
+        &mut self,
+        now: Instant,
+        producer_attempt: u64,
+    ) -> Result<(), ProducerAttemptRejection> {
+        if producer_attempt != self.delivery.producer_attempt {
+            return Err(ProducerAttemptRejection::StaleAttempt);
+        }
+        self.renew_at(now, "producer-install", RollingRenewalSource::Internal)
+            .then_some(())
+            .ok_or(ProducerAttemptRejection::SessionEnded)
+    }
+
+    fn observe_publication_at(
+        &mut self,
+        now: Instant,
+        observation: RollingPublicationObservation,
+    ) -> bool {
+        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live)
+            || observation.producer_attempt != self.delivery.producer_attempt
+        {
+            return false;
+        }
+        self.delivery.playlist_ready |= observation.playlist_ready;
+        if observation.published_segment >= self.delivery.published_segment {
+            self.delivery.published_segment = observation.published_segment;
+        }
+        if observation.published_end_ms >= self.delivery.published_end_ms {
+            self.delivery.published_end_ms = observation.published_end_ms;
+        }
+        self.delivery.next_media_sequence = self
+            .delivery
+            .next_media_sequence
+            .max(observation.next_media_sequence);
+        if let (Some(pending), Some(resolved), Some(end_ms)) = (
+            self.delivery.pending_fetched_segment,
+            observation.resolved_fetched_segment,
+            observation.resolved_fetched_end_ms,
+        ) {
+            if pending == resolved {
+                self.delivery.fetched_segment = Some(
+                    self.delivery
+                        .fetched_segment
+                        .map_or(pending, |current| current.max(pending)),
+                );
+                self.delivery.fetched_end_ms = self.delivery.fetched_end_ms.max(end_ms);
+                self.delivery.pending_fetched_segment = None;
+            }
+        }
+        true
+    }
+
+    fn commit_media_at(
+        &mut self,
+        now: Instant,
+        kind: &'static str,
+        producer_attempt: u64,
+        segment_index: Option<i64>,
+        segment_end_ms: Option<i64>,
+    ) -> bool {
+        if producer_attempt != self.delivery.producer_attempt
+            || !self.renew_at(now, kind, RollingRenewalSource::Media)
+        {
+            return false;
+        }
+        let Some(segment_index) = segment_index else {
+            return true;
+        };
+        if let Some(current) = self.delivery.fetched_segment {
+            if segment_index < current {
+                return true;
+            }
+            if segment_index == current {
+                if self.delivery.pending_fetched_segment == Some(segment_index) {
+                    if let Some(end_ms) = segment_end_ms {
+                        self.delivery.fetched_end_ms = self.delivery.fetched_end_ms.max(end_ms);
+                        self.delivery.pending_fetched_segment = None;
+                    }
+                }
+                return true;
+            }
+        }
+        self.delivery.fetched_segment = Some(segment_index);
+        if let Some(end_ms) = segment_end_ms {
+            self.delivery.fetched_end_ms = self.delivery.fetched_end_ms.max(end_ms);
+            self.delivery.pending_fetched_segment = None;
+        } else {
+            self.delivery.pending_fetched_segment = Some(segment_index);
+        }
+        true
+    }
+
     fn claim_expiry_at(&mut self, now: Instant) -> RollingExpiryClaim {
         let snapshot = self.snapshot_at(now);
         if self.retired {
@@ -1367,8 +1558,9 @@ impl RollingControlActor {
         }
     }
 
-    fn handle_command(&mut self, command: RollingControlCommand) {
+    async fn handle_command(&mut self, command: RollingControlCommand) {
         match command {
+            #[cfg(test)]
             RollingControlCommand::Renew {
                 kind,
                 source,
@@ -1397,6 +1589,72 @@ impl RollingControlActor {
                     *transition = self.deadline();
                 }
                 let _ = reply.send(outcome);
+            }
+            RollingControlCommand::BeginProducerAttempt { reply } => {
+                // Installation holds this exact fence through synchronous
+                // child/registry publication. A newer attempt must not pass
+                // that linearization point and make the just-published owner
+                // stale before the publication itself completes.
+                let outcome = {
+                    let transition = Arc::clone(&self.producer_transition);
+                    let _transition = transition
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    self.begin_producer_attempt_at(rolling_now())
+                };
+                #[cfg(test)]
+                let reply_pause = self
+                    .producer_attempt_reply_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                #[cfg(test)]
+                if let Some(reply_pause) = reply_pause {
+                    reply_pause.wait().await;
+                    reply_pause.wait().await;
+                }
+                let _ = reply.send(outcome);
+            }
+            RollingControlCommand::AuthorizeProducerInstall {
+                producer_attempt,
+                reply,
+            } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let mut transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let authorized =
+                    self.authorize_producer_install_at(rolling_now(), producer_attempt);
+                if authorized.is_ok() {
+                    *transition = self.deadline();
+                }
+                let _ = reply.send(authorized);
+            }
+            RollingControlCommand::ObservePublication { observation, reply } => {
+                let _ = reply.send(self.observe_publication_at(rolling_now(), observation));
+            }
+            RollingControlCommand::CommitMedia {
+                kind,
+                producer_attempt,
+                segment_index,
+                segment_end_ms,
+                reply,
+            } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let mut transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let committed = self.commit_media_at(
+                    rolling_now(),
+                    kind,
+                    producer_attempt,
+                    segment_index,
+                    segment_end_ms,
+                );
+                if committed {
+                    *transition = self.deadline();
+                }
+                let _ = reply.send(committed);
             }
             RollingControlCommand::Snapshot { reply } => {
                 // A snapshot is an actor command, not an advisory timestamp
@@ -1456,7 +1714,7 @@ impl RollingControlActor {
                 let Some(command) = receiver.recv().await else {
                     break;
                 };
-                self.handle_command(command);
+                self.handle_command(command).await;
                 continue;
             }
             let deadline = self.deadline();
@@ -1465,7 +1723,7 @@ impl RollingControlActor {
                     let Some(command) = command else {
                         break;
                     };
-                    self.handle_command(command);
+                    self.handle_command(command).await;
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     // The timer itself is the exact actor-owned deadline. Use
@@ -1486,28 +1744,38 @@ impl RollingControlHandle {
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
+        let producer_attempt = Arc::new(AtomicU64::new(0));
         let now = rolling_now();
         let producer_transition =
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
         let flow_sync = Arc::new(RollingFlowSync::new());
+        #[cfg(test)]
+        let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         tokio::spawn(
             RollingControlActor::with_producer_transition(
                 now,
                 initial_kind,
                 Arc::clone(&retired),
+                Arc::clone(&producer_attempt),
                 Arc::clone(&producer_transition),
                 Arc::clone(&flow_sync),
+                #[cfg(test)]
+                Arc::clone(&producer_attempt_reply_pause),
             )
             .run(receiver),
         );
         Self {
             sender,
             retired,
+            producer_attempt,
             producer_transition,
             flow_sync,
+            #[cfg(test)]
+            producer_attempt_reply_pause,
         }
     }
 
+    #[cfg(test)]
     async fn renew(&self, kind: &'static str, source: RollingRenewalSource) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
@@ -1525,12 +1793,118 @@ impl RollingControlHandle {
         response.await.unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub(crate) async fn renew_media(&self, kind: &'static str) -> bool {
         self.renew(kind, RollingRenewalSource::Media).await
     }
 
-    pub(crate) async fn renew_internal(&self, kind: &'static str) -> bool {
-        self.renew(kind, RollingRenewalSource::Internal).await
+    pub(crate) fn current_producer_attempt(&self) -> u64 {
+        self.producer_attempt.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.sender
+            .send(RollingControlCommand::BeginProducerAttempt { reply })
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        response
+            .await
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_producer_attempt_reply(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .producer_attempt_reply_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) async fn authorize_producer_install(
+        &self,
+        producer_attempt: u64,
+    ) -> Result<(), ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::AuthorizeProducerInstall {
+                producer_attempt,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err(ProducerAttemptRejection::ControlUnavailable);
+        }
+        response
+            .await
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    /// Hold the actor's exact producer-deadline fence across a synchronous
+    /// ownership publication. Callers renew through
+    /// [`Self::authorize_producer_install`] first, then acquire this guard
+    /// immediately before assigning a child or inserting its session.
+    pub(crate) fn lock_authorized_producer_install(
+        &self,
+        producer_attempt: u64,
+    ) -> Result<std::sync::MutexGuard<'_, Instant>, ProducerAttemptRejection> {
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.sender.is_closed() {
+            return Err(ProducerAttemptRejection::ControlUnavailable);
+        }
+        if self.retired.load(Ordering::Acquire) || rolling_now() >= *transition {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
+        if self.producer_attempt.load(Ordering::Acquire) != producer_attempt {
+            return Err(ProducerAttemptRejection::StaleAttempt);
+        }
+        Ok(transition)
+    }
+
+    pub(crate) async fn observe_publication(
+        &self,
+        observation: RollingPublicationObservation,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::ObservePublication { observation, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    pub(crate) async fn commit_media(
+        &self,
+        kind: &'static str,
+        producer_attempt: u64,
+        segment_index: Option<i64>,
+        segment_end_ms: Option<i64>,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::CommitMedia {
+                kind,
+                producer_attempt,
+                segment_index,
+                segment_end_ms,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
     }
 
     pub(crate) async fn control(
@@ -2275,6 +2649,223 @@ mod tests {
         );
     }
 
+    fn publication(
+        producer_attempt: u64,
+        playlist_ready: bool,
+        published_segment: i64,
+        published_end_ms: i64,
+        resolved_fetched_segment: Option<i64>,
+    ) -> RollingPublicationObservation {
+        RollingPublicationObservation {
+            producer_attempt,
+            playlist_ready,
+            published_segment: Some(published_segment),
+            published_end_ms: Some(published_end_ms),
+            next_media_sequence: published_segment + 1,
+            resolved_fetched_segment,
+            resolved_fetched_end_ms: resolved_fetched_segment.map(|_| published_end_ms),
+        }
+    }
+
+    #[test]
+    fn rolling_delivery_attempt_fences_stale_publication_and_fetch() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let first = actor
+            .begin_producer_attempt_at(started)
+            .expect("initial producer attempt");
+        assert_eq!(first, 1);
+        assert!(actor.observe_publication_at(started, publication(first, false, 0, 2_000, None),));
+
+        let second = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(1))
+            .expect("prepublication replacement");
+        assert_eq!(second, 2);
+        assert_eq!(actor.delivery.published_segment, None);
+        assert!(!actor.observe_publication_at(
+            started + Duration::from_secs(2),
+            publication(first, true, 8, 18_000, None),
+        ));
+        assert!(!actor.commit_media_at(
+            started + Duration::from_secs(2),
+            "segment",
+            first,
+            Some(8),
+            Some(18_000),
+        ));
+        assert_eq!(
+            actor.delivery,
+            RollingDeliverySnapshot {
+                producer_attempt: second,
+                ..RollingDeliverySnapshot::default()
+            }
+        );
+
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(2),
+            publication(second, true, 1, 4_000, None),
+        ));
+        assert_eq!(actor.delivery.published_segment, Some(1));
+        assert_eq!(actor.delivery.published_end_ms, Some(4_000));
+        assert_eq!(actor.delivery.next_media_sequence, 2);
+        assert_eq!(
+            actor.begin_producer_attempt_at(started + Duration::from_secs(3)),
+            Err(ProducerAttemptRejection::PlaylistPublished),
+            "client-visible publication returns an exact rejection cause"
+        );
+    }
+
+    #[test]
+    fn rolling_equal_fetch_resolves_its_pending_end() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(1),
+            "segment",
+            attempt,
+            Some(3),
+            None,
+        ));
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(2),
+            "segment",
+            attempt,
+            Some(3),
+            Some(9_000),
+        ));
+        assert_eq!(actor.delivery.fetched_segment, Some(3));
+        assert_eq!(actor.delivery.fetched_end_ms, 9_000);
+        assert_eq!(actor.delivery.pending_fetched_segment, None);
+    }
+
+    #[test]
+    fn rolling_producer_install_requires_the_exact_live_attempt() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        assert_eq!(
+            actor.authorize_producer_install_at(
+                started + Duration::from_secs(1),
+                attempt.saturating_sub(1),
+            ),
+            Err(ProducerAttemptRejection::StaleAttempt)
+        );
+        assert_eq!(
+            actor.authorize_producer_install_at(started + Duration::from_secs(1), attempt,),
+            Ok(())
+        );
+        assert_eq!(
+            actor.authorize_producer_install_at(
+                started + Duration::from_secs(1) + ROLLING_LEGACY_LEASE_TIMEOUT,
+                attempt,
+            ),
+            Err(ProducerAttemptRejection::SessionEnded)
+        );
+        assert!(actor.retired);
+    }
+
+    #[test]
+    fn rolling_delivery_resolves_fetch_after_publication_and_stays_monotonic() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(1),
+            "segment",
+            attempt,
+            Some(3),
+            None,
+        ));
+        assert_eq!(actor.delivery.fetched_segment, Some(3));
+        assert_eq!(actor.delivery.fetched_end_ms, 0);
+        assert_eq!(actor.delivery.pending_fetched_segment, Some(3));
+
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(1),
+            publication(attempt, true, 2, 6_000, Some(2)),
+        ));
+        assert_eq!(actor.delivery.fetched_end_ms, 0);
+        assert_eq!(actor.delivery.pending_fetched_segment, Some(3));
+
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(1),
+            publication(attempt, true, 3, 9_000, Some(3)),
+        ));
+        assert_eq!(actor.delivery.fetched_end_ms, 9_000);
+        assert_eq!(actor.delivery.pending_fetched_segment, None);
+
+        assert!(actor.commit_media_at(
+            started + Duration::from_secs(2),
+            "segment-range",
+            attempt,
+            None,
+            None,
+        ));
+        assert!(actor.observe_publication_at(
+            started + Duration::from_secs(2),
+            publication(attempt, true, 2, 7_000, None),
+        ));
+        assert_eq!(actor.delivery.published_segment, Some(3));
+        assert_eq!(actor.delivery.published_end_ms, Some(9_000));
+        assert_eq!(actor.delivery.fetched_segment, Some(3));
+        assert_eq!(actor.delivery.fetched_end_ms, 9_000);
+    }
+
+    #[test]
+    fn rolling_delivery_retirement_rejects_late_mutations() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        actor.retired = true;
+        assert!(!actor.observe_publication_at(
+            started + Duration::from_secs(1),
+            publication(attempt, true, 1, 4_000, None),
+        ));
+        assert!(!actor.commit_media_at(
+            started + Duration::from_secs(1),
+            "segment",
+            attempt,
+            Some(1),
+            Some(4_000),
+        ));
+        assert_eq!(actor.delivery.published_segment, None);
+        assert_eq!(actor.delivery.fetched_segment, None);
+    }
+
+    #[test]
+    fn rolling_delivery_expiry_rejects_late_publication() {
+        let started = Instant::now();
+        let retired_fence = Arc::new(AtomicBool::new(false));
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::clone(&retired_fence));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+
+        assert!(!actor.observe_publication_at(
+            started + ROLLING_LEGACY_LEASE_TIMEOUT,
+            publication(attempt, true, 1, 4_000, None),
+        ));
+        assert!(actor.retired);
+        assert!(actor.expiration_claimed);
+        assert!(retired_fence.load(Ordering::Acquire));
+        assert_eq!(actor.delivery.published_segment, None);
+    }
+
     #[test]
     fn rolling_absolute_expiry_subtracts_reply_delay_from_the_deadline() {
         let started = Instant::now();
@@ -2530,7 +3121,9 @@ mod tests {
         // independent of timer scheduling and fails if the handler ever
         // returns a zero-remaining live lease instead of claiming expiry.
         let (reply, response) = tokio::sync::oneshot::channel();
-        actor.handle_command(RollingControlCommand::Snapshot { reply });
+        actor
+            .handle_command(RollingControlCommand::Snapshot { reply })
+            .await;
         let deadline_snapshot = response.await.expect("snapshot command reply");
         assert!(deadline_snapshot.retired, "snapshot linearizes expiry");
         assert!(deadline_snapshot.expiration_claimed);

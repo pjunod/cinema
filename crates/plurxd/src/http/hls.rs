@@ -2288,7 +2288,7 @@ async fn subtitle_playlist_local(
     session: &str,
     index: i64,
 ) -> Result<Response, ApiError> {
-    let (_, file, owner) = session_file(state, session).await?;
+    let (_, file, _) = session_file(state, session).await?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2299,15 +2299,23 @@ async fn subtitle_playlist_local(
         ));
     }
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-    let video = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?.0,
+    let (video, owner) = match state.transcode.vod_playlist(session).await {
+        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
         None => state
             .transcode
-            .playlist(session)
+            .playlist_with_owner(session)
             .await
             .map_err(|err| playlist_error(session, err))?,
     };
     let response = subtitle_media_playlist(&video).into_bytes();
+    #[cfg(test)]
+    state
+        .transcode
+        .pause_subtitle_playlist_commit_for_test()
+        .await;
+    // Carry the owner resolved with the exact video bytes. A rolling wait may
+    // span fallback, and a VOD attachment may be replaced under the same id;
+    // a fresh lookup here would authorize the wrong incarnation in both cases.
     commit_resolved_media(state, session, &owner, "subtitle-playlist", None, true).await?;
     Ok(playlist_response(response))
 }
@@ -3975,6 +3983,7 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
@@ -4122,6 +4131,150 @@ mod tests {
         ));
         assert!(!range_covers_object(Some((0, 98)), 100));
         assert!(!range_covers_object(Some((1, 99)), 100));
+    }
+
+    async fn add_http_text_subtitle(fixture: &HlsDeliveryFixture) {
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        let probe = plurx_core::domain::ProbeResult {
+            duration_ms: file.duration_ms,
+            container: file.container.clone(),
+            video_codec: file.video_codec.clone(),
+            video_profile: file.video_profile.clone(),
+            width: file.width,
+            height: file.height,
+            bit_depth: file.bit_depth,
+            hdr: file.hdr.clone(),
+            hdr_format: file.hdr_format.clone(),
+            bitrate: file.bitrate,
+            audio_streams: file.audio_streams.clone(),
+            subtitle_streams: vec![SubtitleStream {
+                index: 0,
+                codec: "subrip".into(),
+                language: Some("eng".into()),
+                title: Some("English".into()),
+                default: true,
+                forced: false,
+                hearing_impaired: false,
+            }],
+            raw_json: None,
+            creation_time: None,
+        };
+        fixture
+            .store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("install text subtitle");
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("updated fixture lookup")
+            .expect("updated fixture");
+        tokio::fs::create_dir_all(&fixture.state.subs_dir)
+            .await
+            .expect("subtitle cache");
+        tokio::fs::write(
+            crate::subtitles::vtt_path(&fixture.state.subs_dir, &file, 0),
+            b"WEBVTT\n\n",
+        )
+        .await
+        .expect("published VTT sidecar");
+    }
+
+    #[tokio::test]
+    async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
+        let dir = crate::test_tempdir().expect("session directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
+        add_http_text_subtitle(&fixture).await;
+        let state = fixture.state.clone();
+        let waiting =
+            tokio::spawn(
+                async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await },
+            );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !waiting.is_finished(),
+            "subtitle response is waiting on the predecessor's video playlist"
+        );
+
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
+            .await
+            .expect("segment zero");
+        tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
+            .await
+            .expect("segment one");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
+        )
+        .await
+        .expect("successor playlist");
+        let response = waiting
+            .await
+            .expect("subtitle task")
+            .expect("subtitle response commits against successor owner");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("subtitle playlist body");
+        let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
+        assert!(
+            text.lines().any(|line| line == "seg00001.vtt"),
+            "subtitle child playlist must use a relative segment URI: {text}"
+        );
+        assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
+    }
+
+    #[tokio::test]
+    async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
+        let dir = crate::test_tempdir().expect("VOD subtitle directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&fixture).await;
+        let session_id = "vod-subtitle-replaced";
+        let _predecessor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+        let state = fixture.state.clone();
+        let pending =
+            tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
+        pause.wait().await;
+
+        let _successor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let successor_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(session_id)
+            .await
+            .expect("successor touch");
+        pause.wait().await;
+
+        assert!(
+            pending.await.expect("subtitle task").is_err(),
+            "predecessor bytes must fail their exact-owner commit"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(session_id)
+                .await,
+            Some(successor_touch),
+            "stale subtitle bytes cannot renew the same-id successor"
+        );
     }
 
     #[test]
@@ -4568,6 +4721,7 @@ mod tests {
             -1,
             "a completed byte range proves demand but not a complete segment"
         );
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
 
         let mut full_span = HeaderMap::new();
         full_span.insert(header::RANGE, "bytes=0-".parse().expect("full range"));
@@ -4591,6 +4745,9 @@ mod tests {
             4,
             "a Range response that contains every byte advances the frontier"
         );
+        let actor_delivery = fixture.actor_delivery().await;
+        assert_eq!(actor_delivery.fetched_segment, Some(4));
+        assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
         let delivered_after_full_span = fixture.delivered_bytes();
 
         let mut conditional = HeaderMap::new();
@@ -4613,6 +4770,7 @@ mod tests {
             4,
             "the client has the cached object"
         );
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, Some(4));
         let renewal_before_rejection = fixture.last_renewal_kind().await;
         let frontier_before_rejection = fixture.fetched_segment();
 
@@ -4771,6 +4929,77 @@ mod tests {
             frontier_after_retirement,
             "EOF from an obsolete incarnation cannot move its frontier"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stream_from_an_old_producer_attempt_cannot_advance_its_successor() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "old-attempt-body").await;
+        let body = vec![9_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("old-attempt-body".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("response opened on attempt zero");
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
+        let renewal_after_replacement = fixture.last_renewal_kind().await;
+
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("already-open predecessor bytes")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_after_replacement,
+            "predecessor EOF cannot renew the successor attempt"
+        );
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
+    }
+
+    #[tokio::test]
+    async fn accepted_predecessor_eof_cannot_project_after_successor_reset() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "projection-race").await;
+        let body = vec![5_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("projection-race".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("predecessor response");
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_response_projection(Arc::clone(&pause));
+        let body_len = body.len();
+        let drain = tokio::spawn(async move {
+            axum::body::to_bytes(response.into_body(), body_len + 1)
+                .await
+                .expect("predecessor body")
+        });
+        pause.wait().await;
+        assert_eq!(
+            fixture.begin_producer_attempt().await,
+            Ok(1),
+            "successor admission resets the compatibility projection"
+        );
+        pause.wait().await;
+        assert_eq!(drain.await.expect("body task").len(), body_len);
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
     }
 
     /// A storage error mid-body is its own classification, separate from an

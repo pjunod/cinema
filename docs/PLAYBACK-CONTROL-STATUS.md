@@ -1,10 +1,13 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-26
-**Merged baseline:** `origin/main` at `bcc5b09a` (PR #613)
-**Current work:** `codex/playback-control-m3-demand-lease` — M3b, ready PR
-[#612](https://github.com/pjunod/plurx/pull/612); exact reviewed local gates are
-green and the web-layout runner repair is pending push and hosted rerun
+**Updated:** 2026-08-27
+**Merged baseline:** `origin/main` at `5908e838` (PR #614)
+**Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
+attempt-fenced publication/fetch ledger. PR #615 is code-complete at `9f84f0b6`;
+its documentation-only `45f610f6` head has exact adversarial approval, every
+local commit-profile check is green, and every required hosted job passed after
+the one contaminated self-hosted runner was quarantined from generic work. A
+final truthful status-only head and merge are next
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -20,7 +23,7 @@ not being counted as complete merely because its foundation has landed.
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
-| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, demand snapshot, renewal, expiry claim, and retirement fence | M3b explicit lease/demand pacing; then playlist, segment, progress, child-exit, end, and cluster-fence event ownership |
+| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, and a reviewed M3c1 delivery ledger in PR #615 | Merge M3c1, then add progress, child-exit, end, and cluster-fence event ownership |
 | M4 — server watchdog removal | **Not started** | — | One producer deadline; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
@@ -39,64 +42,43 @@ not being counted as complete merely because its foundation has landed.
 | [#606](https://github.com/pjunod/plurx/pull/606) | Durable force-analysis requests, bounded queue/status API, Activity status UI | Merged with three red hosted jobs subsequently repaired by #610 |
 | [#610](https://github.com/pjunod/plurx/pull/610) | Fixed all three #606 merge-gate failures and added the missing ops contract test | Adversarial review, local gates, and hosted CI green |
 | [#611](https://github.com/pjunod/plurx/pull/611) | M3a bounded rolling lease actor and atomic expiry/retirement ownership | Adversarial approval at `dddc8d24`; full local gate and all hosted jobs green |
+| [#613](https://github.com/pjunod/plurx/pull/613) | Preserved an empty Dolby Vision `hvcC` record when copying parameter sets upstream | Adversarial review, local gates, and hosted CI green |
+| [#614](https://github.com/pjunod/plurx/pull/614) | M3b explicit demand lease, response-commit ownership, demand-based pacing, and operator instrumentation | Exact-head adversarial approval, full local gate, and all required hosted jobs green |
 
-## Active slice: M3b explicit demand lease
+## Active slice: M3c1 delivery ledger
 
-The active branch is published as ready PR #612. Its rebased implementation
-head `eee52106` was adversarially approved and passed both local gates.
-Adversarial review has driven
-remediation across response ownership/commit ordering, same-id VOD
-reattachment, exact snapshot and physical-signal timing, cancellation-safe
-producer convergence, full-object Range semantics, overlay truth, Activity
-instrumentation, and this ledger. The current work carries an opaque
-engine/incarnation token through every response; commits streamed
-lease/frontier state only at successful EOF; queues producer work outside the
-response body; and names VOD/rolling ownership correctly. The first complete
-post-review unit run exposed one actor/timer clock-domain failure after 1,877
-passing tests; the corrected pre-rebase head then passed all 1,878 executed
-tests. After rebasing over PR #613, the expanded suites were green again
-(`plurx-core`: 783; `plurxd`: 1,034; zero failures). The hosted UI layout sweep
-later lost one disposable Playwright page before `#main` attached, then
-rendered every following page and reported no golden mismatch. Commits
-`fb2128e5` and `ca145db4` add one fresh-context retry only for a root-attachment
-timeout that carries no captured page/console error;
-non-player semantic and golden failures remain immediately fatal, while the
-pre-existing real-player capture retains its separately bounded one retry.
-The slice's acceptance boundary is intentionally smaller than the whole actor
-migration; the exact behavior
-and timer ledger are in
-[`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md):
+M3b merged as PR #614 at `5908e838`. It established the explicit 30-second
+rolling lease, actor-owned demand/pacing policy, response EOF commit ownership,
+hard byte safety bounds, and the Activity/control instrumentation described in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DEMAND-LEASE.md).
 
-- explicit rolling sessions use a 30-second lease while legacy media-only
-  sessions retain the 60-second compatibility lease;
-- an expired explicit lease cannot be revived between repair-loop ticks;
-- `hold` stops production immediately while accepted control or media
-  renewals keep the session alive;
-- `active` production follows the actor-owned reported playhead/runway state;
-- per-session byte and fleet scratch caps remain hard safety bounds even when
-  client observations are malicious or wrong;
-- `end` stops production in this slice, but durable terminal/tombstone
-  semantics are not claimed until rolling, relay, and VOD end ordering share
-  one implementation; and
-- status and events explain lease mode, demand, production frontier, and the
-  exact reason for every hold/resume transition.
+The active M3c1 slice is deliberately passive. It gives the actor one ordered,
+attempt-fenced snapshot of playlist readiness, published frontier, next media
+sequence, completed-fetch frontier, and a fetch whose `EXTINF` is still
+pending. Initial and fallback children use attempts allocated by that actor;
+playlist refreshes and HTTP response commits carry the exact attempt they
+observed. A predecessor response completing after replacement therefore cannot
+renew or advance its successor.
 
-M3b temporarily adds one short process-local producer-transition fence so the
-actor's exact timer and a physical SIGSTOP/SIGCONT call have a strict order.
-It is never held across an await and is deleted with `child_transition` when
-M4 moves child ownership into the actor; it is not a watchdog or another
-recovery owner.
+Existing `SegmentIndex`, `playlist_published`, `high_segment`, and
+`fetched_end_ms` values remain compatibility projections for pruning, byte
+accounting, legacy pacing, and old watchdogs. Rolling status reads the combined
+actor snapshot when available. No process action or recovery policy is added
+or removed; the existing pre-publication fallback must now obtain actor
+admission before touching its predecessor. Its full ordering and rollback
+contract is in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md`](PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md).
 
-Review and test state for M3b:
+Review and test state for M3c1:
 
 | Gate | State |
 |---|---|
-| Implementation | Rebased onto merged `main` at `bcc5b09a`; the Dolby Vision recipe conflict was resolved with the upstream video-presentation contract; narrow UI runner repairs `fb2128e5` and `ca145db4` are committed |
-| Adversarial diff review | Exact rebased implementation head `eee52106` approved; review findings on the UI repair were corrected; exact local head `23f8c533` approved before its tests |
-| Unit/focused tests | Exact `23f8c533`: retry-policy regression and `make test` green (`plurx-core`: 783; `plurxd`: 1,034 passed and 3 ignored; 0 failed) |
-| Full local gate | Exact `23f8c533`: `make validate` 13 passed, 0 failed, 2 optional Playwright skips; history audit covers 955 corrective commits |
-| Hosted CI | Prior head passed Rust, WAL, cluster-daemon, replicated-store, and VOD-browser jobs; web-layout exposed one transient root-attachment failure; repaired head is pending push/rerun |
-| Merge | Pending all gates |
+| Implementation | PR [#615](https://github.com/pjunod/plurx/pull/615), `codex/playback-control-m3-delivery-ledger`, from merged `5908e838`; code-complete head `9f84f0b6` includes actor-owned delivery frontiers plus reviewed producer-attempt, response, replacement, scratch-clear, retention, rejected-child lifecycle, and production-only Clippy cleanup. |
+| Adversarial diff review | Repeated exact-head reviews drove production-build, history-mapping, ordering, cancellation, retention, exact-publication, and false→true→false path-ownership corrections. Later reviews closed the actor-mutation/reply gap, silent predecessor cleanup failures, detached-garbage accounting, cleanup-worker fan-out and head-of-line blocking, final-rejection causality, rejected-child termination, completion-gate lifetime, and production-only dead surfaces. Exact head `9f84f0b6` is approved with no open findings. |
+| Unit/focused tests | Began only after exact PR-head approval. All targeted actor-mutation, expiry, final-fence, scratch-clear, retention, cancellation, playlist/segment/refresh ABA, replacement, startup-gate, and subtitle-publication cases pass. The four failures exposed by the first full run were repaired, reviewed, rerun, and none was waived. |
+| Full local gate | Green on reviewed code head `9f84f0b6`. `make test`: `plurxd` passed 1,063 of 1,066 tests with 3 intentionally ignored and zero failures; every other workspace and doc-test target passed. `make check`: catalog lint, history audit, 121 operations tests, 52 benchmark tests, formatting, Clippy with `-D warnings`, and the complete workspace test gate passed. Unrestricted `make validate`: 13 passed, 0 failed, 2 Playwright checks skipped because the package was absent. With the repository-pinned Playwright 1.62.0 in a disposable environment, `web-layout` then passed 60 captures/5,850 structural facts with no console or page errors, and `reader-browser` passed every restore, handoff, search, finish, stale-revision, and hostile-content contract. Effective result: all 15 commit-profile checks passed. |
+| Hosted CI | The initial runs for `9f84f0b6` and `45f610f6` each failed before code checkout on `gha-nynuc-general-02`: `actions/checkout` could not remove stale root-owned `.git/refs/heads/codex/playback-control-m3-demand-lease-v2` (`EACCES`). The jobs ran no PR code. Runner 30 was quarantined by removing only its reversible `general` label; it remains registered for operator repair. Rerun attempt 2 for `45f610f6` then reached the code on healthy runners and passed preflight, validation scope, fast Rust, replicated WAL, replicated Store/topology, cluster daemon, VOD browser acceptance, and web layout/accessibility. Scope-correct mobile, release, image, coverage, and Docker jobs skipped. |
+| Merge | Code, adversarial review, local validation, and a complete hosted run are green. Remaining: exact review and hosted validation of this final status-only head, then merge. |
 
 ## Watchdog-removal ledger
 
@@ -108,11 +90,12 @@ The detailed symbol-by-symbol contract is in the plan's
 
 | Mechanism | What it currently does | Removal owner |
 |---|---|---|
-| first-segment/software grace and progress watcher | Polls startup/progress and can replace or kill the encoder | M4 replaces it with one actor-owned `ProducerProgressDeadline` |
+| first-segment/software grace and progress watcher | Polls startup/progress and can replace or kill the encoder | M3c2 feeds progress/exit observations to the actor; M4 replaces this watcher with one actor-owned `ProducerProgressDeadline` |
 | `child_transition`, `watchdog_active`, `replacing_child` | Serializes and masks the old in-place replacement paths | M4 deletes them after every child event/action enters the actor |
-| playlist and live-segment wait budgets | Bound an HTTP request waiting for publication | M3 routes waiters through actor state; bounded HTTP deadlines remain by design |
-| 15-second repair/flow-control tick | Refreshes indexes, prunes retention, records speed, evaluates flow, and claims lease expiry | Scheduling remains; recovery decisions move to actor events/deadlines |
-| fetched-frontier ahead-window inference | Suspends/resumes production based on download behavior | M3b replaces the time policy only after a session enters explicit mode; legacy pacing and byte/disk safety remain |
+| playlist and live-segment wait budgets | Bound an HTTP request waiting for publication | M3c1 records publication in actor state; later M3 routes waiters through it; bounded HTTP deadlines remain by design |
+| 15-second repair/flow-control tick | Refreshes indexes, prunes retention, records speed, evaluates flow, and claims lease expiry | Scheduling remains; M3c1 copies publication/fetch facts into the actor but recovery decisions still move in M4 |
+| `SegmentIndex`, `playlist_published`, `high_segment`, `fetched_end_ms` | Catalogs rolling files and feeds pruning, byte accounting, pacing, and status | M3c1 makes actor delivery state authoritative for status while retaining these as action-path compatibility projections until M4 |
+| fetched-frontier ahead-window inference | Suspends/resumes production based on download behavior | M3b replaced the time policy only after a session enters explicit mode; legacy pacing and byte/disk safety remain |
 | VOD segment materialization deadline | Bounds demand for an immutable segment that is not ready | Remains permanently as one of the three approved progress deadlines |
 
 ### Client recovery owners still present
@@ -139,10 +122,10 @@ recovery watchdogs.
 
 ## Remaining delivery order
 
-1. Finish M3b, adversarially review the exact PR diff, then run/fix all tests
-   and merge only when hosted CI is green.
-2. Finish M3 event ownership for playlist, segment, progress, child exit, end,
-   and cluster fences, including model tests over event reorderings.
+1. Review and validate this final M3c1 status-only head, then merge PR #615.
+2. Add nonblocking, coalesced producer progress and exact-attempt child-exit
+   observations in M3c2, then finish end and cluster-fence event ownership with
+   model tests over event reorderings.
 3. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
 4. Complete M4 and prove the old server watchdog/replacement symbols are gone.

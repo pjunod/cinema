@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2fbb8a4b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust gate compiles the non-test rolling-session constructors, proving test-only response projection seams remain conditionally absent from production Session initializers."

@@ -1,7 +1,8 @@
 # Playback control protocol — explicit demand, one owner, prepared handoffs
 
-**Status:** adversarially reviewed implementation handoff · M1 ready · written
-2026-08-26 against `origin/main` at `64d8f4de` · wire names, defaults, and
+**Status:** adversarially reviewed implementation handoff · M1, web M2, M3a,
+and M3b merged · M3c delivery-event ownership in progress · updated
+2026-08-26 against `origin/main` at `5908e838` · wire names, defaults, and
 source locations must be re-verified at build time
 
 This plan replaces the temporary growing-HLS recovery engine's inferred
@@ -19,6 +20,8 @@ Companions: [PLAYBACK.md](PLAYBACK.md),
 [CLUSTER-MEDIA-POOL-PLAN.md](CLUSTER-MEDIA-POOL-PLAN.md). The independent
 finding ledger is
 [PLAYBACK-CONTROL-PROTOCOL-REVIEW.md](PLAYBACK-CONTROL-PROTOCOL-REVIEW.md).
+The current actor-event slice is specified in
+[PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md](PLAYBACK-CONTROL-PROTOCOL-M3-DELIVERY-LEDGER.md).
 
 ## 0. Decision summary
 
