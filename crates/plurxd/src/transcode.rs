@@ -19886,8 +19886,13 @@ mod tests {
         assert_eq!(result, original_rate_control);
         assert!(served_name.join("predecessor-bytes").exists());
         assert!(
-            session.child.lock().await.is_none(),
-            "no candidate was installed"
+            session
+                .child
+                .lock()
+                .await
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the slot retains only the deliberately stopped predecessor handle"
         );
         assert!(session.replacing_child.load(Acquire));
         assert!(session.coherent_path_producer_attempt().await.is_none());
@@ -20116,6 +20121,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -20132,7 +20138,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
-            dir.path().join("manager-work"),
+            manager_dir.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
@@ -20180,6 +20186,7 @@ mod tests {
         use tokio::io::AsyncReadExt as _;
 
         let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
         seeded_session_dir(dir.path(), 1, 2.0).await;
         tokio::fs::write(dir.path().join("seg00000.ts"), b"predecessor")
             .await
@@ -20199,7 +20206,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
-            dir.path().join("manager-work"),
+            manager_dir.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
