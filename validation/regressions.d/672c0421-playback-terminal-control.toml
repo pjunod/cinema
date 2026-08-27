@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["672c0421"]
+points = ["playback.pipeline", "server.api"]
+checks = ["rust-gate"]
+reason = "The Rust gate retains the corrected M3c3 terminal-control contracts: accepted rolling and VOD demand=end requests atomically enter terminal state, preserve an exact idempotent acknowledgement after response loss, never renew the playback lease, and reject every non-exact later mutation; terminal mailbox commands claim an already-due monotonic expiry before End or AuthorityFence can relabel it; manager and VOD integration tests prove terminal status joining, reader detach, and immutable first-winner outcomes; and the 5,040-order state model exercises the production control-End and expiry-claim transitions."
