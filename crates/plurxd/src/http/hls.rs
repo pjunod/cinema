@@ -2044,16 +2044,28 @@ async fn control_local_inner(
                 );
             }
         };
+        let (Ok(sequence), Some(request_fingerprint)) =
+            (i64::try_from(request.sequence), request.fingerprint())
+        else {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Invalid);
+            return control_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_control",
+                "the terminal control identity could not be retained",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                Some("sequence"),
+            );
+        };
         let acknowledgement = MediaSessionTerminalAck {
             incarnation_id: route.incarnation_id.clone(),
             session_id: route.session_id.clone(),
             owner_node_id: route.owner_node_id.clone(),
             owner_epoch: route.owner_epoch,
             client_instance_id: request.client_instance_id.clone(),
-            sequence: i64::try_from(request.sequence).expect("validated control sequence"),
-            request_fingerprint: request
-                .fingerprint()
-                .expect("validated control request is serializable"),
+            sequence,
+            request_fingerprint,
             response_json,
             expires_at_ms: server_time_unix_ms
                 .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),

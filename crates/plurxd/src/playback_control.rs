@@ -729,6 +729,7 @@ impl ControlRelayRequest {
             && self.deadline_unix_ms > 0
             && self.control.generation == self.generation
             && u64::try_from(self.expected_owner_epoch).ok() == Some(self.control.control_epoch)
+            && self.control.validate(None, 30_000).is_ok()
     }
 }
 
@@ -4615,6 +4616,7 @@ mod tests {
     #[test]
     fn relay_answers_are_schema_bounded_and_tuple_bound() {
         let request = relay_request();
+        assert!(request.is_valid());
         let response = ControlResponseV1 {
             protocol: PROTOCOL_V1.to_owned(),
             generation: request.generation.clone(),
@@ -4683,6 +4685,10 @@ mod tests {
             !terminal_response.is_valid_for(&request),
             "an ended lease is only valid for the exact terminal demand"
         );
+
+        let mut oversized_sequence = terminal_request.clone();
+        oversized_sequence.control.sequence = i64::MAX as u64 + 1;
+        assert!(!oversized_sequence.is_valid());
 
         let unavailable = ControlErrorBody {
             code: "control_unavailable".to_owned(),
