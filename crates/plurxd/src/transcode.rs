@@ -2556,17 +2556,22 @@ impl Session {
                 pause.wait().await;
             }
         }
-        let install = self
+        let install = match self
             .control
-            .lock_authorized_producer_install(producer_attempt);
-        let rejection = install.as_ref().err().copied();
-        if let Some(reason) = rejection {
-            drop(install);
-            let _ = candidate.kill().await;
-            let _ = candidate.wait().await;
-            return Err(reason);
-        }
-        let install = install.expect("producer install authorization checked above");
+            .lock_authorized_producer_install(producer_attempt)
+        {
+            Ok(install) => install,
+            Err(reason) => {
+                // The exact-fence verdict is synchronous. Start termination
+                // before returning, then reap outside this future so a
+                // non-Send MutexGuard Result can never cross an await.
+                let _ = candidate.start_kill();
+                tokio::spawn(async move {
+                    let _ = candidate.wait().await;
+                });
+                return Err(reason);
+            }
+        };
         *child = Some(candidate);
         drop(install);
         Ok(())
