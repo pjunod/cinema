@@ -1016,6 +1016,15 @@ impl TerminalCommitReceipt {
         self.expiry.expired()
     }
 
+    #[cfg(test)]
+    pub(crate) fn deadline_for_test(&self) -> tokio::time::Instant {
+        self.expiry
+            .deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .expect("terminal receipt must carry an exact deadline")
+    }
+
     pub(crate) fn retry(&self) {
         if let Some(retry) = &self.retry {
             retry.start_if_needed();
@@ -3332,6 +3341,103 @@ mod tests {
         after.retry();
         assert_eq!(after_starts.load(Ordering::Acquire), 0);
         assert!(after.wait().await.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_commit_success_completion_and_waiter_cannot_cross_exact_expiry() {
+        fn response() -> ControlResponseV1 {
+            ControlResponseV1 {
+                protocol: PROTOCOL_V1.to_owned(),
+                generation: "test-terminal-generation".to_owned(),
+                control_epoch: 1,
+                accepted_sequence: 1,
+                server_time_unix_ms: 1,
+                lease: PlaybackLeaseView {
+                    state: "ended".to_owned(),
+                    renew_after_ms: NEXT_EXCHANGE_MS,
+                    expires_at_unix_ms: 1,
+                },
+                delivery: DeliveryView {
+                    presentation: "test".to_owned(),
+                    producer_state: "complete".to_owned(),
+                    produced_through_ms: None,
+                    fetched_through_ms: 0,
+                    delivered_bps: None,
+                    delivered_idle_ms: None,
+                    recent_producer_speed: None,
+                    client_runway_ms: 0,
+                    admitted: None,
+                    hold_reason: None,
+                    owner_node_hash: "n-test".to_owned(),
+                    owner_epoch: 1,
+                },
+                effective_selection: EffectiveSelection {
+                    quality_auto: true,
+                    height: 720,
+                    audio_track: None,
+                    subtitle_burn: None,
+                    audio_offset_ms: 0,
+                    codec: "test".to_owned(),
+                    dynamic_range: Some("sdr".to_owned()),
+                },
+                action: ControlAction::None,
+            }
+        }
+
+        let pending_attempt = Arc::new(std::sync::Mutex::new(None::<TerminalCommitAttempt>));
+        let completing = TerminalCommitReceipt::deferred_retryable_until(
+            crate::media_sessions::unix_ms().saturating_add(60_000),
+            {
+                let pending_attempt = Arc::clone(&pending_attempt);
+                move |attempt| {
+                    *pending_attempt
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(attempt);
+                }
+            },
+        );
+        let completion_deadline = completing.deadline_for_test();
+        tokio::time::advance(
+            completion_deadline
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        completing.retry();
+        assert!(pending_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        pending_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .expect("attempt started before expiry")
+            .complete(Ok(response()));
+        assert!(
+            completing.wait().await.is_err(),
+            "an attempt completing at expiry cannot publish success"
+        );
+
+        let stored = TerminalCommitReceipt::retryable_until(
+            crate::media_sessions::unix_ms().saturating_add(60_000),
+            |attempt| attempt.complete(Ok(response())),
+        );
+        assert!(
+            stored.wait().await.is_ok(),
+            "success is visible before expiry"
+        );
+        tokio::time::advance(
+            stored
+                .deadline_for_test()
+                .duration_since(tokio::time::Instant::now()),
+        )
+        .await;
+        assert!(
+            stored.wait().await.is_err(),
+            "a delayed waiter cannot consume stored success at expiry"
+        );
     }
 
     struct DropReplyOnTerminalAdmission {

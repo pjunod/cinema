@@ -16465,7 +16465,37 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
-        tokio::time::advance(Duration::from_secs(60)).await;
+        let terminal_deadline = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("rolling terminal receipt")
+            .deadline_for_test();
+        tokio::time::advance(
+            terminal_deadline
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .expect("rolling operation retained before expiry")
+                .expect("exact rolling replay before expiry")
+                .disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert!(fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(
             fixture
                 .state
@@ -16482,6 +16512,13 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains_key(&session_id));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(fixture
+            .state
+            .transcode
+            .hls_session_control(request(1))
+            .await
+            .is_none());
     }
 
     #[tokio::test]

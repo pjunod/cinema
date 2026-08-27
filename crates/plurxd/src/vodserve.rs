@@ -547,6 +547,10 @@ struct Shared {
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
+    /// Test-only rendezvous immediately before an exact terminal replay joins
+    /// the session-owned detach fence.
+    #[cfg(test)]
+    terminal_replay_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 pub struct VodServe {
@@ -725,6 +729,8 @@ impl VodServe {
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
+                #[cfg(test)]
+                terminal_replay_pause: StdMutex::new(None),
             }),
         })
     }
@@ -1575,13 +1581,6 @@ impl VodServe {
                     // bounded response-recovery window. The retained Store
                     // handle, response, and retry closure are no longer useful.
                     session.control_end = None;
-                    if session
-                        .terminal_cleanup
-                        .as_ref()
-                        .is_some_and(|cleanup| cleanup.is_finished())
-                    {
-                        session.terminal_cleanup = None;
-                    }
                     return Some(Err(
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
@@ -1599,6 +1598,18 @@ impl VodServe {
             }
         };
         if let Some((result, cleanup)) = terminal_replay {
+            #[cfg(test)]
+            let terminal_replay_pause = self
+                .shared
+                .terminal_replay_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            #[cfg(test)]
+            if let Some(pause) = terminal_replay_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
             cleanup.wait().await;
             if let Some(commit) = &result.terminal_commit {
                 // Reader detach is the visibility fence for VOD End. Every
@@ -1889,13 +1900,6 @@ impl VodServe {
                     .is_some_and(|commit| commit.is_expired());
                 if expired {
                     session.control_end = None;
-                    if session
-                        .terminal_cleanup
-                        .as_ref()
-                        .is_some_and(|cleanup| cleanup.is_finished())
-                    {
-                        session.terminal_cleanup = None;
-                    }
                 }
             }
         }
@@ -4980,7 +4984,31 @@ mod tests {
             ))
         ));
 
-        tokio::time::advance(Duration::from_secs(60)).await;
+        let terminal_deadline = accepted
+            .terminal_commit
+            .as_ref()
+            .expect("accepted terminal receipt")
+            .deadline_for_test();
+        tokio::time::advance(
+            terminal_deadline
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        assert_eq!(
+            serve
+                .control(request(1))
+                .await
+                .expect("VOD tombstone before expiry")
+                .expect("exact response retained before expiry")
+                .disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert!(serve.shared.sessions.lock().await[&session_id]
+            .control_end
+            .is_some());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
         assert!(matches!(
             serve.control(request(1)).await,
             Some(Err(
@@ -4994,6 +5022,54 @@ mod tests {
             "expired VOD recovery drops the retained operation but keeps its ownership tombstone"
         );
         drop(sessions);
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            serve.control(request(1)).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+
+        assert!(
+            serve.end(&session_id, Terminal::AdminStop).await,
+            "a repeated non-control end remains idempotent after response expiry"
+        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let events = serve
+                    .shared
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        since_ms: None,
+                        event: Some("session_end".to_owned()),
+                        limit: 10,
+                    })
+                    .await
+                    .expect("terminal lifecycle query");
+                if !events.is_empty() {
+                    break events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("terminal lifecycle persisted");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let events = serve
+            .shared
+            .store
+            .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                since_ms: None,
+                event: Some("session_end".to_owned()),
+                limit: 10,
+            })
+            .await
+            .expect("settled terminal lifecycle query");
+        assert_eq!(
+            events.len(),
+            1,
+            "expiry plus repeated end cannot emit a second lifecycle event: {events:?}"
+        );
 
         serve.shared.sessions.lock().await.remove(&session_id);
         drop(accepted);
@@ -5080,6 +5156,13 @@ mod tests {
         };
         assert!(cancellation.is_cancelled());
 
+        let terminal_replay_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .terminal_replay_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&terminal_replay_pause));
         let replay = {
             let serve = Arc::clone(&serve);
             let session_id = session_id.clone();
@@ -5105,11 +5188,12 @@ mod tests {
                     .await
             })
         };
-        tokio::task::yield_now().await;
+        terminal_replay_pause.wait().await;
         assert!(
             !committer.started.load(Acquire),
-            "a replacement waiter cannot expose terminal settlement while detach is pinned"
+            "a replacement waiter at the cleanup fence cannot expose terminal settlement while detach is pinned"
         );
+        terminal_replay_pause.wait().await;
         drop(readers);
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
