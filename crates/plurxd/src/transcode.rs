@@ -2302,7 +2302,26 @@ impl RollingTerminalIdentity {
 struct RollingTerminalOperation {
     identity: RollingTerminalIdentity,
     result: RollingTerminalResultReceipt,
-    expires_at_unix_ms: i64,
+    /// Zero while the actor-owned result is still being prepared. Once the
+    /// terminal committer returns, this becomes its exact immutable durable
+    /// acknowledgement expiry rather than a separately guessed admission TTL.
+    expires_at_unix_ms: Arc<AtomicI64>,
+    exact_commit: Arc<std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>>,
+}
+
+impl RollingTerminalOperation {
+    fn expired(&self, now_unix_ms: i64) -> bool {
+        if let Some(commit) = self
+            .exact_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return commit.is_expired();
+        }
+        let expires_at_unix_ms = self.expires_at_unix_ms.load(Acquire);
+        expires_at_unix_ms > 0 && now_unix_ms >= expires_at_unix_ms
+    }
 }
 
 struct Session {
@@ -6395,11 +6414,13 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
             return;
         }
         let (receipt, sender) = RollingTerminalResultReceipt::pending();
+        let expires_at_unix_ms = Arc::new(AtomicI64::new(0));
+        let exact_commit = Arc::new(std::sync::Mutex::new(None));
         let operation = RollingTerminalOperation {
             identity: self.identity.clone(),
             result: receipt,
-            expires_at_unix_ms: crate::media_sessions::unix_ms()
-                .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
+            expires_at_unix_ms: Arc::clone(&expires_at_unix_ms),
+            exact_commit: Arc::clone(&exact_commit),
         };
         let handoff = {
             let mut shared = self
@@ -6450,6 +6471,25 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
                     control_pause,
                 )
                 .await;
+            let prepared_commit = result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.terminal_commit.as_ref())
+                .cloned();
+            let exact_expiry = prepared_commit
+                .as_ref()
+                .and_then(|commit| commit.expires_at_unix_ms())
+                // Tests and embedders may intentionally omit durable commit;
+                // still start their bound after result preparation, never at
+                // actor admission before the immutable result exists.
+                .unwrap_or_else(|| {
+                    crate::media_sessions::unix_ms()
+                        .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS)
+                });
+            *exact_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared_commit;
+            expires_at_unix_ms.store(exact_expiry, Release);
             let _ = sender.send(Some(result));
         });
     }
@@ -12903,7 +12943,7 @@ impl TranscodeManager {
         let Some(operation) = terminal.get(control.session_id).cloned() else {
             return Ok(None);
         };
-        if crate::media_sessions::unix_ms() >= operation.expires_at_unix_ms {
+        if operation.expired(crate::media_sessions::unix_ms()) {
             terminal.remove(control.session_id);
             return Ok(None);
         }
@@ -14949,7 +14989,7 @@ impl TranscodeManager {
             self.terminal_controls
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .retain(|_, operation| operation.expires_at_unix_ms > now_unix_ms);
+                .retain(|_, operation| !operation.expired(now_unix_ms));
             let limits = self.ahead_limits().await;
             let mut expired = Vec::new();
             let mut live = Vec::new();
@@ -16265,7 +16305,7 @@ mod tests {
             .is_some_and(|lease| lease.retired));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
         let dir = crate::test_tempdir().expect("session dir");
         let session_id = uuid::Uuid::new_v4().to_string();
@@ -16296,7 +16336,10 @@ mod tests {
                 snapshot,
             }
         };
-        let committer = crate::playback_control::RecoveringTerminalCommitter::new();
+        let retry_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let committer = crate::playback_control::RecoveringTerminalCommitter::with_retry_pause(
+            Arc::clone(&retry_pause),
+        );
 
         let accepted = fixture
             .state
@@ -16354,7 +16397,7 @@ mod tests {
             "the retry proof must use the manager terminal tombstone, not the live session"
         );
 
-        let (replay_a, replay_b) = tokio::join!(
+        let (replay_a, replay_b, ()) = tokio::join!(
             fixture.state.transcode.hls_session_control_with_terminal(
                 request(1),
                 i64::MAX,
@@ -16364,7 +16407,20 @@ mod tests {
                 request(1),
                 i64::MAX,
                 Some(committer.clone()),
-            )
+            ),
+            async {
+                // The first replay has marked the one shared receipt running
+                // and entered the second durable attempt. The other replay
+                // now has a deterministic interval in which to contend.
+                retry_pause.wait().await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    committer.attempts(),
+                    2,
+                    "both waiters must share one in-flight retry attempt"
+                );
+                retry_pause.wait().await;
+            }
         );
         let replay_a = replay_a
             .expect("first local terminal worker")
@@ -16409,6 +16465,23 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .is_none(),
+            "the rolling manager must drop the exact retained operation at acknowledgement expiry"
+        );
+        assert!(!fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
     }
 
     #[tokio::test]

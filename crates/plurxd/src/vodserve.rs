@@ -431,9 +431,10 @@ fn deferred_terminal_commit(
     committer: Arc<dyn crate::playback_control::TerminalControlCommitter>,
     result: &mut crate::playback_control::LocalControlResult,
 ) -> crate::playback_control::TerminalCommitReceipt {
-    let prepared = Arc::new(StdMutex::new(
-        None::<crate::playback_control::LocalControlResult>,
-    ));
+    // Install immutable prepared data before the outer receipt is attached.
+    // Keeping that receipt out of the closure's captured result avoids the
+    // outer -> closure -> prepared result -> outer Arc cycle.
+    let prepared = Arc::new(StdMutex::new(Some(result.clone())));
     let inner = Arc::new(StdMutex::new(
         None::<crate::playback_control::TerminalCommitReceipt>,
     ));
@@ -462,6 +463,9 @@ fn deferred_terminal_commit(
                     (receipt, false)
                 }
             };
+            if let Some(expires_at_unix_ms) = receipt.expires_at_unix_ms() {
+                attempt.set_expires_at_unix_ms(expires_at_unix_ms);
+            }
             if retry {
                 receipt.retry();
             }
@@ -471,9 +475,6 @@ fn deferred_terminal_commit(
         }
     });
     result.terminal_commit = Some(receipt.clone());
-    *prepared
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result.clone());
     receipt
 }
 
@@ -1537,8 +1538,8 @@ impl VodServe {
         // and sequence; no Store read is needed to recover that immutable
         // owner-local result.
         let terminal_replay = {
-            let sessions = self.shared.sessions.lock().await;
-            let session = sessions.get(control.session_id)?;
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = sessions.get_mut(control.session_id)?;
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
                 return None;
             }
@@ -1565,13 +1566,30 @@ impl VodServe {
                         crate::playback_control::ControlStateError::SessionEnded,
                     ));
                 };
+                if result
+                    .terminal_commit
+                    .as_ref()
+                    .is_some_and(|commit| commit.is_expired())
+                {
+                    // Preserve only the owner/sequence tombstone after the
+                    // bounded response-recovery window. The retained Store
+                    // handle, response, and retry closure are no longer useful.
+                    session.control_end = None;
+                    if session
+                        .terminal_cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| cleanup.is_finished())
+                    {
+                        session.terminal_cleanup = None;
+                    }
+                    return Some(Err(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                    ));
+                }
                 debug_assert_eq!(result.accepted_sequence, accepted_sequence);
                 debug_assert_eq!(result.action, action);
                 debug_assert_eq!(result.platform, platform);
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
-                if let Some(commit) = &result.terminal_commit {
-                    commit.retry();
-                }
                 let Some(cleanup) = session.terminal_cleanup.as_ref().map(Arc::clone) else {
                     return Some(Err(crate::playback_control::ControlStateError::Unavailable));
                 };
@@ -1582,6 +1600,12 @@ impl VodServe {
         };
         if let Some((result, cleanup)) = terminal_replay {
             cleanup.wait().await;
+            if let Some(commit) = &result.terminal_commit {
+                // Reader detach is the visibility fence for VOD End. Every
+                // retry, including one replacing a cancelled original HTTP
+                // waiter, must cross the session-owned cleanup first.
+                commit.retry();
+            }
             return Some(Ok(result));
         }
 
@@ -1847,6 +1871,34 @@ impl VodServe {
                 .map(|cleanup| async move { cleanup.wait().await }),
         )
         .await;
+
+        // End tombstones outlive the response-recovery operation so late or
+        // mismatched control cannot resurrect a detached reader. Once the
+        // exact durable acknowledgement window closes, retain only that small
+        // ownership fence and release the Store/response/retry graph.
+        {
+            let mut sessions = self.shared.sessions.lock().await;
+            for session in sessions
+                .values_mut()
+                .filter(|session| session.tombstone.is_some())
+            {
+                let expired = session
+                    .control_end
+                    .as_ref()
+                    .and_then(|result| result.terminal_commit.as_ref())
+                    .is_some_and(|commit| commit.is_expired());
+                if expired {
+                    session.control_end = None;
+                    if session
+                        .terminal_cleanup
+                        .as_ref()
+                        .is_some_and(|cleanup| cleanup.is_finished())
+                    {
+                        session.terminal_cleanup = None;
+                    }
+                }
+            }
+        }
 
         let now = Instant::now();
         // Idle live sessions vanish — tombstone-free, because an idle reap is
@@ -3629,6 +3681,7 @@ mod tests {
         started: AtomicBool,
         reader_detached: AtomicBool,
         attempts: Arc<AtomicUsize>,
+        expires_at_unix_ms: i64,
     }
 
     impl crate::playback_control::TerminalControlCommitter for CleanupObservingCommitter {
@@ -3646,14 +3699,17 @@ mod tests {
             self.reader_detached.store(detached, Release);
             let response = crate::playback_control::terminal_response_for_test(result);
             let attempts = Arc::clone(&self.attempts);
-            crate::playback_control::TerminalCommitReceipt::retryable(move |attempt| {
-                let index = attempts.fetch_add(1, AcqRel);
-                attempt.complete(if index == 0 {
-                    Err(())
-                } else {
-                    Ok(response.clone())
-                });
-            })
+            crate::playback_control::TerminalCommitReceipt::retryable_until(
+                self.expires_at_unix_ms,
+                move |attempt| {
+                    let index = attempts.fetch_add(1, AcqRel);
+                    attempt.complete(if index == 0 {
+                        Err(())
+                    } else {
+                        Ok(response.clone())
+                    });
+                },
+            )
         }
     }
 
@@ -4800,7 +4856,7 @@ mod tests {
         drop(lifecycle_guard);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn accepted_vod_control_end_tombstones_detaches_and_replays_exactly() {
         let base = crate::test_tempdir().expect("base");
         let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -4836,7 +4892,9 @@ mod tests {
             started: AtomicBool::new(false),
             reader_detached: AtomicBool::new(false),
             attempts: Arc::new(AtomicUsize::new(0)),
+            expires_at_unix_ms: crate::media_sessions::unix_ms().saturating_add(60_000),
         });
+        let committer_weak = Arc::downgrade(&committer);
         let accepted = serve
             .control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
             .await
@@ -4921,6 +4979,30 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+
+        tokio::time::advance(Duration::from_secs(60)).await;
+        assert!(matches!(
+            serve.control(request(1)).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+        let sessions = serve.shared.sessions.lock().await;
+        assert_eq!(sessions[&session_id].tombstone, Some(Terminal::Deleted));
+        assert!(
+            sessions[&session_id].control_end.is_none(),
+            "expired VOD recovery drops the retained operation but keeps its ownership tombstone"
+        );
+        drop(sessions);
+
+        serve.shared.sessions.lock().await.remove(&session_id);
+        drop(accepted);
+        drop(replay);
+        drop(committer);
+        assert!(
+            committer_weak.upgrade().is_none(),
+            "removing the VOD tombstone must release its deferred operation graph"
+        );
     }
 
     #[tokio::test]
@@ -4934,6 +5016,14 @@ mod tests {
         let rendition = synthetic_rendition(base.path()).await;
         insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
         let client = uuid::Uuid::new_v4().to_string();
+        let committer = Arc::new(CleanupObservingCommitter {
+            rendition: Arc::clone(&rendition),
+            session_id: session_id.clone(),
+            started: AtomicBool::new(false),
+            reader_detached: AtomicBool::new(false),
+            attempts: Arc::new(AtomicUsize::new(0)),
+            expires_at_unix_ms: crate::media_sessions::unix_ms().saturating_add(60_000),
+        });
 
         // Pin the exact detach lock so the session-owned cleanup task cannot
         // finish before the request future is cancelled.
@@ -4943,6 +5033,7 @@ mod tests {
             let session_id = session_id.clone();
             let generation = generation.clone();
             let client = client.clone();
+            let committer = committer.clone();
             tokio::spawn(async move {
                 let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
                     crate::playback_control::ClientPlatform::Apple,
@@ -4951,15 +5042,19 @@ mod tests {
                 snapshot.playback_rate = 0.0;
                 snapshot.render_state = crate::playback_control::RenderState::Ended;
                 serve
-                    .control(crate::playback_control::LocalControlRequest {
-                        session_id: &session_id,
-                        generation: &generation,
-                        owner_node_id: "node-a",
-                        owner_epoch: 1,
-                        client_instance_id: &client,
-                        sequence: 1,
-                        snapshot,
-                    })
+                    .control_with_terminal(
+                        crate::playback_control::LocalControlRequest {
+                            session_id: &session_id,
+                            generation: &generation,
+                            owner_node_id: "node-a",
+                            owner_epoch: 1,
+                            client_instance_id: &client,
+                            sequence: 1,
+                            snapshot,
+                        },
+                        i64::MAX,
+                        Some(committer),
+                    )
                     .await
             })
         };
@@ -4984,35 +5079,61 @@ mod tests {
             Ok(_) => panic!("request unexpectedly completed"),
         };
         assert!(cancellation.is_cancelled());
+
+        let replay = {
+            let serve = Arc::clone(&serve);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Apple,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::End;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Ended;
+                serve
+                    .control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "node-a",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        assert!(
+            !committer.started.load(Acquire),
+            "a replacement waiter cannot expose terminal settlement while detach is pinned"
+        );
         drop(readers);
         tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
             .await
             .expect("detached cleanup survives request cancellation");
         assert!(!rendition.readers.lock().await.contains_key(&session_id));
+        assert!(committer.started.load(Acquire));
+        assert!(committer.reader_detached.load(Acquire));
 
-        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
-            crate::playback_control::ClientPlatform::Apple,
-        );
-        snapshot.demand = crate::playback_control::PlaybackDemand::End;
-        snapshot.playback_rate = 0.0;
-        snapshot.render_state = crate::playback_control::RenderState::Ended;
-        let replay = serve
-            .control(crate::playback_control::LocalControlRequest {
-                session_id: &session_id,
-                generation: &generation,
-                owner_node_id: "node-a",
-                owner_epoch: 1,
-                client_instance_id: &client,
-                sequence: 1,
-                snapshot,
-            })
+        let replay = replay
             .await
+            .expect("replacement replay task")
             .expect("terminal VOD session")
             .expect("terminal replay after cleanup");
         assert_eq!(
             replay.disposition,
             crate::playback_control::ControlDisposition::Replay
         );
+        assert!(replay
+            .terminal_commit
+            .as_ref()
+            .expect("replacement receipt")
+            .wait()
+            .await
+            .is_ok());
     }
 
     #[tokio::test]

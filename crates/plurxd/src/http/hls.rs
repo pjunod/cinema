@@ -1535,7 +1535,18 @@ async fn persist_terminal_ack_with_faults(
     acknowledgement: MediaSessionTerminalAck,
     faults: Option<&TerminalCommitFaults>,
 ) -> bool {
-    let deadline = tokio::time::Instant::now() + TERMINAL_COMMIT_RETRY_BUDGET;
+    let remaining_ms = acknowledgement.expires_at_ms.saturating_sub(unix_ms());
+    let Some(remaining_ms) = u64::try_from(remaining_ms)
+        .ok()
+        .filter(|remaining| *remaining > 0)
+    else {
+        return false;
+    };
+    let now = tokio::time::Instant::now();
+    let acknowledgement_deadline = now
+        .checked_add(Duration::from_millis(remaining_ms))
+        .unwrap_or(now);
+    let deadline = (now + TERMINAL_COMMIT_RETRY_BUDGET).min(acknowledgement_deadline);
     let mut delay = TERMINAL_COMMIT_RETRY_MIN;
     loop {
         let now = tokio::time::Instant::now();
@@ -1641,33 +1652,36 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         };
         let store = Arc::clone(&self.store);
         let faults = self.faults.clone();
-        crate::playback_control::TerminalCommitReceipt::retryable(move |attempt| {
-            let store = Arc::clone(&store);
-            let acknowledgement = acknowledgement.clone();
-            let response = response.clone();
-            let handoff = handoff.clone();
-            let faults = faults.clone();
-            if let Some(handoff) = &handoff {
-                handoff.restart();
-            }
-            tokio::spawn(async move {
-                let persisted = match faults {
-                    Some(faults) => {
-                        persist_terminal_ack_with_faults(
-                            store,
-                            acknowledgement,
-                            Some(faults.as_ref()),
-                        )
-                        .await
-                    }
-                    None => persist_terminal_ack(store, acknowledgement).await,
-                };
-                if let Some(handoff) = handoff {
-                    handoff.complete();
+        crate::playback_control::TerminalCommitReceipt::retryable_until(
+            acknowledgement.expires_at_ms,
+            move |attempt| {
+                let store = Arc::clone(&store);
+                let acknowledgement = acknowledgement.clone();
+                let response = response.clone();
+                let handoff = handoff.clone();
+                let faults = faults.clone();
+                if let Some(handoff) = &handoff {
+                    handoff.restart();
                 }
-                attempt.complete(if persisted { Ok(response) } else { Err(()) });
-            });
-        })
+                tokio::spawn(async move {
+                    let persisted = match faults {
+                        Some(faults) => {
+                            persist_terminal_ack_with_faults(
+                                store,
+                                acknowledgement,
+                                Some(faults.as_ref()),
+                            )
+                            .await
+                        }
+                        None => persist_terminal_ack(store, acknowledgement).await,
+                    };
+                    if let Some(handoff) = handoff {
+                        handoff.complete();
+                    }
+                    attempt.complete(if persisted { Ok(response) } else { Err(()) });
+                });
+            },
+        )
     }
 }
 

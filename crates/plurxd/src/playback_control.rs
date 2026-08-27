@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -831,6 +831,58 @@ impl TerminalResponseHandoff {
 pub(crate) struct TerminalCommitReceipt {
     result: tokio::sync::watch::Receiver<Option<Result<ControlResponseV1, ()>>>,
     retry: Option<Arc<TerminalCommitRetry>>,
+    expiry: Arc<TerminalCommitExpiry>,
+}
+
+struct TerminalCommitExpiry {
+    expires_at_unix_ms: AtomicI64,
+    deadline: std::sync::Mutex<Option<tokio::time::Instant>>,
+}
+
+impl TerminalCommitExpiry {
+    fn new(expires_at_unix_ms: Option<i64>) -> Self {
+        let expiry = Self {
+            expires_at_unix_ms: AtomicI64::new(0),
+            deadline: std::sync::Mutex::new(None),
+        };
+        if let Some(expires_at_unix_ms) = expires_at_unix_ms {
+            expiry.set(expires_at_unix_ms);
+        }
+        expiry
+    }
+
+    fn set(&self, expires_at_unix_ms: i64) {
+        let previous = self
+            .expires_at_unix_ms
+            .compare_exchange(0, expires_at_unix_ms, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or_else(|existing| existing);
+        debug_assert!(previous == 0 || previous == expires_at_unix_ms);
+        if previous != 0 {
+            return;
+        }
+        let remaining_ms = expires_at_unix_ms.saturating_sub(crate::media_sessions::unix_ms());
+        let deadline = tokio::time::Instant::now()
+            .checked_add(Duration::from_millis(
+                u64::try_from(remaining_ms).unwrap_or(0),
+            ))
+            .unwrap_or_else(tokio::time::Instant::now);
+        *self
+            .deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(deadline);
+    }
+
+    fn unix_ms(&self) -> Option<i64> {
+        let expires_at_unix_ms = self.expires_at_unix_ms.load(Ordering::Acquire);
+        (expires_at_unix_ms > 0).then_some(expires_at_unix_ms)
+    }
+
+    fn expired(&self) -> bool {
+        self.deadline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+    }
 }
 
 struct TerminalCommitRetry {
@@ -838,20 +890,29 @@ struct TerminalCommitRetry {
     running: Arc<AtomicBool>,
     transition: Arc<std::sync::Mutex<()>>,
     start: Arc<dyn Fn(TerminalCommitAttempt) + Send + Sync>,
+    expiry: Arc<TerminalCommitExpiry>,
 }
 
 pub(crate) struct TerminalCommitAttempt {
     result: tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
     running: Arc<AtomicBool>,
     transition: Arc<std::sync::Mutex<()>>,
+    expiry: Arc<TerminalCommitExpiry>,
 }
 
 impl TerminalCommitAttempt {
-    pub(crate) fn complete(self, outcome: Result<ControlResponseV1, ()>) {
+    pub(crate) fn set_expires_at_unix_ms(&self, expires_at_unix_ms: i64) {
+        self.expiry.set(expires_at_unix_ms);
+    }
+
+    pub(crate) fn complete(self, mut outcome: Result<ControlResponseV1, ()>) {
         let _transition = self
             .transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if outcome.is_ok() && self.expiry.expired() {
+            outcome = Err(());
+        }
         self.running.store(false, Ordering::Release);
         let _ = self.result.send(Some(outcome));
     }
@@ -863,6 +924,11 @@ impl TerminalCommitRetry {
         let _transition = transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.expiry.expired() {
+            self.running.store(false, Ordering::Release);
+            let _ = self.result.send(Some(Err(())));
+            return;
+        }
         if self.result.borrow().as_ref().is_some_and(Result::is_ok)
             || self.running.swap(true, Ordering::AcqRel)
         {
@@ -873,6 +939,7 @@ impl TerminalCommitRetry {
             result: self.result.clone(),
             running: Arc::clone(&self.running),
             transition: Arc::clone(&transition),
+            expiry: Arc::clone(&self.expiry),
         };
         drop(_transition);
         (self.start)(attempt);
@@ -889,6 +956,7 @@ impl TerminalCommitReceipt {
             Self {
                 result,
                 retry: None,
+                expiry: Arc::new(TerminalCommitExpiry::new(None)),
             },
             sender,
         )
@@ -897,17 +965,21 @@ impl TerminalCommitReceipt {
     fn retryable_inner(
         start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
         start_now: bool,
+        expires_at_unix_ms: Option<i64>,
     ) -> Self {
         let (result, receiver) = tokio::sync::watch::channel(None);
+        let expiry = Arc::new(TerminalCommitExpiry::new(expires_at_unix_ms));
         let retry = Arc::new(TerminalCommitRetry {
             result,
             running: Arc::new(AtomicBool::new(false)),
             transition: Arc::new(std::sync::Mutex::new(())),
             start: Arc::new(start),
+            expiry: Arc::clone(&expiry),
         });
         let receipt = Self {
             result: receiver,
             retry: Some(Arc::clone(&retry)),
+            expiry,
         };
         if start_now {
             retry.start_if_needed();
@@ -915,14 +987,33 @@ impl TerminalCommitReceipt {
         receipt
     }
 
-    pub(crate) fn retryable(start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static) -> Self {
-        Self::retryable_inner(start, true)
+    pub(crate) fn retryable_until(
+        expires_at_unix_ms: i64,
+        start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
+    ) -> Self {
+        Self::retryable_inner(start, true, Some(expires_at_unix_ms))
     }
 
     pub(crate) fn deferred_retryable(
         start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
     ) -> Self {
-        Self::retryable_inner(start, false)
+        Self::retryable_inner(start, false, None)
+    }
+
+    #[cfg(test)]
+    fn deferred_retryable_until(
+        expires_at_unix_ms: i64,
+        start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
+    ) -> Self {
+        Self::retryable_inner(start, false, Some(expires_at_unix_ms))
+    }
+
+    pub(crate) fn expires_at_unix_ms(&self) -> Option<i64> {
+        self.expiry.unix_ms()
+    }
+
+    pub(crate) fn is_expired(&self) -> bool {
+        self.expiry.expired()
     }
 
     pub(crate) fn retry(&self) {
@@ -934,7 +1025,10 @@ impl TerminalCommitReceipt {
     pub(crate) async fn wait(&self) -> Result<ControlResponseV1, ()> {
         let mut result = self.result.clone();
         loop {
-            if let Some(outcome) = result.borrow().clone() {
+            if let Some(mut outcome) = result.borrow().clone() {
+                if outcome.is_ok() && self.expiry.expired() {
+                    outcome = Err(());
+                }
                 return outcome;
             }
             result.changed().await.map_err(|_| ())?;
@@ -991,13 +1085,15 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
 #[cfg(test)]
 pub(crate) struct RecoveringTerminalCommitter {
     attempts: Arc<AtomicUsize>,
+    retry_pause: Option<Arc<tokio::sync::Barrier>>,
 }
 
 #[cfg(test)]
 impl RecoveringTerminalCommitter {
-    pub(crate) fn new() -> Arc<Self> {
+    pub(crate) fn with_retry_pause(retry_pause: Arc<tokio::sync::Barrier>) -> Arc<Self> {
         Arc::new(Self {
             attempts: Arc::new(AtomicUsize::new(0)),
+            retry_pause: Some(retry_pause),
         })
     }
 
@@ -1012,20 +1108,39 @@ impl TerminalControlCommitter for RecoveringTerminalCommitter {
         let response = terminal_response_for_test(result);
         let attempts = Arc::clone(&self.attempts);
         let handoff = result.terminal_handoff.clone();
-        TerminalCommitReceipt::retryable(move |attempt| {
-            if let Some(handoff) = &handoff {
-                handoff.restart();
-            }
-            let index = attempts.fetch_add(1, Ordering::AcqRel);
-            if let Some(handoff) = &handoff {
-                handoff.complete();
-            }
-            attempt.complete(if index == 0 {
-                Err(())
-            } else {
-                Ok(response.clone())
-            });
-        })
+        let retry_pause = self.retry_pause.clone();
+        TerminalCommitReceipt::retryable_until(
+            crate::media_sessions::unix_ms().saturating_add(TERMINAL_ACK_REPLAY_TTL_MS),
+            move |attempt| {
+                if let Some(handoff) = &handoff {
+                    handoff.restart();
+                }
+                let index = attempts.fetch_add(1, Ordering::AcqRel);
+                if index == 1 {
+                    if let Some(retry_pause) = retry_pause.clone() {
+                        let response = response.clone();
+                        let handoff = handoff.clone();
+                        tokio::spawn(async move {
+                            retry_pause.wait().await;
+                            retry_pause.wait().await;
+                            if let Some(handoff) = handoff {
+                                handoff.complete();
+                            }
+                            attempt.complete(Ok(response));
+                        });
+                        return;
+                    }
+                }
+                if let Some(handoff) = &handoff {
+                    handoff.complete();
+                }
+                attempt.complete(if index == 0 {
+                    Err(())
+                } else {
+                    Ok(response.clone())
+                });
+            },
+        )
     }
 }
 
@@ -3167,6 +3282,57 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_commit_retry_starts_before_but_not_at_or_after_exact_expiry() {
+        fn receipt(starts: Arc<AtomicUsize>) -> TerminalCommitReceipt {
+            TerminalCommitReceipt::deferred_retryable_until(
+                crate::media_sessions::unix_ms().saturating_add(60_000),
+                move |attempt| {
+                    starts.fetch_add(1, Ordering::AcqRel);
+                    attempt.complete(Err(()));
+                },
+            )
+        }
+
+        fn deadline(receipt: &TerminalCommitReceipt) -> tokio::time::Instant {
+            receipt
+                .expiry
+                .deadline
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .expect("exact terminal deadline")
+        }
+
+        let before_starts = Arc::new(AtomicUsize::new(0));
+        let before = receipt(Arc::clone(&before_starts));
+        tokio::time::advance(
+            deadline(&before)
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        before.retry();
+        assert_eq!(before_starts.load(Ordering::Acquire), 1);
+        assert!(before.wait().await.is_err());
+
+        let at_starts = Arc::new(AtomicUsize::new(0));
+        let at = receipt(Arc::clone(&at_starts));
+        tokio::time::advance(deadline(&at).duration_since(tokio::time::Instant::now())).await;
+        at.retry();
+        assert_eq!(at_starts.load(Ordering::Acquire), 0);
+        assert!(at.wait().await.is_err());
+
+        let after_starts = Arc::new(AtomicUsize::new(0));
+        let after = receipt(Arc::clone(&after_starts));
+        tokio::time::advance(
+            deadline(&after).duration_since(tokio::time::Instant::now()) + Duration::from_millis(1),
+        )
+        .await;
+        after.retry();
+        assert_eq!(after_starts.load(Ordering::Acquire), 0);
+        assert!(after.wait().await.is_err());
+    }
 
     struct DropReplyOnTerminalAdmission {
         receiver: std::sync::Mutex<

@@ -105,10 +105,15 @@ transient Store failures and unknown write outcomes are retried for a bounded
 five-second attempt with these same immutable bytes; every Store write, read,
 and backoff is capped by that attempt's one absolute deadline. Read-after-
 unknown recognizes a write whose reply was lost without manufacturing a
-second response timestamp. If one attempt expires, the local request fails but
-the prepared response and acknowledgement remain retryable until their
-60-second idempotency bound. A later exact End starts at most one new attempt;
-it never reconstructs the response or its server timestamp. Both
+second response timestamp. Every attempt is additionally capped by the exact
+prepared acknowledgement expiry, and no start, completion, or waiter can turn
+into success at or after that boundary. If an earlier attempt fails, the local
+request fails but the prepared response and acknowledgement remain retryable
+only until that same immutable 60-second bound. A later exact End starts at
+most one new attempt; it never reconstructs the response or its server
+timestamp. Rolling retention derives from the prepared receipt rather than
+actor-admission time. VOD drops the retained response/Store operation after
+expiry while keeping the small owner-and-sequence tombstone. Both
 public ingress and the exact-write cluster endpoint consult it before active
 route and rate-limit rejection, validate the complete response against the
 exact terminal request, and return it as a replay. A different identity,
