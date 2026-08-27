@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["00af94d7"]
+reason = "This commit only records the metadata-only review correction in the historical regression ledger; it changes no runtime or validation behavior."
+ignore = true
