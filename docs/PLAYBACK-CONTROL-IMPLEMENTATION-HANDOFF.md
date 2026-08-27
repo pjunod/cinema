@@ -6,15 +6,15 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `5ac31a5c193eee75b4f3868a7614bfeb192383c6`
-(round 6 **APPROVED**)
-**Current repair implementation:**
-`97916906c774a26242ba417a23c446aca213772d`, with history binding
-`248d675b60dbd92c55bb460f93fe7782ca7889f9`; this documentation snapshot
-follows them, so resolve the immutable branch tip before requesting round 7
-**Test state:** the first authorized focused command reached the Rust compiler
-but ran zero tests because of three test-build errors. The errors are repaired
-but not recompiled or retested; exact-head round 7 must approve first.
+**Last reviewed exact head:** `f31945a3027dad0d5640972bed16539785f634bd`
+(round 7 **APPROVED**)
+**Current repair:** metadata-only history mapping
+`aca0b8d2e138f9230258102fdf9143c257440f66`; this documentation snapshot
+follows it, so resolve the immutable branch tip before requesting round 8
+**Test state:** 67 focused tests passed. `make check` then stopped at
+`history-check` before workspace tests because commit `248d675b` lacked its own
+metadata mapping. The mapping is committed but unverified; round 8 must approve
+before the gate resumes.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -248,6 +248,24 @@ ends before cleanup. Two independent static passes approved the narrow repair;
 Because the fix changes code, exact-head round 7 is required before the focused
 command may be retried.
 
+Round 7 reviewed exact head
+`f31945a3027dad0d5640972bed16539785f634bd`; all three passes **APPROVED**.
+Authorized focused validation then passed:
+
+- all 63 `playback_control::tests`;
+- both `deferred_flow_signal` process-supervisor regressions;
+- the actor-task-exit fencing and cleanup regression; and
+- the producer-signal/retirement linearization regression.
+
+That is 67 focused tests with zero failures. `make check` then passed the
+catalog audit but stopped at `history-check`, before the workspace test phase,
+because the subject of metadata commit `248d675b` contained “repair” and was
+itself classified as corrective without a mapping. Commit
+`aca0b8d2e138f9230258102fdf9143c257440f66` records `248d675b` as
+metadata-only and claims no runtime, test, or validation behavior. No gate has
+been rerun. Because the exact head changed, round 8 must approve before
+`make check` resumes.
+
 ### PR #619 adversarial review chronology
 
 Thirteen exact-head reviews ran. No tests were run during them.
@@ -322,13 +340,13 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 6 **APPROVED**
-exact head `5ac31a5c193eee75b4f3868a7614bfeb192383c6`. The first focused command found
-three compile errors before running tests; repair commits `97916906` and
-`248d675b` remain uncompiled and untested pending exact-head round 7.
+The action-passive deadline slice is in PR #621. Review round 7 **APPROVED**
+exact head `f31945a3027dad0d5640972bed16539785f634bd`, and all 67 focused tests passed.
+`make check` stopped at corrective-history metadata before workspace tests;
+`aca0b8d2` repairs that mapping and awaits exact-head round 8.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-7 review of that exact commit.
+  adversarial round-8 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -400,8 +418,8 @@ Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
 
-Committed implementation and review-repair sequence through the compile-fix
-history binding preceding this documentation snapshot:
+Committed implementation and review-repair sequence through the metadata
+binding preceding this documentation snapshot:
 
 The documentation commit containing this list and any later metadata-only
 binding are intentionally resolved with `git log`; a commit cannot list its
@@ -425,6 +443,9 @@ d3d5703b docs(playback): record history review repairs
 5ac31a5c chore(validation): bind ledger boundary evidence
 97916906 fix(playback): compile deferred flow regressions
 248d675b chore(validation): map deferred flow compile repair
+c4d01713 docs(playback): record focused compile repair
+f31945a3 chore(validation): bind focused compile evidence
+aca0b8d2 chore(validation): register compile evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
