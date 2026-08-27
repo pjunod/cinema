@@ -399,7 +399,7 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `9d100a04`. Continue in this order:
+committed through `f463d4d4`. Continue in this order:
 
 1. Obtain targeted ownership/lint review of `f463d4d4` plus its mapping.
 2. Rerun `make check`, then run `make cluster-check`.
