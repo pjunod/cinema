@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1b06d928"]
+points = ["cluster.auth", "playback.pipeline"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained lease-tick regression proves an explicitly protected HLS predecessor remains live but non-renewable until activation settles, while the clustered replacement-gate regression proves that protection is acquired for the exact predecessor and released with the activation guard; the replicated cluster contracts exercise the same durable session fencing and takeover paths."
