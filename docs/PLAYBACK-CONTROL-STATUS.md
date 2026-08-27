@@ -4,15 +4,16 @@
 **Merged baseline:** `origin/main` at `dba35f98` (PR #624)
 **Current work:** M4 decision transport on
 `codex/playback-control-m4-producer-decision` in the disposable clone. Runtime
-commits `c04898e2`, `732d3442`, and `91486148` add a behavior-neutral, one-slot
-immutable actor decision, a non-consuming poll command, and one bounded passive
-executor inbox/task. Root static review repaired a mailbox self-retention cycle
-before the first commit. Adversarial rounds 1 and 2 found timer-only terminal
-wake, executor-loss visibility, terminal-cause projection, compile/lint,
-test-scheduling, actor-loss classification, and terminal/receiver-loss race
-gaps. The three runtime commits repair those findings. The current head still
-needs exact-head round-3 review, and no unit, full, or cluster test has run for
-this slice yet.
+commits `c04898e2`, `732d3442`, `91486148`, and `ba3a504d` add a
+behavior-neutral, one-slot immutable actor decision, a non-consuming poll
+command, and one bounded passive executor inbox/task. Root static review
+repaired a mailbox self-retention cycle before the first commit. Adversarial
+rounds 1 through 3 found timer-only terminal wake, executor-loss visibility,
+terminal-cause projection, compile/lint, test-scheduling, actor-loss
+classification, terminal/receiver-loss races, stale executor-state overwrite,
+and a four-variant poll-contract violation. The four runtime commits repair
+those findings. The current head needs one exact-head re-review, and no unit,
+full, or cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -105,7 +106,7 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Rounds 1 and 2 addressed; round 3 pending.** At `ceb8c74d`, one reviewer approved and two requested changes for timer-only terminal wake, executor-loss visibility, terminal-cause projection, compile/lint issues, and weak liveness evidence. At `ff6ba47d`, one reviewer approved while two found actor loss during an in-flight poll could be mislabeled terminal, a terminal/receiver-loss race could obscure executor loss, and several tests still depended on task scheduling. Runtime repair `91486148` adds an explicit unavailable result for uncommitted actor loss, a committed terminal projection, loss-preserving terminal settlement, and phase-barrier/standalone bounded-primitive regressions. It awaits exact-head review. |
+| Adversarial implementation review | **Rounds 1 through 3 addressed; final exact-head re-review pending.** At `ceb8c74d`, one reviewer approved and two requested liveness, projection, compile/lint, and test-evidence changes. At `ff6ba47d`, one approved while two found actor-loss/terminal races and scheduler-dependent tests. At `c212547a`, one approved while two found a stale in-flight poll could overwrite terminal status and that transport loss had incorrectly become a fourth actor poll result. Runtime repair `ba3a504d` makes terminal/lost executor states atomically absorbing, adds a post-result race barrier/regression, restores the actor poll contract to exactly Idle/Decision/Terminal, and keeps uncommitted actor loss private to the transport. It awaits one exact-head re-review. |
 | Unit/focused tests | **Not run for the active slice.** Authored transport/lifecycle tests remain intentionally unexecuted until adversarial approval. |
 | Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
 

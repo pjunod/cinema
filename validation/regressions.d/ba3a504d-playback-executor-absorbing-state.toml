@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["ba3a504d"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "Round-3 repairs make terminal and lost executor observations atomic absorbing states, so an in-flight pre-terminal poll cannot publish stale idle/observing state after terminal commit. A post-result phase barrier proves that race. The actor poll contract again exposes exactly Idle, Decision, or Terminal while uncommitted actor loss remains a private transport result mapped to executor lost."
