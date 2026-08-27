@@ -431,7 +431,12 @@ smallest shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-This branch is unreviewed and untested. The sequencing and projection do not
+Formal round 1 at exact head `b57143a1` received concurrency and contract
+approval; the static reviewer requested two P3 stale source-comment repairs.
+The automatic policy preflight also reported three mechanical ownership-ledger
+count changes (`44→57`, `260→266`, and `244→248`) while correctly skipping the
+Rust and cluster gates. The repaired candidate still needs exact-head
+re-review, and runtime tests remain unrun. The sequencing and projection do not
 make recovery decisions. Legacy watchdogs, direct replacement/action paths,
 response admission, cleanup, and process ownership remain active. There is no
 `ProducerDecision`, action executor, retry cutover, or transparent handoff in

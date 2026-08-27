@@ -1652,8 +1652,9 @@ struct ProducerProgressDeadline {
 
 /// Provisional action-passive deadline observation retained when the exact
 /// armed clock becomes due. It is deliberately not a `ProducerDecision`:
-/// lifecycle commands do not join the ingress sequence until the next M4
-/// slice, so terminal or exact physical-flow facts may still revoke it.
+/// commands and producer facts now share ingress order, but the later M4
+/// decision/executor slice still owns whether this observation causes an
+/// action. Terminal or exact physical-flow facts may still revoke it first.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProducerDeadlineDue {
     producer_attempt: u64,
@@ -1856,8 +1857,8 @@ impl RollingFlowSync {
     }
 }
 
-/// A bounded, coalescing producer-event ingress independent of the actor's
-/// command mailbox.
+/// A bounded, coalescing producer-event ingress coordinated with the actor's
+/// bounded command mailbox.
 ///
 /// ffmpeg progress is read from a pipe that must never stop draining because
 /// a control request or filesystem observation filled the mailbox. Publishing
@@ -1868,8 +1869,10 @@ impl RollingFlowSync {
 /// link is retained and later telemetry cannot bridge it. Exit and successful
 /// exact-attempt physical-flow acknowledgements seal the open batch into
 /// barrier blocks, so progress cannot fold across process death or a physical
-/// hold/resume transition. Command barriers join this same fence in the next
-/// M4 slice before the actor deadline becomes an active recovery owner.
+/// hold/resume transition. Command publication seals all preceding blocks
+/// under the transition plus ingress fence and assigns the next coordinate;
+/// later producer facts therefore cannot leapfrog a queued command. This
+/// shared ordering remains action-passive until the later M4 cutover.
 struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
