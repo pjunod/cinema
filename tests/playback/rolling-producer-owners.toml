@@ -256,7 +256,7 @@ expected_occurrences = 17
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
-expected_occurrences = 44
+expected_occurrences = 57
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -269,7 +269,7 @@ expected_occurrences = 44
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 260
+expected_occurrences = 266
 
 [[module_structures]]
 id = "method-spawn"
@@ -319,7 +319,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 244
+expected_occurrences = 248
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

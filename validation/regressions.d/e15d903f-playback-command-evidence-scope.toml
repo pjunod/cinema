@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["e15d903f"]
+reason = "This commit clarifies that PR #624 final-head verification permits its new history-coverage record while requiring all pre-existing runtime, test, and validation blobs to match the approved implementation; it changes no runtime behavior."
+ignore = true

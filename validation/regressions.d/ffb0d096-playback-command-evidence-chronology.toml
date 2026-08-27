@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ffb0d096"]
+reason = "This commit reconciles three stale handoff passages with the recorded PR #624 review and local-gate chronology; it changes no runtime behavior."
+ignore = true

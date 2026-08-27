@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["03d1d850"]
+reason = "This commit only corrects source commentary, updates reviewed lexical ownership counts for the already-covered command-ingress regressions, and synchronizes playback-control status documentation; it changes no runtime behavior."
+ignore = true

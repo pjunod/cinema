@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["ddd09bd2"]
+reason = "This commit only binds PR #624 into the playback-control implementation handoff and Markdown/HTML project status; it changes no runtime behavior."
+ignore = true

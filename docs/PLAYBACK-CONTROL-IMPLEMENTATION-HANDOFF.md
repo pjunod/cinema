@@ -1,18 +1,21 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `48ea494c` (PR #619)
-**Active PR:** [#621](https://github.com/pjunod/plurx/pull/621)
-**Active branch:** `codex/playback-control-m4-deadline-cutoff`
-**Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
-(approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `86502718f12fc4fc0a49c20438aa0777feb572ed`
-(round 9 **APPROVED**)
-**Current repair:** final documentation-only gate evidence in this snapshot;
-resolve the immutable branch tip before requesting round 10
-**Test state:** 67 focused tests, `make check`, `make cluster-check`, and hosted
-PR validation are green on the round-9 runtime head. This documentation-only
-head requires exact-head round 10 and its latest hosted checks before merge.
+**Merged baseline:** `origin/main` at `8e331672` (PR #621)
+**Active PR:** #624
+**Active branch:** `codex/playback-control-m4-command-sequencing`
+**Last merged exact head:** `8e331672` (PR #621; round-10 unanimous
+**APPROVE** and hosted run `33109297301` green)
+**Last reviewed exact head:** `dc7c76676be2545d0425112fe19cfed1e86bf362`
+(PR #624 round 5 unanimously **APPROVED**)
+**Current implementation:** bounded shared command/producer sequencing,
+publication-time ordering, stale-exit fencing, partial observation-only actor
+projection in `SessionInfo` and telemetry, and bounded command metrics on the
+active branch; local validation complete, hosted CI pending
+**Test state:** 75 focused tests passed before the final lint-only repair. At
+approved implementation head `dc7c7667`, `make check` and
+`make cluster-check` passed. Hosted CI and evidence-only exact-head confirmation
+remain before merge.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -56,6 +59,19 @@ The rewrite is not starting from scratch:
 - PR #619: cutoff-safe progress coverage plus a checked whole-module legacy
   owner inventory, merged at `48ea494c` after thirteen exact-head reviews,
   focused tests, `make check`, `make cluster-check`, and hosted CI all passed.
+- PR #621: passive producer deadline and cutoff-safe ingress/fencing, merged as
+  `8e331672` after unanimous round-10 approval and hosted run `33109297301`
+  passed. It is the validated baseline for the active branch, not evidence for
+  that branch's new code.
+
+The active branch adds bounded shared command/producer sequencing,
+publication-time ordering, stale-exit fencing, partial observation-only actor
+projection in `SessionInfo` and telemetry, and bounded command metrics. Its
+implementation head `dc7c7667` received unanimous round-5 approval and passed
+the focused, full-workspace, and cluster gates. Hosted CI and evidence-only
+final-head confirmation remain. Legacy watchdogs, recovery actions, response
+admission, and compatibility owners remain active; no decision/executor cutover
+has happened.
 
 The merged actor is behavior-neutral for recovery. Legacy rolling watchdogs
 and in-place replacement still operate until later M4 slices transfer action
@@ -379,67 +395,108 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 9 **APPROVED**
-exact head `86502718f12fc4fc0a49c20438aa0777feb572ed`. Focused, full, cluster, and hosted
-gates are green on that runtime head. This final documentation-only evidence
-snapshot awaits exact-head round 10 and latest hosted validation.
+The active branch is `codex/playback-control-m4-command-sequencing` in PR
+#624. PR #621 is already merged as `8e331672` after unanimous
+round-10 approval and hosted run `33109297301` passed. The active branch adds
+behavioral sequencing and projection code, so the merged #621 evidence cannot
+be reused as its validation.
 
-- Push this candidate, resolve the immutable remote head, and request
-  adversarial round-10 review of that exact commit.
-- Confirm every required hosted check on that exact head is green, then merge
-  PR #621. Any correction requires another exact-head review before a test or
-  merge gate is reused.
+The implementation head `dc7c7667` has now completed steps 1–4 locally:
+round 5 returned three **APPROVE** verdicts with no P1/P2/P3 finding,
+`make check` passed, and `make cluster-check` passed. Continue in this order:
+
+1. Commit this final evidence-only documentation update and bind its history
+   metadata without changing the reviewed runtime implementation.
+2. Obtain a narrow exact-head review confirming that only evidence/docs and the
+   new history-coverage record changed, and that every pre-existing runtime,
+   test, and validation blob still matches approved `dc7c7667`.
+3. Require every hosted PR gate to pass on that exact documentation head; fix
+   any genuine failure and repeat review before rerunning affected tests.
+4. Merge PR #624 only after the exact hosted head is green.
+5. Keep the legacy watchdogs and actions in place until the actor decision,
+   executor, response-admission, and cleanup slices are individually landed
+   and reviewed. Do not describe sequencing or projection as recovery cutover.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
 review before local unit tests and full verification before merge.
 
-## 5. Current bounded M4 slice after #619
+## 5. Current M4 command-sequencing slice after #621
 
-A read-only Luna scout inspected the contract and current code without editing
-or testing. Its recommended smallest slice is now in the PR candidate:
+The active branch extends the merged passive deadline foundation with the
+smallest shared ordering and observability slice:
 
-- add actor-private `ProducerProgressDeadline` state beside producer facts in
-  `RollingControlActor`;
-- arm `starting` in `begin_producer_attempt_at`;
-- rearm `advancing` from accepted ingress `published_at`, never delayed
-  `observed_at`;
-- classify non-success exit immediately and enter `classifying_exit` only for
-  a successful exact exit needing completion proof;
-- choose the nearest lease/producer deadline in `run`, with a post-receive
-  due-first cutoff rather than relying only on `tokio::select!` bias; and
-- emit no retry/kill/replace action yet.
+- bounded actor command and producer-event envelopes share one ingress
+  sequence, so commands, publication facts, exits, and physical-flow barriers
+  can be compared without inferring order from task scheduling;
+- publication-time coordinates remain distinct from delayed observation time,
+  preserving the timestamp at which media became available;
+- stale producer exits are fenced by exact attempt and shared sequence, so a
+  predecessor cannot relabel a successor after replacement or actor teardown;
+- a partial, observation-only producer projection is carried through
+  `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
+- bounded command/deadline metrics expose activity without unbounded labels.
 
-The local candidate retains the exact armed instant in a provisional
-action-passive due record, applies exact-boundary progress or non-success exit
-before cutoff, gives lease/session terminal state priority, and disarms the
-passive deadline after one observation so it cannot spin. Producer cutoff now
-captures under the synchronous transition plus ingress fence and folds once;
-the sole process supervisor publishes successful exact-attempt SIGSTOP/SIGCONT
-as ordered ingress barriers before releasing that fence. Full bounded ingress
+Formal round 1 at exact head `b57143a1` received concurrency and contract
+approval; the static reviewer requested two P3 stale source-comment repairs.
+The automatic policy preflight also reported three mechanical ownership-ledger
+count changes (`44→57`, `260→266`, and `244→248`) while correctly skipping the
+Rust and cluster gates. Rounds 2 and 3 then unanimously approved exact head
+`a8d8ccb0`. The first focused build did not execute a test: Rust rejected the
+test actor future as non-`Send` because it could not prove an explicit
+transition-guard drop preceded the reply-pause await. The repair encloses the
+whole synchronous command transaction in a lexical scope, carries only the
+test reply tuple across the await, and applies `cargo fmt`; that changed head
+received unanimous round-4 approval as `7b7dfc58`. All 72 rolling-control tests
+and the three changed status/telemetry tests then passed. `make check` passed
+catalog/history and 173 policy/contract tests before Clippy found three static
+cleanup items: a now-test-only drain helper, a production unit binding, and a
+complex test tuple. The behavior-neutral repair gates the helper with
+`cfg(test)`, names the deferred test reply, and uses a zero-sized production
+marker. Round 5 unanimously approved exact implementation head `dc7c7667` with
+no P1/P2/P3 finding. At that head, `make check` passed catalog/history, the 121-
+and 52-test Python policy/contract suites, formatting, Clippy with warnings
+denied, and the complete Rust workspace/doc suite. `make cluster-check` then
+passed vendor snapshot/WAL recovery, 63 serialized clustered store contracts
+with two helper processes ignored, the live failure/topology campaign, seven
+cluster-activation tests, and two cluster-activity tests. Hosted CI and a
+narrow review of the evidence-only final head remain before merge. The
+sequencing and projection do not make recovery decisions. Legacy watchdogs,
+direct replacement/action paths, response admission, cleanup, and process
+ownership remain active. There is no
+`ProducerDecision`, action executor, retry cutover, or transparent handoff in
+this slice; the v1 wire action remains `none`.
+
+The merged passive deadline still retains its exact armed instant in a
+provisional action-passive due record, applies exact-boundary progress or
+non-success exit before cutoff, gives lease/session terminal state priority,
+and disarms after one observation so it cannot spin. Producer cutoff captures
+under the synchronous transition plus ingress fence and folds once; the sole
+process supervisor publishes successful exact-attempt SIGSTOP/SIGCONT as
+ordered ingress barriers before releasing that fence. Full bounded ingress
 waits before the syscall and re-authorizes after actor drain; intentional holds
-disarm the clock and a resume grants a fresh full budget. The temporary
-starting budget is the conservative 30-second compatibility value until the
-next policy-admission slice supplies the existing 12-second hardware or
-30-second software/copy budget. No recovery behavior consults this passive
-observation.
+disarm the clock and a resume grants a fresh full budget. No recovery behavior
+consults the passive observation yet.
 
-The armed `ProducerProgressDeadline`, provisional due record, process-exit due,
-flow revision, and physical-flow state remain actor-private. They are not yet
-projected through `RollingLeaseSnapshot`, Activity/status, or Prometheus; only
-bounded flow-capacity deferrals are exported. The decision/action slice must
-add a bounded operational projection before any legacy watchdog is removed.
+Primary implementation sites are:
 
-Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
+- `crates/plurxd/src/playback_control.rs` for the bounded command envelope,
+  actor/producer sequence merge, publication-time ordering, stale-exit fence,
+  producer projection, and bounded metrics;
+- `crates/plurxd/src/transcode.rs` for the additive `SessionInfo` projection;
+- `crates/plurxd/src/http/system.rs` for joined server telemetry; and
+- the existing producer-ingress and process-supervisor paths for the passive
+  deadline and physical-flow barriers.
 
-- `ProgressCoverageBatch` and ingress near line 1892;
-- `RollingControlActor` producer state near line 2411;
-- `begin_producer_attempt_at` near line 2758;
-- `observe_producer_progress_at` near line 2826;
-- `observe_producer_exit_at` near line 2849; and
-- actor `run` near line 3421.
+The passive deadline implementation remains centered in
+`crates/plurxd/src/playback_control.rs`: `ProgressCoverageBatch` and
+`RollingProducerIngress`, `RollingControlActor` producer state,
+`begin_producer_attempt_at`, `observe_producer_progress_at`,
+`observe_producer_exit_at`, `handle_command`, and actor `run`.
 
-Authored but not yet run focused evidence covers exact starting expiry and
+Focused evidence passed for command/producer sequence ordering,
+publication-time barriers, stale-exit/successor fencing, projection
+serialization, bounded metric labels, exact starting expiry and
 idempotent settlement, scheduler-delayed dispatch, rearm from fenced
 publication time, late/duplicate progress, exact-boundary progress and
 non-success exit, contiguous versus gapped A/B/C coverage, capture while
@@ -451,11 +508,10 @@ ordered physical hold/resume barriers, timely versus late hold, capacity
 deferral/wakeup through the real process supervisor with exact-attempt
 re-authorization against successor and retirement, unexpected actor-exit
 serialization, post-fence signal denial, cleanup progress, exact
-lifecycle-expiry precedence, process-owner flow publication, and lifecycle commands
-before/at/after the provisional producer due coordinate.
-Command publication sequencing remains deliberately outside this
-action-passive slice; it must land before a producer deadline is allowed to
-emit a decision.
+lifecycle-expiry precedence, process-owner flow publication, and lifecycle
+commands before/at/after the provisional producer due coordinate. These are
+observation and ordering regressions only; no test claims that the new branch
+has completed the decision/action cutover.
 
 Committed implementation and review-repair sequence through the final runtime
 head preceding this documentation snapshot:
@@ -491,7 +547,17 @@ db158bd6 docs(playback): record focused gate evidence
 aa7e12e4 chore(validation): register deadline helper evidence
 6f9676a5 docs(playback): record clippy gate repair
 86502718 chore(validation): bind clippy gate evidence
+383d62d8 feat(playback): sequence actor command ingress
+de23104d chore(validation): map sequenced command ingress
 ```
+
+The original command-sequencing and projection runtime is committed at
+`383d62d8`, with its regression-evidence mapping at `de23104d`; subsequent
+review and static-gate repairs culminate in approved implementation head
+`dc7c7667`. That head owns the focused, `make check`, and `make cluster-check`
+evidence recorded above. This documentation snapshot and its metadata-only
+bindings follow the implementation without changing it; only narrow
+evidence-head confirmation and hosted CI remain before merge.
 
 Leave all compatibility owners unchanged and active in that slice:
 `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`,
@@ -502,7 +568,7 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After the passive deadline slice:
+After the current sequencing/projection slice, the remaining M4 work is:
 
 1. Add one immutable actor decision and nonblocking session-executor wake.
 2. Move the single allowed pre-publication validated retry behind that owner.

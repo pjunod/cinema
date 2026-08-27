@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["de23104d", "905568b7"]
+reason = "These commits only record the sequenced command-ingress regression mapping and synchronize the playback-control handoff and Markdown/HTML project status with the immutable runtime candidate; they change no runtime behavior."
+ignore = true

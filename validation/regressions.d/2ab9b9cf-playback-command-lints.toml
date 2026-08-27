@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2ab9b9cf"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The retained rolling-control and paused-reply regressions compile both production and test actor shapes under Clippy with warnings denied: producer block draining is test-only, the deferred attempt reply has a named bounded payload, and the production command transaction returns a zero-sized marker rather than binding unit while preserving the same transition and flow-capacity order."
