@@ -18209,6 +18209,10 @@ mod tests {
         // The supervisor has authorized the exact attempt and still owns the
         // transition guard immediately before the syscall.
         pause.wait();
+        assert!(
+            control.producer_transition_guard_is_held_for_test(),
+            "the paused supervisor must own the transition guard"
+        );
         let (started, contender_started) = std::sync::mpsc::channel();
         let (fenced, observed) = std::sync::mpsc::channel();
         let fence = {

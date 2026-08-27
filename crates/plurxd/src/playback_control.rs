@@ -2366,6 +2366,17 @@ impl RollingControlHandle {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    #[cfg(test)]
+    pub(crate) fn producer_transition_guard_is_held_for_test(&self) -> bool {
+        match self.producer_transition.try_lock() {
+            Ok(_guard) => false,
+            Err(std::sync::TryLockError::WouldBlock) => true,
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                panic!("producer transition guard is poisoned: {error}")
+            }
+        }
+    }
+
     /// Authorize the one physical producer transition guarded by `guard`.
     ///
     /// The actor timer and this check share the same mutex and deadline. A
