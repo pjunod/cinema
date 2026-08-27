@@ -3401,9 +3401,7 @@ async fn session_info(
         .or(fallback_exit);
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
-    } else if s.cached {
-        "complete"
-    } else if producer_exit.as_ref().is_some_and(|exit| exit.success) {
+    } else if s.cached || producer_exit.as_ref().is_some_and(|exit| exit.success) {
         "complete"
     } else if producer_exit.is_some() {
         "exited"

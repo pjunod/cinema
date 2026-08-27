@@ -1487,6 +1487,16 @@ enum RollingControlCommand {
     },
 }
 
+struct RollingActorRuntime {
+    retired_fence: Arc<AtomicBool>,
+    producer_attempt: Arc<AtomicU64>,
+    producer_transition: Arc<std::sync::Mutex<Instant>>,
+    flow_sync: Arc<RollingFlowSync>,
+    producer_events: Arc<RollingProducerIngress>,
+    #[cfg(test)]
+    producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+}
+
 struct RollingControlActor {
     control: ControlState,
     last_renewal: Instant,
@@ -1511,30 +1521,36 @@ struct RollingControlActor {
 impl RollingControlActor {
     #[cfg(test)]
     fn new(now: Instant, initial_kind: &'static str, retired_fence: Arc<AtomicBool>) -> Self {
-        Self::with_producer_transition(
+        Self::with_runtime(
             now,
             initial_kind,
-            retired_fence,
-            Arc::new(AtomicU64::new(0)),
-            Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
-            Arc::new(RollingFlowSync::new()),
-            Arc::new(RollingProducerIngress::new()),
-            Arc::new(std::sync::Mutex::new(None)),
+            RollingActorRuntime {
+                retired_fence,
+                producer_attempt: Arc::new(AtomicU64::new(0)),
+                producer_transition: Arc::new(std::sync::Mutex::new(
+                    now + ROLLING_LEGACY_LEASE_TIMEOUT,
+                )),
+                flow_sync: Arc::new(RollingFlowSync::new()),
+                producer_events: Arc::new(RollingProducerIngress::new()),
+                producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
+            },
         )
     }
 
-    fn with_producer_transition(
+    fn with_runtime(
         now: Instant,
         initial_kind: &'static str,
-        retired_fence: Arc<AtomicBool>,
-        producer_attempt: Arc<AtomicU64>,
-        producer_transition: Arc<std::sync::Mutex<Instant>>,
-        flow_sync: Arc<RollingFlowSync>,
-        producer_events: Arc<RollingProducerIngress>,
-        #[cfg(test)] producer_attempt_reply_pause: Arc<
-            std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-        >,
+        runtime: RollingActorRuntime,
     ) -> Self {
+        let RollingActorRuntime {
+            retired_fence,
+            producer_attempt,
+            producer_transition,
+            flow_sync,
+            producer_events,
+            #[cfg(test)]
+            producer_attempt_reply_pause,
+        } = runtime;
         Self {
             control: ControlState::default(),
             last_renewal: now,
@@ -2071,16 +2087,18 @@ impl RollingControlHandle {
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         tokio::spawn(
-            RollingControlActor::with_producer_transition(
+            RollingControlActor::with_runtime(
                 now,
                 initial_kind,
-                Arc::clone(&retired),
-                Arc::clone(&producer_attempt),
-                Arc::clone(&producer_transition),
-                Arc::clone(&flow_sync),
-                Arc::clone(&producer_events),
-                #[cfg(test)]
-                Arc::clone(&producer_attempt_reply_pause),
+                RollingActorRuntime {
+                    retired_fence: Arc::clone(&retired),
+                    producer_attempt: Arc::clone(&producer_attempt),
+                    producer_transition: Arc::clone(&producer_transition),
+                    flow_sync: Arc::clone(&flow_sync),
+                    producer_events: Arc::clone(&producer_events),
+                    #[cfg(test)]
+                    producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
+                },
             )
             .run(receiver),
         );
