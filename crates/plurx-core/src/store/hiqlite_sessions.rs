@@ -1027,6 +1027,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             revision = revision + 1, updated_at_ms = $1
                       WHERE resource = $2 AND owner_node_id = $3 AND fence = $4
                         AND revision < 9223372036854775807
+                        AND expires_at_ms > $1
                         AND EXISTS (SELECT 1 FROM media_sessions
                           WHERE incarnation_id = $5 AND session_id = $6
                             AND owner_node_id = $3 AND owner_epoch = $4

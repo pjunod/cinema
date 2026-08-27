@@ -4455,7 +4455,6 @@ mod tests {
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         fixture.pause_control_after_acceptance(Arc::clone(&pause));
-        let reaper = tokio::spawn(Arc::clone(&fixture.state.transcode).reap_loop());
         let control = tokio::spawn({
             let state = fixture.state.clone();
             let route = route.clone();
@@ -4464,8 +4463,10 @@ mod tests {
         });
         pause.wait().await;
 
-        // Force a reaper pass after actor End but before the final status join.
-        tokio::time::sleep(Duration::from_millis(1_100)).await;
+        // Run the production reaper verdict after actor End but before the
+        // final status join. It must join the pending acknowledgement instead
+        // of treating the retired actor as abandoned cleanup.
+        assert!(fixture.reaper_pass_keeps_worker(&session_id).await);
         assert!(fixture.worker_is_registered(&session_id).await);
         control.abort();
         assert!(matches!(control.await, Err(error) if error.is_cancelled()));
@@ -4496,8 +4497,6 @@ mod tests {
                 .map(|route| route.state),
             Some("ended".to_owned())
         );
-        reaper.abort();
-        assert!(matches!(reaper.await, Err(error) if error.is_cancelled()));
     }
 
     #[tokio::test]

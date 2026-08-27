@@ -2497,6 +2497,17 @@ struct Session {
     first_slide_logged: AtomicBool,
 }
 
+enum SessionReapVerdict {
+    Live(String, Arc<Session>),
+    Expired {
+        id: String,
+        session: Arc<Session>,
+        idle_seconds: u64,
+        last_request: &'static str,
+        cleanup_reason: &'static str,
+    },
+}
+
 /// Keeps the replacement marker true across every await between actor
 /// admission and publishing (or terminally failing) its successor.
 ///
@@ -14724,63 +14735,15 @@ impl TranscodeManager {
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect::<Vec<_>>();
             for (id, session) in sessions {
-                // Serialize the actor's expiry fence with every producer
-                // signal and child transition. After a claim wins, no stale
-                // flow snapshot can resume the child before teardown takes
-                // this gate again.
-                let transition = session.child_transition.lock().await;
-                if session.terminal_response_pending.load(Acquire) {
-                    drop(transition);
-                    live.push((id, session));
-                    continue;
-                }
-                let claim = session.control.claim_expiry().await;
-                drop(transition);
-                match claim {
-                    Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
-                        // The actor publishes the shared process-local fence
-                        // before replying, so this claim owns ordinary idle
-                        // teardown even if the task is cancelled later.
-                        expired.push((
-                            id,
-                            session,
-                            lease.idle_for.as_secs(),
-                            lease.last_renewal_kind,
-                            "idle",
-                        ));
-                    }
-                    Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
-                        // A prior explicit retirement or expiry claimant died
-                        // before process teardown. Preserve that distinction
-                        // instead of inventing a second idle verdict.
-                        let reason = if lease.expiration_claimed {
-                            "idle"
-                        } else {
-                            "retired_recovery"
-                        };
-                        expired.push((
-                            id,
-                            session,
-                            lease.idle_for.as_secs(),
-                            lease.last_renewal_kind,
-                            reason,
-                        ));
-                    }
-                    Ok(crate::playback_control::RollingExpiryClaim::Live) => {
-                        live.push((id, session));
-                    }
-                    Err(_) => {
-                        // A dead mailbox cannot accept another renewal. Fail
-                        // closed instead of leaking an encoder forever.
-                        session.control.fence_unavailable();
-                        expired.push((
-                            id,
-                            session,
-                            0,
-                            "control-unavailable",
-                            "control_unavailable",
-                        ));
-                    }
+                match self.session_reap_verdict(id, session).await {
+                    SessionReapVerdict::Live(id, session) => live.push((id, session)),
+                    SessionReapVerdict::Expired {
+                        id,
+                        session,
+                        idle_seconds,
+                        last_request,
+                        cleanup_reason,
+                    } => expired.push((id, session, idle_seconds, last_request, cleanup_reason)),
                 }
             }
             for (id, session, idle_seconds, last_request, cleanup_reason) in expired {
@@ -14838,6 +14801,57 @@ impl TranscodeManager {
             for (id, session) in &live {
                 self.apply_ahead_window(session, id, limits, global_live, global_ahead)
                     .await;
+            }
+        }
+    }
+
+    async fn session_reap_verdict(&self, id: String, session: Arc<Session>) -> SessionReapVerdict {
+        // Serialize the actor's expiry fence with every producer signal and
+        // child transition. A pending accepted-End handoff is live only for
+        // cleanup purposes: the actor is terminal, but removing its Arc before
+        // the replicated acknowledgement lands would discard the winner.
+        let transition = session.child_transition.lock().await;
+        if session.terminal_response_pending.load(Acquire) {
+            drop(transition);
+            return SessionReapVerdict::Live(id, session);
+        }
+        let claim = session.control.claim_expiry().await;
+        drop(transition);
+        match claim {
+            Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: "idle",
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: if lease.expiration_claimed {
+                        "idle"
+                    } else {
+                        "retired_recovery"
+                    },
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Live) => {
+                SessionReapVerdict::Live(id, session)
+            }
+            Err(_) => {
+                session.control.fence_unavailable();
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: 0,
+                    last_request: "control-unavailable",
+                    cleanup_reason: "control_unavailable",
+                }
             }
         }
     }
@@ -15615,6 +15629,27 @@ impl HlsDeliveryFixture {
             .lock()
             .await
             .contains_key(session_id)
+    }
+
+    pub(crate) async fn reaper_pass_keeps_worker(&self, session_id: &str) -> bool {
+        let Some(session) = self
+            .state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+        else {
+            return false;
+        };
+        matches!(
+            self.state
+                .transcode
+                .session_reap_verdict(session_id.to_owned(), session)
+                .await,
+            SessionReapVerdict::Live(_, _)
+        )
     }
 
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
