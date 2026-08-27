@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["b0d62b88"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit retains the exact coverage declaration for the terminal recovery-lifetime correction without claiming that its validation-only mapping commit changed playback runtime behavior."
