@@ -3,8 +3,10 @@
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `8e331672` (PR #621)
 **Current work:** PR #624 on `codex/playback-control-m4-command-sequencing`;
-review round 1 found two stale source comments, and the repaired candidate is
-pending exact-head re-review. Runtime tests remain intentionally unrun.
+formal round 3 unanimously approved `a8d8ccb0`. The first focused build then
+found a non-`Send` test future because the compiler could not prove an explicit
+`MutexGuard` drop preceded the reply-pause await. The lexical-scope repair is
+pending exact-head review; no focused test body has executed yet.
 PR #621 merged as `8e331672` after exact-head round 10 received unanimous
 **APPROVE** verdicts and hosted run `33109297301` passed. The active branch
 adds bounded shared command/producer sequencing, publication-time ordering,
@@ -99,8 +101,8 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged in #621; active branch extends the foundation.** The merged slice folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. The active branch adds shared command/producer ordering and publication-time barriers, but has not been adversarially reviewed or tested. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** The active branch exposes bounded actor producer truth through `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry, including deadline/due, process-exit, physical-flow, and last-applied-sequence observations. It does not expose a decision, action, retry, executor, or response-admission verdict. The bounded deadline and command metrics are instrumentation, not recovery authority. |
-| Adversarial implementation review | **Active branch round 1 complete; repaired head pending.** At `b57143a1`, concurrency and contract reviewers approved; the static reviewer requested two P3 source-comment corrections. Those corrections and the automatic preflight's three mechanical ownership-inventory count updates are being bound into one repaired candidate for exact-head re-review before any runtime unit or full gate. |
-| Unit/focused tests | **Not run for the active branch.** The merged #621 head had 67 focused tests plus full/cluster evidence, but those results do not transfer to the new implementation head. |
+| Adversarial implementation review | **Round 3 unanimously approved `a8d8ccb0`; compile repair pending review.** Round 1 found two stale P3 source comments; round 2 approved their batched repair and the policy-preflight inventory counts; round 3 confirmed the metadata-only exact head. The first focused build then found a non-`Send` test future, so the lexical-scope repair and formatter output require a new exact-head approval before tests resume. |
+| Unit/focused tests | **Build attempted; no test body executed.** The first focused command failed while compiling `plurxd` because async `Send` analysis retained the transition `MutexGuard` across the test-only reply-pause await. The repair places the complete synchronous transaction in a lexical scope and carries only the reply tuple across the await; rerun waits for exact-head approval. The merged #621 results remain historical only. |
 | Full/cluster/hosted gates | **Not run for the active branch.** The merged #621 evidence is historical; rerun only after exact-head adversarial approval, and bind results to the unchanged reviewed head. |
 
 ## Watchdog-removal ledger

@@ -3652,9 +3652,7 @@ async fn session_info(
         production_policy: flow.map_or("unavailable", |flow| flow.policy),
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
-        producer_control: lease
-            .as_ref()
-            .map(|lease| lease.producer_control.clone()),
+        producer_control: lease.as_ref().map(|lease| lease.producer_control.clone()),
         producer_state,
         producer_attempt: Some(status_owner_attempt),
         playlist_ready: delivery.map(|delivery| delivery.playlist_ready),

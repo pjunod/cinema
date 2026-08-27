@@ -435,9 +435,14 @@ Formal round 1 at exact head `b57143a1` received concurrency and contract
 approval; the static reviewer requested two P3 stale source-comment repairs.
 The automatic policy preflight also reported three mechanical ownership-ledger
 count changes (`44→57`, `260→266`, and `244→248`) while correctly skipping the
-Rust and cluster gates. The repaired candidate still needs exact-head
-re-review, and runtime tests remain unrun. The sequencing and projection do not
-make recovery decisions. Legacy watchdogs, direct replacement/action paths,
+Rust and cluster gates. Rounds 2 and 3 then unanimously approved exact head
+`a8d8ccb0`. The first focused build did not execute a test: Rust rejected the
+test actor future as non-`Send` because it could not prove an explicit
+transition-guard drop preceded the reply-pause await. The repair encloses the
+whole synchronous command transaction in a lexical scope, carries only the
+test reply tuple across the await, and applies `cargo fmt`; that changed head
+must be adversarially approved before focused tests resume. The sequencing and
+projection do not make recovery decisions. Legacy watchdogs, direct replacement/action paths,
 response admission, cleanup, and process ownership remain active. There is no
 `ProducerDecision`, action executor, retry cutover, or transparent handoff in
 this slice; the v1 wire action remains `none`.
