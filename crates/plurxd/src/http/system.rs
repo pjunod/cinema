@@ -832,6 +832,7 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
             "production_policy": info.production_policy,
             "production_ahead_seconds": info.production_ahead_seconds,
             "production_target_seconds": info.production_target_seconds,
+            "producer_control": info.producer_control,
             "last_request_idle_ms": i64::try_from(info.idle_seconds)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(1_000)
@@ -3848,6 +3849,24 @@ mod tests {
             production_policy: "explicit_demand",
             production_ahead_seconds: Some(35),
             production_target_seconds: Some(50),
+            producer_control: Some(
+                crate::playback_control::RollingProducerOperationalSnapshot {
+                    phase: "held",
+                    deadline_attempt: None,
+                    deadline_mode: None,
+                    deadline_remaining_ms: None,
+                    due_attempt: None,
+                    due_mode: None,
+                    due_overdue_ms: None,
+                    process_exit_attempt: None,
+                    process_exit_due: false,
+                    physical_flow: "held",
+                    last_flow_applied_sequence: 11,
+                    last_applied_sequence: 17,
+                    observation_only: true,
+                    action_owner: "legacy_compatibility",
+                },
+            ),
             producer_state: "held",
             producer_attempt: Some(3),
             playlist_ready: Some(true),
@@ -3936,6 +3955,11 @@ mod tests {
         assert_eq!(extra["server"]["production_policy"], "explicit_demand");
         assert_eq!(extra["server"]["production_ahead_seconds"], 35);
         assert_eq!(extra["server"]["production_target_seconds"], 50);
+        assert_eq!(extra["server"]["producer_control"]["phase"], "held");
+        assert_eq!(
+            extra["server"]["producer_control"]["last_applied_sequence"],
+            17
+        );
     }
 
     #[test]

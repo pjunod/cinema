@@ -1485,6 +1485,32 @@ pub(crate) struct RollingLeaseSnapshot {
     /// True only when the playback deadline, rather than an explicit
     /// lifecycle fence, performed the actor's terminal transition.
     pub expiration_claimed: bool,
+    /// Bounded, actor-owned rolling producer truth. This is observation-only
+    /// until the later M4 decision/executor cutover removes the compatibility
+    /// recovery owners.
+    pub producer_control: RollingProducerOperationalSnapshot,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RollingProducerOperationalSnapshot {
+    pub phase: &'static str,
+    pub deadline_attempt: Option<u64>,
+    pub deadline_mode: Option<&'static str>,
+    pub deadline_remaining_ms: Option<i64>,
+    pub due_attempt: Option<u64>,
+    pub due_mode: Option<&'static str>,
+    pub due_overdue_ms: Option<i64>,
+    pub process_exit_attempt: Option<u64>,
+    pub process_exit_due: bool,
+    pub physical_flow: &'static str,
+    /// Ingress coordinate of the last exact physical-flow acknowledgement.
+    /// This is not the later desired-flow/action revision.
+    pub last_flow_applied_sequence: u64,
+    /// Global ingress coordinate of the last producer fact or command applied
+    /// by the actor. It is ordering evidence, not a desired-flow revision.
+    pub last_applied_sequence: u64,
+    pub observation_only: bool,
+    pub action_owner: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1605,6 +1631,16 @@ enum ProducerProgressDeadlineMode {
     Starting,
     Advancing,
     ClassifyingExit,
+}
+
+impl ProducerProgressDeadlineMode {
+    fn metric(self) -> (usize, &'static str) {
+        match self {
+            Self::Starting => (0, "starting"),
+            Self::Advancing => (1, "advancing"),
+            Self::ClassifyingExit => (2, "classifying_exit"),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1855,6 +1891,9 @@ struct RollingProducerIngressState {
     exit: Option<SequencedProducerBarrier>,
     flow: std::collections::VecDeque<SequencedProducerBarrier>,
     flow_reservations: usize,
+    /// Applied flow barriers moved into queued command envelopes still occupy
+    /// their fixed slots until the actor consumes that envelope.
+    sealed_flow_barriers: usize,
     #[cfg(test)]
     last_flow_applied: Option<RollingProducerFlowObservation>,
 }
@@ -1940,6 +1979,10 @@ impl ProgressCoverageBatch {
             .map_or(self.latest_telemetry.published_at, |progress| {
                 progress.published_at
             })
+    }
+
+    fn last_sequence(&self) -> u64 {
+        self.latest_telemetry.sequence
     }
 
     fn push(&mut self, mut sample: PublishedProgress) {
@@ -2077,7 +2120,9 @@ impl RollingProducerIngress {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if state.flow.len() + state.flow_reservations >= ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY {
+        if state.flow.len() + state.flow_reservations + state.sealed_flow_barriers
+            >= ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY
+        {
             ROLLING_PRODUCER_FLOW_DEFERRALS.fetch_add(1, Ordering::Relaxed);
             return false;
         }
@@ -2091,7 +2136,7 @@ impl RollingProducerIngress {
     async fn wait_for_flow_barrier_capacity(
         &self,
         retired: &AtomicBool,
-        actor: &tokio::sync::mpsc::Sender<RollingControlCommand>,
+        actor: &tokio::sync::mpsc::Sender<RollingControlEnvelope>,
     ) -> bool {
         loop {
             let notified = self.flow_capacity_available.notified();
@@ -2105,7 +2150,8 @@ impl RollingProducerIngress {
                     .state
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
-                state.flow.len() + state.flow_reservations < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY
+                state.flow.len() + state.flow_reservations + state.sealed_flow_barriers
+                    < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY
             };
             if has_capacity {
                 return true;
@@ -2329,6 +2375,48 @@ impl RollingProducerIngress {
         blocks
     }
 
+    /// Seal all producer evidence that linearized before one command, then
+    /// allocate the command's ingress coordinate while the caller holds the
+    /// shared producer-transition fence. Later producer publications must
+    /// therefore begin after this envelope and cannot be drained ahead of it.
+    fn seal_command(&self, command: RollingControlCommand) -> RollingControlEnvelope {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let sealed_flow_barriers = state.flow.len();
+        state.sealed_flow_barriers = state
+            .sealed_flow_barriers
+            .saturating_add(sealed_flow_barriers);
+        let preceding_producer = Self::take_blocks(&mut state);
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let sequence = state.next_sequence;
+        // Stamp only after both ingress fences are held. A publisher cannot
+        // carry an earlier time across a scheduling gap into a later order.
+        let published_at = rolling_now();
+        RollingControlEnvelope {
+            sequence,
+            published_at,
+            preceding_producer,
+            sealed_flow_barriers,
+            command,
+        }
+    }
+
+    fn release_sealed_flow_barriers(&self, count: usize) {
+        if count == 0 {
+            return;
+        }
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(state.sealed_flow_barriers >= count);
+        state.sealed_flow_barriers = state.sealed_flow_barriers.saturating_sub(count);
+        drop(state);
+        self.flow_capacity_available.notify_waiters();
+    }
+
     #[cfg(test)]
     fn drain(&self) -> Vec<RollingProducerEvent> {
         self.drain_blocks()
@@ -2356,7 +2444,7 @@ impl RollingProducerIngress {
 
 #[derive(Clone)]
 pub(crate) struct RollingControlHandle {
-    sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
+    sender: tokio::sync::mpsc::Sender<RollingControlEnvelope>,
     retired: Arc<AtomicBool>,
     producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
@@ -2427,6 +2515,34 @@ enum RollingControlCommand {
     },
 }
 
+impl RollingControlCommand {
+    fn metric_index(&self) -> Option<usize> {
+        match self {
+            #[cfg(test)]
+            Self::Renew { .. } | Self::SetRenewalForTest { .. } => None,
+            Self::Control { .. } => Some(0),
+            Self::BeginProducerAttempt { .. } => Some(1),
+            Self::AuthorizeProducerInstall { .. } => Some(2),
+            Self::ObservePublication { .. } => Some(3),
+            Self::CommitMedia { .. } => Some(4),
+            Self::Snapshot { .. } => Some(5),
+            Self::ClaimExpiry { .. } => Some(6),
+            Self::Terminal { .. } => Some(7),
+        }
+    }
+}
+
+/// One bounded actor command linearized with producer progress, exit, and
+/// physical-flow facts. The client control sequence remains an independent
+/// replay/idempotency coordinate; this sequence orders actor ingress only.
+struct RollingControlEnvelope {
+    sequence: u64,
+    published_at: Instant,
+    preceding_producer: Vec<RollingProducerIngressBlock>,
+    sealed_flow_barriers: usize,
+    command: RollingControlCommand,
+}
+
 struct RollingActorRuntime {
     retired_fence: Arc<AtomicBool>,
     producer_attempt: Arc<AtomicU64>,
@@ -2481,6 +2597,7 @@ struct RollingControlActor {
     producer_process_exit_due: Option<ProducerProcessExitDue>,
     producer_flow_revision: u64,
     producer_physical_flow: ProducerPhysicalFlowState,
+    last_applied_ingress_sequence: u64,
     retired: bool,
     terminal: Option<RollingTerminalCause>,
     expiration_claimed: bool,
@@ -2546,6 +2663,7 @@ impl RollingControlActor {
             producer_process_exit_due: None,
             producer_flow_revision: 0,
             producer_physical_flow: ProducerPhysicalFlowState::Running,
+            last_applied_ingress_sequence: 0,
             retired: false,
             terminal: None,
             expiration_claimed: false,
@@ -2589,6 +2707,70 @@ impl RollingControlActor {
             retired: self.retired,
             terminal: self.terminal,
             expiration_claimed: self.expiration_claimed,
+            producer_control: self.producer_operational_snapshot_at(now),
+        }
+    }
+
+    fn producer_operational_snapshot_at(
+        &self,
+        now: Instant,
+    ) -> RollingProducerOperationalSnapshot {
+        let deadline_mode = self.producer_progress_deadline.map(|deadline| match deadline.mode {
+            ProducerProgressDeadlineMode::Starting => "starting",
+            ProducerProgressDeadlineMode::Advancing => "advancing",
+            ProducerProgressDeadlineMode::ClassifyingExit => "classifying_exit",
+        });
+        let deadline_remaining_ms = self.producer_progress_deadline.map(|deadline| {
+            i64::try_from(deadline.instant.saturating_duration_since(now).as_millis())
+                .unwrap_or(i64::MAX)
+        });
+        let due_mode = self.producer_deadline_due.map(|due| match due.mode {
+            ProducerProgressDeadlineMode::Starting => "starting",
+            ProducerProgressDeadlineMode::Advancing => "advancing",
+            ProducerProgressDeadlineMode::ClassifyingExit => "classifying_exit",
+        });
+        let due_overdue_ms = self.producer_deadline_due.map(|due| {
+            i64::try_from(now.saturating_duration_since(due.deadline).as_millis())
+                .unwrap_or(i64::MAX)
+        });
+        let phase = if self.retired {
+            "terminal"
+        } else if self.producer_deadline_due.is_some() || self.producer_process_exit_due.is_some() {
+            "due"
+        } else if self.producer_physical_flow == ProducerPhysicalFlowState::Held {
+            "held"
+        } else {
+            match self.producer_progress_deadline.map(|deadline| deadline.mode) {
+                Some(ProducerProgressDeadlineMode::Starting) => "starting",
+                Some(ProducerProgressDeadlineMode::Advancing) => "running",
+                Some(ProducerProgressDeadlineMode::ClassifyingExit) => "classifying_exit",
+                None => "unarmed",
+            }
+        };
+        RollingProducerOperationalSnapshot {
+            phase,
+            deadline_attempt: self
+                .producer_progress_deadline
+                .map(|deadline| deadline.producer_attempt),
+            deadline_mode,
+            deadline_remaining_ms,
+            due_attempt: self
+                .producer_deadline_due
+                .map(|due| due.producer_attempt),
+            due_mode,
+            due_overdue_ms,
+            process_exit_attempt: self
+                .producer_process_exit_due
+                .map(|due| due.producer_attempt),
+            process_exit_due: self.producer_process_exit_due.is_some(),
+            physical_flow: match self.producer_physical_flow {
+                ProducerPhysicalFlowState::Running => "running",
+                ProducerPhysicalFlowState::Held => "held",
+            },
+            last_flow_applied_sequence: self.producer_flow_revision,
+            last_applied_sequence: self.last_applied_ingress_sequence,
+            observation_only: true,
+            action_owner: "legacy_compatibility",
         }
     }
 
@@ -2654,6 +2836,9 @@ impl RollingControlActor {
             deadline: deadline.instant,
         };
         self.producer_deadline_due = Some(due);
+        let (mode_index, _) = deadline.mode.metric();
+        ROLLING_PRODUCER_DEADLINE_OBSERVATIONS[mode_index]
+            .fetch_add(1, Ordering::Relaxed);
         Some(due)
     }
 
@@ -3073,16 +3258,25 @@ impl RollingControlActor {
     fn handle_producer_block_at(&mut self, now: Instant, block: RollingProducerIngressBlock) {
         match block {
             RollingProducerIngressBlock::Progress(batch) => {
+                self.last_applied_ingress_sequence = self
+                    .last_applied_ingress_sequence
+                    .max(batch.last_sequence());
                 let accepted = self.observe_producer_progress_batch_at(now, batch);
                 ROLLING_PRODUCER_EVENT_OUTCOMES[usize::from(!accepted)]
                     .fetch_add(1, Ordering::Relaxed);
             }
             RollingProducerIngressBlock::Barrier(barrier) => {
                 if let Some(batch) = barrier.preceding_progress {
+                    self.last_applied_ingress_sequence = self
+                        .last_applied_ingress_sequence
+                        .max(batch.last_sequence());
                     let accepted = self.observe_producer_progress_batch_at(now, batch);
                     ROLLING_PRODUCER_EVENT_OUTCOMES[usize::from(!accepted)]
                         .fetch_add(1, Ordering::Relaxed);
                 }
+                self.last_applied_ingress_sequence = self
+                    .last_applied_ingress_sequence
+                    .max(barrier.event.sequence);
                 self.handle_sequenced_producer_event_at(now, barrier.event);
             }
         }
@@ -3105,16 +3299,8 @@ impl RollingControlActor {
         let _ = self.settle_producer_deadline_at(now);
     }
 
-    fn run_due_first_cutoff(&mut self) {
-        self.run_due_first_cutoff_with_now(None);
-    }
-
     #[cfg(test)]
     fn run_due_first_cutoff_at(&mut self, now: Instant) {
-        self.run_due_first_cutoff_with_now(Some(now));
-    }
-
-    fn run_due_first_cutoff_with_now(&mut self, test_now: Option<Instant>) {
         let transition = Arc::clone(&self.producer_transition);
         let _transition = transition
             .lock()
@@ -3130,9 +3316,6 @@ impl RollingControlActor {
         // after this ingress guard is released.
         let freed_flow_capacity = !ingress.flow.is_empty();
         let blocks = RollingProducerIngress::take_blocks(&mut ingress);
-        // Production samples dispatch only after both possibly-contended
-        // fences are owned. Test callers may inject an exact monotonic point.
-        let now = test_now.unwrap_or_else(rolling_now);
         self.handle_producer_blocks_at(now, blocks);
         drop(ingress);
         drop(_transition);
@@ -3316,7 +3499,29 @@ impl RollingControlActor {
         }
     }
 
-    async fn handle_command(&mut self, command: RollingControlCommand) {
+    async fn handle_command(&mut self, envelope: RollingControlEnvelope) {
+        let RollingControlEnvelope {
+            sequence,
+            published_at,
+            preceding_producer,
+            sealed_flow_barriers,
+            command,
+        } = envelope;
+        let transition = Arc::clone(&self.producer_transition);
+        let mut transition = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.handle_producer_blocks_at(published_at, preceding_producer);
+        self.last_applied_ingress_sequence = self.last_applied_ingress_sequence.max(sequence);
+        if let Some(metric_index) = command.metric_index() {
+            ROLLING_CONTROL_COMMANDS[metric_index].fetch_add(1, Ordering::Relaxed);
+        }
+        #[cfg(test)]
+        let mut deferred_begin_reply: Option<(
+            tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+            Result<u64, ProducerAttemptRejection>,
+            Option<Arc<tokio::sync::Barrier>>,
+        )> = None;
         match command {
             #[cfg(test)]
             RollingControlCommand::Renew {
@@ -3324,11 +3529,7 @@ impl RollingControlActor {
                 source,
                 reply,
             } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let mut transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let renewed = self.renew_at(rolling_now(), kind, source);
+                let renewed = self.renew_at(published_at, kind, source);
                 if renewed {
                     transition.lease_deadline = self.deadline();
                 }
@@ -3345,42 +3546,37 @@ impl RollingControlActor {
                 // deadline has expired.  The final closed check and mutation
                 // are consecutive actor operations with no suspension point.
                 if reply.is_closed() {
-                    return;
-                }
-                let transition = Arc::clone(&self.producer_transition);
-                let mut transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let outcome = if crate::media_sessions::unix_ms() >= deadline_unix_ms {
-                    Err(ControlStateError::Unavailable)
+                    // Cancellation before actor application consumes the
+                    // ordered barrier but must not mutate control state.
                 } else {
-                    self.control_at(rolling_now(), *request)
-                };
-                if outcome.as_ref().is_ok_and(|outcome| {
-                    outcome.disposition == ControlDisposition::Accepted && !outcome.lease.retired
-                }) {
-                    transition.lease_deadline = self.deadline();
-                }
-                if let (Some(admission), Ok(outcome)) = (terminal_admission, outcome.as_ref()) {
-                    if outcome.lease.terminal == Some(RollingTerminalCause::End) {
-                        // Transfer ownership before the fallible reply send.
-                        admission.accepted(outcome.clone());
+                    let outcome = if crate::media_sessions::unix_ms() >= deadline_unix_ms {
+                        Err(ControlStateError::Unavailable)
+                    } else {
+                        self.control_at(published_at, *request)
+                    };
+                    if outcome.as_ref().is_ok_and(|outcome| {
+                        outcome.disposition == ControlDisposition::Accepted
+                            && !outcome.lease.retired
+                    }) {
+                        transition.lease_deadline = self.deadline();
                     }
+                    if let (Some(admission), Ok(outcome)) =
+                        (terminal_admission, outcome.as_ref())
+                    {
+                        if outcome.lease.terminal == Some(RollingTerminalCause::End) {
+                            // Transfer ownership before the fallible reply send.
+                            admission.accepted(outcome.clone());
+                        }
+                    }
+                    let _ = reply.send(outcome);
                 }
-                let _ = reply.send(outcome);
             }
             RollingControlCommand::BeginProducerAttempt { reply } => {
                 // Installation holds this exact fence through synchronous
                 // child/registry publication. A newer attempt must not pass
                 // that linearization point and make the just-published owner
                 // stale before the publication itself completes.
-                let outcome = {
-                    let transition = Arc::clone(&self.producer_transition);
-                    let _transition = transition
-                        .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
-                    self.begin_producer_attempt_at(rolling_now())
-                };
+                let outcome = self.begin_producer_attempt_at(published_at);
                 #[cfg(test)]
                 let reply_pause = self
                     .producer_attempt_reply_pause
@@ -3388,29 +3584,25 @@ impl RollingControlActor {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .take();
                 #[cfg(test)]
-                if let Some(reply_pause) = reply_pause {
-                    reply_pause.wait().await;
-                    reply_pause.wait().await;
+                {
+                    deferred_begin_reply = Some((reply, outcome, reply_pause));
                 }
+                #[cfg(not(test))]
                 let _ = reply.send(outcome);
             }
             RollingControlCommand::AuthorizeProducerInstall {
                 producer_attempt,
                 reply,
             } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let mut transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let authorized =
-                    self.authorize_producer_install_at(rolling_now(), producer_attempt);
+                    self.authorize_producer_install_at(published_at, producer_attempt);
                 if authorized.is_ok() {
                     transition.lease_deadline = self.deadline();
                 }
                 let _ = reply.send(authorized);
             }
             RollingControlCommand::ObservePublication { observation, reply } => {
-                let _ = reply.send(self.observe_publication_at(rolling_now(), observation));
+                let _ = reply.send(self.observe_publication_at(published_at, observation));
             }
             RollingControlCommand::CommitMedia {
                 kind,
@@ -3419,12 +3611,8 @@ impl RollingControlActor {
                 segment_end_ms,
                 reply,
             } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let mut transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let committed = self.commit_media_at(
-                    rolling_now(),
+                    published_at,
                     kind,
                     producer_attempt,
                     segment_index,
@@ -3441,53 +3629,94 @@ impl RollingControlActor {
                 // both select branches are ready, it must linearize expiry
                 // before any caller can use the returned state to authorize a
                 // producer signal.
-                let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let now = rolling_now();
-                let snapshot = match self.claim_expiry_at(now) {
-                    RollingExpiryClaim::Live => self.snapshot_at(now),
+                let snapshot = match self.claim_expiry_at(published_at) {
+                    RollingExpiryClaim::Live => {
+                        let _ = self.settle_producer_deadline_at(published_at);
+                        self.snapshot_at(published_at)
+                    }
                     RollingExpiryClaim::Claimed(snapshot)
                     | RollingExpiryClaim::Retired(snapshot) => snapshot,
                 };
                 let _ = reply.send(snapshot);
             }
             RollingControlCommand::ClaimExpiry { reply } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                let _ = reply.send(self.claim_expiry_at(rolling_now()));
+                let _ = reply.send(self.claim_expiry_at(published_at));
             }
             RollingControlCommand::Terminal { cause, reply } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let _transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                // A lifecycle command dequeued at or after the monotonic
-                // deadline cannot steal the terminal label from an expiry
-                // that is already due merely because the timer branch has not
-                // been scheduled yet.
-                let _ = self.claim_expiry_at(rolling_now());
+                // Publication time is the lifecycle linearization point. An
+                // exact-deadline terminal command loses to expiry, while a
+                // command published before the deadline is not relabelled by
+                // actor scheduling delay.
+                let _ = self.claim_expiry_at(published_at);
                 let outcome = self.terminate(cause);
                 let _ = reply.send(outcome);
             }
             #[cfg(test)]
             RollingControlCommand::SetRenewalForTest { at, kind, reply } => {
-                let transition = Arc::clone(&self.producer_transition);
-                let mut transition = transition
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 self.last_renewal = at;
                 self.last_renewal_kind = kind;
                 transition.lease_deadline = self.deadline();
                 let _ = reply.send(());
             }
         }
+        drop(transition);
+        self.producer_events
+            .release_sealed_flow_barriers(sealed_flow_barriers);
+        #[cfg(test)]
+        if let Some((reply, outcome, reply_pause)) = deferred_begin_reply {
+            if let Some(reply_pause) = reply_pause {
+                reply_pause.wait().await;
+                reply_pause.wait().await;
+            }
+            let _ = reply.send(outcome);
+        }
     }
 
-    async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlCommand>) {
+    #[cfg(test)]
+    async fn handle_command_for_test(&mut self, command: RollingControlCommand) {
+        let transition = Arc::clone(&self.producer_transition);
+        let transition = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envelope = self.producer_events.seal_command(command);
+        drop(transition);
+        self.handle_command(envelope).await;
+    }
+
+    /// If a command published before this cutoff is already queued, return it
+    /// without draining producer facts that followed it. The shared
+    /// transition fence closes the missed-wakeup race: a publisher either
+    /// completed its send before `try_recv`, or receives a later timestamp
+    /// after this cutoff releases the fence.
+    fn command_before_cutoff(
+        &mut self,
+        receiver: &mut tokio::sync::mpsc::Receiver<RollingControlEnvelope>,
+    ) -> Option<RollingControlEnvelope> {
+        let transition = Arc::clone(&self.producer_transition);
+        let _transition = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Ok(envelope) = receiver.try_recv() {
+            return Some(envelope);
+        }
+        let producer_events = Arc::clone(&self.producer_events);
+        let mut ingress = producer_events
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let freed_flow_capacity = !ingress.flow.is_empty();
+        let blocks = RollingProducerIngress::take_blocks(&mut ingress);
+        let now = rolling_now();
+        self.handle_producer_blocks_at(now, blocks);
+        drop(ingress);
+        drop(_transition);
+        if freed_flow_capacity {
+            producer_events.flow_capacity_available.notify_waiters();
+        }
+        None
+    }
+
+    async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlEnvelope>) {
         let _exit_fence = RollingActorExitFence {
             retired: Arc::clone(&self.retired_fence),
             producer_transition: Arc::clone(&self.producer_transition),
@@ -3504,18 +3733,12 @@ impl RollingControlActor {
                         let Some(command) = command else {
                             break;
                         };
-                        let now = rolling_now();
-                        self.handle_producer_blocks_at(
-                            now,
-                            self.producer_events.drain_blocks(),
-                        );
                         self.handle_command(command).await;
                     }
                     _ = producer_events.wait_for_activity() => {
-                        self.handle_producer_blocks_at(
-                            rolling_now(),
-                            self.producer_events.drain_blocks(),
-                        );
+                        if let Some(command) = self.command_before_cutoff(&mut receiver) {
+                            self.handle_command(command).await;
+                        }
                     }
                 }
                 continue;
@@ -3525,22 +3748,20 @@ impl RollingControlActor {
             tokio::select! {
                 biased;
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
-                    // Bias is not the proof. Capture producer facts only after
-                    // taking the transition and ingress fences together.
-                    self.run_due_first_cutoff();
+                    if let Some(command) = self.command_before_cutoff(&mut receiver) {
+                        self.handle_command(command).await;
+                    }
                 }
                 command = receiver.recv() => {
                     let Some(command) = command else {
                         break;
                     };
-                    // Retain the selected envelope while the due-first cutoff
-                    // consumes producer facts that may have been published at
-                    // or before the armed deadline.
-                    self.run_due_first_cutoff();
                     self.handle_command(command).await;
                 }
                 _ = producer_events.wait_for_activity() => {
-                    self.run_due_first_cutoff();
+                    if let Some(command) = self.command_before_cutoff(&mut receiver) {
+                        self.handle_command(command).await;
+                    }
                 }
             }
         }
@@ -3548,6 +3769,37 @@ impl RollingControlActor {
 }
 
 impl RollingControlHandle {
+    /// Publish one command through the same bounded sequence as producer
+    /// facts. Capacity is reserved before either synchronous fence is taken;
+    /// after the transition fence is acquired there is no await or fallible
+    /// mailbox operation before the sealed envelope is sent.
+    async fn enqueue_command(&self, command: RollingControlCommand) -> Result<(), ()> {
+        let permit = self.sender.reserve().await.map_err(|_| ())?;
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envelope = self.producer_events.seal_command(command);
+        permit.send(envelope);
+        drop(transition);
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn try_enqueue_command_for_test(&self, command: RollingControlCommand) -> bool {
+        let Ok(permit) = self.sender.try_reserve() else {
+            return false;
+        };
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envelope = self.producer_events.seal_command(command);
+        permit.send(envelope);
+        drop(transition);
+        true
+    }
+
     pub(crate) fn spawn(initial_kind: &'static str) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         let retired = Arc::new(AtomicBool::new(false));
@@ -3621,8 +3873,7 @@ impl RollingControlHandle {
     async fn renew(&self, kind: &'static str, source: RollingRenewalSource) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .sender
-            .send(RollingControlCommand::Renew {
+            .enqueue_command(RollingControlCommand::Renew {
                 kind,
                 source,
                 reply,
@@ -3674,6 +3925,22 @@ impl RollingControlHandle {
         code: Option<i32>,
         signal: Option<i32>,
     ) {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Attempt admission, process signalling, actor exit, and terminal
+        // publication share this fence. A predecessor that loses to Begin(B)
+        // cannot take B's open progress batch and later disappear when B's
+        // own exit replaces it.
+        if self.retired.load(Ordering::Acquire)
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
+            ROLLING_PRODUCER_EVENT_INGRESS[1].fetch_add(1, Ordering::Relaxed);
+            ROLLING_PRODUCER_EVENT_COALESCED[1].fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         self.producer_events
             .publish_exit(RollingProducerExitObservation {
                 producer_attempt,
@@ -3686,8 +3953,7 @@ impl RollingControlHandle {
 
     pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::BeginProducerAttempt { reply })
+        self.enqueue_command(RollingControlCommand::BeginProducerAttempt { reply })
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
         response
@@ -3709,8 +3975,7 @@ impl RollingControlHandle {
     ) -> Result<(), ProducerAttemptRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .sender
-            .send(RollingControlCommand::AuthorizeProducerInstall {
+            .enqueue_command(RollingControlCommand::AuthorizeProducerInstall {
                 producer_attempt,
                 reply,
             })
@@ -3755,8 +4020,7 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .sender
-            .send(RollingControlCommand::ObservePublication { observation, reply })
+            .enqueue_command(RollingControlCommand::ObservePublication { observation, reply })
             .await
             .is_err()
         {
@@ -3774,8 +4038,7 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .sender
-            .send(RollingControlCommand::CommitMedia {
+            .enqueue_command(RollingControlCommand::CommitMedia {
                 kind,
                 producer_attempt,
                 segment_index,
@@ -3812,8 +4075,7 @@ impl RollingControlHandle {
             snapshot: request.snapshot,
         };
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::Control {
+        self.enqueue_command(RollingControlCommand::Control {
                 request: Box::new(request),
                 deadline_unix_ms,
                 terminal_admission,
@@ -3826,8 +4088,7 @@ impl RollingControlHandle {
 
     pub(crate) async fn snapshot(&self) -> Option<RollingLeaseSnapshot> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::Snapshot { reply })
+        self.enqueue_command(RollingControlCommand::Snapshot { reply })
             .await
             .ok()?;
         response.await.ok()
@@ -3835,8 +4096,7 @@ impl RollingControlHandle {
 
     pub(crate) async fn claim_expiry(&self) -> Result<RollingExpiryClaim, ControlStateError> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::ClaimExpiry { reply })
+        self.enqueue_command(RollingControlCommand::ClaimExpiry { reply })
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)
@@ -3847,8 +4107,7 @@ impl RollingControlHandle {
         cause: RollingTerminalCause,
     ) -> Result<RollingTerminalOutcome, ControlStateError> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::Terminal { cause, reply })
+        self.enqueue_command(RollingControlCommand::Terminal { cause, reply })
             .await
             .map_err(|_| ControlStateError::Unavailable)?;
         response.await.map_err(|_| ControlStateError::Unavailable)
@@ -4046,8 +4305,7 @@ impl RollingControlHandle {
     #[cfg(test)]
     pub(crate) async fn set_renewal_for_test(&self, at: Instant, kind: &'static str) {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.sender
-            .send(RollingControlCommand::SetRenewalForTest { at, kind, reply })
+        self.enqueue_command(RollingControlCommand::SetRenewalForTest { at, kind, reply })
             .await
             .expect("rolling actor available");
         response.await.expect("rolling actor reply");
@@ -4100,6 +4358,9 @@ static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::ne
 /// Progress accepted/rejected, then exit accepted/rejected.
 static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
+static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] =
+    [const { AtomicU64::new(0) }; 3];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -4336,6 +4597,43 @@ pub(crate) fn prometheus() -> String {
          plurx_playback_rolling_producer_flow_deferrals_total {}\n",
         ROLLING_PRODUCER_FLOW_DEFERRALS.load(Ordering::Relaxed),
     ));
+    output.push_str(
+        "# HELP plurx_playback_rolling_producer_deadline_observations_total Action-passive rolling producer deadlines observed due by bounded mode.\n\
+         # TYPE plurx_playback_rolling_producer_deadline_observations_total counter\n",
+    );
+    for mode in [
+        ProducerProgressDeadlineMode::Starting,
+        ProducerProgressDeadlineMode::Advancing,
+        ProducerProgressDeadlineMode::ClassifyingExit,
+    ] {
+        let (index, label) = mode.metric();
+        output.push_str(&format!(
+            "plurx_playback_rolling_producer_deadline_observations_total{{mode=\"{label}\"}} {}\n",
+            ROLLING_PRODUCER_DEADLINE_OBSERVATIONS[index].load(Ordering::Relaxed),
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_rolling_control_commands_total Sequenced rolling actor commands dequeued by bounded kind.\n\
+         # TYPE plurx_playback_rolling_control_commands_total counter\n",
+    );
+    for (index, kind) in [
+        "control",
+        "begin_attempt",
+        "authorize_install",
+        "observe_publication",
+        "commit_media",
+        "snapshot",
+        "claim_expiry",
+        "terminal",
+    ]
+    .iter()
+    .enumerate()
+    {
+        output.push_str(&format!(
+            "plurx_playback_rolling_control_commands_total{{kind=\"{kind}\"}} {}\n",
+            ROLLING_CONTROL_COMMANDS[index].load(Ordering::Relaxed),
+        ));
+    }
     output
 }
 
@@ -6335,6 +6633,41 @@ mod tests {
         assert!(ingress.drain_blocks().is_empty());
     }
 
+    #[test]
+    fn command_envelope_retains_flow_capacity_until_actor_application() {
+        let ingress = RollingProducerIngress::new();
+        for held in [true, false] {
+            assert!(ingress.reserve_flow_barrier());
+            ingress.finish_reserved_flow_barrier(
+                RollingProducerFlowObservation {
+                    producer_attempt: 1,
+                    state: if held {
+                        ProducerPhysicalFlowState::Held
+                    } else {
+                        ProducerPhysicalFlowState::Running
+                    },
+                },
+                true,
+            );
+        }
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let envelope = ingress.seal_command(RollingControlCommand::Snapshot { reply });
+        assert_eq!(envelope.sealed_flow_barriers, 2);
+        assert!(
+            !ingress.reserve_flow_barrier(),
+            "moving barriers into the bounded mailbox must not authorize another syscall"
+        );
+        ingress.release_sealed_flow_barriers(envelope.sealed_flow_barriers);
+        assert!(ingress.reserve_flow_barrier());
+        ingress.finish_reserved_flow_barrier(
+            RollingProducerFlowObservation {
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Running,
+            },
+            false,
+        );
+    }
+
     #[tokio::test]
     async fn closed_actor_mailbox_fences_and_releases_a_full_capacity_waiter() {
         let control = RollingControlHandle::unavailable_for_test();
@@ -6479,6 +6812,335 @@ mod tests {
         assert_eq!(actor.terminal, Some(RollingTerminalCause::LeaseExpired));
         assert_eq!(actor.producer_deadline_due, None);
         assert_eq!(actor.producer_progress_deadline, None);
+    }
+
+    #[test]
+    fn command_envelope_splits_progress_and_preserves_global_ingress_order() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
+            false,
+            started,
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                200,
+                950,
+                850,
+                started + Duration::from_secs(1),
+            )),
+            false,
+            started + Duration::from_secs(1),
+        );
+        let (reply, _response) = tokio::sync::oneshot::channel();
+        let envelope = ingress.seal_command(RollingControlCommand::Snapshot { reply });
+        assert_eq!(envelope.sealed_flow_barriers, 0);
+        let [RollingProducerIngressBlock::Progress(preceding)] =
+            envelope.preceding_producer.as_slice()
+        else {
+            panic!("command seals exactly its preceding progress batch");
+        };
+        assert!(preceding.last_sequence() < envelope.sequence);
+        assert_eq!(
+            preceding
+                .latest_progress
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(200)
+        );
+
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                300,
+                1_000,
+                900,
+                started + Duration::from_secs(2),
+            )),
+            false,
+            started + Duration::from_secs(2),
+        );
+        let successor_blocks = ingress.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(successor)] = successor_blocks.as_slice() else {
+            panic!("post-command progress starts a successor batch");
+        };
+        assert!(successor.first_sequence() > envelope.sequence);
+        assert_eq!(
+            successor
+                .first_advancing
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(300)
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_command_cutoff_cannot_drain_its_successor_progress_early() {
+        let started = rolling_now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        let ingress = Arc::clone(&actor.producer_events);
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
+            false,
+            started + Duration::from_secs(1),
+        );
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let envelope = ingress.seal_command(RollingControlCommand::Snapshot { reply });
+        let command_sequence = envelope.sequence;
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send(envelope).expect("command queued");
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
+            false,
+            started + Duration::from_secs(2),
+        );
+
+        let selected = actor
+            .command_before_cutoff(&mut receiver)
+            .expect("queued command wins cutoff");
+        assert!(
+            ingress
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .progress
+                .is_some(),
+            "post-command progress remains in ingress"
+        );
+        actor.handle_command(selected).await;
+        let snapshot = response.await.expect("snapshot reply");
+        assert_eq!(snapshot.delivery.producer_out_time_ms, Some(100));
+        assert_eq!(
+            snapshot.producer_control.last_applied_sequence,
+            command_sequence
+        );
+
+        actor.run_due_first_cutoff_at(started + Duration::from_secs(3));
+        assert_eq!(actor.delivery.producer_out_time_ms, Some(200));
+        assert!(actor.last_applied_ingress_sequence > command_sequence);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn command_publication_time_not_dispatch_delay_owns_lease_ordering() {
+        let published_at = rolling_now();
+        let accepted_at = published_at - ROLLING_LEGACY_LEASE_TIMEOUT
+            + Duration::from_millis(2);
+        let mut actor = RollingControlActor::new(
+            accepted_at,
+            "session-start",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (snapshot_reply, snapshot_response) = tokio::sync::oneshot::channel();
+        let snapshot_envelope = RollingControlEnvelope {
+            sequence: 1,
+            published_at,
+            preceding_producer: Vec::new(),
+            sealed_flow_barriers: 0,
+            command: RollingControlCommand::Snapshot {
+                reply: snapshot_reply,
+            },
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let envelope = RollingControlEnvelope {
+            sequence: 2,
+            published_at: published_at + Duration::from_millis(1),
+            preceding_producer: Vec::new(),
+            sealed_flow_barriers: 0,
+            command: RollingControlCommand::Renew {
+                kind: "sequenced-before-deadline",
+                source: RollingRenewalSource::Internal,
+                reply,
+            },
+        };
+        tokio::time::advance(Duration::from_millis(3)).await;
+        actor.handle_command(snapshot_envelope).await;
+        assert!(
+            !snapshot_response
+                .await
+                .expect("pre-deadline snapshot reply")
+                .retired,
+            "dispatch delay cannot move a sequenced snapshot past a later renewal"
+        );
+        actor.handle_command(envelope).await;
+        assert!(response.await.expect("renewal reply"));
+        assert!(!actor.retired);
+        assert_eq!(
+            actor.last_renewal,
+            published_at + Duration::from_millis(1)
+        );
+
+        let tied = rolling_now();
+        let mut tied_actor = RollingControlActor::new(
+            tied - ROLLING_LEGACY_LEASE_TIMEOUT,
+            "session-start",
+            Arc::new(AtomicBool::new(false)),
+        );
+        let (reply, response) = tokio::sync::oneshot::channel();
+        tied_actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 1,
+                published_at: tied,
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::Terminal {
+                    cause: RollingTerminalCause::End,
+                    reply,
+                },
+            })
+            .await;
+        assert_eq!(
+            response.await.expect("terminal reply"),
+            RollingTerminalOutcome::AlreadyTerminal(RollingTerminalCause::LeaseExpired)
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_actor_control_after_producer_deadline_exposes_due_projection() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let attempt = handle
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        tokio::time::advance(PRODUCER_STARTUP_BUDGET + Duration::from_millis(1)).await;
+
+        let request = request();
+        let outcome = handle
+            .control(LocalControlRequest {
+                session_id: "unused",
+                generation: &request.generation,
+                owner_node_id: "node-a",
+                owner_epoch: request.control_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                snapshot: PlaybackDemandSnapshot::from(&request),
+            })
+            .await
+            .expect("post-deadline control remains compatibility-passive");
+
+        assert_eq!(outcome.lease.producer_control.deadline_attempt, None);
+        assert_eq!(outcome.lease.producer_control.deadline_mode, None);
+        assert_eq!(outcome.lease.producer_control.due_attempt, Some(attempt));
+        assert_eq!(outcome.lease.producer_control.due_mode, Some("starting"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_actor_timer_and_mailbox_tie_settles_due_before_control() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_producer_attempt_reply(Arc::clone(&pause));
+        let begin = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.begin_producer_attempt().await })
+        };
+        pause.wait().await;
+        let attempt = handle.current_producer_attempt();
+        assert!(attempt > 0);
+
+        tokio::time::advance(PRODUCER_STARTUP_BUDGET).await;
+        let request = request();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        assert!(handle.try_enqueue_command_for_test(RollingControlCommand::Control {
+            request: Box::new(owned_control(&request)),
+            deadline_unix_ms: i64::MAX,
+            terminal_admission: None,
+            reply,
+        }));
+        pause.wait().await;
+        assert_eq!(begin.await.expect("begin task"), Ok(attempt));
+
+        let outcome = response
+            .await
+            .expect("control response")
+            .expect("control accepted");
+        assert_eq!(outcome.lease.producer_control.deadline_attempt, None);
+        assert_eq!(outcome.lease.producer_control.due_attempt, Some(attempt));
+        assert_eq!(outcome.lease.producer_control.due_mode, Some("starting"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn real_actor_predeadline_command_keeps_publication_time_after_delayed_dispatch() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_producer_attempt_reply(Arc::clone(&pause));
+        let begin = {
+            let handle = handle.clone();
+            tokio::spawn(async move { handle.begin_producer_attempt().await })
+        };
+        pause.wait().await;
+        let attempt = handle.current_producer_attempt();
+        assert!(attempt > 0);
+
+        tokio::time::advance(PRODUCER_STARTUP_BUDGET - Duration::from_millis(1)).await;
+        let request = request();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        assert!(handle.try_enqueue_command_for_test(RollingControlCommand::Control {
+            request: Box::new(owned_control(&request)),
+            deadline_unix_ms: i64::MAX,
+            terminal_admission: None,
+            reply,
+        }));
+        tokio::time::advance(Duration::from_millis(2)).await;
+        pause.wait().await;
+        assert_eq!(begin.await.expect("begin task"), Ok(attempt));
+
+        let outcome = response
+            .await
+            .expect("control response")
+            .expect("control accepted");
+        assert_eq!(
+            outcome.lease.producer_control.deadline_attempt,
+            Some(attempt)
+        );
+        assert_eq!(
+            outcome.lease.producer_control.deadline_mode,
+            Some("starting")
+        );
+        assert_eq!(outcome.lease.producer_control.due_attempt, None);
+        assert_eq!(outcome.lease.producer_control.due_mode, None);
+    }
+
+    #[test]
+    fn producer_operational_projection_is_bounded_and_tracks_actor_phase() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        let starting = actor.producer_operational_snapshot_at(started);
+        assert_eq!(starting.phase, "starting");
+        assert_eq!(starting.deadline_mode, Some("starting"));
+        assert!(starting.observation_only);
+
+        assert!(actor.observe_producer_progress_at(
+            started + Duration::from_secs(1),
+            producer_progress(1, 100, 900, 800, started + Duration::from_secs(1)),
+        ));
+        assert_eq!(
+            actor
+                .producer_operational_snapshot_at(started + Duration::from_secs(1))
+                .phase,
+            "running"
+        );
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_secs(2),
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_secs(2),
+            },
+        );
+        let held = actor.producer_operational_snapshot_at(started + Duration::from_secs(2));
+        assert_eq!(held.phase, "held");
+        assert_eq!(held.physical_flow, "held");
+
+        assert!(actor.terminate(RollingTerminalCause::End).won());
+        let terminal = actor.producer_operational_snapshot_at(started + Duration::from_secs(3));
+        assert_eq!(terminal.phase, "terminal");
+        assert_eq!(terminal.deadline_mode, None);
     }
 
     #[test]
@@ -6648,18 +7310,15 @@ mod tests {
 
         for _ in 0..ROLLING_ACTOR_MAILBOX_CAPACITY {
             let (reply, _response) = tokio::sync::oneshot::channel();
-            handle
-                .sender
-                .try_send(RollingControlCommand::Snapshot { reply })
-                .expect("paused actor mailbox has the advertised bounded capacity");
+            assert!(
+                handle.try_enqueue_command_for_test(RollingControlCommand::Snapshot { reply }),
+                "paused actor mailbox has the advertised bounded capacity"
+            );
         }
         let (overflow_reply, _overflow_response) = tokio::sync::oneshot::channel();
-        assert!(matches!(
-            handle.sender.try_send(RollingControlCommand::Snapshot {
+        assert!(!handle.try_enqueue_command_for_test(RollingControlCommand::Snapshot {
                 reply: overflow_reply
-            }),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_))
-        ));
+            }));
 
         handle.observe_producer_progress(attempt, Some(5_000), Some(1_250), Some(1_100));
         handle.observe_producer_progress(attempt, Some(6_000), Some(1_200), Some(1_050));
@@ -6678,6 +7337,32 @@ mod tests {
         assert_eq!(delivery.producer_out_time_ms, Some(6_000));
         assert_eq!(delivery.producer_speed_milli, Some(1_200));
         assert_eq!(delivery.producer_recent_speed_milli, Some(1_050));
+    }
+
+    #[tokio::test]
+    async fn stale_predecessor_exit_cannot_steal_successor_progress_before_drain() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let predecessor = handle
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        handle.observe_producer_exit(predecessor, false, Some(11), None);
+        let successor = handle
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        assert!(successor > predecessor);
+
+        handle.observe_producer_progress(successor, Some(7_000), Some(1_100), Some(1_050));
+        handle.observe_producer_exit(predecessor, false, Some(12), None);
+        handle.observe_producer_exit(successor, false, Some(13), None);
+        let snapshot = handle.snapshot().await.expect("ordered actor snapshot");
+        assert_eq!(snapshot.delivery.producer_attempt, successor);
+        assert_eq!(snapshot.delivery.producer_out_time_ms, Some(7_000));
+        let exit = snapshot.delivery.producer_exit.expect("successor exit");
+        assert!(!exit.success);
+        assert_eq!(exit.code, Some(13));
+        assert_eq!(exit.signal, None);
     }
 
     #[test]
@@ -7133,7 +7818,7 @@ mod tests {
         // returns a zero-remaining live lease instead of claiming expiry.
         let (reply, response) = tokio::sync::oneshot::channel();
         actor
-            .handle_command(RollingControlCommand::Snapshot { reply })
+            .handle_command_for_test(RollingControlCommand::Snapshot { reply })
             .await;
         let deadline_snapshot = response.await.expect("snapshot command reply");
         assert!(deadline_snapshot.retired, "snapshot linearizes expiry");
@@ -7152,8 +7837,7 @@ mod tests {
             .await;
         let (reply, dropped) = tokio::sync::oneshot::channel();
         expiry
-            .sender
-            .send(RollingControlCommand::ClaimExpiry { reply })
+            .enqueue_command(RollingControlCommand::ClaimExpiry { reply })
             .await
             .expect("expiry command queued");
         drop(dropped);
@@ -7172,8 +7856,7 @@ mod tests {
         let retirement = RollingControlHandle::spawn("session-start");
         let (reply, dropped) = tokio::sync::oneshot::channel();
         retirement
-            .sender
-            .send(RollingControlCommand::Terminal {
+            .enqueue_command(RollingControlCommand::Terminal {
                 cause: RollingTerminalCause::End,
                 reply,
             })
@@ -7217,8 +7900,7 @@ mod tests {
         let (reply, dropped) = tokio::sync::oneshot::channel();
         drop(dropped);
         control
-            .sender
-            .send(RollingControlCommand::Control {
+            .enqueue_command(RollingControlCommand::Control {
                 request: Box::new(owned_control(&request)),
                 deadline_unix_ms: i64::MAX,
                 terminal_admission: None,
@@ -7244,8 +7926,7 @@ mod tests {
         let expired = RollingControlHandle::spawn("session-start");
         let (reply, response) = tokio::sync::oneshot::channel();
         expired
-            .sender
-            .send(RollingControlCommand::Control {
+            .enqueue_command(RollingControlCommand::Control {
                 request: Box::new(owned_control(&request)),
                 deadline_unix_ms: crate::media_sessions::unix_ms(),
                 terminal_admission: None,
@@ -7274,8 +7955,7 @@ mod tests {
             accepted: AtomicUsize::new(0),
         });
         terminal_control
-            .sender
-            .send(RollingControlCommand::Control {
+            .enqueue_command(RollingControlCommand::Control {
                 request: Box::new(owned_control(&end)),
                 deadline_unix_ms: i64::MAX,
                 terminal_admission: Some(admission.clone()),
@@ -7469,6 +8149,12 @@ mod tests {
             "plurx_playback_rolling_producer_event_outcomes_total{event=\"exit\",outcome=\"rejected\"}"
         ));
         assert!(metrics.contains("plurx_playback_rolling_producer_flow_deferrals_total"));
+        assert!(metrics.contains(
+            "plurx_playback_rolling_producer_deadline_observations_total{mode=\"advancing\"}"
+        ));
+        assert!(metrics.contains(
+            "plurx_playback_rolling_control_commands_total{kind=\"snapshot\"}"
+        ));
     }
 
     async fn activate_route(

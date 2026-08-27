@@ -990,6 +990,7 @@ fn flow_event_extra(
         "lease_state": lease_state,
         "lease_timeout_ms": lease.timeout_ms(),
         "control_demand": demand.map(|demand| demand.demand),
+        "producer_control": &lease.producer_control,
         "reported_position_ms": demand.map(|demand| demand.position_ms),
         "client_runway_ms": demand.map(|demand| demand.runway_ms()),
         "production_policy": evaluation.policy,
@@ -3651,6 +3652,9 @@ async fn session_info(
         production_policy: flow.map_or("unavailable", |flow| flow.policy),
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
+        producer_control: lease
+            .as_ref()
+            .map(|lease| lease.producer_control.clone()),
         producer_state,
         producer_attempt: Some(status_owner_attempt),
         playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
@@ -3729,6 +3733,7 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         production_policy: "immutable_vod",
         production_ahead_seconds: None,
         production_target_seconds: None,
+        producer_control: None,
         producer_state: "vod",
         producer_attempt: None,
         playlist_ready: None,
@@ -4514,8 +4519,14 @@ pub struct SessionInfo {
     pub production_policy: &'static str,
     pub production_ahead_seconds: Option<i64>,
     pub production_target_seconds: Option<i64>,
-    /// Honest current producer verdict. Additive to the legacy status shape;
-    /// control uses it instead of inferring health from suspension alone.
+    /// Bounded actor-owned producer control truth. `None` means the rolling
+    /// actor was unavailable or this is immutable VOD, rather than inferring
+    /// control state from compatibility fields.
+    pub producer_control: Option<crate::playback_control::RollingProducerOperationalSnapshot>,
+    /// Compatibility-derived producer summary retained for existing Activity
+    /// consumers. `producer_control` is the actor-owned source for deadline
+    /// and ingress truth; this field remains non-authoritative until the M4
+    /// decision/executor cutover removes the legacy child/watchdog inputs.
     pub producer_state: &'static str,
     /// Actor-owned rolling attempt and delivery coordinates. Immutable VOD is
     /// `None`; an unavailable rolling actor reports the once-sampled fallback
@@ -16237,6 +16248,12 @@ mod tests {
             assert_eq!(status.client_runway_ms, Some(15_000));
             assert_eq!(status.render_state, Some("rendering"));
             assert_eq!(status.production_policy, "explicit_demand");
+            let producer_control = status
+                .producer_control
+                .as_ref()
+                .expect("rolling status carries actor projection");
+            assert!(producer_control.observation_only);
+            assert!(producer_control.last_applied_sequence > 0);
         };
         assert_explicit_status(&accepted.status);
         let live_status = fixture
@@ -16698,6 +16715,7 @@ mod tests {
         assert_eq!(extra["control_demand"], "hold");
         assert_eq!(extra["production_policy"], "explicit_demand");
         assert_eq!(extra["production_target_seconds"], 0);
+        assert_eq!(extra["producer_control"]["observation_only"], true);
     }
 
     #[tokio::test]
