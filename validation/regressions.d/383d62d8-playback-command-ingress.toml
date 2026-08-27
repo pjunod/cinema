@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["383d62d8"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The rolling-actor regressions now publish commands and producer facts through one bounded ingress sequence, retain command publication time under the transition and ingress fences, preserve post-command progress for the successor drain, keep sealed physical-flow barriers inside the fixed capacity until actor application, settle action-passive producer deadlines before mutating commands, and prove the deadline boundary through a real actor when dispatch is late or timer and mailbox readiness coincide. Exact-attempt exit regressions prevent a stale predecessor from stealing successor progress; status and telemetry regressions require the bounded observation-only actor projection; metric checks pin fixed command and deadline label sets. Legacy recovery owners remain active, so this slice emits no retry, kill, replacement, cleanup, or other producer action."
