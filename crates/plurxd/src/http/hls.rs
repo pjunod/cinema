@@ -4228,9 +4228,11 @@ mod tests {
         let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
             .await
             .expect("subtitle playlist body");
-        assert!(String::from_utf8(body.to_vec())
-            .expect("subtitle playlist text")
-            .contains("seg00001.vtt"));
+        let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
+        assert!(
+            text.lines().any(|line| line == "seg00001.vtt"),
+            "subtitle child playlist must use a relative segment URI: {text}"
+        );
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
 
