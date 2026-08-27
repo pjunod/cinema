@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3470a0f5", "298901be"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The Rust gate retains the real-path rolling delivery regressions for both corrective commits: attempt/path ABA sampling across playlist, segment, and refresh; exact returned-playlist publication; phase-aware fallback cancellation before and after actor reply; terminal install rejection causality; verified predecessor scratch clearing; successor-safe retention handoff; and one-owner per-item garbage cleanup whose failed bytes remain in session/global hard-cap accounting while independent tail entries are removed."
