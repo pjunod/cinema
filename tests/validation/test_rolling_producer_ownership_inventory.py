@@ -8,6 +8,118 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 MANIFEST = ROOT / "tests/playback/rolling-producer-owners.toml"
+RAW_STRING_START = re.compile(r'(?:br|rb|r)(#*)"')
+TURBOFISH_START = re.compile(r"::\s*<")
+CHAR_LITERAL = re.compile(
+    r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\})|[^\\'\r\n])'"
+)
+
+
+def _blank_non_newlines(chars: list[str], start: int, end: int) -> None:
+    for index in range(start, end):
+        if chars[index] not in "\r\n":
+            chars[index] = " "
+
+
+def rust_structural_source(source: str) -> str:
+    """Retain Rust syntax while removing comments, literals, and turbofish payloads."""
+
+    chars = list(source)
+    index = 0
+    length = len(chars)
+    while index < length:
+        if source.startswith("//", index):
+            end = source.find("\n", index + 2)
+            end = length if end < 0 else end
+            _blank_non_newlines(chars, index, end)
+            index = end
+            continue
+        if source.startswith("/*", index):
+            depth = 1
+            end = index + 2
+            while end < length and depth:
+                if source.startswith("/*", end):
+                    depth += 1
+                    end += 2
+                elif source.startswith("*/", end):
+                    depth -= 1
+                    end += 2
+                else:
+                    end += 1
+            _blank_non_newlines(chars, index, end)
+            index = end
+            continue
+
+        raw = RAW_STRING_START.match(source, index)
+        if raw is not None:
+            terminator = '"' + raw.group(1)
+            body = raw.end()
+            close = source.find(terminator, body)
+            end = length if close < 0 else close + len(terminator)
+            _blank_non_newlines(chars, index, end)
+            index = end
+            continue
+
+        quote = index + 1 if source.startswith('b"', index) else index
+        if quote < length and source[quote] == '"':
+            end = quote + 1
+            escaped = False
+            while end < length:
+                char = source[end]
+                end += 1
+                if escaped:
+                    escaped = False
+                elif char == "\\":
+                    escaped = True
+                elif char == '"':
+                    break
+            _blank_non_newlines(chars, index, end)
+            index = end
+            continue
+
+        if source[index] == "'":
+            literal = CHAR_LITERAL.match(source, index)
+            if literal is None:
+                index += 1
+            else:
+                _blank_non_newlines(chars, index, literal.end())
+                index = literal.end()
+            continue
+
+        index += 1
+
+    code = "".join(chars)
+    chars = list(code)
+    index = 0
+    while index < len(chars):
+        opener = TURBOFISH_START.match(code, index)
+        if opener is None:
+            index += 1
+            continue
+        depth = 1
+        delimiter_depth = 0
+        end = opener.end()
+        while end < len(chars) and depth:
+            char = code[end]
+            if char in "([{":
+                delimiter_depth += 1
+            elif char in ")]}" and delimiter_depth:
+                delimiter_depth -= 1
+            elif char == "<" and delimiter_depth == 0:
+                depth += 1
+            elif (
+                char == ">"
+                and delimiter_depth == 0
+                and (end == 0 or code[end - 1] not in "-=")
+            ):
+                depth -= 1
+            end += 1
+        if depth == 0:
+            _blank_non_newlines(chars, index, end)
+            index = end
+        else:
+            index += 1
+    return "".join(chars)
 
 
 class RollingProducerOwnershipInventoryTest(unittest.TestCase):
@@ -21,20 +133,24 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         cls.module_source = "\n".join(
             path.read_text(encoding="utf-8") for path in cls.module_paths
         )
+        cls.module_structural_source = rust_structural_source(cls.module_source)
 
     def test_catalog_has_unique_complete_rows(self) -> None:
         self.assertEqual(self.catalog.get("version"), 1)
         symbols = self.catalog["symbols"]
         module_symbols = self.catalog["module_symbols"]
         module_structures = self.catalog["module_structures"]
+        contract_cases = self.catalog["contract_cases"]
         entries = self.catalog["entrypoints"]
         symbol_ids = [entry["id"] for entry in symbols]
         module_symbol_ids = [entry["id"] for entry in module_symbols]
         module_structure_ids = [entry["id"] for entry in module_structures]
+        contract_case_ids = [entry["id"] for entry in contract_cases]
         entry_ids = [entry["id"] for entry in entries]
         self.assertEqual(len(symbol_ids), len(set(symbol_ids)))
         self.assertEqual(len(module_symbol_ids), len(set(module_symbol_ids)))
         self.assertEqual(len(module_structure_ids), len(set(module_structure_ids)))
+        self.assertEqual(len(contract_case_ids), len(set(contract_case_ids)))
         self.assertEqual(len(entry_ids), len(set(entry_ids)))
         self.assertEqual(
             {
@@ -54,6 +170,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "rolling-supervisor-construction",
                 "forbidden-timer-or-task-alias",
                 "forbidden-timer-or-task-callable-alias",
+                "forbidden-parenthesized-callable",
                 "forbidden-command-alias",
                 "forbidden-low-level-function-alias",
                 "forbidden-process-namespace-alias",
@@ -65,7 +182,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         )
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
-        self.assertGreaterEqual(len(module_structures), 22)
+        self.assertGreaterEqual(len(module_structures), 23)
+        self.assertGreaterEqual(len(contract_cases), 18)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
@@ -101,6 +219,15 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     {"id", "pattern", "expected_occurrences"}, set(row)
                 )
                 self.assertGreaterEqual(row["expected_occurrences"], 0)
+
+        for row in contract_cases:
+            with self.subTest(contract_case=row["id"]):
+                self.assertEqual({"id", "source", "must_trigger"}, set(row))
+                self.assertTrue(row["source"].strip())
+                self.assertTrue(row["must_trigger"])
+                self.assertLessEqual(
+                    set(row["must_trigger"]), set(module_structure_ids)
+                )
 
         for row in entries:
             with self.subTest(entrypoint=row["id"]):
@@ -147,7 +274,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     pattern = re.compile(row["pattern"])
                 except re.error as error:
                     self.fail(f"invalid structural pattern for {row['id']}: {error}")
-                actual = len(pattern.findall(self.module_source))
+                actual = len(pattern.findall(self.module_structural_source))
                 self.assertEqual(
                     actual,
                     row["expected_occurrences"],
@@ -155,6 +282,20 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     "new task, timer, process, or alias shapes require an explicit "
                     "ownership review and allowlist update",
                 )
+
+    def test_promised_syntax_forms_hit_structural_sentinels(self) -> None:
+        patterns = {
+            row["id"]: re.compile(row["pattern"])
+            for row in self.catalog["module_structures"]
+        }
+        for row in self.catalog["contract_cases"]:
+            source = rust_structural_source(row["source"])
+            for structure_id in row["must_trigger"]:
+                with self.subTest(contract_case=row["id"], structure=structure_id):
+                    self.assertIsNotNone(
+                        patterns[structure_id].search(source),
+                        f"{row['id']} no longer triggers {structure_id}",
+                    )
 
     def test_every_named_entrypoint_is_live_and_unique(self) -> None:
         for row in self.catalog["entrypoints"]:
