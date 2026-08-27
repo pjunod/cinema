@@ -8,8 +8,9 @@
 
 #[cfg(test)]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::Weak;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -1491,6 +1492,150 @@ pub(crate) struct RollingLeaseSnapshot {
     pub producer_control: RollingProducerOperationalSnapshot,
 }
 
+/// The only producer-failure reasons that may be retained by the M4 actor.
+/// This is a typed identity, not a recovery vote: the current slice only
+/// transports test-installed decisions and leaves compatibility recovery in
+/// charge.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum ProducerDecisionReason {
+    StartupDeadline,
+    ProgressDeadline,
+    ExitClassificationDeadline,
+    ProcessExit,
+    PartialSuccessExit,
+    Unsupported,
+    InvalidConfiguration,
+    ReaderFailed,
+    FlowStopFailed,
+    FlowResumeFailed,
+    FlowStopDeadline,
+    FlowResumeDeadline,
+    InstallDeadline,
+    ExecutorLost,
+}
+
+impl ProducerDecisionReason {
+    fn status(self) -> &'static str {
+        match self {
+            Self::StartupDeadline => "startup_deadline",
+            Self::ProgressDeadline => "progress_deadline",
+            Self::ExitClassificationDeadline => "exit_classification_deadline",
+            Self::ProcessExit => "process_exit",
+            Self::PartialSuccessExit => "partial_success_exit",
+            Self::Unsupported => "unsupported",
+            Self::InvalidConfiguration => "invalid_configuration",
+            Self::ReaderFailed => "reader_failed",
+            Self::FlowStopFailed => "flow_stop_failed",
+            Self::FlowResumeFailed => "flow_resume_failed",
+            Self::FlowStopDeadline => "flow_stop_deadline",
+            Self::FlowResumeDeadline => "flow_resume_deadline",
+            Self::InstallDeadline => "install_deadline",
+            Self::ExecutorLost => "executor_lost",
+        }
+    }
+}
+
+/// Cleanup is immutable decision evidence. It does not authorize deletion or
+/// termination in this behavior-neutral transport slice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CleanupPolicy {
+    RetainPublished,
+    DiscardPrepublication,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProducerFailureCleanupKind {
+    ProducerFailureCleanup,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ProducerFailureCleanup {
+    pub kind: ProducerFailureCleanupKind,
+    pub cleanup_policy: CleanupPolicy,
+}
+
+/// The executor receives an opaque identity plus a fingerprint. Concrete
+/// command inputs remain outside this actor-owned transport so this type can
+/// be cloned for redelivery without permitting mutation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ValidatedRetryRecipe {
+    pub identity: String,
+    pub fingerprint: String,
+}
+
+impl ValidatedRetryRecipe {
+    #[cfg(test)]
+    fn for_test(identity: &str, fingerprint: &str) -> Self {
+        Self {
+            identity: identity.to_owned(),
+            fingerprint: fingerprint.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) struct ActionProposal {
+    pub proposal_id: String,
+    pub kind: &'static str,
+    pub reason: ProducerDecisionReason,
+    pub source: &'static str,
+    pub severity: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) enum ProducerDecision {
+    Retry {
+        decision_sequence: u64,
+        failed_attempt: u64,
+        recipe: ValidatedRetryRecipe,
+        reason: ProducerDecisionReason,
+    },
+    Fail {
+        decision_sequence: u64,
+        failed_attempt: u64,
+        reason: ProducerDecisionReason,
+        proposal: Option<ActionProposal>,
+        cleanup: ProducerFailureCleanup,
+    },
+}
+
+impl ProducerDecision {
+    pub(crate) fn decision_sequence(&self) -> u64 {
+        match self {
+            Self::Retry {
+                decision_sequence, ..
+            }
+            | Self::Fail {
+                decision_sequence, ..
+            } => *decision_sequence,
+        }
+    }
+
+    pub(crate) fn reason(&self) -> ProducerDecisionReason {
+        match self {
+            Self::Retry { reason, .. } | Self::Fail { reason, .. } => *reason,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ProducerDecisionPoll {
+    Idle,
+    Decision(Arc<ProducerDecision>),
+    Terminal(RollingTerminalCause),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct RollingProducerOperationalSnapshot {
     pub phase: &'static str,
@@ -1511,6 +1656,15 @@ pub struct RollingProducerOperationalSnapshot {
     pub last_applied_sequence: u64,
     pub observation_only: bool,
     pub action_owner: &'static str,
+    /// Immutable producer decision identity, when one has been retained.
+    pub decision_sequence: Option<u64>,
+    pub decision_reason: Option<&'static str>,
+    /// Bounded observation of the passive executor task. This slice never
+    /// reports a DecisionApplied acknowledgement.
+    pub executor_state: &'static str,
+    pub executor_pending_decision_age_ms: Option<i64>,
+    pub executor_last_observed_sequence: u64,
+    pub executor_last_action_failure: Option<&'static str>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2454,6 +2608,7 @@ pub(crate) struct RollingControlHandle {
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
+    decision_transport: Arc<RollingDecisionTransport>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
@@ -2485,6 +2640,15 @@ enum RollingControlCommand {
     },
     BeginProducerAttempt {
         reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+    },
+    PollProducerDecision {
+        after_sequence: u64,
+        reply: tokio::sync::oneshot::Sender<ProducerDecisionPoll>,
+    },
+    #[cfg(test)]
+    InstallProducerDecision {
+        decision: ProducerDecision,
+        reply: tokio::sync::oneshot::Sender<bool>,
     },
     AuthorizeProducerInstall {
         producer_attempt: u64,
@@ -2526,12 +2690,15 @@ impl RollingControlCommand {
             Self::Renew { .. } | Self::SetRenewalForTest { .. } => None,
             Self::Control { .. } => Some(0),
             Self::BeginProducerAttempt { .. } => Some(1),
-            Self::AuthorizeProducerInstall { .. } => Some(2),
-            Self::ObservePublication { .. } => Some(3),
-            Self::CommitMedia { .. } => Some(4),
-            Self::Snapshot { .. } => Some(5),
-            Self::ClaimExpiry { .. } => Some(6),
-            Self::Terminal { .. } => Some(7),
+            Self::PollProducerDecision { .. } => Some(2),
+            #[cfg(test)]
+            Self::InstallProducerDecision { .. } => None,
+            Self::AuthorizeProducerInstall { .. } => Some(3),
+            Self::ObservePublication { .. } => Some(4),
+            Self::CommitMedia { .. } => Some(5),
+            Self::Snapshot { .. } => Some(6),
+            Self::ClaimExpiry { .. } => Some(7),
+            Self::Terminal { .. } => Some(8),
         }
     }
 }
@@ -2547,6 +2714,145 @@ struct RollingControlEnvelope {
     command: RollingControlCommand,
 }
 
+/// A move-only inbox is created once for a rolling generation. Its receiver
+/// belongs to the one passive executor task; callers can retain only the
+/// bounded sender held by the actor-side wake path.
+struct RollingSessionExecutorInbox {
+    receiver: tokio::sync::mpsc::Receiver<()>,
+}
+
+impl RollingSessionExecutorInbox {
+    fn new() -> (tokio::sync::mpsc::Sender<()>, Self) {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        (sender, Self { receiver })
+    }
+}
+
+#[derive(Default)]
+struct RollingExecutorObservation {
+    /// 0=registered, 1=idle, 2=observing, 3=terminal, 4=lost.
+    state: AtomicU8,
+    last_observed_sequence: AtomicU64,
+}
+
+impl RollingExecutorObservation {
+    fn state(&self) -> &'static str {
+        match self.state.load(Ordering::Acquire) {
+            1 => "idle",
+            2 => "observing",
+            3 => "terminal",
+            4 => "lost",
+            _ => "registered",
+        }
+    }
+}
+
+/// Actor-owned half of the decision path. It deliberately contains no actor
+/// command sender, so keeping the wake path alive cannot keep the actor's own
+/// mailbox open after every external handle is dropped.
+struct RollingDecisionWake {
+    decision_notify: Arc<tokio::sync::Notify>,
+    executor_wake: tokio::sync::mpsc::Sender<()>,
+    executor_observation: Arc<RollingExecutorObservation>,
+}
+
+impl RollingDecisionWake {
+    fn wake(&self) {
+        // Notify is the retained decision permit required by the M4 contract.
+        // The capacity-one inbox additionally wakes on actor-side closure. A
+        // full inbox already guarantees another poll, so coalescing is safe.
+        self.decision_notify.notify_one();
+        let _ = self.executor_wake.try_send(());
+    }
+}
+
+/// Handle-owned command half of the decision path. The passive executor holds
+/// only a `Weak` reference, so it cannot keep a retired actor/session alive.
+/// Polling is deliberately observational and has no DecisionApplied command
+/// in this slice.
+struct RollingDecisionTransport {
+    sender: tokio::sync::mpsc::Sender<RollingControlEnvelope>,
+    producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
+    producer_events: Arc<RollingProducerIngress>,
+    executor_observation: Arc<RollingExecutorObservation>,
+}
+
+impl RollingDecisionTransport {
+    async fn poll_after(&self, after_sequence: u64) -> ProducerDecisionPoll {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let permit = match self.sender.reserve().await {
+            Ok(permit) => permit,
+            Err(_) => return ProducerDecisionPoll::Terminal(RollingTerminalCause::AuthorityFence),
+        };
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envelope =
+            self.producer_events
+                .seal_command(RollingControlCommand::PollProducerDecision {
+                    after_sequence,
+                    reply,
+                });
+        permit.send(envelope);
+        drop(transition);
+        response.await.unwrap_or(ProducerDecisionPoll::Terminal(
+            RollingTerminalCause::AuthorityFence,
+        ))
+    }
+
+    fn spawn_executor(
+        self: &Arc<Self>,
+        weak: Weak<Self>,
+        decision_notify: Arc<tokio::sync::Notify>,
+        mut inbox: RollingSessionExecutorInbox,
+    ) -> tokio::task::JoinHandle<()> {
+        let observation = Arc::clone(&self.executor_observation);
+        tokio::spawn(async move {
+            let mut observed_sequence = 0_u64;
+            loop {
+                let notified = decision_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                let wake = tokio::select! {
+                    _ = notified.as_mut() => true,
+                    wake = inbox.receiver.recv() => wake.is_some(),
+                };
+                let Some(transport) = weak.upgrade() else {
+                    break;
+                };
+                if !wake {
+                    let poll = transport.poll_after(observed_sequence).await;
+                    if matches!(poll, ProducerDecisionPoll::Terminal(_)) {
+                        observation.state.store(3, Ordering::Release);
+                    } else {
+                        observation.state.store(4, Ordering::Release);
+                    }
+                    break;
+                }
+                observation.state.store(2, Ordering::Release);
+                match transport.poll_after(observed_sequence).await {
+                    ProducerDecisionPoll::Idle => observation.state.store(1, Ordering::Release),
+                    ProducerDecisionPoll::Decision(decision) => {
+                        // Polling never consumes the actor slot. The local
+                        // observation cursor only prevents a passive task
+                        // from repeatedly observing one retained value.
+                        observed_sequence = decision.decision_sequence();
+                        observation
+                            .last_observed_sequence
+                            .store(observed_sequence, Ordering::Release);
+                        observation.state.store(1, Ordering::Release);
+                    }
+                    ProducerDecisionPoll::Terminal(_) => {
+                        observation.state.store(3, Ordering::Release);
+                        break;
+                    }
+                }
+            }
+        })
+    }
+}
+
 #[cfg(test)]
 struct DeferredProducerAttemptReply {
     reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
@@ -2560,6 +2866,7 @@ struct RollingActorRuntime {
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
+    decision_wake: Arc<RollingDecisionWake>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
     #[cfg(test)]
@@ -2617,6 +2924,9 @@ struct RollingControlActor {
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
+    decision_wake: Arc<RollingDecisionWake>,
+    pending_decision: Option<Arc<ProducerDecision>>,
+    decision_committed_at: Option<Instant>,
     last_flow_ticket: u64,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
@@ -2627,17 +2937,25 @@ struct RollingControlActor {
 impl RollingControlActor {
     #[cfg(test)]
     fn new(now: Instant, initial_kind: &'static str, retired_fence: Arc<AtomicBool>) -> Self {
+        let producer_transition = Arc::new(std::sync::Mutex::new(
+            RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
+        ));
+        let producer_events = Arc::new(RollingProducerIngress::new());
+        let (executor_wake, _executor_inbox) = RollingSessionExecutorInbox::new();
         Self::with_runtime(
             now,
             initial_kind,
             RollingActorRuntime {
                 retired_fence,
                 producer_attempt: Arc::new(AtomicU64::new(0)),
-                producer_transition: Arc::new(std::sync::Mutex::new(
-                    RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
-                )),
+                producer_transition: Arc::clone(&producer_transition),
                 flow_sync: Arc::new(RollingFlowSync::new()),
-                producer_events: Arc::new(RollingProducerIngress::new()),
+                producer_events: Arc::clone(&producer_events),
+                decision_wake: Arc::new(RollingDecisionWake {
+                    decision_notify: Arc::new(tokio::sync::Notify::new()),
+                    executor_wake,
+                    executor_observation: Arc::new(RollingExecutorObservation::default()),
+                }),
                 producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
                 actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
             },
@@ -2655,6 +2973,7 @@ impl RollingControlActor {
             producer_transition,
             flow_sync,
             producer_events,
+            decision_wake,
             #[cfg(test)]
             producer_attempt_reply_pause,
             #[cfg(test)]
@@ -2683,6 +3002,9 @@ impl RollingControlActor {
             producer_transition,
             flow_sync,
             producer_events,
+            decision_wake,
+            pending_decision: None,
+            decision_committed_at: None,
             last_flow_ticket: 0,
             #[cfg(test)]
             producer_attempt_reply_pause,
@@ -2745,6 +3067,8 @@ impl RollingControlActor {
         });
         let phase = if self.retired {
             "terminal"
+        } else if self.pending_decision.is_some() {
+            "decided"
         } else if self.producer_deadline_due.is_some() || self.producer_process_exit_due.is_some() {
             "due"
         } else if self.producer_physical_flow == ProducerPhysicalFlowState::Held {
@@ -2782,6 +3106,25 @@ impl RollingControlActor {
             last_applied_sequence: self.last_applied_ingress_sequence,
             observation_only: true,
             action_owner: "legacy_compatibility",
+            decision_sequence: self
+                .pending_decision
+                .as_ref()
+                .map(ProducerDecision::decision_sequence),
+            decision_reason: self
+                .pending_decision
+                .as_ref()
+                .map(|decision| decision.reason().status()),
+            executor_state: self.decision_wake.executor_observation.state(),
+            executor_pending_decision_age_ms: self.decision_committed_at.map(|committed_at| {
+                i64::try_from(now.saturating_duration_since(committed_at).as_millis())
+                    .unwrap_or(i64::MAX)
+            }),
+            executor_last_observed_sequence: self
+                .decision_wake
+                .executor_observation
+                .last_observed_sequence
+                .load(Ordering::Acquire),
+            executor_last_action_failure: None,
         }
     }
 
@@ -3045,6 +3388,33 @@ impl RollingControlActor {
         );
         self.producer_attempt.store(attempt, Ordering::Release);
         Ok(attempt)
+    }
+
+    fn poll_producer_decision_at(&self, after_sequence: u64) -> ProducerDecisionPoll {
+        // Lifecycle terminal state is a higher-priority observation than a
+        // retained decision. Polling never consumes either value.
+        if let Some(cause) = self.terminal {
+            return ProducerDecisionPoll::Terminal(cause);
+        }
+        self.pending_decision
+            .as_ref()
+            .filter(|decision| decision.decision_sequence() > after_sequence)
+            .cloned()
+            .map_or(ProducerDecisionPoll::Idle, ProducerDecisionPoll::Decision)
+    }
+
+    #[cfg(test)]
+    fn install_producer_decision_for_test(
+        &mut self,
+        committed_at: Instant,
+        decision: ProducerDecision,
+    ) -> bool {
+        if self.retired || self.pending_decision.is_some() || decision.decision_sequence() == 0 {
+            return false;
+        }
+        self.pending_decision = Some(Arc::new(decision));
+        self.decision_committed_at = Some(committed_at);
+        true
     }
 
     fn update_producer_progress_at(
@@ -3475,6 +3845,8 @@ impl RollingControlActor {
         self.producer_progress_deadline = None;
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
+        self.pending_decision = None;
+        self.decision_committed_at = None;
         self.retired_fence.store(true, Ordering::Release);
         self.producer_events.notify_flow_capacity_waiters();
         self.last_flow_ticket = self.flow_sync.request();
@@ -3525,6 +3897,8 @@ impl RollingControlActor {
             let mut transition = transition
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let had_pending_decision = self.pending_decision.is_some();
+            let was_retired = self.retired;
             self.handle_producer_blocks_at(published_at, preceding_producer);
             self.last_applied_ingress_sequence = self.last_applied_ingress_sequence.max(sequence);
             if let Some(metric_index) = command.metric_index() {
@@ -3604,6 +3978,17 @@ impl RollingControlActor {
                     #[cfg(not(test))]
                     let _ = reply.send(outcome);
                 }
+                RollingControlCommand::PollProducerDecision {
+                    after_sequence,
+                    reply,
+                } => {
+                    let _ = reply.send(self.poll_producer_decision_at(after_sequence));
+                }
+                #[cfg(test)]
+                RollingControlCommand::InstallProducerDecision { decision, reply } => {
+                    let installed = self.install_producer_decision_for_test(published_at, decision);
+                    let _ = reply.send(installed);
+                }
                 RollingControlCommand::AuthorizeProducerInstall {
                     producer_attempt,
                     reply,
@@ -3676,18 +4061,29 @@ impl RollingControlActor {
             drop(transition);
             self.producer_events
                 .release_sealed_flow_barriers(sealed_flow_barriers);
+            let wake_executor = (!had_pending_decision && self.pending_decision.is_some())
+                || (!was_retired && self.retired);
             #[cfg(test)]
             let deferred_result = deferred_begin_reply;
             #[cfg(not(test))]
             let deferred_result = std::marker::PhantomData::<()>;
-            deferred_result
+            (deferred_result, wake_executor)
         };
+        #[cfg(test)]
+        let (deferred_begin_reply, wake_executor) = _deferred_begin_reply;
+        #[cfg(not(test))]
+        let (_, wake_executor) = _deferred_begin_reply;
+        if wake_executor {
+            // The actor state is committed and all actor/ingress locks are
+            // released before notifying the passive executor.
+            self.decision_wake.wake();
+        }
         #[cfg(test)]
         if let Some(DeferredProducerAttemptReply {
             reply,
             outcome,
             reply_pause,
-        }) = _deferred_begin_reply
+        }) = deferred_begin_reply
         {
             if let Some(reply_pause) = reply_pause {
                 reply_pause.wait().await;
@@ -3835,6 +4231,20 @@ impl RollingControlHandle {
         ));
         let flow_sync = Arc::new(RollingFlowSync::new());
         let producer_events = Arc::new(RollingProducerIngress::new());
+        let (executor_wake, executor_inbox) = RollingSessionExecutorInbox::new();
+        let executor_observation = Arc::new(RollingExecutorObservation::default());
+        let decision_notify = Arc::new(tokio::sync::Notify::new());
+        let decision_wake = Arc::new(RollingDecisionWake {
+            decision_notify: Arc::clone(&decision_notify),
+            executor_wake,
+            executor_observation: Arc::clone(&executor_observation),
+        });
+        let decision_transport = Arc::new(RollingDecisionTransport {
+            sender: sender.clone(),
+            producer_transition: Arc::clone(&producer_transition),
+            producer_events: Arc::clone(&producer_events),
+            executor_observation,
+        });
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         #[cfg(test)]
@@ -3848,11 +4258,17 @@ impl RollingControlHandle {
                 producer_transition: Arc::clone(&producer_transition),
                 flow_sync: Arc::clone(&flow_sync),
                 producer_events: Arc::clone(&producer_events),
+                decision_wake,
                 #[cfg(test)]
                 producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
                 #[cfg(test)]
                 actor_exit_fence_started: Arc::clone(&actor_exit_fence_started),
             },
+        );
+        let _executor_task = decision_transport.spawn_executor(
+            Arc::downgrade(&decision_transport),
+            decision_notify,
+            executor_inbox,
         );
         let actor_task = tokio::spawn(actor.run(receiver));
         #[cfg(test)]
@@ -3865,6 +4281,7 @@ impl RollingControlHandle {
             producer_transition,
             flow_sync,
             producer_events,
+            decision_transport,
             #[cfg(test)]
             producer_attempt_reply_pause,
             #[cfg(test)]
@@ -3879,15 +4296,24 @@ impl RollingControlHandle {
         let (sender, receiver) = tokio::sync::mpsc::channel(ROLLING_ACTOR_MAILBOX_CAPACITY);
         drop(receiver);
         let now = rolling_now();
+        let producer_transition = Arc::new(std::sync::Mutex::new(
+            RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
+        ));
+        let producer_events = Arc::new(RollingProducerIngress::new());
+        let decision_transport = Arc::new(RollingDecisionTransport {
+            sender: sender.clone(),
+            producer_transition: Arc::clone(&producer_transition),
+            producer_events: Arc::clone(&producer_events),
+            executor_observation: Arc::new(RollingExecutorObservation::default()),
+        });
         Self {
             sender,
             retired: Arc::new(AtomicBool::new(false)),
             producer_attempt: Arc::new(AtomicU64::new(0)),
-            producer_transition: Arc::new(std::sync::Mutex::new(
-                RollingProducerTransitionFence::new(now + ROLLING_LEGACY_LEASE_TIMEOUT),
-            )),
+            producer_transition,
             flow_sync: Arc::new(RollingFlowSync::new()),
-            producer_events: Arc::new(RollingProducerIngress::new()),
+            producer_events,
+            decision_transport,
             producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
             actor_abort: None,
             actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
@@ -3984,6 +4410,43 @@ impl RollingControlHandle {
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    /// Poll the immutable actor decision after an executor-owned sequence.
+    /// Polling is a read and never clears or acknowledges the one-slot value.
+    #[cfg(test)]
+    pub(crate) async fn poll_producer_decision(&self, after_sequence: u64) -> ProducerDecisionPoll {
+        self.decision_transport.poll_after(after_sequence).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_producer_decision_for_test(
+        &self,
+        decision: ProducerDecision,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command(RollingControlCommand::InstallProducerDecision { decision, reply })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        response.await.unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executor_observation_for_test(&self) -> (String, u64) {
+        (
+            self.decision_transport
+                .executor_observation
+                .state()
+                .to_owned(),
+            self.decision_transport
+                .executor_observation
+                .last_observed_sequence
+                .load(Ordering::Acquire),
+        )
     }
 
     #[cfg(test)]
@@ -4384,7 +4847,7 @@ static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::ne
 static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 9] = [const { AtomicU64::new(0) }; 9];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -4643,6 +5106,7 @@ pub(crate) fn prometheus() -> String {
     for (index, kind) in [
         "control",
         "begin_attempt",
+        "poll_producer_decision",
         "authorize_install",
         "observe_publication",
         "commit_media",
@@ -8286,5 +8750,156 @@ mod tests {
             .await,
             Err(ControlStateError::OwnerTransition)
         );
+    }
+
+    #[test]
+    fn producer_decision_slot_is_immutable_redeliverable_and_bounded() {
+        let now = Instant::now();
+        let mut actor =
+            RollingControlActor::new(now, "session-start", Arc::new(AtomicBool::new(false)));
+        let decision = ProducerDecision::Retry {
+            decision_sequence: 7,
+            failed_attempt: 1,
+            recipe: ValidatedRetryRecipe::for_test("cpu-safe", "fingerprint-a"),
+            reason: ProducerDecisionReason::StartupDeadline,
+        };
+        assert!(actor.install_producer_decision_for_test(now, decision.clone()));
+        assert!(!actor.install_producer_decision_for_test(
+            now,
+            ProducerDecision::Fail {
+                decision_sequence: 8,
+                failed_attempt: 1,
+                reason: ProducerDecisionReason::ProcessExit,
+                proposal: None,
+                cleanup: ProducerFailureCleanup {
+                    kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                    cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                },
+            }
+        ));
+        assert_eq!(
+            actor.poll_producer_decision_at(0),
+            ProducerDecisionPoll::Decision(Arc::new(decision.clone()))
+        );
+        assert_eq!(
+            actor.poll_producer_decision_at(6),
+            ProducerDecisionPoll::Decision(Arc::new(decision))
+        );
+        assert_eq!(
+            actor.poll_producer_decision_at(7),
+            ProducerDecisionPoll::Idle
+        );
+    }
+
+    #[test]
+    fn terminal_transition_settles_the_retained_producer_decision() {
+        let now = Instant::now();
+        let retired = Arc::new(AtomicBool::new(false));
+        let mut actor = RollingControlActor::new(now, "session-start", retired);
+        assert!(actor.install_producer_decision_for_test(
+            now,
+            ProducerDecision::Fail {
+                decision_sequence: 3,
+                failed_attempt: 2,
+                reason: ProducerDecisionReason::ProgressDeadline,
+                proposal: None,
+                cleanup: ProducerFailureCleanup {
+                    kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                    cleanup_policy: CleanupPolicy::RetainPublished,
+                },
+            }
+        ));
+        assert_eq!(
+            actor.terminate(RollingTerminalCause::End),
+            RollingTerminalOutcome::Won(RollingTerminalCause::End)
+        );
+        assert_eq!(
+            actor.poll_producer_decision_at(0),
+            ProducerDecisionPoll::Terminal(RollingTerminalCause::End)
+        );
+        assert!(actor.pending_decision.is_none());
+        assert!(actor.decision_committed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn decision_poll_replays_without_a_fake_application_acknowledgement() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let decision = ProducerDecision::Fail {
+            decision_sequence: 4,
+            failed_attempt: 1,
+            reason: ProducerDecisionReason::ReaderFailed,
+            proposal: None,
+            cleanup: ProducerFailureCleanup {
+                kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                cleanup_policy: CleanupPolicy::DiscardPrepublication,
+            },
+        };
+        assert!(
+            handle
+                .install_producer_decision_for_test(decision.clone())
+                .await
+        );
+        assert_eq!(
+            handle.poll_producer_decision(0).await,
+            ProducerDecisionPoll::Decision(Arc::new(decision.clone()))
+        );
+        assert_eq!(
+            handle.poll_producer_decision(0).await,
+            ProducerDecisionPoll::Decision(Arc::new(decision))
+        );
+        assert_eq!(
+            handle.poll_producer_decision(4).await,
+            ProducerDecisionPoll::Idle
+        );
+        let (state, observed) = handle.executor_observation_for_test();
+        assert!(matches!(
+            state.as_str(),
+            "registered" | "idle" | "observing"
+        ));
+        assert!(observed <= 4);
+    }
+
+    #[tokio::test]
+    async fn decision_transport_is_registered_before_begin_attempt_and_terminal_wake_is_retained() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert_eq!(handle.begin_producer_attempt().await, Ok(1));
+        assert!(
+            handle
+                .install_producer_decision_for_test(ProducerDecision::Fail {
+                    decision_sequence: 9,
+                    failed_attempt: 1,
+                    reason: ProducerDecisionReason::ExecutorLost,
+                    proposal: None,
+                    cleanup: ProducerFailureCleanup {
+                        kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                        cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                    },
+                })
+                .await
+        );
+        assert_eq!(
+            handle.end().await,
+            Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
+        );
+        assert_eq!(
+            handle.poll_producer_decision(0).await,
+            ProducerDecisionPoll::Terminal(RollingTerminalCause::End)
+        );
+    }
+
+    #[tokio::test]
+    async fn dropping_the_last_handle_does_not_leave_the_actor_mailbox_self_owned() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let retired = Arc::clone(&handle.retired);
+
+        drop(handle);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !retired.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must exit promptly after its final external sender is dropped");
     }
 }

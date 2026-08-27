@@ -206,7 +206,8 @@ replacement = "one session executor acquires process capacity and cleanup regist
 # Module-wide sentinel counts cover every Rust playback-server module, not
 # only the compatibility implementation. They intentionally describe today's
 # pre-deletion state. Later M4 slices drive the legacy counts to zero and may
-# add only the actor-owned deadline names at their actual construction sites.
+# add only actor-owned transport/executor names at their actual construction
+# sites.
 
 [[module_symbols]]
 id = "legacy-first-segment-grace"
@@ -258,6 +259,31 @@ id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
 expected_occurrences = 57
 
+[[module_symbols]]
+id = "m4-producer-decision-poll"
+pattern = "PollProducerDecision"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-producer-decision-install-test"
+pattern = "InstallProducerDecision"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-executor-inbox"
+pattern = "RollingSessionExecutorInbox"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-decision-transport"
+pattern = "RollingDecisionTransport"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-decision-wake"
+pattern = "RollingDecisionWake"
+expected_occurrences = 6
+
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
 # offset a count, and turbofish payloads are removed before matching. Tests are
@@ -269,12 +295,12 @@ expected_occurrences = 57
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 266
+expected_occurrences = 267
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 32
+expected_occurrences = 33
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -592,6 +618,12 @@ id = "watchdog-verdict"
 anchor = "async fn watch_for_stall_claimed("
 owns = ["startup timeout", "progress timeout", "failure", "replacement"]
 replacement = "one due-first actor ProducerProgressDeadline and immutable ProducerDecision"
+
+[[entrypoints]]
+id = "producer-decision-transport"
+anchor = "async fn poll_producer_decision("
+owns = ["decision polling", "executor wake", "executor inbox"]
+replacement = "one retained actor decision slot and one passive weak-reference executor task; no action authority in this slice"
 
 [[entrypoints]]
 id = "request-verdict"
