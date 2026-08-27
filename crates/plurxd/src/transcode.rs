@@ -18965,27 +18965,29 @@ mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
-        let signal = child.signal(libc::SIGSTOP);
-        tokio::pin!(signal);
-        tokio::select! {
-            result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
-            _ = control.wait_for_producer_flow_deferral_for_test() => {}
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            let successor = control
+                .begin_producer_attempt()
+                .await
+                .expect("successor attempt");
+            assert!(successor > attempt);
+            control.release_producer_flow_capacity_for_test();
+            assert!(
+                !signal.await.expect("deferred signal verdict"),
+                "the predecessor signal must fail after exact-attempt re-authorization"
+            );
+            assert_eq!(
+                control.producer_flow_applied_for_test(),
+                None,
+                "a deferred predecessor cannot fabricate a physical acknowledgement"
+            );
         }
-        let successor = control
-            .begin_producer_attempt()
-            .await
-            .expect("successor attempt");
-        assert!(successor > attempt);
-        control.release_producer_flow_capacity_for_test();
-        assert!(
-            !signal.await.expect("deferred signal verdict"),
-            "the predecessor signal must fail after exact-attempt re-authorization"
-        );
-        assert_eq!(
-            control.producer_flow_applied_for_test(),
-            None,
-            "a deferred predecessor cannot fabricate a physical acknowledgement"
-        );
         control.release_producer_flow_capacity_for_test();
         child.kill().await.expect("reap predecessor child");
     }
@@ -19001,17 +19003,19 @@ mod tests {
         assert!(control.reserve_producer_flow_capacity_for_test());
         assert!(control.reserve_producer_flow_capacity_for_test());
 
-        let signal = child.signal(libc::SIGSTOP);
-        tokio::pin!(signal);
-        tokio::select! {
-            result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
-            _ = control.wait_for_producer_flow_deferral_for_test() => {}
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            control.fence_unavailable();
+            assert!(
+                !signal.await.expect("fenced deferred signal verdict"),
+                "retirement must wake a capacity waiter before PID access"
+            );
         }
-        control.fence_unavailable();
-        assert!(
-            !signal.await.expect("fenced deferred signal verdict"),
-            "retirement must wake a capacity waiter before PID access"
-        );
         control.release_producer_flow_capacity_for_test();
         control.release_producer_flow_capacity_for_test();
         child

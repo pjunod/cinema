@@ -2154,7 +2154,9 @@ impl RollingProducerIngress {
         let sequence = state.next_sequence;
         let preceding_progress = state.progress.take();
         #[cfg(test)]
-        state.last_flow_applied = Some(observation);
+        {
+            state.last_flow_applied = Some(observation);
+        }
         state.flow.push_back(SequencedProducerBarrier {
             preceding_progress,
             event: SequencedProducerEvent {
