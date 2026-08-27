@@ -53,8 +53,10 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "kill-on-drop-construction",
                 "rolling-supervisor-construction",
                 "forbidden-timer-or-task-alias",
+                "forbidden-timer-or-task-callable-alias",
                 "forbidden-command-alias",
                 "forbidden-low-level-function-alias",
+                "forbidden-process-namespace-alias",
                 "forbidden-command-type-alias",
                 "forbidden-command-callable-alias",
                 "forbidden-low-level-callable-alias",
@@ -63,7 +65,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         )
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
-        self.assertGreaterEqual(len(module_structures), 20)
+        self.assertGreaterEqual(len(module_structures), 22)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 

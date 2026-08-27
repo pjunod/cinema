@@ -306,13 +306,13 @@ expected_occurrences = 155
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
-pattern = "(?:[A-Za-z_]\\w*::)+Command::(?:spawn|output|status)\\s*\\("
+pattern = "(?:[A-Za-z_]\\w*::)*Command::(?:spawn|output|status)\\s*\\("
 expected_occurrences = 0
 
 [[module_structures]]
 id = "low-level-process-start"
-pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp)|(?<![:.\\w])(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp))\\s*\\("
-expected_occurrences = 626
+pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:fork|vfork|posix_spawn|posix_spawnp)|(?:(?:libc|nix|rustix)(?:::[A-Za-z_]\\w*)*)::(?:clone|clone3)|(?<![:.\\w])(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp))\\s*\\("
+expected_occurrences = 1
 
 [[module_structures]]
 id = "process-lifecycle-method"
@@ -340,6 +340,11 @@ pattern = "use\\s+[^;]*(?:spawn|spawn_blocking|spawn_local|sleep|sleep_until|int
 expected_occurrences = 0
 
 [[module_structures]]
+id = "forbidden-timer-or-task-callable-alias"
+pattern = "(?:let|const|static)\\s+(?:mut\\s+)?[A-Za-z_]\\w*(?:\\s*:[^=;]+)?\\s*=\\s*(?:(?:[A-Za-z_]\\w*::)+)?(?:spawn|spawn_blocking|spawn_local|sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\b(?!\\s*(?:::|\\())"
+expected_occurrences = 0
+
+[[module_structures]]
 id = "forbidden-command-alias"
 pattern = "use\\s+(?:tokio|std)[^;]*Command\\s+as\\s+"
 expected_occurrences = 0
@@ -347,6 +352,11 @@ expected_occurrences = 0
 [[module_structures]]
 id = "forbidden-low-level-function-alias"
 pattern = "use\\s+[^;]*(?:fork|vfork|clone|clone3|posix_spawn|posix_spawnp|kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)\\s+as\\s+"
+expected_occurrences = 0
+
+[[module_structures]]
+id = "forbidden-process-namespace-alias"
+pattern = "use\\s+(?:(?:libc|nix|rustix)(?:::[A-Za-z_]\\w*)*\\s+as|(?:libc|nix|rustix)[^;]*\\bself\\s+as)\\s+"
 expected_occurrences = 0
 
 [[module_structures]]
