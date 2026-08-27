@@ -115,21 +115,21 @@ replacement = "typed producer facts entering the actor; only its prepublication 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 18
+expected_occurrences = 21
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
 [[symbols]]
 id = "physical-flow-signal"
 pattern = "child\\.signal\\("
-expected_occurrences = 3
+expected_occurrences = 7
 kind = "process_action"
 replacement = "retained behind exact actor attempt/revision authorization and acknowledgement"
 
 [[symbols]]
 id = "child-termination"
 pattern = "child\\.kill\\(\\)\\.await"
-expected_occurrences = 12
+expected_occurrences = 13
 kind = "process_action"
 replacement = "the sole supervisor command path, with candidate cleanup registered before spawn"
 
@@ -157,7 +157,7 @@ replacement = "retained as response-EOF fetched-frontier evidence, not retry aut
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 54
+expected_occurrences = 55
 kind = "structural_task_scan"
 replacement = "every new detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
 
@@ -256,7 +256,7 @@ expected_occurrences = 17
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
-expected_occurrences = 0
+expected_occurrences = 44
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -269,7 +269,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 254
+expected_occurrences = 260
 
 [[module_structures]]
 id = "method-spawn"
@@ -284,7 +284,7 @@ expected_occurrences = 1
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 321
+expected_occurrences = 322
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -319,7 +319,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 237
+expected_occurrences = 244
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -334,7 +334,7 @@ expected_occurrences = 31
 [[module_structures]]
 id = "rolling-supervisor-construction"
 pattern = "AttemptChild::new\\s*\\("
-expected_occurrences = 18
+expected_occurrences = 21
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
