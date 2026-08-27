@@ -2572,7 +2572,7 @@ impl Session {
     async fn install_replacement_child(
         &self,
         producer_attempt: u64,
-        mut candidate: Child,
+        candidate: Child,
     ) -> Result<(), crate::playback_control::ProducerAttemptRejection> {
         // Acquire the async slot before authorization. The exact actor fence
         // below is synchronous and must never be held across an await.
@@ -11339,7 +11339,7 @@ impl TranscodeManager {
                         session = %session_log_id(sid),
                         producer_attempt = generation,
                         rejection = ?reason,
-                        "rolling actor refused fallback installation after spawn; candidate killed"
+                        "rolling actor refused fallback installation after spawn; candidate removed from session ownership"
                     );
                     return opts.effective_rate_control;
                 }
@@ -11856,7 +11856,7 @@ impl TranscodeManager {
                                         session = %session_log_id(&sid),
                                         producer_attempt = generation,
                                         rejection = ?reason,
-                                        "rolling actor refused copy fallback installation after spawn; candidate killed"
+                                        "rolling actor refused copy fallback installation after spawn; candidate removed from session ownership"
                                     );
                                     return;
                                 }
