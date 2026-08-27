@@ -186,10 +186,11 @@ copy outcome through ingress. Expiry of this mode becomes a typed
 
 Before the first advancing progress event, the deadline is
 `attempt_started_at + startup_budget`. Each advancing `out_time_ms` resets it
-to `observed_at + progress_budget`. Speed-only telemetry updates status but
-does not prove advancing output and cannot reset the deadline. Publication
-sets `published=true`; it does not itself excuse a producer that has stopped
-advancing.
+to the event's fenced `published_at + progress_budget`. A source observation
+timestamp remains telemetry and cannot backdate or extend the actor's ingress
+deadline. Speed-only telemetry updates status but does not prove advancing
+output and cannot reset the deadline. Publication sets `published=true`; it
+does not itself excuse a producer that has stopped advancing.
 
 The actor accepts `ApplyProducerFlow` with the exact attempt, a monotonic flow
 revision, and the complete evaluated inputs for demand, time-ahead, byte, disk,
@@ -230,27 +231,56 @@ the short fence, allocate its sequence and `published_at`, publish through the
 reserved permit, and release the fence. It cannot receive a pre-deadline stamp
 and then be descheduled before insertion.
 
-Nonblocking producer ingress is bounded but cutoff-aware. Under that same
-fence, the current attempt has:
+Nonblocking producer ingress is bounded but deadline-chain aware. Under that
+same fence, each command-free interval accumulates one
+`ProgressCoverageBatch`:
 
-- a `first_advancing` slot that retains the first unconsumed increase in
-  `out_time_ms`, including its original sequence and `published_at`, and cannot
-  be overwritten by later progress;
-- a separate `latest_telemetry` accumulator. It keeps the newest status sample
-  and, independently, the greatest subsequent `out_time_ms` together with the
-  sequence and `published_at` that proved that increase. A later speed-only
-  sample may update speed but cannot erase either advancing proof; and
-- fixed exit, physical-flow-acknowledgement, and classifier-result slots. Each
-  is non-overwritable for its exact attempt and operation/probe sequence;
-  duplicate publication is rejected rather than replacing an eligible fact.
+```text
+ProgressCoverageBatch
+  attempt
+  first_advancing(sequence, published_at, out_time_ms)
+  covered_last(sequence, published_at, out_time_ms)
+  covered_deadline
+  first_gap(sequence, published_at, out_time_ms) | None
+  latest_telemetry(sequence, published_at, speed, status)
+```
 
-The actor drains `first_advancing` before `latest_telemetry`. Consuming the
-first slot permits the next advancing observation to become the new first
-slot. A higher admitted attempt may replace predecessor slots only while the
-actor and ingress fences are held and after the predecessor facts have been
-drained or declared stale. A late lower-attempt publisher cannot evict any
-successor fact. This remains constant-space while preserving the evidence
-needed to decide an armed deadline.
+The first unconsumed `out_time_ms` increase initializes `first_advancing` and
+`covered_last`. Each later increase extends `covered_last` and
+`covered_deadline` only while no gap is recorded and its `published_at` is at
+or before `covered_last.published_at + progress_budget`. This proves the
+internal A-to-B-to-C chain without retaining every sample. The first increase
+after that horizon is retained as `first_gap`; it freezes coverage, and no
+later progress may bridge it. Speed-only telemetry updates
+`latest_telemetry` but cannot create coverage or erase the first, covered-last,
+or first-gap evidence.
+
+The batch does not decide whether its first event beat the actor's current
+armed deadline. On drain, the actor first requires
+`first_advancing.published_at <= current_deadline`. If true, the batch's
+already-proved contiguous prefix may advance the deadline to
+`covered_deadline`; if false, none of the batch can rescue the attempt. A
+recorded first gap is then necessarily after that resulting deadline and
+causes the ordinary single deadline verdict unless a higher-priority event
+wins. Thus delayed A/B/C is accepted only when every link was timely, while a
+missing middle sample cannot either create a false timeout or bridge a real
+stall.
+
+A command is an ordering barrier. After reserving its one bounded mailbox
+permit and taking the ingress fence, the sender seals the current open producer
+batch into `command.preceding_producer_batch`, resets the open batch, then
+allocates and publishes the command sequence. Producer facts after that command
+enter a new batch and can never be folded across it. At most one sealed batch
+belongs to each bounded command envelope, plus one open batch, so memory stays
+constant at `O(mailbox_capacity)`, not progress rate.
+
+Exit, physical-flow-acknowledgement, and classifier-result facts occupy fixed
+non-overwritable slots inside their command interval. They retain original
+sequence and `published_at` plus exact attempt and operation/probe sequence;
+duplicate publication is rejected. A higher admitted attempt may replace
+predecessor slots only while the actor and ingress fences are held and after
+the predecessor batch has been drained or declared stale. A late
+lower-attempt publisher cannot evict a successor fact.
 
 Actor dispatch is due-first: before every receive it compares the nearest
 deadline with `now`, and its `tokio::select!` is biased with the deadline branch
@@ -264,15 +294,17 @@ cutoff starts, the actor performs it without awaiting external work:
 
 1. acquire the synchronous actor transition fence and the ingress fence, then
    record the deadline instant plus the ingress high-water sequence;
-2. close and drain the fixed producer slots published through that sequence,
-   preserving each slot's original publication metadata;
+2. close and drain the sealed command batches plus the open producer batch
+   published through that sequence, preserving original publication metadata
+   and command barriers;
 3. retain the already-selected envelope, then `try_recv` at most the bounded
    mailbox capacity into an actor-owned deque capped at mailbox capacity plus
    that one selected envelope; process
-   only envelopes through the captured high-water mark whose fenced
-   `published_at` is no later than the deadline, while later publications stay
-   ordered in the deque for post-verdict handling; senders cannot publish a
-   new sequence until the ingress fence is released;
+   only facts through the captured high-water mark, folding each one against
+   the current armed deadline as earlier accepted progress may extend it;
+   facts later than that resulting deadline stay ordered in the deque for
+   post-verdict handling; senders cannot publish a new sequence until the
+   ingress fence is released;
 4. give an already-due End, authority fence, or playback-lease expiry first
    precedence;
 5. apply response-publication admissions, successful flow acknowledgements,
@@ -280,16 +312,20 @@ cutoff starts, the actor performs it without awaiting external work:
 6. let an accepted publication convert the pending verdict to a
    post-publication failure, let accepted progress rearm, and only then emit a
    producer decision if the exact armed deadline is still due; and
-7. release both fences, perform any wake or external action, then handle the
-   retained post-deadline deque against the new actor state before receiving more
-   input.
+7. release both fences and perform any wake or external action. Every retained
+   producer batch or command envelope then re-enters the same due-first
+   dispatch one item at a time: reread `now`, run any now-due cutoff, and only
+   then handle that item. A plain loop may not dispatch the retained deque
+   without those per-item deadline checks.
 
 An observation is eligible only if its fenced `published_at` is at or before
-the exact armed deadline and its sequence is within the captured high-water
-mark. Merely existing before cutoff processing begins is not sufficient. An
-earlier source timestamp published after the armed deadline is late and cannot
-reverse an already-emitted decision. If exit and deadline are both eligible, a
-classified exit published at or before the armed deadline supplies the reason;
+the deadline armed immediately before that observation and its sequence is
+within the captured high-water mark. Contiguous advancing progress may extend
+that deadline before the next observation is evaluated. Merely existing before
+cutoff processing begins is not sufficient. An earlier source timestamp
+published after its applicable armed deadline is late and cannot reverse an
+already-emitted decision. If exit and deadline are both eligible, a classified
+exit published at or before its applicable armed deadline supplies the reason;
 otherwise the deadline does. Session terminal/lease events always beat either.
 
 This gives deterministic outcomes under scheduler delay:
@@ -353,18 +389,22 @@ ProducerDecision::Fail {
 Reasons are exhaustive and typed: `startup_deadline`, `progress_deadline`,
 `exit_classification_deadline`, `process_exit`, `partial_success_exit`,
 `unsupported`, `invalid_configuration`, `reader_failed`, `flow_stop_failed`,
-`flow_resume_failed`, or `executor_lost`. A physical action timeout or cleanup
-error is execution evidence, not a new producer-decision reason; it is recorded
-separately as `last_action_failure` and cannot rewrite the immutable reason,
-decision sequence, or proposal identity.
+`flow_resume_failed`, `flow_stop_deadline`, `flow_resume_deadline`,
+`install_deadline`, or `executor_lost`. A physical action timeout or cleanup
+error is always recorded separately as `last_action_failure`. If an immutable
+decision already exists, execution failure cannot rewrite its reason, decision
+sequence, cleanup policy, or proposal identity. If no decision exists yet, the
+per-action settlement table below emits exactly one typed decision rather than
+leaving a fenced producer with no disposition.
 
 `ProducerDecision::Fail.cleanup` is fixed when the decision is emitted.
 Pre-publication failure uses `discard_prepublication`; its cleanup kills and
 confirms reap before deleting scratch and resetting compatibility projections.
 Post-publication failure uses `retain_published`; its cleanup kills and confirms
 reap but cannot delete, truncate, rename, or reset the published generation's
-scratch and catalogs. An action deadline applies the same recorded policy. It
-never performs a generic scratch-directory deletion.
+scratch and catalogs. A deadline on that producer-failure cleanup action
+applies the same recorded policy. It never performs a generic
+scratch-directory deletion.
 
 The actor owns one decision slot. Writing it is an in-memory actor mutation;
 the actor then calls `Notify::notify_one`, which never awaits and retains a
@@ -382,6 +422,7 @@ PendingProducerAction
         producer_failure_cleanup | terminal_cleanup
   attempt
   deadline
+  origin: independent | initial | decision_sequence | terminal_sequence
   cleanup_registration
   cleanup_policy: none | retain_published | discard_prepublication
 ```
@@ -428,15 +469,35 @@ cancellation cannot independently change the outcome. The operation kind
 supplies a bounded budget; retry's overall budget encloses smaller kill/reap,
 directory-clear, actor-reply, and proxy-slot wait budgets. Expiry fences the
 actor, records the bounded action failure without changing the producer
-decision, and invokes the cleanup owner directly using the action's immutable
-cleanup policy. It cannot request another recipe or compete with a progress
-decision.
+decision when one exists, and applies the exact settlement below. It cannot
+request another recipe or compete with a progress decision.
 
 Deadline priority is exact: an already-due session lifecycle terminal wins
 first; `ProducerActionDeadline` wins a same-instant tie with running progress;
 then `ProducerProgressDeadline` is evaluated. A progress decision that becomes
 due strictly before an outstanding flow-action deadline cancels that flow
 action as above. In `classifying_exit` there is no action deadline to compete.
+
+Action-deadline settlement is exhaustive:
+
+| Pending action | Required settlement at its exact deadline |
+|---|---|
+| `signal_stop`, no decision | Fence the signal token, emit one `Fail(reason=flow_stop_deadline)` using current publication state, then run its exact producer-failure cleanup. |
+| `signal_resume`, no decision | Fence the signal token, emit one `Fail(reason=flow_resume_deadline)` using current publication state, then run its exact producer-failure cleanup. |
+| initial `install`, no decision | Reject publication/manager registration, emit one pre-publication `Fail(reason=install_deadline, cleanup_policy=discard_prepublication)`, and return a typed `producer_action_failed` create response. |
+| retry or retry-origin `install` | Preserve the retry decision and original producer reason; record `last_action_failure`, settle `prepublication_failed`, and terminate/reap every registered predecessor or candidate before policy-authorized discard. |
+| `producer_failure_cleanup` | Preserve the exact `Fail`, disposition, proposal, and scratch policy; record the cleanup timeout and keep registered termination/reap active. |
+| `terminal_cleanup` | Preserve End, authority-fence, or lease-expiry terminal cause and acknowledgement replay; record the cleanup timeout and keep registered termination/reap active. |
+
+If a decision or terminal transition preempted the action first, the old action
+deadline is stale and observation-only. For a live winning action deadline,
+the actor advances the action token before requesting cleanup, so a late
+physical acknowledgement cannot revive or relabel the producer. Status and
+HTTP projections are deterministic: a newly created pre-publication failure is
+`prepublication_failed`; a newly created post-publication flow failure is
+`producer_ended_with_proposal`, preserves admitted bytes, and returns typed
+`producer_ended` only beyond its frontier. Action-failure detail is additional
+evidence, never a substitute for the immutable producer or terminal cause.
 
 The executor is registered before the initial producer deadline can arm. Its
 join monitor holds only a weak session reference. Unexpected receiver closure,
@@ -460,24 +521,52 @@ different values:
   sender, and terminal receipt. Its `Drop` has no process side effect, and its
   terminate/reap request is idempotent.
 
-Before every process spawn, including the initial attempt, the executor must
-acquire one fixed `ProducerCleanupPermit`. Registry capacity is derived from
-the active rolling-session limit plus at most one pending retry per active
-session. If no cleanup permit is available, admission fails before spawn; a
-child can never exist without a registry slot.
+M4 introduces one node-local hard `RollingProcessCapacity` for the compatibility
+rolling presentation. `playback.rolling_process_limit` is read at daemon start,
+defaults to 64, and accepts 4–256; changing it requires restart so shrinking the
+limit cannot orphan existing permits. One slot covers one spawned rolling
+process and its cleanup-registry entry. It includes copy producers, hardware
+and software transcodes, initial attempts, and pending retry candidates. VOD's
+separate producer scheduler is outside this limit. `active_session_count` and
+cluster `session_pressure_limit` remain telemetry/scoring only and are
+explicitly not admission bounds.
 
-The executor registers the `SupervisorCleanupHandle`, cleanup permit, and that
-process's hardware/software admission permits in one manager-owned registry
-entry before any later await, including actor admission and proxy-slot
-acquisition, while retaining the move-only installed lease locally. After
-installation the Session owns that lease and the registry keeps the separate
-cleanup handle and process-capacity resources. An entry survives actor,
-executor, and Session retirement until its terminal receipt confirms reap.
-Only that receipt may remove the entry and release its cleanup and
-hardware/software admission permits.
+Before every process spawn the executor must acquire one
+`RollingProcessPermit` and atomically reserve its fixed manager-owned cleanup
+registry entry. If no slot is available, admission fails before process spawn,
+scratch publication, or session registration; a child can never exist without
+a registry entry. A `RollingSpawnReservation` drop guard owns the empty entry
+and permit until spawn returns. A no-process spawn error removes the entry and
+releases the permit; a successful spawn synchronously fills the entry before
+the next await, so cancellation cannot strand an unregistered child. The
+executor registers the `SupervisorCleanupHandle`, rolling-process permit, and
+any hardware/software admission permit in that entry before actor admission or
+proxy-slot acquisition, while retaining the move-only installed lease locally.
+Copy has no encoder-family permit but always has the rolling-process permit.
+
+After installation the Session owns the installed lease and the registry keeps
+the separate cleanup handle and process-capacity resources. An entry survives
+actor, executor, and Session retirement until its terminal receipt confirms
+reap. Only that receipt may remove the entry and release its rolling-process
+and hardware/software admission permits.
+
+Capacity exhaustion is explicit compatibility behavior:
+
+- an initial local create returns typed HTTP 503
+  `rolling_process_capacity` with bounded retry guidance, leaves no registered
+  session or scratch generation, and settles its `request_id` claim as that
+  replayable result;
+- cluster placement advertises zero rolling capacity for that node so another
+  eligible owner may be selected, but the local manager still enforces the
+  permit and never trusts scoring as admission;
+- a pre-publication retry that cannot acquire a second process slot spawns
+  nothing, records `last_action_failure=rolling_process_capacity`, and settles
+  the original producer decision as `prepublication_failed`; and
+- no path silently changes recipe, swaps to VOD, waits without a deadline, or
+  exceeds the hard process bound.
 
 Executor-task and action-concurrency permits are different resources: they may
-be released as soon as an action settles or is aborted. Process-capacity,
+be released as soon as an action settles or is aborted. Rolling-process,
 cleanup-registry, and hardware/software admission permits are never released
 on abort, action-deadline expiry, Session retirement, or a best-effort kill
 request. A supervisor whose reap cannot be confirmed therefore continues to
@@ -666,8 +755,10 @@ Activity and session status add:
 - outstanding proposal ID/type;
 - executor state, pending-decision age, last acknowledged sequence, and
   separate `last_action_failure` class without relabeling the producer
-  decision; and
-- flow revision plus desired/applied flow state.
+  decision;
+- flow revision plus desired/applied flow state; and
+- rolling-process slots used/available/limit, cleanup-registry entries, and
+  `reap_unconfirmed` count.
 
 The timer inventory also exposes the two actor-owned server bounds:
 
@@ -680,12 +771,13 @@ The latter is not a recovery voter: expiry can only fail/fence the already
 chosen action and invoke its registered cleanup. It cannot choose a retry or
 replacement.
 
-Prometheus counters are bounded-label:
+Prometheus metrics are bounded-label:
 
 - `plurx_playback_producer_deadline_total{phase,outcome}`;
 - `plurx_playback_producer_decision_total{kind,reason}`;
-- `plurx_playback_producer_retry_total{outcome}`; and
-- `plurx_playback_producer_action_total{outcome}`.
+- `plurx_playback_producer_retry_total{outcome}`;
+- `plurx_playback_producer_action_total{outcome}`; and
+- `plurx_playback_rolling_process_slots{state="used|available|reap_unconfirmed"}`.
 
 No generation, file, client, or action ID is a metric label. Logs may carry
 those values as structured fields.
@@ -724,11 +816,15 @@ misclassified as a watchdog.
 
 | Ordering | Required result |
 |---|---|
-| advancing progress A published at or before the armed deadline, speed-only or later progress B published after it | immutable A slot wins and rearms; B cannot erase A |
+| delayed A/B/C where every advancing publication is within the deadline established by its predecessor | one contiguous coverage batch proves the chain and rearms through C |
+| delayed A/C with B absent and C after A's resulting deadline | first gap freezes coverage; C cannot bridge the real stall |
+| advancing A followed by speed-only B after the original deadline | A remains coverage evidence and rearms; B neither erases nor extends it |
 | progress published after the armed deadline | one timeout decision |
+| producer batch, command barrier, producer batch | batches are evaluated on their own sides of the command; coverage never crosses it |
 | command reserved before deadline but published after | post-deadline command; cannot reverse verdict |
 | deadline becomes due while receive branches are ready | due-first cutoff runs before ordinary dispatch |
 | timer polls pending, deadline passes, then receive wakes | selected envelope retained; cutoff runs before handling it |
+| deadline becomes due between two retained deque items | due-first cutoff runs before the second item |
 | classified exit published at or before the armed deadline plus deadline | exit reason wins; one decision |
 | classification published after the armed deadline | deadline reason wins; later classification cannot duplicate |
 | due End/authority fence/lease expiry plus producer deadline | lifecycle terminal wins; no producer decision |
@@ -736,7 +832,9 @@ misclassified as a watchdog.
 | pause or physical hold acknowledgement published at or before the armed deadline | disarmed; no decision |
 | SIGSTOP live error | running deadline remains until one bounded retry settles or typed failure wins |
 | SIGCONT live error | held state remains until one bounded retry settles or typed failure wins |
-| signal command/reply blocks | action deadline fences and supervisor cleanup owns the process |
+| signal command/reply blocks before a decision | action deadline emits one typed flow-deadline failure, fences the token, and supervisor cleanup owns the process |
+| initial install blocks before a decision | typed pre-publication install failure; no session registration or unowned child |
+| retry/install/cleanup blocks after a decision | original decision and proposal remain immutable; action failure is separate evidence |
 | resume after a long hold | fresh full progress budget |
 | publication just before failure | no retry; one proposal |
 | retry decision then End | candidate is killed; no install |
@@ -749,7 +847,8 @@ misclassified as a watchdog.
 | zero exit without valid ENDLIST/frontier | typed partial-success failure, never complete |
 | post-publication failure cleanup expires | terminate/reap continues; published scratch and catalogs remain readable; original decision reason remains |
 | pre-publication failure cleanup completes | reap is confirmed before scratch is discarded and compatibility projections reset |
-| cleanup registry full before spawn | admission fails without spawning a child |
+| rolling process/cleanup registry full before initial copy or transcode spawn | typed 503 admission failure without process, scratch generation, or registered session |
+| rolling process/cleanup registry full before retry spawn | original decision settles pre-publication failure; no candidate process |
 | terminate requested but reap remains unconfirmed | registry, process-capacity, and hardware/software admission permits remain held and observable |
 | predecessor exit after retry install | stale fact rejected |
 | executor loss with pending decision | actor fences; supervisor termination and manager cleanup proceed without executor |
@@ -767,13 +866,15 @@ unit tests run.
 3. Implement the process executor and migrate transcode/copy paths.
 4. Delete the old tasks, locks, atomics, and replacement helpers.
 5. Add status, metrics, and the repository ownership check.
-6. Obtain adversarial review of the exact cumulative diff; fix every finding.
-7. Run focused actor and fault-injection tests.
-8. Run `make check`, repair failures, and repeat until green.
-9. Run `make cluster-check` because terminal, owner-fence, and producer action
+6. Open or update the implementation PR at the frozen cumulative head.
+7. Obtain adversarial review of that exact PR head; fix every finding and
+   repeat exact-head review before running unit tests.
+8. Run focused actor and fault-injection tests.
+9. Run `make check`, repair failures, and repeat until green.
+10. Run `make cluster-check` because terminal, owner-fence, and producer action
    ordering cross cluster ownership.
-10. Open the PR, obtain exact-head adversarial review, require every hosted job
-    to pass, and merge only while the reviewed head is unchanged.
+11. Require every hosted job to pass and merge only while the reviewed head is
+    unchanged.
 
 ## 11. Acceptance
 
@@ -793,6 +894,10 @@ M4 is complete only when all of the following are true:
 - terminal and attempt fences reject every late install, signal, and event;
 - executor loss fences and terminates without stranding a process;
 - executor step expiry reaches pending as well as installed supervisors;
+- every action-deadline kind has one typed settlement whether or not a
+  producer decision existed first;
+- the hard rolling-process limit includes copy, transcode, and retry
+  candidates, and no permit returns before confirmed reap;
 - every external acknowledgement is fenced by action sequence, kind, and
   attempt, and terminal preemption cannot be undone;
 - zero exit needs exact ENDLIST/frontier proof to become complete;
