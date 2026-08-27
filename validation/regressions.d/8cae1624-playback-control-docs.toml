@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["8cae1624"]
+reason = "This commit only corrected the M4 playback-control implementation contract and project status; it changed no runtime behavior."
+ignore = true
