@@ -4,11 +4,11 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
 **Active branch:** `codex/playback-control-m4-actor-deadline`
-**Last reviewed head:** `252f2a72e46f08bb90ca99a334cd6f32887ef54a`
+**Last reviewed head:** `5824c8cc0d86c948f250fa0bd71c73d22657de76`
 (changes requested)
 **Current exact head:** resolve
 `origin/codex/playback-control-m4-actor-deadline`; the seventh-review
-candidate includes the sixth-pass corrections and this handoff
+successor includes the seventh-pass corrections and this handoff
 **Test state:** no unit, full, or cluster tests have run for this PR
 
 This is the resumable execution ledger for the playback-control rewrite. Read
@@ -96,6 +96,7 @@ a376727e chore(validation): bind M4 review corrections
 8a18a1b5 chore(validation): enumerate process ownership forms
 df2389a7 chore(validation): catalog callable construction paths
 252f2a72 test(validation): specify structural syntax contract
+5824c8cc test(validation): specify wrapped ownership syntax
 ```
 
 ### Adversarial review chronology
@@ -115,12 +116,15 @@ Six exact-head reviews have run. No tests were run during them.
    callables and grouped/absolute aliases were not pinned.
 6. `252f2a72`: nested parentheses and references plus grouped/absolute
    `Command`, absolute type, and `extern crate` process aliases remained.
+7. `5824c8cc`: callable-argument groups could be mistaken for transparent
+   wrappers; alias wrappers did not allow interleaved references/parentheses;
+   and the immediate-next-step handoff text was stale.
 
 The reviewer has consistently confirmed the producer-ingress and successor
 watermark behavior after the first corrections. The remaining work is the
 static structural contract, not runtime semantics.
 
-### Seventh-review candidate
+### Eighth-review candidate
 
 The candidate:
 
@@ -129,11 +133,14 @@ The candidate:
   counting;
 - preserves raw source for legacy-name sentinels;
 - normalizes arbitrarily nested parenthesized callable paths only when the
-  wrapper itself is invoked, without deleting ordinary call arguments;
-- accepts reference/dereference wrappers in forbidden local aliases;
+  wrapper itself is invoked and its opening group is not owned by a preceding
+  callable;
+- accepts recursively interleaved parenthesis/reference/dereference wrappers
+  in forbidden local aliases;
 - catches grouped/absolute `Command` import aliases, absolute `Command` type
   aliases, and `extern crate libc|nix|rustix as ...`;
-- carries 22 exact structural rows and 27 synthetic syntax-contract cases; and
+- carries 22 exact structural rows, 30 positive syntax-contract cases, two
+  negative ordinary-argument cases, and exact required-ID assertions; and
 - has zero real-source structural count mismatches under a read-only static
   count check.
 
@@ -143,23 +150,21 @@ truth for the immutable review SHA.
 
 ## 4. Immediate continuation procedure
 
-1. Finish static inspection of the local sixth-pass diff. In particular,
-   verify callable-wrapper normalization does not remove ordinary function
-   argument parentheses, and every new synthetic case names a live structural
-   row.
-2. Update this file and both status pages with the correction head.
-3. Run formatting and non-test static checks only: `cargo fmt --all` and
-   `git diff --check`.
-4. Commit with a history-neutral subject, push, and record the immutable SHA
-   here.
-5. Request adversarial exact-head pass seven. Explicitly prohibit tests.
-6. If approved, run the focused Python ownership-inventory test and focused
-   Rust producer-ingress tests.
-7. Correct any failure. A changed head requires a fresh exact-head review.
-8. Run `make check`, then `make cluster-check`, then require hosted CI green.
-9. Update handoff/status with counts and exact SHA; merge PR #619.
-10. Fast-forward the disposable clone to merged `main`, create the next
-    `codex/` branch, and continue M4.
+The current exact remote head's next gate is an adversarial verdict. Do not
+run tests while that verdict is pending.
+
+- If review requests changes, batch every finding into one correction,
+  update this handoff/status, perform formatting and non-test static checks,
+  commit and push, then request a fresh immutable exact-head review.
+- If review approves, run the focused Python ownership-inventory test and
+  focused Rust producer-ingress tests.
+- Correct any test failure. A changed head requires a fresh exact-head review
+  before merge.
+- After focused evidence is green, run `make check`, then
+  `make cluster-check`, then require every hosted check green.
+- Record exact SHAs and test counts here and in status, merge PR #619,
+  fast-forward the disposable clone to merged `main`, create the next
+  `codex/` branch, and continue M4.
 
 Do not skip from step 5 directly to merge because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial

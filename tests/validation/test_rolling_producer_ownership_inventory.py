@@ -14,10 +14,12 @@ CHAR_LITERAL = re.compile(
     r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\})|[^\\'\r\n])'"
 )
 TRANSPARENT_CALLABLE_PARENS = re.compile(
-    r"(?P<open>(?:\(\s*)+)"
-    r"(?P<reference>(?:(?:&\s*(?:mut\s+)?)|(?:\*\s*))*)"
+    r"(?P<prefix>(?:(?:\(\s*)|(?:&\s*(?:mut\s+)?)|(?:\*\s*))+)"
     r"(?P<path>(?:::)?(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)"
     r"(?P<close>(?:\s*\))+)(?=\s*\()"
+)
+EXPRESSION_PREFIX_KEYWORDS = frozenset(
+    {"break", "else", "if", "let", "match", "move", "return", "while", "yield"}
 )
 
 
@@ -25,6 +27,22 @@ def _blank_non_newlines(chars: list[str], start: int, end: int) -> None:
     for index in range(start, end):
         if chars[index] not in "\r\n":
             chars[index] = " "
+
+
+def _preceded_by_callable(source: str, start: int) -> bool:
+    index = start - 1
+    while index >= 0 and source[index].isspace():
+        index -= 1
+    if index < 0:
+        return False
+    if source[index] in ")]}!?":
+        return True
+    if not (source[index].isalnum() or source[index] == "_"):
+        return False
+    end = index + 1
+    while index >= 0 and (source[index].isalnum() or source[index] == "_"):
+        index -= 1
+    return source[index + 1 : end] not in EXPRESSION_PREFIX_KEYWORDS
 
 
 def rust_structural_source(source: str) -> str:
@@ -128,7 +146,10 @@ def rust_structural_source(source: str) -> str:
     code = "".join(chars)
 
     def unwrap(match: re.Match[str]) -> str:
-        value = match.group("reference") + match.group("path")
+        prefix = match.group("prefix")
+        if "(" not in prefix or _preceded_by_callable(code, match.start()):
+            return match.group(0)
+        value = prefix.replace("(", "") + match.group("path")
         padding = len(match.group(0)) - len(value)
         return " " * (padding // 2) + value + " " * (padding - padding // 2)
 
@@ -154,16 +175,19 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         module_symbols = self.catalog["module_symbols"]
         module_structures = self.catalog["module_structures"]
         contract_cases = self.catalog["contract_cases"]
+        negative_cases = self.catalog["negative_cases"]
         entries = self.catalog["entrypoints"]
         symbol_ids = [entry["id"] for entry in symbols]
         module_symbol_ids = [entry["id"] for entry in module_symbols]
         module_structure_ids = [entry["id"] for entry in module_structures]
         contract_case_ids = [entry["id"] for entry in contract_cases]
+        negative_case_ids = [entry["id"] for entry in negative_cases]
         entry_ids = [entry["id"] for entry in entries]
         self.assertEqual(len(symbol_ids), len(set(symbol_ids)))
         self.assertEqual(len(module_symbol_ids), len(set(module_symbol_ids)))
         self.assertEqual(len(module_structure_ids), len(set(module_structure_ids)))
         self.assertEqual(len(contract_case_ids), len(set(contract_case_ids)))
+        self.assertEqual(len(negative_case_ids), len(set(negative_case_ids)))
         self.assertEqual(len(entry_ids), len(set(entry_ids)))
         self.assertEqual(
             {
@@ -178,11 +202,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "parenthesized-local-timer-alias",
                 "turbofished-local-task-alias",
                 "referenced-local-task-alias",
+                "interleaved-local-task-alias",
                 "command-construction",
                 "command-method-launch",
                 "bare-command-ufcs",
                 "namespaced-command-ufcs",
                 "parenthesized-command-alias",
+                "interleaved-command-alias",
                 "grouped-command-import-alias",
                 "absolute-command-import-alias",
                 "absolute-command-type-alias",
@@ -194,8 +220,13 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "process-lifecycle-method",
                 "free-process-signal",
                 "local-low-level-alias",
+                "interleaved-low-level-alias",
             },
             set(contract_case_ids),
+        )
+        self.assertEqual(
+            {"ordinary-call-argument", "referenced-ordinary-call-argument"},
+            set(negative_case_ids),
         )
         self.assertEqual(
             {
@@ -227,7 +258,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
         self.assertGreaterEqual(len(module_structures), 22)
-        self.assertGreaterEqual(len(contract_cases), 27)
+        self.assertGreaterEqual(len(contract_cases), 30)
+        self.assertGreaterEqual(len(negative_cases), 2)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
@@ -271,6 +303,15 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 self.assertTrue(row["must_trigger"])
                 self.assertLessEqual(
                     set(row["must_trigger"]), set(module_structure_ids)
+                )
+
+        for row in negative_cases:
+            with self.subTest(negative_case=row["id"]):
+                self.assertEqual({"id", "source", "must_not_trigger"}, set(row))
+                self.assertTrue(row["source"].strip())
+                self.assertTrue(row["must_not_trigger"])
+                self.assertLessEqual(
+                    set(row["must_not_trigger"]), set(module_structure_ids)
                 )
 
         for row in entries:
@@ -339,6 +380,20 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                     self.assertIsNotNone(
                         patterns[structure_id].search(source),
                         f"{row['id']} no longer triggers {structure_id}",
+                    )
+
+    def test_ordinary_argument_groups_do_not_manufacture_calls(self) -> None:
+        patterns = {
+            row["id"]: re.compile(row["pattern"])
+            for row in self.catalog["module_structures"]
+        }
+        for row in self.catalog["negative_cases"]:
+            source = rust_structural_source(row["source"])
+            for structure_id in row["must_not_trigger"]:
+                with self.subTest(negative_case=row["id"], structure=structure_id):
+                    self.assertIsNone(
+                        patterns[structure_id].search(source),
+                        f"{row['id']} manufactured {structure_id}",
                     )
 
     def test_every_named_entrypoint_is_live_and_unique(self) -> None:
