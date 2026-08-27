@@ -18920,7 +18920,7 @@ mod tests {
         secs_each: f64,
         first_segment: Option<&'static [u8]>,
     ) -> u64 {
-        let (mut replacement, attempt) = session
+        let (replacement, attempt) = session
             .kill_child_for_replacement()
             .await
             .expect("prepublication replacement");
@@ -20358,7 +20358,7 @@ mod tests {
             let session = Arc::clone(&session);
             let path = dir.path().to_path_buf();
             async move {
-                let (mut replacement, attempt) = session
+                let (replacement, attempt) = session
                     .kill_child_for_replacement()
                     .await
                     .expect("prepublication replacement");
@@ -21865,7 +21865,7 @@ mod tests {
             .watchdog_verdict_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let (mut replacement, _) = session
+        let (replacement, _) = session
             .kill_child_for_replacement()
             .await
             .expect("a live session may replace its child");
@@ -21971,7 +21971,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let replacement_session = Arc::clone(&session);
         let replacement = tokio::spawn(async move {
-            let Some((mut replacement, _)) = replacement_session
+            let Some((replacement, _)) = replacement_session
                 .begin_copy_child_replacement()
                 .await
                 .expect("rolling actor must answer replacement admission")
@@ -22101,7 +22101,7 @@ mod tests {
         let replacement = tokio::spawn({
             let session = Arc::clone(&session);
             async move {
-                let (mut replacement, _) = session
+                let (replacement, _) = session
                     .begin_copy_child_replacement()
                     .await
                     .expect("rolling actor must answer replacement admission")
