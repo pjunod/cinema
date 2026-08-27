@@ -1636,6 +1636,10 @@ pub(crate) enum ProducerDecisionPoll {
     Idle,
     Decision(Arc<ProducerDecision>),
     Terminal(RollingTerminalCause),
+}
+
+enum DecisionTransportPoll {
+    Available(ProducerDecisionPoll),
     Unavailable,
 }
 
@@ -2769,6 +2773,32 @@ impl RollingExecutorObservation {
             _ => "registered",
         }
     }
+
+    fn begin_observing(&self) -> bool {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (!matches!(state, 3 | 4)).then_some(2)
+            })
+            .is_ok()
+    }
+
+    fn finish_observing(&self) -> bool {
+        self.state
+            .compare_exchange(2, 1, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+
+    fn settle_terminal(&self) {
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (state != 4).then_some(3)
+            });
+    }
+
+    fn settle_lost(&self) {
+        self.state.store(4, Ordering::Release);
+    }
 }
 
 /// Actor-owned half of the decision path. It deliberately contains no actor
@@ -2803,6 +2833,8 @@ struct RollingDecisionTransport {
     terminal_projection: Arc<AtomicU8>,
     #[cfg(test)]
     executor_poll_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    executor_observation_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
 
 impl RollingDecisionTransport {
@@ -2810,15 +2842,16 @@ impl RollingDecisionTransport {
         RollingTerminalCause::from_projection(self.terminal_projection.load(Ordering::Acquire))
     }
 
-    async fn poll_after(&self, after_sequence: u64) -> ProducerDecisionPoll {
+    async fn poll_after(&self, after_sequence: u64) -> DecisionTransportPoll {
         let (reply, response) = tokio::sync::oneshot::channel();
         let permit = match self.sender.reserve().await {
             Ok(permit) => permit,
             Err(_) => {
-                return self.committed_terminal().map_or(
-                    ProducerDecisionPoll::Unavailable,
-                    ProducerDecisionPoll::Terminal,
-                );
+                return self
+                    .committed_terminal()
+                    .map_or(DecisionTransportPoll::Unavailable, |cause| {
+                        DecisionTransportPoll::Available(ProducerDecisionPoll::Terminal(cause))
+                    });
             }
         };
         let transition = self
@@ -2833,12 +2866,15 @@ impl RollingDecisionTransport {
                 });
         permit.send(envelope);
         drop(transition);
-        response.await.unwrap_or_else(|_| {
-            self.committed_terminal().map_or(
-                ProducerDecisionPoll::Unavailable,
-                ProducerDecisionPoll::Terminal,
-            )
-        })
+        response
+            .await
+            .map(DecisionTransportPoll::Available)
+            .unwrap_or_else(|_| {
+                self.committed_terminal()
+                    .map_or(DecisionTransportPoll::Unavailable, |cause| {
+                        DecisionTransportPoll::Available(ProducerDecisionPoll::Terminal(cause))
+                    })
+            })
     }
 
     fn spawn_executor(
@@ -2850,6 +2886,8 @@ impl RollingDecisionTransport {
         let observation = Arc::clone(&self.executor_observation);
         #[cfg(test)]
         let executor_poll_pause = Arc::clone(&self.executor_poll_pause);
+        #[cfg(test)]
+        let executor_observation_pause = Arc::clone(&self.executor_observation_pause);
         tokio::spawn(async move {
             let mut observed_sequence = 0_u64;
             loop {
@@ -2864,15 +2902,16 @@ impl RollingDecisionTransport {
                     break;
                 };
                 if !wake {
-                    let state = if transport.committed_terminal().is_some() {
-                        3
+                    if transport.committed_terminal().is_some() {
+                        observation.settle_terminal();
                     } else {
-                        4
-                    };
-                    observation.state.store(state, Ordering::Release);
+                        observation.settle_lost();
+                    }
                     break;
                 }
-                observation.state.store(2, Ordering::Release);
+                if !observation.begin_observing() {
+                    break;
+                }
                 #[cfg(test)]
                 let poll_pause = {
                     executor_poll_pause
@@ -2885,9 +2924,26 @@ impl RollingDecisionTransport {
                     pause.wait().await;
                     pause.wait().await;
                 }
-                match transport.poll_after(observed_sequence).await {
-                    ProducerDecisionPoll::Idle => observation.state.store(1, Ordering::Release),
-                    ProducerDecisionPoll::Decision(decision) => {
+                let poll = transport.poll_after(observed_sequence).await;
+                #[cfg(test)]
+                let observation_pause = {
+                    executor_observation_pause
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take()
+                };
+                #[cfg(test)]
+                if let Some(pause) = observation_pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+                match poll {
+                    DecisionTransportPoll::Available(ProducerDecisionPoll::Idle) => {
+                        if !observation.finish_observing() {
+                            break;
+                        }
+                    }
+                    DecisionTransportPoll::Available(ProducerDecisionPoll::Decision(decision)) => {
                         // Polling never consumes the actor slot. The local
                         // observation cursor only prevents a passive task
                         // from repeatedly observing one retained value.
@@ -2895,14 +2951,16 @@ impl RollingDecisionTransport {
                         observation
                             .last_observed_sequence
                             .store(observed_sequence, Ordering::Release);
-                        observation.state.store(1, Ordering::Release);
+                        if !observation.finish_observing() {
+                            break;
+                        }
                     }
-                    ProducerDecisionPoll::Terminal(_) => {
-                        observation.state.store(3, Ordering::Release);
+                    DecisionTransportPoll::Available(ProducerDecisionPoll::Terminal(_)) => {
+                        observation.settle_terminal();
                         break;
                     }
-                    ProducerDecisionPoll::Unavailable => {
-                        observation.state.store(4, Ordering::Release);
+                    DecisionTransportPoll::Unavailable => {
+                        observation.settle_lost();
                         break;
                     }
                 }
@@ -3478,10 +3536,7 @@ impl RollingControlActor {
             return;
         }
         self.executor_lost = true;
-        self.decision_wake
-            .executor_observation
-            .state
-            .store(4, Ordering::Release);
+        self.decision_wake.executor_observation.settle_lost();
     }
 
     fn wake_executor_after_transition(&self, had_pending_decision: bool, was_retired: bool) {
@@ -3490,10 +3545,7 @@ impl RollingControlActor {
             // Executor loss is useful pre-terminal evidence and wins this
             // status projection. Otherwise terminal settlement is actor truth
             // even if the task disappears between commit and wake delivery.
-            let executor_state = &self.decision_wake.executor_observation.state;
-            if executor_state.load(Ordering::Acquire) != 4 {
-                executor_state.store(3, Ordering::Release);
-            }
+            self.decision_wake.executor_observation.settle_terminal();
         }
         if (!had_pending_decision && self.pending_decision.is_some()) || became_terminal {
             self.decision_wake.wake();
@@ -4346,6 +4398,8 @@ impl RollingControlHandle {
         let terminal_projection = Arc::new(AtomicU8::new(0));
         #[cfg(test)]
         let executor_poll_pause = Arc::new(std::sync::Mutex::new(None));
+        #[cfg(test)]
+        let executor_observation_pause = Arc::new(std::sync::Mutex::new(None));
         let decision_wake = Arc::new(RollingDecisionWake {
             decision_notify: Arc::clone(&decision_notify),
             executor_wake,
@@ -4360,6 +4414,8 @@ impl RollingControlHandle {
             terminal_projection,
             #[cfg(test)]
             executor_poll_pause,
+            #[cfg(test)]
+            executor_observation_pause,
         });
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
@@ -4434,6 +4490,7 @@ impl RollingControlHandle {
             executor_observation: Arc::new(RollingExecutorObservation::default()),
             terminal_projection: Arc::new(AtomicU8::new(0)),
             executor_poll_pause: Arc::new(std::sync::Mutex::new(None)),
+            executor_observation_pause: Arc::new(std::sync::Mutex::new(None)),
         });
         Self {
             sender,
@@ -4546,8 +4603,14 @@ impl RollingControlHandle {
     /// Poll the immutable actor decision after an executor-owned sequence.
     /// Polling is a read and never clears or acknowledges the one-slot value.
     #[cfg(test)]
-    pub(crate) async fn poll_producer_decision(&self, after_sequence: u64) -> ProducerDecisionPoll {
-        self.decision_transport.poll_after(after_sequence).await
+    pub(crate) async fn poll_producer_decision(
+        &self,
+        after_sequence: u64,
+    ) -> Result<ProducerDecisionPoll, ()> {
+        match self.decision_transport.poll_after(after_sequence).await {
+            DecisionTransportPoll::Available(poll) => Ok(poll),
+            DecisionTransportPoll::Unavailable => Err(()),
+        }
     }
 
     #[cfg(test)]
@@ -4585,6 +4648,15 @@ impl RollingControlHandle {
         *self
             .decision_transport
             .executor_poll_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pause_executor_observation_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .decision_transport
+            .executor_observation_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
@@ -9014,15 +9086,15 @@ mod tests {
         );
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Decision(Arc::new(decision.clone()))
+            Ok(ProducerDecisionPoll::Decision(Arc::new(decision.clone())))
         );
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Decision(Arc::new(decision))
+            Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
         );
         assert_eq!(
             handle.poll_producer_decision(4).await,
-            ProducerDecisionPoll::Idle
+            Ok(ProducerDecisionPoll::Idle)
         );
         wait_for_executor_observation(&handle, "idle", Some(4)).await;
     }
@@ -9073,7 +9145,7 @@ mod tests {
 
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Decision(Arc::new(decision))
+            Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
         );
     }
 
@@ -9101,7 +9173,7 @@ mod tests {
         );
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Terminal(RollingTerminalCause::End)
+            Ok(ProducerDecisionPoll::Terminal(RollingTerminalCause::End))
         );
         wait_for_executor_observation(&handle, "terminal", None).await;
         handle.abort_actor_for_test();
@@ -9109,7 +9181,7 @@ mod tests {
         handle.sender.closed().await;
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Terminal(RollingTerminalCause::End),
+            Ok(ProducerDecisionPoll::Terminal(RollingTerminalCause::End)),
             "mailbox loss cannot relabel the actor's committed terminal cause"
         );
     }
@@ -9124,7 +9196,9 @@ mod tests {
 
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Terminal(RollingTerminalCause::LeaseExpired)
+            Ok(ProducerDecisionPoll::Terminal(
+                RollingTerminalCause::LeaseExpired
+            ))
         );
     }
 
@@ -9152,7 +9226,7 @@ mod tests {
         );
         assert_eq!(
             handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Decision(Arc::new(decision))
+            Ok(ProducerDecisionPoll::Decision(Arc::new(decision)))
         );
         assert_eq!(handle.executor_observation_for_test().0, "lost");
         assert_eq!(
@@ -9177,10 +9251,37 @@ mod tests {
         wait_for_executor_observation(&handle, "lost", None).await;
 
         assert_eq!(handle.decision_transport.committed_terminal(), None);
-        assert_eq!(
-            handle.poll_producer_decision(0).await,
-            ProducerDecisionPoll::Unavailable
+        assert_eq!(handle.poll_producer_decision(0).await, Err(()));
+    }
+
+    #[tokio::test]
+    async fn stale_poll_result_cannot_overwrite_terminal_executor_state() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_executor_observation_for_test(Arc::clone(&pause));
+        assert!(
+            handle
+                .install_producer_decision_for_test(ProducerDecision::Fail {
+                    decision_sequence: 17,
+                    failed_attempt: 1,
+                    reason: ProducerDecisionReason::ReaderFailed,
+                    proposal: None,
+                    cleanup: ProducerFailureCleanup {
+                        kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
+                        cleanup_policy: CleanupPolicy::DiscardPrepublication,
+                    },
+                })
+                .await
         );
+        pause.wait().await;
+
+        assert_eq!(
+            handle.end().await,
+            Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
+        );
+        assert_eq!(handle.executor_observation_for_test().0, "terminal");
+        pause.wait().await;
+        wait_for_executor_observation(&handle, "terminal", Some(17)).await;
     }
 
     #[tokio::test]
