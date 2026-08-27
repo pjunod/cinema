@@ -4,11 +4,13 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
 **Active branch:** `codex/playback-control-m4-actor-deadline`
-**Last reviewed head:** `10c95e6d4fbc7e56079bef336b7c806658ed2673`
-(approved; no P1/P2/P3 findings)
+**Approved implementation head:** `10c95e6d4fbc7e56079bef336b7c806658ed2673`
+(no P1/P2/P3 findings)
+**Last reviewed head:** `8818b82ae8c771a4188044ea7ad7254c9a97b9c3`
+(documentation-only P3; implementation unchanged)
 **Current exact head:** resolve
-`origin/codex/playback-control-m4-actor-deadline`; the approval successor is
-documentation-only gate evidence and requires final exact-head review
+`origin/codex/playback-control-m4-actor-deadline`; the review successor fixes
+one stale handoff instruction and requires final exact-head review
 **Test state:** focused tests, `make check`, and `make cluster-check` green;
 hosted checks pending on the final evidence head
 
@@ -106,7 +108,7 @@ b918fdfd test(validation): specify callable ownership contexts
 
 ### Adversarial review chronology
 
-Eleven exact-head reviews have run. No tests were run during them.
+Twelve exact-head reviews have run. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
    coverage; latest progress was hidden by first-gap projection; inventory and
@@ -136,6 +138,9 @@ Eleven exact-head reviews have run. No tests were run during them.
     the raw-identifier boundary, labeled-break and for-in positives, all
     wrapper and alias distinctions, exact 22/33/3 contract sets, source
     routing and counts, documentation chronology, and runtime ingress logic.
+12. `8818b82a`: the gate evidence was truthful and implementation unchanged,
+    but the immediate continuation list still instructed a successor to push
+    the evidence commit that was already on the remote.
 
 The reviewer has consistently confirmed the producer-ingress and successor
 watermark behavior after the first corrections. The remaining work is the
@@ -177,7 +182,7 @@ The current implementation is approved and all local gates are green. The
 documentation-only evidence commit needs a final exact-head adversarial
 review while hosted CI runs.
 
-- Push the gate-evidence commit and request final exact-head review.
+- Await final exact-head review of the documentation-only successor.
 - Require every hosted check green. Investigate and fix any failure; any
   changed head requires another exact-head review and affected local gates.
 - Record exact SHAs and test counts here and in status, merge PR #619,
