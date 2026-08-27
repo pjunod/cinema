@@ -6,15 +6,16 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `f31945a3027dad0d5640972bed16539785f634bd`
-(round 7 **APPROVED**)
-**Current repair:** metadata-only history mapping
-`aca0b8d2e138f9230258102fdf9143c257440f66`; this documentation snapshot
-follows it, so resolve the immutable branch tip before requesting round 8
-**Test state:** 67 focused tests passed. `make check` then stopped at
-`history-check` before workspace tests because commit `248d675b` lacked its own
-metadata mapping. The mapping is committed but unverified; round 8 must approve
-before the gate resumes.
+**Last reviewed exact head:** `5a9a62dbfedfcc4af08912c971c4289084781f04`
+(round 8 **APPROVED**)
+**Current repair implementation:**
+`6333b0656bf553ffe1fe7016bb98880df9a01ab8`, with history binding
+`aa7e12e48218e339e7ad8b247a5dac1db63fb122`; this documentation snapshot
+follows them, so resolve the immutable branch tip before requesting round 9
+**Test state:** 67 focused tests passed. The second `make check` passed catalog,
+history, 173 policy/contract tests, and formatting, then Clippy stopped on
+test-only dead code. The repair is committed but unverified; round 9 must
+approve before the gate resumes.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -266,6 +267,25 @@ metadata-only and claims no runtime, test, or validation behavior. No gate has
 been rerun. Because the exact head changed, round 8 must approve before
 `make check` resumes.
 
+Round 8 reviewed exact head
+`5a9a62dbfedfcc4af08912c971c4289084781f04`; all three passes **APPROVED**.
+The second `make check` advanced through:
+
+- catalog: 22 points, 27 checks, 9,410 audited files;
+- history: 1,002 corrective commits and complete current evidence;
+- Python policy/contract suites: 121 and 52 tests passed; and
+- `cargo fmt --all --check`.
+
+Clippy then stopped under `-D warnings` because three reported dead-code sites
+covered four helpers used only by tests: `into_events`, `drain`,
+`settle_due_deadlines_at`, and `handle_producer_event`. Commit
+`6333b0656bf553ffe1fe7016bb98880df9a01ab8` marks those adapters `#[cfg(test)]`;
+production continues through `drain_blocks`, `handle_producer_blocks_at`, and
+the due-first cutoff. Two independent static passes confirmed every call site
+is test-only and no production path or ownership count changes. Commit
+`aa7e12e48218e339e7ad8b247a5dac1db63fb122` maps the correction. The gate has
+not been rerun; exact-head round 9 is required first.
+
 ### PR #619 adversarial review chronology
 
 Thirteen exact-head reviews ran. No tests were run during them.
@@ -340,13 +360,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 7 **APPROVED**
-exact head `f31945a3027dad0d5640972bed16539785f634bd`, and all 67 focused tests passed.
-`make check` stopped at corrective-history metadata before workspace tests;
-`aca0b8d2` repairs that mapping and awaits exact-head round 8.
+The action-passive deadline slice is in PR #621. Review round 8 **APPROVED**
+exact head `5a9a62dbfedfcc4af08912c971c4289084781f04`. The 67 focused tests remain green;
+`make check` passed through policy, history, and formatting before Clippy found
+test-only dead code. Commits `6333b065` and `aa7e12e4` repair and map it, pending
+exact-head round 9.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-8 review of that exact commit.
+  adversarial round-9 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -418,7 +439,7 @@ Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
 
-Committed implementation and review-repair sequence through the metadata
+Committed implementation and review-repair sequence through the Clippy-fix
 binding preceding this documentation snapshot:
 
 The documentation commit containing this list and any later metadata-only
@@ -446,6 +467,10 @@ d3d5703b docs(playback): record history review repairs
 c4d01713 docs(playback): record focused compile repair
 f31945a3 chore(validation): bind focused compile evidence
 aca0b8d2 chore(validation): register compile evidence
+db158bd6 docs(playback): record focused gate evidence
+5a9a62db chore(validation): bind focused gate evidence
+6333b065 fix(playback): gate test-only deadline helpers
+aa7e12e4 chore(validation): register deadline helper evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
