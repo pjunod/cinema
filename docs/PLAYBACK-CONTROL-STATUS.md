@@ -13,8 +13,11 @@ terminal-cause projection, compile/lint, test-scheduling, actor-loss
 classification, terminal/receiver-loss races, stale executor-state overwrite,
 and a four-variant poll-contract violation. The final defensive pass also made
 the first terminal-or-lost settlement win in either order. The current head
-needs targeted exact-head confirmation, and no unit, full, or cluster test has
-run for this slice yet.
+received unanimous exact-head approval at `981ebb51`. The focused Rust suite
+then passed 85/85; the ownership inventory exposed six stale normalized
+counts/anchors and one warnings-as-errors risk, repaired in `73cd33e9` and
+awaiting targeted review before the failed inventory is rerun. No full or
+cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -107,8 +110,8 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **All findings addressed; targeted exact-head confirmation pending.** At `ceb8c74d`, reviewers requested liveness, projection, compile/lint, and test-evidence changes. At `ff6ba47d`, they found actor-loss/terminal races and scheduler-dependent tests. At `c212547a`, they found a stale in-flight poll could overwrite terminal status and that transport loss had incorrectly become a fourth actor poll result. At `3708d379`, two reviewers approved and one requested that the atomic lost-settlement helper defensively preserve an already-committed terminal state even though current transport causality prevents that order. Runtime repairs `ba3a504d` and `4d0a0c0f` make the first terminal-or-lost state atomically absorbing in either order, cover both settlement orders plus the stale-result race, restore the actor poll contract to exactly Idle/Decision/Terminal, and keep uncommitted actor loss private to the transport. |
-| Unit/focused tests | **Not run for the active slice.** Authored transport/lifecycle tests remain intentionally unexecuted until adversarial approval. |
+| Adversarial implementation review | **Runtime approved; post-test inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Focused testing then exposed only inventory/warning bookkeeping; `73cd33e9` aligns the normalized structural counts/entrypoint and suppresses dead-code warnings for deliberately exhaustive passive reason variants. |
+| Unit/focused tests | **Rust playback control passed 85/85 at approved head `981ebb51`.** The ownership inventory ran 7 tests and failed 6 stale count/anchor assertions; `73cd33e9` repairs their exact parser-observed values and awaits review before rerun. |
 | Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
 
 ## Watchdog-removal ledger

@@ -6,16 +6,19 @@
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `3708d37981c9f092855e4a6de09bbd6752b52308`
-(two approvals; one defensive settlement change requested)
+**Last reviewed exact head:** `981ebb51b9d54c5fb71e49232722693e7cf079fe`
+(unanimously approved; no P1/P2/P3 findings)
 **Current implementation:** behavior-neutral decision transport committed at
 `c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
 repairs at `91486148`, absorbing executor-state/poll-contract repairs at
 `ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
 actor slot, non-consuming actor polling, one move-only bounded executor inbox,
-a passive weak-reference executor, and status projection
-**Test state:** no tests or builds run for the active slice; exact-head
-adversarial approval is required first
+a passive weak-reference executor, and status projection; post-test inventory
+and dead-code warning repair is committed at `73cd33e9`
+**Test state:** focused Rust playback control passed 85/85 at `981ebb51`; the
+7-test ownership inventory failed 6 stale anchor/count assertions, repaired at
+`73cd33e9` and awaiting targeted review before rerun; full/cluster gates have
+not run
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -394,16 +397,14 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `4d0a0c0f` and deliberately untested. Continue in this order:
+committed through `73cd33e9`. Continue in this order:
 
-1. Bind the final settlement repair to the regression catalog, commit this
-   truthful review ledger, and freeze one exact head without running tests.
-2. Obtain independent adversarial concurrency/lifecycle, contract/ordering,
-   and static/test/inventory reviews of that exact head. Fix every actionable
-   P1/P2/P3 finding and repeat exact-head review after any runtime/test change.
-3. Only after approval, run focused tests, `make check`, and
-   `make cluster-check`; repair any failure, re-review changed code, and repeat
-   the affected gates.
+1. Obtain targeted static/inventory review of `73cd33e9` plus this mapping; it
+   changes only one deliberate dead-code annotation and parser-observed
+   inventory counts/anchor.
+2. Rerun the failed ownership inventory and confirm the focused Rust suite is
+   still warning-free, then run `make check` and `make cluster-check`.
+3. Repair any failure, re-review changed code, and repeat the affected gates.
 4. Open/finish the PR, require every hosted check to pass on the exact reviewed
    head, and merge.
 5. Immediately begin the first authoritative vertical cut: actor-owned
@@ -431,8 +432,8 @@ earlier shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-The active runtime is committed through `4d0a0c0f` but has not been built or
-tested. Root static review found and removed an initial cycle in which the
+The active runtime is committed through `4d0a0c0f`. Root static review found
+and removed an initial cycle in which the
 actor retained a transport containing a sender back into its own mailbox.
 Round 1 at exact head `ceb8c74d` returned one approval and two change requests.
 It found that timer-only lease expiry did not wake the executor, executor task
@@ -476,7 +477,19 @@ transport cannot produce uncommitted loss after an actor terminal commit, the
 low-level `settle_lost` helper could overwrite terminal if future call ordering
 changed. Repair `4d0a0c0f` makes both terminal and lost first-winner absorbing
 and directly proves both settlement orders. Only targeted confirmation of that
-exact repair remains before tests.
+exact repair remained before tests. All three reviewers subsequently approved
+exact head `981ebb51b9d54c5fb71e49232722693e7cf079fe` with no P1/P2/P3 findings.
+
+The focused playback-control suite then passed 85/85. The separate ownership
+inventory ran seven tests and exposed six bookkeeping failures: the new tests'
+namespaced `RollingControlHandle::spawn`, `Barrier::wait`, and timeout syntax
+changed normalized structural counts; the replaced spawn shape changed the
+method count; and rustfmt made the decision-poll entrypoint signature multiline.
+The test build also warned that deliberately exhaustive passive decision-reason
+variants are not all constructed yet. Repair `73cd33e9` records the exact
+parser-observed counts, uses a stable unique entrypoint anchor, and makes the
+intentional dead-code allowance apply to test builds. It requires targeted
+review before the failed inventory is rerun.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
