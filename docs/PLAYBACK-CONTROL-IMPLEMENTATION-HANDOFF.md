@@ -66,10 +66,12 @@ The rewrite is not starting from scratch:
 
 The active branch adds bounded shared command/producer sequencing,
 publication-time ordering, stale-exit fencing, partial observation-only actor
-projection in `SessionInfo` and telemetry, and bounded command metrics. It is
-not yet reviewed or tested. Legacy watchdogs, recovery actions, response
-admission, and compatibility owners remain active; no decision/executor
-cutover has happened.
+projection in `SessionInfo` and telemetry, and bounded command metrics. Its
+implementation head `dc7c7667` received unanimous round-5 approval and passed
+the focused, full-workspace, and cluster gates. Hosted CI and evidence-only
+final-head confirmation remain. Legacy watchdogs, recovery actions, response
+admission, and compatibility owners remain active; no decision/executor cutover
+has happened.
 
 The merged actor is behavior-neutral for recovery. Legacy rolling watchdogs
 and in-place replacement still operate until later M4 slices transfer action
@@ -492,8 +494,8 @@ The passive deadline implementation remains centered in
 `begin_producer_attempt_at`, `observe_producer_progress_at`,
 `observe_producer_exit_at`, `handle_command`, and actor `run`.
 
-Authored but not yet run focused evidence covers command/producer sequence
-ordering, publication-time barriers, stale-exit/successor fencing, projection
+Focused evidence passed for command/producer sequence ordering,
+publication-time barriers, stale-exit/successor fencing, projection
 serialization, bounded metric labels, exact starting expiry and
 idempotent settlement, scheduler-delayed dispatch, rearm from fenced
 publication time, late/duplicate progress, exact-boundary progress and
@@ -549,12 +551,13 @@ aa7e12e4 chore(validation): register deadline helper evidence
 de23104d chore(validation): map sequenced command ingress
 ```
 
-The active command-sequencing and projection runtime is committed at
-`383d62d8`, with its regression-evidence mapping at `de23104d`. This
-documentation snapshot and any metadata-only binding follow those commits;
-the eventual exact candidate head still requires adversarial approval. No
-test or hosted-gate result belongs to this branch until that approval is
-recorded and the unchanged reviewed head is exercised.
+The original command-sequencing and projection runtime is committed at
+`383d62d8`, with its regression-evidence mapping at `de23104d`; subsequent
+review and static-gate repairs culminate in approved implementation head
+`dc7c7667`. That head owns the focused, `make check`, and `make cluster-check`
+evidence recorded above. This documentation snapshot and its metadata-only
+bindings follow the implementation without changing it; only narrow
+evidence-head confirmation and hosted CI remain before merge.
 
 Leave all compatibility owners unchanged and active in that slice:
 `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`,
