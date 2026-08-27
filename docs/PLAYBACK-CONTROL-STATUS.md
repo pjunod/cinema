@@ -9,6 +9,8 @@ legacy-owner baseline before the actor deadline is allowed to make recovery
 decisions. The final zero-legacy-owner §8 check lands with deletion.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
+The resumable execution state is in
+[`PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md`](PLAYBACK-CONTROL-IMPLEMENTATION-HANDOFF.md).
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -75,7 +77,7 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Interim baseline implemented on the active branch.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans the whole compatibility source plus every Rust module under `plurxd/src`. Structural matching removes comments, literals, and turbofish payloads first, then covers namespaced, method, and bare task/timer calls; command construction plus method/bare-or-namespaced-UFCS launches; low-level process start and lifecycle forms; and import, namespace, type, local-callable, or parenthesized-callable bypasses. Synthetic contract snippets pin every promised spelling. The final §8 check drives every legacy sentinel to zero when deletion lands. |
 | Progress ingress | **Review corrections implemented locally.** One constant-space `ProgressCoverageBatch` retains first advancing progress, the contiguous covered tail/deadline, the first gap, latest progress, and latest telemetry. A persistent exact-attempt ingress watermark prevents a repeated/regressing timestamp after a drain from manufacturing a new deadline link; exit seals the preceding batch. |
-| Adversarial implementation review | **Fifth pass requested changes at `df2389a7`.** All earlier history, ingress, successor, and ordinary-call findings are resolved. The remaining findings normalize comments/literals/turbofish, prohibit wrapped callable and grouped/absolute alias bypasses, and add synthetic scan-contract cases; this removes the last false-positive doc-comment clone anchor. The corrected head requires a fresh exact-head review before tests. |
+| Adversarial implementation review | **Sixth pass requested changes at `252f2a72`.** The lexical normalization, zero real low-level count, and all prior findings are resolved. The remaining corrections normalize arbitrarily nested/reference-wrapped callable invocations without touching ordinary arguments, and fence grouped/absolute `Command`, absolute type, and `extern crate` process-namespace aliases. Twenty-seven synthetic cases pin these forms. The corrected head requires a fresh exact-head review before tests. |
 | Unit/focused tests | **Not run for this runtime slice.** Per project gate order, tests wait for the adversarial PR review. Contract PR #618 was green before merge. |
 | Full/cluster/hosted gates | **Pending for this runtime slice.** After review findings are fixed: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 

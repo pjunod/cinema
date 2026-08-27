@@ -13,6 +13,12 @@ TURBOFISH_START = re.compile(r"::\s*<")
 CHAR_LITERAL = re.compile(
     r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\})|[^\\'\r\n])'"
 )
+TRANSPARENT_CALLABLE_PARENS = re.compile(
+    r"(?P<open>(?:\(\s*)+)"
+    r"(?P<reference>(?:(?:&\s*(?:mut\s+)?)|(?:\*\s*))*)"
+    r"(?P<path>(?:::)?(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)"
+    r"(?P<close>(?:\s*\))+)(?=\s*\()"
+)
 
 
 def _blank_non_newlines(chars: list[str], start: int, end: int) -> None:
@@ -119,7 +125,14 @@ def rust_structural_source(source: str) -> str:
             index = end
         else:
             index += 1
-    return "".join(chars)
+    code = "".join(chars)
+
+    def unwrap(match: re.Match[str]) -> str:
+        value = match.group("reference") + match.group("path")
+        padding = len(match.group(0)) - len(value)
+        return " " * (padding // 2) + value + " " * (padding - padding // 2)
+
+    return TRANSPARENT_CALLABLE_PARENS.sub(unwrap, code)
 
 
 class RollingProducerOwnershipInventoryTest(unittest.TestCase):
@@ -154,6 +167,38 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertEqual(len(entry_ids), len(set(entry_ids)))
         self.assertEqual(
             {
+                "namespaced-task-turbofish",
+                "method-task-spawn-local",
+                "bare-task-spawn",
+                "parenthesized-task-call",
+                "nested-parenthesized-task-call",
+                "referenced-nested-task-call",
+                "namespaced-time-turbofish",
+                "bare-time-constructor",
+                "parenthesized-local-timer-alias",
+                "turbofished-local-task-alias",
+                "referenced-local-task-alias",
+                "command-construction",
+                "command-method-launch",
+                "bare-command-ufcs",
+                "namespaced-command-ufcs",
+                "parenthesized-command-alias",
+                "grouped-command-import-alias",
+                "absolute-command-import-alias",
+                "absolute-command-type-alias",
+                "namespaced-process-clone",
+                "bare-imported-process-start",
+                "grouped-process-namespace-alias",
+                "absolute-process-namespace-alias",
+                "extern-process-namespace-alias",
+                "process-lifecycle-method",
+                "free-process-signal",
+                "local-low-level-alias",
+            },
+            set(contract_case_ids),
+        )
+        self.assertEqual(
+            {
                 "namespaced-task-spawn",
                 "method-spawn",
                 "bare-task-spawn",
@@ -170,7 +215,6 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "rolling-supervisor-construction",
                 "forbidden-timer-or-task-alias",
                 "forbidden-timer-or-task-callable-alias",
-                "forbidden-parenthesized-callable",
                 "forbidden-command-alias",
                 "forbidden-low-level-function-alias",
                 "forbidden-process-namespace-alias",
@@ -182,8 +226,8 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         )
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
-        self.assertGreaterEqual(len(module_structures), 23)
-        self.assertGreaterEqual(len(contract_cases), 18)
+        self.assertGreaterEqual(len(module_structures), 22)
+        self.assertGreaterEqual(len(contract_cases), 27)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
