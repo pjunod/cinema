@@ -2115,7 +2115,10 @@ impl ChildReplacement<'_> {
         self.state = ChildReplacementState::PreAdmission;
     }
 
-    fn complete(&mut self) {
+    /// Publish completion and release the transition when this call returns.
+    /// A completed transaction must not remain a hidden mutex owner merely
+    /// because its caller keeps the now-useless local binding in scope.
+    fn complete(mut self) {
         self.state = ChildReplacementState::Completed;
         self.session.replacing_child.store(false, Release);
     }
@@ -19046,6 +19049,7 @@ mod tests {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
         seeded_session_dir(dir.path(), 2, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -19056,7 +19060,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let mgr = Arc::new(TranscodeManager::new(
             store,
-            dir.path().join("manager-work"),
+            manager_dir.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));

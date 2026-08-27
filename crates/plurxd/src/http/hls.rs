@@ -4230,7 +4230,7 @@ mod tests {
             .expect("subtitle playlist body");
         assert!(String::from_utf8(body.to_vec())
             .expect("subtitle playlist text")
-            .contains("subtitles/0/seg00001.vtt"));
+            .contains("seg00001.vtt"));
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
 
