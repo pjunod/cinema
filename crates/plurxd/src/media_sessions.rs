@@ -85,29 +85,30 @@ const TAKEOVER_CLEANUP_DEADLINE: Duration = Duration::from_secs(2);
 /// which is far more failovers than one playback session can survive.
 const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000;
 
-/// Session ids currently mid-takeover, counted rather than set-valued.
+/// Session ids whose durable route must survive a process-local transition,
+/// counted rather than set-valued.
 ///
-/// Overlapping attempts for one route are ordinary — a route stays expired
-/// and claimable until somebody's CAS lands, and two ticks can be in flight
-/// at once. A plain set would let the *loser*'s guard drop un-protect the
-/// winner mid-settlement, which is the exact race this registry exists to
-/// close, so protection is released only when the last holder leaves.
-static TAKEOVER_SETTLING: LazyLock<StdMutex<HashMap<String, usize>>> =
+/// Takeover and same-player replacement both have a bounded interval where a
+/// durable owner exists but the old worker is absent: takeover has not yet
+/// published its adopted worker, while replacement has retired the predecessor
+/// before the successor activation CAS. Overlapping attempts are ordinary, so
+/// a plain set would let one guard drop un-protect another mid-settlement.
+static SESSION_SETTLEMENT_PROTECTED: LazyLock<StdMutex<HashMap<String, usize>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
-/// Marks a session id as mid-takeover: claimed, or about to be, but not yet
-/// published locally. The lease loop must neither reap it as an owned route
-/// with no worker nor fence it for failing to report a frontier.
-struct TakeoverSettlementGuard {
+/// Keeps one durable session route out of stale settlement while its local
+/// worker lifecycle is deliberately between generations. The lease loop must
+/// neither end it for having no worker nor renew it without a frontier.
+pub(crate) struct SessionSettlementGuard {
     session_id: String,
 }
 
-impl TakeoverSettlementGuard {
+impl SessionSettlementGuard {
     /// Infallible by construction. A poisoned registry must not be able to
     /// turn this protection off — failing open here silently re-enables the
     /// races the guard exists to close, for the rest of the process.
-    fn begin(session_id: &str) -> Self {
-        *TAKEOVER_SETTLING
+    pub(crate) fn begin(session_id: &str) -> Self {
+        *SESSION_SETTLEMENT_PROTECTED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .entry(session_id.to_owned())
@@ -158,9 +159,9 @@ impl TakeoverMetricGuard {
     }
 }
 
-impl Drop for TakeoverSettlementGuard {
+impl Drop for SessionSettlementGuard {
     fn drop(&mut self) {
-        let mut settling = TAKEOVER_SETTLING
+        let mut settling = SESSION_SETTLEMENT_PROTECTED
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(holders) = settling.get_mut(&self.session_id) {
@@ -172,8 +173,8 @@ impl Drop for TakeoverSettlementGuard {
     }
 }
 
-fn settling_takeover_ids() -> HashSet<String> {
-    TAKEOVER_SETTLING
+pub(crate) fn settlement_protected_ids() -> HashSet<String> {
+    SESSION_SETTLEMENT_PROTECTED
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .keys()
@@ -1403,7 +1404,7 @@ pub(crate) async fn takeover_loop(state: AppState) {
         // it reappears on every tick until then. Contesting it again while
         // this node's own attempt is still in flight buys nothing and costs an
         // offers round trip, an ffmpeg spawn and an admission slot each time.
-        let in_flight = settling_takeover_ids();
+        let in_flight = settlement_protected_ids();
         stream::iter(
             routes
                 .into_iter()
@@ -1519,7 +1520,7 @@ async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<
     // Held from before the local worker exists until after the route is
     // published, so no window between those two points can be read as "this
     // node owns a session it is not producing".
-    let _settlement = TakeoverSettlementGuard::begin(&route.session_id);
+    let _settlement = SessionSettlementGuard::begin(&route.session_id);
     let started = tokio::time::timeout_at(
         deadline,
         state.transcode.create_cluster_takeover_session(
@@ -1773,19 +1774,17 @@ fn takeover_source_matches(envelope: &RemoteStartRequest, size: i64, mtime: i64)
 /// What one lease tick may touch.
 ///
 /// `live` is every session id this node is answerable for: the workers it can
-/// produce for, plus the takeovers it is settling. `active` is the subset it
-/// can actually renew.
+/// produce for, plus routes protected during takeover or replacement.
+/// `active` is the subset it can actually renew.
 ///
-/// A settling takeover is the one id that belongs to the first and not the
-/// second. It owns the replicated row already, but its worker is still
-/// registered under the provisional id, so it can report no frontier: leaving
-/// it out of `live` would let the stale-settlement sweep end the session this
-/// node just won, and leaving it in `active` would let the missing frontier
-/// read as lost ownership and fence it. Both halves of that decision are made
-/// here, from one read of the registry, so no caller can supply the wrong set.
+/// A protected route belongs to the first and not the second. It cannot report
+/// a frontier while its old worker is gone and its successor is not durable:
+/// leaving it out of `live` lets stale settlement delete the activation CAS
+/// predecessor, while leaving it in `active` turns the missing frontier into a
+/// false lease-loss verdict. Both halves are derived from the guard registry.
 fn lease_tick_live(renewable_session_ids: Vec<String>) -> HashSet<String> {
     let mut live = renewable_session_ids.into_iter().collect::<HashSet<_>>();
-    live.extend(settling_takeover_ids());
+    live.extend(settlement_protected_ids());
     live
 }
 
@@ -1793,7 +1792,7 @@ fn lease_tick_active<'a>(
     routes: &'a [OwnedMediaSessionLease],
     live: &HashSet<String>,
 ) -> Vec<&'a OwnedMediaSessionLease> {
-    let settling = settling_takeover_ids();
+    let settling = settlement_protected_ids();
     routes
         .iter()
         .filter(|route| live.contains(&route.session_id) && !settling.contains(&route.session_id))
@@ -2156,15 +2155,12 @@ mod tests {
         );
     }
 
-    /// A settling takeover owns the replicated row before its worker is
-    /// republished under the durable id, so it can report no frontier. Left
-    /// in the renewal batch, that missing frontier reads as lost ownership
-    /// and the node fences the session it has just won; left out of `live`
-    /// entirely, the stale-settlement sweep ends it instead. It must be in
-    /// exactly one of the two sets, and the guard — not a caller-supplied
-    /// set — is what decides.
+    /// A settling takeover or replacement cannot report a frontier while its
+    /// process-local worker is between generations. Left in the renewal batch,
+    /// that absence reads as lost ownership; left out of `live`, stale
+    /// settlement deletes the durable route needed by the activation CAS.
     #[test]
-    fn a_settling_takeover_is_live_but_not_renewable() {
+    fn a_settlement_protected_route_is_live_but_not_renewable_or_stale() {
         let routes = vec![
             owned_lease("session-live"),
             owned_lease("session-settling"),
@@ -2172,7 +2168,7 @@ mod tests {
         ];
         let renewable = vec!["session-live".to_owned()];
 
-        let settling = TakeoverSettlementGuard::begin("session-settling");
+        let settling = SessionSettlementGuard::begin("session-settling");
         let live = lease_tick_live(renewable.clone());
         assert!(live.contains("session-settling"), "{live:?}");
         assert!(live.contains("session-live"), "{live:?}");
@@ -2186,10 +2182,27 @@ mod tests {
             vec!["session-live"],
             "only a route with a reportable frontier may be renewed or fenced"
         );
+        let mut stale_in_flight = HashSet::new();
+        let mut backoff = HashMap::new();
+        let stale = take_stale_settlement_candidates(
+            &routes,
+            &live,
+            &mut stale_in_flight,
+            &mut backoff,
+            tokio::time::Instant::now(),
+        );
+        assert_eq!(
+            stale
+                .iter()
+                .map(|(route, _)| route.session_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["session-gone"],
+            "the protected predecessor must retain the pointer needed by successor activation"
+        );
 
         // A second attempt for the same route is ordinary; the loser's guard
         // must not un-protect the winner.
-        let overlapping = TakeoverSettlementGuard::begin("session-settling");
+        let overlapping = SessionSettlementGuard::begin("session-settling");
         drop(overlapping);
         let live = lease_tick_live(renewable);
         assert!(
@@ -2218,6 +2231,22 @@ mod tests {
             ids,
             vec!["session-live", "session-settling"],
             "once the last guard drops the route renews normally"
+        );
+
+        let no_worker = lease_tick_live(Vec::new());
+        let mut stale_in_flight = HashSet::new();
+        let mut backoff = HashMap::new();
+        let stale = take_stale_settlement_candidates(
+            &[owned_lease("session-settling")],
+            &no_worker,
+            &mut stale_in_flight,
+            &mut backoff,
+            tokio::time::Instant::now(),
+        );
+        assert_eq!(
+            stale.len(),
+            1,
+            "after the transition resolves, an actually orphaned route settles normally"
         );
     }
 

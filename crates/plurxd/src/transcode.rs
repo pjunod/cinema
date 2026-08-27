@@ -40,6 +40,7 @@ use crate::copyseg;
 use crate::ffmpeg::ffmpeg_bin;
 #[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::ffmpeg::pacing_caps;
+use crate::media_sessions::SessionSettlementGuard;
 use crate::meter::Meter;
 
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
@@ -4453,6 +4454,7 @@ pub(crate) struct ClusterReplacementGuard {
     registry: Arc<ClusterReplacementGates>,
     key: String,
     permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _predecessor_settlement: Option<SessionSettlementGuard>,
 }
 
 impl Drop for ClusterReplacementGuard {
@@ -9868,7 +9870,11 @@ impl TranscodeManager {
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
         let replacement = self
-            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .acquire_cluster_replacement_gate(
+                gate_key,
+                req.previous_session_id.as_deref(),
+                deadline,
+            )
             .await?;
         if tokio::time::Instant::now() >= deadline {
             return Err(capacity_error(
@@ -9896,7 +9902,11 @@ impl TranscodeManager {
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
         let replacement = self
-            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .acquire_cluster_replacement_gate(
+                gate_key,
+                req.previous_session_id.as_deref(),
+                deadline,
+            )
             .await?;
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
@@ -9921,6 +9931,7 @@ impl TranscodeManager {
     async fn acquire_cluster_replacement_gate(
         &self,
         key: String,
+        predecessor_session_id: Option<&str>,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
         let gate = {
@@ -9956,6 +9967,12 @@ impl TranscodeManager {
             registry: Arc::clone(&self.cluster_replacement_gates),
             key,
             permit: Some(permit),
+            // Acquired after serialization and before `create_session_inner`
+            // can reap the named worker. The lease tick reads workers before
+            // this registry, so it observes either the predecessor process or
+            // this protection and can never settle the durable pointer in the
+            // gap before successor activation.
+            _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
         })
     }
 
@@ -26390,12 +26407,13 @@ mod tests {
         let held = mgr
             .acquire_cluster_replacement_gate(
                 key.clone(),
+                None,
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
             .expect("first replacement owns its gate");
         let error = match mgr
-            .acquire_cluster_replacement_gate(key.clone(), tokio::time::Instant::now())
+            .acquire_cluster_replacement_gate(key.clone(), None, tokio::time::Instant::now())
             .await
         {
             Ok(_) => panic!("a timed-out replacement must never reach predecessor reap"),
@@ -26407,11 +26425,49 @@ mod tests {
         let reacquired = mgr
             .acquire_cluster_replacement_gate(
                 key,
+                None,
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
             .expect("a live retry acquires the released gate");
         drop(reacquired);
+    }
+
+    /// The cluster replacement guard already spans worker creation through the
+    /// ingress activation verdict. A typed reopen must bind its predecessor to
+    /// that same lifetime so the lease loop cannot settle the durable pointer
+    /// after local reap but before the activation CAS.
+    #[tokio::test]
+    async fn clustered_replacement_gate_protects_its_exact_predecessor_route() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let predecessor = "replacement-activation-predecessor";
+        let guard = mgr
+            .acquire_cluster_replacement_gate(
+                "replacement-activation-player".to_owned(),
+                Some(predecessor),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement owns its gate");
+        assert!(
+            crate::media_sessions::settlement_protected_ids().contains(predecessor),
+            "the predecessor is protected before session creation may reap its worker"
+        );
+
+        drop(guard);
+        assert!(
+            !crate::media_sessions::settlement_protected_ids().contains(predecessor),
+            "a definitive activation or abort releases stale-settlement protection"
+        );
     }
 
     #[tokio::test]
