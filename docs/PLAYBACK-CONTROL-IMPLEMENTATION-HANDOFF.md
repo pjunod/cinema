@@ -13,13 +13,14 @@
 repairs at `91486148`, absorbing executor-state/poll-contract repairs at
 `ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
 actor slot, non-consuming actor polling, one move-only bounded executor inbox,
-a passive weak-reference executor, and status projection; post-test inventory
-and dead-code warning repairs are committed through `9d100a04`
+a passive weak-reference executor, and status projection; post-test inventory,
+enum-warning, and strong lifetime-owner lint repairs are committed through
+`f463d4d4`
 **Test state:** focused Rust playback control passed 85/85 twice without
 warnings; the ownership inventory passed 7/7 after reviewed repairs;
-`make check` reached history validation and stopped on four missing mapping-
-commit chronology links, now added and awaiting targeted review; cluster has
-not run
+`make check` passed catalog/history/121+52 tests after the chronology repair,
+then stopped on the strong transport-owner field's production dead-code lint;
+`f463d4d4` documents/allows that field and awaits review; cluster has not run
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -400,8 +401,7 @@ PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
 committed through `9d100a04`. Continue in this order:
 
-1. Obtain targeted history/static review of the four exact mapping-commit IDs
-   added to their existing regression records.
+1. Obtain targeted ownership/lint review of `f463d4d4` plus its mapping.
 2. Rerun `make check`, then run `make cluster-check`.
 3. Repair any failure, re-review changed code, and repeat the affected gates.
 4. Open/finish the PR, require every hosted check to pass on the exact reviewed
@@ -501,6 +501,15 @@ subjects, so the chronology checker requires those mapping commits themselves
 to appear beside their runtime commit in regression evidence. The existing
 four records now include those exact IDs. This is a history-only repair; no
 runtime, test, owner count, or behavior changed.
+
+Targeted review approved that chronology at `db19670d`. The next `make check`
+passed catalog, history, 121 validation tests, and 52 additional tests before
+Clippy found one production-only lint: `RollingControlHandle.decision_transport`
+is not directly read outside tests. The field is nevertheless the required
+strong lifetime owner for the executor's weak transport reference; removing it
+would recreate the premature transport teardown that the slice explicitly
+tests. Repair `f463d4d4` documents that invariant and applies a field-local
+dead-code allowance. It awaits targeted review before the affected gate rerun.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,

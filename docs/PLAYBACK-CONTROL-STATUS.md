@@ -22,8 +22,11 @@ entrypoint row was invalid because that table is deliberately source-local to
 sentinels continue to cover the transport. Targeted review approved that
 repair and the inventory passed 7/7. `make check` then reached the history gate
 and stopped because four corrective mapping commits were not themselves named
-by their existing evidence records; that chronology-only repair awaits review.
-No cluster test has run for this slice yet.
+by their existing evidence records. After that reviewed repair, the rerun
+passed catalog, history, 121 validation tests, and 52 additional tests, then
+Clippy identified the intentionally retained strong transport owner as unread
+outside tests. `f463d4d4` documents and allows that one lifetime-owner field and
+awaits review. No cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -118,7 +121,7 @@ Review and test state for M4:
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
 | Adversarial implementation review | **Runtime approved; final source-local inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Two reviewers approved the post-test count/warning repair at `f447aa1d`; the rerun then isolated one misplaced entrypoint row, removed by `9d100a04`. |
 | Unit/focused tests | **Green.** Rust playback control passed 85/85 twice without warnings; after reviewed bookkeeping repairs, the ownership inventory passed 7/7. |
-| Full/cluster/hosted gates | **Full gate stopped at history chronology; cluster/hosted not run.** `make check` passed the catalog audit, then `history-check` required the four corrective mapping commits to be added to their existing evidence records. No code or unit assertion failed. The validated baseline remains #624. |
+| Full/cluster/hosted gates | **Full gate reached Clippy; cluster/hosted not run.** After the reviewed history repair, `make check` passed catalog, history, 121 validation tests, and 52 additional tests. Clippy then rejected the strong `decision_transport` lifetime-owner field as unread in production; `f463d4d4` adds its explicit ownership comment/allowance and awaits review before rerun. The validated baseline remains #624. |
 
 ## Watchdog-removal ledger
 
