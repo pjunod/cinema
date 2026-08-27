@@ -1,7 +1,0 @@
-version = 1
-
-[[coverage]]
-commits = ["69de00a9"]
-points = ["web.experience"]
-checks = ["web-static"]
-reason = "The retained web theme regression proves Panovic shares the cockpit family and synchronized true-black/deep-orange palette."
