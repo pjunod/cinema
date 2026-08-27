@@ -4,10 +4,10 @@
 **Merged baseline:** `origin/main` at `46c08439` (PR #615)
 **Current work:** PR [#616](https://github.com/pjunod/plurx/pull/616),
 `codex/playback-control-m3-producer-events` — M3c2 passive, nonblocking producer
-progress and exact-attempt process-exit observations. Two adversarial passes
-requested changes on `405f6d3e` and `79d9460b`; both finding sets are remediated
-on the current untested head, which requires a fresh exact-head approval before
-any local unit or full-gate run
+progress and exact-attempt process-exit observations. Three adversarial passes
+requested changes on `405f6d3e`, `79d9460b`, and `e3924882`; all finding sets
+are remediated on the current untested head, which requires a fresh exact-head
+approval before any local unit or full-gate run
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -72,10 +72,10 @@ Review and test state for M3c2:
 | Gate | State |
 |---|---|
 | Implementation | Remediation is complete but untested on PR #616 from merged `46c08439`. The current implementation has constant-space event ingress, actor-owned facts, a cancel-safe targeted process supervisor, one guarded signal linearization, single-attempt status projection, bounded metrics, and regression mapping. |
-| Adversarial diff review | **Changes requested twice.** Head `405f6d3e`: compile blockers, cached-PID reuse, terminal/held and first-exit ordering, unavailable status, and coverage/status gaps. Head `79d9460b`: guard released before signal, recursive corrective-history classification, mixed N/N+1 status, and per-child `SIGCHLD` fan-out. All are remediated; a third exact-head review is required. |
-| Unit/focused tests | **Not run**, by design, until the remediated exact head passes adversarial review. Added cases cover a genuinely full command mailbox, same-attempt progress regression, contradictory exits, supervised signals/kill/drop/reap, authorization-to-syscall fencing, actor-unavailable status, replacement during status assembly, terminal-over-held priority, joined status fields, and metric names. |
+| Adversarial diff review | **Changes requested three times.** Head `405f6d3e`: compile blockers, cached-PID reuse, terminal/held and first-exit ordering, unavailable status, and coverage/status gaps. Head `79d9460b`: guard-before-signal gap, history recursion, mixed N/N+1 status, and per-child `SIGCHLD` fan-out. Head `e3924882`: relay omitted `exited`, merged progress retained pre-exit ordering, replacement status fabricated `complete`, signal-race test lacked a contender handshake, and this ledger lagged the automatic run. All are remediated; a fourth exact-head review is required. |
+| Unit/focused tests | **Not run**, by design, until the remediated exact head passes adversarial review. Added cases cover a genuinely full command mailbox, same-attempt progress regression, progress-after-exit terminal ordering, contradictory exits, relay `exited` validation, supervised signals/kill/drop/reap, authorization-to-syscall fencing with a contender handshake, actor-unavailable status, replacement-during-status `waiting`, terminal-over-held priority, joined status fields, and metric names. |
 | Full local gate | Not run. After review: focused tests, `make test`, `make check`, unrestricted `make validate`, and applicable browser contracts. |
-| Hosted CI | Automatic run `33040710196` failed initial-head compile/Clippy; `33041867989` found the mapping filename; `33041927855` found the filename-fix subject; and `33042661180` classified the mapping-update subject itself because it contained “race/remediation.” Both metadata commits are now neutral (`be83782d`, `f54b426a`), while corrective runtime head `38aac17e` remains mapped. A new hosted run will start after push. These automatic runs remain pre-review evidence, not a substitute for the required local sequence. |
+| Hosted CI | Automatic run `33040710196` failed initial-head compile/Clippy; `33041867989` found the mapping filename; `33041927855` found the filename-fix subject; and `33042661180` classified the mapping-update subject itself. Both metadata commits are now neutral (`be83782d`, `f54b426a`), while corrective runtime head `38aac17e` remains mapped. Exact-head run `33042791225` passed history preflight and started hosted jobs before the third adversarial verdict; its evidence is superseded by the current unpushed remediation and is not a substitute for the required local sequence. |
 | Merge | Not ready. Requires exact-head approval, local green, hosted green, and no unresolved review findings. |
 
 ## Watchdog-removal ledger

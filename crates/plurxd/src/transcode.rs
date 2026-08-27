@@ -3412,7 +3412,7 @@ async fn session_info(
     } else if child_is_running {
         "running"
     } else {
-        "complete"
+        "waiting"
     };
     SessionInfo {
         id: id.to_owned(),
@@ -18211,14 +18211,19 @@ mod tests {
         // The supervisor has authorized the exact attempt and still owns the
         // transition guard immediately before the syscall.
         pause.wait();
+        let (started, contender_started) = std::sync::mpsc::channel();
         let (fenced, observed) = std::sync::mpsc::channel();
         let fence = {
             let control = control.clone();
             std::thread::spawn(move || {
+                started.send(()).expect("contender started");
                 control.fence_unavailable();
                 fenced.send(()).expect("fence observation");
             })
         };
+        contender_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fence contender reached the guarded operation");
         assert!(
             observed.recv_timeout(Duration::from_millis(50)).is_err(),
             "retirement cannot linearize between authorization and signal"
@@ -18368,6 +18373,15 @@ mod tests {
                 .producer_out_time_ms,
             Some(1_000)
         );
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("remove fixture child");
+        }
+        *session.child.lock().await = Some(AttemptChild::new(
+            predecessor,
+            long_running_child(),
+            session.control.clone(),
+        ));
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         *session
@@ -18440,7 +18454,7 @@ mod tests {
         assert_eq!(status.recent_speed, Some(0.8));
         assert_eq!(status.producer_exit_success, None);
         assert_eq!(status.producer_exit_code, None);
-        assert_ne!(status.producer_state, "exited");
+        assert_eq!(status.producer_state, "waiting");
     }
 
     /// Cumulative speed hides a slowdown behind a fast start; the recent rate

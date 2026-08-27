@@ -160,7 +160,10 @@ try to reconstruct a coherent snapshot from resettable progress atomics.
 `producer_state` reports
 `complete` for a successful supervised exit and `exited` for another terminal
 status unless an existing explicit session failure has the stronger `failed`
-verdict. A terminal process verdict also precedes a stale `held` projection.
+verdict. If replacement removes the snapshot attempt's exact child before
+status finishes, it reports `waiting` rather than fabricating successful
+completion. A terminal process verdict also precedes a stale `held`
+projection, and `exited` remains a valid strict cluster-relay state.
 
 Prometheus adds bounded counters for:
 

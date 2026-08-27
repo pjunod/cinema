@@ -470,7 +470,7 @@ impl ControlResponseV1 {
             && matches!(self.delivery.presentation.as_str(), "live-recovery" | "vod")
             && matches!(
                 self.delivery.producer_state.as_str(),
-                "running" | "held" | "complete" | "failed" | "waiting" | "vod"
+                "running" | "held" | "complete" | "exited" | "failed" | "waiting" | "vod"
             )
             && self
                 .delivery
@@ -1335,8 +1335,11 @@ impl RollingProducerIngress {
                 }
                 ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
             }
-        } else if let Some(pending) = state.progress.as_mut() {
-            let pending_attempt = pending.event.producer_attempt();
+        } else if let Some(pending_attempt) = state
+            .progress
+            .as_ref()
+            .map(|pending| pending.event.producer_attempt())
+        {
             if pending_attempt > incoming_attempt {
                 return;
             }
@@ -1345,21 +1348,35 @@ impl RollingProducerIngress {
                 let RollingProducerEvent::Progress(incoming) = event else {
                     unreachable!("progress slot accepts only progress events");
                 };
-                let RollingProducerEvent::Progress(current) = &mut pending.event else {
-                    unreachable!("progress slot contains only progress events");
-                };
-                let advanced = match (current.out_time_ms, incoming.out_time_ms) {
-                    (Some(current), Some(incoming)) => incoming > current,
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-                if advanced {
-                    current.out_time_ms = incoming.out_time_ms;
-                    current.observed_at = incoming.observed_at;
+                {
+                    let pending = state.progress.as_mut().expect("observed progress slot");
+                    let RollingProducerEvent::Progress(current) = &mut pending.event else {
+                        unreachable!("progress slot contains only progress events");
+                    };
+                    let advanced = match (current.out_time_ms, incoming.out_time_ms) {
+                        (Some(current), Some(incoming)) => incoming > current,
+                        (None, Some(_)) => true,
+                        _ => false,
+                    };
+                    if advanced {
+                        current.out_time_ms = incoming.out_time_ms;
+                        current.observed_at = incoming.observed_at;
+                    }
+                    current.speed_milli = incoming.speed_milli.or(current.speed_milli);
+                    current.recent_speed_milli =
+                        incoming.recent_speed_milli.or(current.recent_speed_milli);
                 }
-                current.speed_milli = incoming.speed_milli.or(current.speed_milli);
-                current.recent_speed_milli =
-                    incoming.recent_speed_milli.or(current.recent_speed_milli);
+                // This accepted observation happened after any pending exit,
+                // even though it shares the fixed progress slot. Give the
+                // merged fact its real publication order so terminal exit is
+                // applied first and rejects the later progress.
+                state.next_sequence = state.next_sequence.saturating_add(1);
+                let sequence = state.next_sequence;
+                state
+                    .progress
+                    .as_mut()
+                    .expect("merged progress slot")
+                    .sequence = sequence;
                 drop(state);
                 self.notify.notify_one();
                 return;
@@ -3369,6 +3386,52 @@ mod tests {
     }
 
     #[test]
+    fn progress_published_after_exit_drains_after_exit_and_stays_terminal() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_progress(producer_progress(1, 100, 900, 800, started));
+        ingress.publish_exit(producer_exit(
+            1,
+            false,
+            Some(7),
+            None,
+            started + Duration::from_secs(1),
+        ));
+        ingress.publish_progress(producer_progress(
+            1,
+            200,
+            1_000,
+            900,
+            started + Duration::from_secs(2),
+        ));
+        let events = ingress.drain();
+        assert_eq!(
+            events.len(),
+            2,
+            "one retained exit and one retained progress"
+        );
+        assert!(matches!(&events[0], RollingProducerEvent::Exit(_)));
+        assert!(matches!(&events[1], RollingProducerEvent::Progress(_)));
+
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(
+            actor.begin_producer_attempt_at(started),
+            Ok(1),
+            "fixture uses the ingress attempt"
+        );
+        for event in events {
+            actor.handle_producer_event(event);
+        }
+        let delivery = actor.snapshot_at(started + Duration::from_secs(3)).delivery;
+        assert_eq!(delivery.producer_out_time_ms, None);
+        assert_eq!(
+            delivery.producer_exit.as_ref().map(|exit| exit.code),
+            Some(Some(7))
+        );
+    }
+
+    #[test]
     fn rolling_equal_fetch_resolves_its_pending_end() {
         let started = Instant::now();
         let mut actor =
@@ -3961,6 +4024,13 @@ mod tests {
         let mut wrong_epoch = response.clone();
         wrong_epoch.control_epoch = 2;
         assert!(!wrong_epoch.is_valid_for(&request));
+        let mut exited = response.clone();
+        exited.delivery.presentation = "live-recovery".to_owned();
+        exited.delivery.producer_state = "exited".to_owned();
+        assert!(
+            exited.is_valid_for(&request),
+            "a remote owner may truthfully report an unsuccessful producer exit"
+        );
         let mut invented_state = response;
         invented_state.delivery.producer_state = "probably_running".to_owned();
         assert!(!invented_state.is_valid_for(&request));
