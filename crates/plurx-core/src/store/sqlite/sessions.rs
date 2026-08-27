@@ -745,7 +745,8 @@ impl MediaSessionStore for SqliteStore {
         }
         let acknowledgement = acknowledgement.clone();
         self.with_conn(move |conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "INSERT OR IGNORE INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
                      client_instance_id, sequence, request_fingerprint, response_json,
@@ -768,7 +769,7 @@ impl MediaSessionStore for SqliteStore {
                     acknowledgement.updated_at_ms,
                 ],
             )?;
-            let stored = conn
+            let stored = tx
                 .query_row(
                     "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
                             client_instance_id, sequence, request_fingerprint, response_json,
@@ -778,7 +779,87 @@ impl MediaSessionStore for SqliteStore {
                     terminal_ack_from_row,
                 )
                 .optional()?;
-            Ok(stored.as_ref() == Some(&acknowledgement))
+            let exact = stored.as_ref() == Some(&acknowledgement);
+            if exact {
+                let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
+                tx.execute(
+                    "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = ?1,
+                            updated_at_ms = ?1
+                      WHERE incarnation_id = ?2 AND session_id = ?3
+                        AND owner_node_id = ?4 AND owner_epoch = ?5
+                        AND state IN ('active', 'ended')
+                        AND EXISTS (SELECT 1 FROM media_session_terminal_acks
+                          WHERE session_id = ?3 AND incarnation_id = ?2
+                            AND owner_node_id = ?4 AND owner_epoch = ?5
+                            AND client_instance_id = ?6 AND sequence = ?7
+                            AND request_fingerprint = ?8 AND response_json = ?9
+                            AND expires_at_ms = ?10 AND updated_at_ms = ?1)",
+                    params![
+                        acknowledgement.updated_at_ms,
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.client_instance_id,
+                        acknowledgement.sequence,
+                        acknowledgement.request_fingerprint,
+                        acknowledgement.response_json,
+                        acknowledgement.expires_at_ms,
+                    ],
+                )?;
+                tx.execute(
+                    "UPDATE job_leases
+                        SET expires_at_ms = CASE
+                              WHEN expires_at_ms < ?1 THEN expires_at_ms ELSE ?1 END,
+                            revision = revision + 1, updated_at_ms = ?1
+                      WHERE resource = ?2 AND owner_node_id = ?3 AND fence = ?4
+                        AND revision < 9223372036854775807
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?5 AND session_id = ?6
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?1)",
+                    params![
+                        acknowledgement.updated_at_ms,
+                        lease_resource,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM media_playback_pointers
+                      WHERE current_incarnation_id = ?1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?1 AND session_id = ?2
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?5)",
+                    params![
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms,
+                    ],
+                )?;
+                tx.execute(
+                    "DELETE FROM cache_consumer_pins
+                      WHERE consumer_kind = 'media_session' AND consumer_id = ?1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = ?1 AND session_id = ?2
+                            AND owner_node_id = ?3 AND owner_epoch = ?4
+                            AND state = 'ended' AND updated_at_ms = ?5)",
+                    params![
+                        acknowledgement.incarnation_id,
+                        acknowledgement.session_id,
+                        acknowledgement.owner_node_id,
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(exact)
         })
         .await
     }

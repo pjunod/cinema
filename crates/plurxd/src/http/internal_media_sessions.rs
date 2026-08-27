@@ -353,7 +353,7 @@ async fn control_inner(
     )
     .await
     {
-        Ok(Some(response)) => return super::hls::terminal_ack_response(response, &request.control),
+        Ok(Some(replay)) => return super::hls::terminal_ack_response(replay),
         Ok(None) => {}
         Err(()) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);

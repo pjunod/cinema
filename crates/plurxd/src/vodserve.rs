@@ -1155,6 +1155,7 @@ impl VodServe {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn spawn_terminal_cleanup(
         &self,
         session_id: String,
@@ -1449,6 +1450,19 @@ impl VodServe {
             crate::playback_control::ControlStateError,
         >,
     > {
+        self.control_with_terminal(control, None).await
+    }
+
+    pub(crate) async fn control_with_terminal(
+        &self,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
         // Resolve registry ownership before durable I/O, then keep this
         // session's gate held from the authority read through sequence
         // acceptance and any terminal detach. `end` and idle reap take the
@@ -1567,7 +1581,7 @@ impl VodServe {
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
             {
                 let status = ending_status?;
-                let result = crate::playback_control::LocalControlResult {
+                let mut result = crate::playback_control::LocalControlResult {
                     disposition,
                     accepted_sequence,
                     action,
@@ -1576,7 +1590,12 @@ impl VodServe {
                     lease_state: "ended",
                     status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
                     platform,
+                    terminal_handoff: None,
+                    terminal_commit: None,
                 };
+                if let Some(committer) = &terminal_committer {
+                    result.terminal_commit = Some(committer.start(&result));
+                }
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
                 session.tombstone = Some(Terminal::Deleted);
@@ -1658,6 +1677,8 @@ impl VodServe {
             lease_state: "active",
             status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
             platform,
+            terminal_handoff: None,
+            terminal_commit: None,
         }))
     }
 

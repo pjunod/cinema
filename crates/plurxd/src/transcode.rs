@@ -2260,6 +2260,15 @@ struct Session {
     /// command while the HTTP-owned transition guard is still held.
     #[cfg(test)]
     control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Set while an accepted rolling End is being handed from the actor to
+    /// the replicated terminal commit. The reaper observes it under
+    /// `child_transition`, so it cannot remove the session between those two
+    /// linearization points.
+    terminal_response_pending: Arc<AtomicBool>,
+    /// The one durable terminal continuation shared by exact rolling End
+    /// retries. Keeping it here prevents simultaneous retries from inventing
+    /// different response timestamps for the same immutable sequence.
+    terminal_commit: std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>,
     /// Test-only seam after producer policy is applied but before the flow
     /// ticket is completed back to a waiting control response.
     #[cfg(test)]
@@ -8174,6 +8183,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_commit: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -11473,6 +11484,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_commit: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12130,6 +12143,8 @@ impl TranscodeManager {
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_commit: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -12706,7 +12721,24 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
-        if let Some(result) = self.vod.control(control.clone()).await {
+        self.hls_session_control_with_terminal(control, None).await
+    }
+
+    pub(crate) async fn hls_session_control_with_terminal(
+        self: &Arc<Self>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        if let Some(result) = self
+            .vod
+            .control_with_terminal(control.clone(), terminal_committer.clone())
+            .await
+        {
             return Some(result);
         }
         let session = self
@@ -12755,79 +12787,162 @@ impl TranscodeManager {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        let terminal_handoff = (acknowledged_end
+            && session
+                .terminal_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none())
+        .then(|| {
+            crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
+                &session.terminal_response_pending,
+            ))
+        });
         #[cfg(test)]
         let control_pause = session
             .control_applied_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .take();
-        #[cfg(test)]
-        if let Some(pause) = control_pause {
-            pause.wait().await;
-            pause.wait().await;
-        }
         drop(transition);
-        // The actor also tickets replayed sequences. A caller whose first
-        // response was lost can therefore wait for physical convergence
-        // without relying on the periodic repair pass.
-        session.control.wait_for_flow(flow_ticket).await;
-        let limits = self.ahead_limits().await;
-        let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
-        // Convergence is not enough if retirement or replacement won while
-        // this response waited. Re-enter the exact physical-transition gate,
-        // revalidate this Arc against the registry, and keep the gate through
-        // the status join so an active success cannot describe a stale child.
-        let _final_transition = session.child_transition.lock().await;
-        if session.control.is_retired() && !acknowledged_end {
-            return Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded,
-            ));
-        }
-        if !self
-            .sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &session))
-        {
-            return Some(Err(
-                crate::playback_control::ControlStateError::OwnerTransition,
-            ));
-        }
-        let status = session_info(
-            &session_id,
-            &session,
-            limits,
-            global_live_bytes,
-            global_ahead_bytes,
-        )
-        .await;
-        if session.control.is_retired() && !acknowledged_end {
-            return Some(Err(
-                crate::playback_control::ControlStateError::SessionEnded,
-            ));
-        }
-        if !self
-            .sessions
-            .lock()
-            .await
-            .get(&session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, &session))
-        {
-            return Some(Err(
-                crate::playback_control::ControlStateError::OwnerTransition,
-            ));
-        }
-        Some(Ok(crate::playback_control::LocalControlResult {
+        let finish = Arc::clone(self).finish_hls_session_control(
+            session_id,
+            session,
             disposition,
             accepted_sequence,
             action,
+            platform,
             lease_expires_at_unix_ms,
             lease_timeout_ms,
+            flow_ticket,
             lease_state,
-            status: HlsSessionInfo::Live(Box::new(status)),
-            platform,
-        }))
+            acknowledged_end,
+            terminal_handoff.clone(),
+            terminal_committer,
+            #[cfg(test)]
+            control_pause,
+        );
+        if acknowledged_end {
+            // The mutation has already linearized in the actor. From this
+            // point one session-owned continuation completes physical join,
+            // durable acknowledgement and exact-route settlement even if the
+            // HTTP future is cancelled.
+            let rescue = terminal_handoff;
+            return Some(match tokio::spawn(finish).await {
+                Ok(result) => result,
+                Err(_) => {
+                    if let Some(handoff) = rescue {
+                        handoff.complete();
+                    }
+                    Err(crate::playback_control::ControlStateError::Unavailable)
+                }
+            });
+        }
+        Some(finish.await)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_hls_session_control(
+        self: Arc<Self>,
+        session_id: String,
+        session: Arc<Session>,
+        disposition: crate::playback_control::ControlDisposition,
+        accepted_sequence: u64,
+        action: crate::playback_control::ControlAction,
+        platform: crate::playback_control::ClientPlatform,
+        lease_expires_at_unix_ms: i64,
+        lease_timeout_ms: u32,
+        flow_ticket: u64,
+        lease_state: &'static str,
+        acknowledged_end: bool,
+        terminal_handoff: Option<crate::playback_control::TerminalResponseHandoff>,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        #[cfg(test)] control_pause: Option<Arc<tokio::sync::Barrier>>,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let rescue = terminal_handoff.clone();
+        let outcome = async {
+            #[cfg(test)]
+            if let Some(pause) = control_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            // The actor also tickets replayed sequences. A caller whose first
+            // response was lost can therefore wait for physical convergence.
+            session.control.wait_for_flow(flow_ticket).await;
+            let limits = self.ahead_limits().await;
+            let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+            let _final_transition = session.child_transition.lock().await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let status = session_info(
+                &session_id,
+                &session,
+                limits,
+                global_live_bytes,
+                global_ahead_bytes,
+            )
+            .await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let mut result = crate::playback_control::LocalControlResult {
+                disposition,
+                accepted_sequence,
+                action,
+                lease_expires_at_unix_ms,
+                lease_timeout_ms,
+                lease_state,
+                status: HlsSessionInfo::Live(Box::new(status)),
+                platform,
+                terminal_handoff,
+                terminal_commit: None,
+            };
+            if acknowledged_end {
+                let mut shared = session
+                    .terminal_commit
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(commit) = shared.as_ref() {
+                    result.terminal_commit = Some(commit.clone());
+                } else if let Some(committer) = terminal_committer {
+                    let commit = committer.start(&result);
+                    result.terminal_commit = Some(commit.clone());
+                    *shared = Some(commit);
+                } else if let Some(handoff) = &result.terminal_handoff {
+                    handoff.complete();
+                }
+            }
+            Ok(result)
+        }
+        .await;
+        if outcome.is_err() {
+            if let Some(handoff) = rescue {
+                handoff.complete();
+            }
+        }
+        outcome
     }
 
     async fn emit_session_event(
@@ -14614,6 +14729,11 @@ impl TranscodeManager {
                 // flow snapshot can resume the child before teardown takes
                 // this gate again.
                 let transition = session.child_transition.lock().await;
+                if session.terminal_response_pending.load(Acquire) {
+                    drop(transition);
+                    live.push((id, session));
+                    continue;
+                }
                 let claim = session.control.claim_expiry().await;
                 drop(transition);
                 match claim {
@@ -15480,6 +15600,23 @@ impl HlsDeliveryFixture {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
 
+    pub(crate) fn pause_control_after_acceptance(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
+        self.state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .contains_key(session_id)
+    }
+
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
     /// them have landed. Telemetry is written off the request path.
     pub(crate) async fn delivery_events(&self, want: usize) -> Vec<PlaybackEvent> {
@@ -15553,6 +15690,8 @@ fn test_session(dir: PathBuf) -> Session {
         watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
+        terminal_response_pending: Arc::new(AtomicBool::new(false)),
+        terminal_commit: std::sync::Mutex::new(None),
         flow_completion_pause: std::sync::Mutex::new(None),
         playlist_publication_pause: std::sync::Mutex::new(None),
         producer_install_pause: std::sync::Mutex::new(None),
@@ -22511,6 +22650,8 @@ mod tests {
             watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_commit: std::sync::Mutex::new(None),
             flow_completion_pause: std::sync::Mutex::new(None),
             playlist_publication_pause: std::sync::Mutex::new(None),
             producer_install_pause: std::sync::Mutex::new(None),

@@ -946,9 +946,8 @@ impl MediaSessionCoordinator {
                 PeerAuthMode::ExactRequest,
             )
             .await?;
-        let response = validated_control_relay_response(response, request).map_err(|error| {
+        let response = validated_control_relay_response(response, request).inspect_err(|_| {
             relay_metric.invalid_response();
-            error
         })?;
         relay_metric.valid_response();
         Ok(response)

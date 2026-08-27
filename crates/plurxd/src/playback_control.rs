@@ -798,6 +798,58 @@ pub(crate) struct LocalControlResult {
     pub lease_state: &'static str,
     pub status: HlsSessionInfo,
     pub platform: ClientPlatform,
+    /// Rolling delivery only: keeps process cleanup fenced until the exact
+    /// terminal acknowledgement has reached durable storage.
+    pub terminal_handoff: Option<TerminalResponseHandoff>,
+    /// Shared result of the one session-owned durable terminal continuation.
+    pub terminal_commit: Option<TerminalCommitReceipt>,
+}
+
+#[derive(Clone)]
+pub(crate) struct TerminalResponseHandoff {
+    pending: Arc<AtomicBool>,
+}
+
+impl TerminalResponseHandoff {
+    pub(crate) fn new(pending: Arc<AtomicBool>) -> Self {
+        pending.store(true, Ordering::Release);
+        Self { pending }
+    }
+
+    pub(crate) fn complete(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct TerminalCommitReceipt {
+    result: tokio::sync::watch::Receiver<Option<Result<ControlResponseV1, ()>>>,
+}
+
+impl TerminalCommitReceipt {
+    pub(crate) fn pending() -> (
+        Self,
+        tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+    ) {
+        let (sender, result) = tokio::sync::watch::channel(None);
+        (Self { result }, sender)
+    }
+
+    pub(crate) async fn wait(&self) -> Result<ControlResponseV1, ()> {
+        let mut result = self.result.clone();
+        loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return outcome;
+            }
+            result.changed().await.map_err(|_| ())?;
+        }
+    }
+}
+
+pub(crate) trait TerminalControlCommitter: Send + Sync {
+    /// Start the continuation synchronously. The returned receipt may be
+    /// awaited by HTTP, but dropping every waiter cannot cancel the commit.
+    fn start(&self, result: &LocalControlResult) -> TerminalCommitReceipt;
 }
 
 #[derive(Clone)]
@@ -2725,6 +2777,21 @@ pub(crate) fn record_platform(outcome: MetricOutcome, platform: ClientPlatform) 
     CONTROL_PLATFORMS[outcome_index][platform_index].fetch_add(1, Ordering::Relaxed);
 }
 
+#[cfg(test)]
+pub(crate) fn platform_count(outcome: MetricOutcome, platform: ClientPlatform) -> u64 {
+    let outcome_index = match outcome {
+        MetricOutcome::Accepted => 0,
+        MetricOutcome::Replay => 1,
+        _ => return 0,
+    };
+    let platform_index = match platform {
+        ClientPlatform::Web => 0,
+        ClientPlatform::Apple => 1,
+        ClientPlatform::Android => 2,
+    };
+    CONTROL_PLATFORMS[outcome_index][platform_index].load(Ordering::Relaxed)
+}
+
 fn hold_reason_index(reason: crate::transcode::AheadHoldReason) -> usize {
     match reason {
         crate::transcode::AheadHoldReason::Demand => 0,
@@ -3682,7 +3749,7 @@ mod tests {
             "a sequence replay cannot substitute a different demand payload"
         );
 
-        drop(local);
+        let _ = local;
         end.sequence += 1;
         assert_eq!(
             handle

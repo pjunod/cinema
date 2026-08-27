@@ -968,9 +968,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 "invalid media-session terminal acknowledgement".to_owned(),
             ));
         }
+        let lease_resource = format!("session:{}", acknowledgement.incarnation_id);
         self.client()
-            .execute(
-                "INSERT INTO media_session_terminal_acks
+            .txn([
+                (
+                    "INSERT INTO media_session_terminal_acks
                     (incarnation_id, session_id, owner_node_id, owner_epoch,
                      client_instance_id, sequence, request_fingerprint, response_json,
                      expires_at_ms, updated_at_ms)
@@ -980,20 +982,99 @@ impl MediaSessionStore for HiqliteAuthStore {
                        AND owner_node_id = $3 AND owner_epoch = $4
                        AND state IN ('active', 'ended'))
                  ON CONFLICT(session_id) DO NOTHING",
-                params!(
-                    acknowledgement.incarnation_id.as_str(),
-                    acknowledgement.session_id.as_str(),
-                    acknowledgement.owner_node_id.as_str(),
-                    acknowledgement.owner_epoch,
-                    acknowledgement.client_instance_id.as_str(),
-                    acknowledgement.sequence,
-                    acknowledgement.request_fingerprint.as_str(),
-                    acknowledgement.response_json.as_str(),
-                    acknowledgement.expires_at_ms,
-                    acknowledgement.updated_at_ms
+                    params!(
+                        acknowledgement.incarnation_id.as_str(),
+                        acknowledgement.session_id.as_str(),
+                        acknowledgement.owner_node_id.as_str(),
+                        acknowledgement.owner_epoch,
+                        acknowledgement.client_instance_id.as_str(),
+                        acknowledgement.sequence,
+                        acknowledgement.request_fingerprint.as_str(),
+                        acknowledgement.response_json.as_str(),
+                        acknowledgement.expires_at_ms,
+                        acknowledgement.updated_at_ms
+                    ),
                 ),
-            )
-            .await?;
+                (
+                    "UPDATE media_sessions SET state = 'ended', lease_expires_at_ms = $1,
+                            updated_at_ms = $1
+                      WHERE incarnation_id = $2 AND session_id = $3
+                        AND owner_node_id = $4 AND owner_epoch = $5
+                        AND state IN ('active', 'ended')
+                        AND EXISTS (SELECT 1 FROM media_session_terminal_acks
+                          WHERE session_id = $3 AND incarnation_id = $2
+                            AND owner_node_id = $4 AND owner_epoch = $5
+                            AND client_instance_id = $6 AND sequence = $7
+                            AND request_fingerprint = $8 AND response_json = $9
+                            AND expires_at_ms = $10 AND updated_at_ms = $1)",
+                    params!(
+                        acknowledgement.updated_at_ms,
+                        acknowledgement.incarnation_id.as_str(),
+                        acknowledgement.session_id.as_str(),
+                        acknowledgement.owner_node_id.as_str(),
+                        acknowledgement.owner_epoch,
+                        acknowledgement.client_instance_id.as_str(),
+                        acknowledgement.sequence,
+                        acknowledgement.request_fingerprint.as_str(),
+                        acknowledgement.response_json.as_str(),
+                        acknowledgement.expires_at_ms
+                    ),
+                ),
+                (
+                    "UPDATE job_leases
+                        SET expires_at_ms = CASE
+                              WHEN expires_at_ms < $1 THEN expires_at_ms ELSE $1 END,
+                            revision = revision + 1, updated_at_ms = $1
+                      WHERE resource = $2 AND owner_node_id = $3 AND fence = $4
+                        AND revision < 9223372036854775807
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = $5 AND session_id = $6
+                            AND owner_node_id = $3 AND owner_epoch = $4
+                            AND state = 'ended' AND updated_at_ms = $1)",
+                    params!(
+                        acknowledgement.updated_at_ms,
+                        lease_resource.as_str(),
+                        acknowledgement.owner_node_id.as_str(),
+                        acknowledgement.owner_epoch,
+                        acknowledgement.incarnation_id.as_str(),
+                        acknowledgement.session_id.as_str()
+                    ),
+                ),
+                (
+                    "DELETE FROM media_playback_pointers
+                      WHERE current_incarnation_id = $1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = $1 AND session_id = $2
+                            AND owner_node_id = $3 AND owner_epoch = $4
+                            AND state = 'ended' AND updated_at_ms = $5)",
+                    params!(
+                        acknowledgement.incarnation_id.as_str(),
+                        acknowledgement.session_id.as_str(),
+                        acknowledgement.owner_node_id.as_str(),
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms
+                    ),
+                ),
+                (
+                    "DELETE FROM cache_consumer_pins
+                      WHERE consumer_kind = 'media_session' AND consumer_id = $1
+                        AND EXISTS (SELECT 1 FROM media_sessions
+                          WHERE incarnation_id = $1 AND session_id = $2
+                            AND owner_node_id = $3 AND owner_epoch = $4
+                            AND state = 'ended' AND updated_at_ms = $5)",
+                    params!(
+                        acknowledgement.incarnation_id.as_str(),
+                        acknowledgement.session_id.as_str(),
+                        acknowledgement.owner_node_id.as_str(),
+                        acknowledgement.owner_epoch,
+                        acknowledgement.updated_at_ms
+                    ),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
         let stored = self
             .client()
             .query_consistent_map::<TerminalAckRow, _>(
@@ -1007,7 +1088,16 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0);
-        Ok(stored.as_ref() == Some(acknowledgement))
+        let ended = route_by(self, "session_id", &acknowledgement.session_id)
+            .await?
+            .is_some_and(|route| {
+                route.incarnation_id == acknowledgement.incarnation_id
+                    && route.owner_node_id == acknowledgement.owner_node_id
+                    && route.owner_epoch == acknowledgement.owner_epoch
+                    && route.state == "ended"
+                    && route.updated_at_ms == acknowledgement.updated_at_ms
+            });
+        Ok(stored.as_ref() == Some(acknowledgement) && ended)
     }
 
     async fn media_session_terminal_ack(

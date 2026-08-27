@@ -1498,7 +1498,7 @@ async fn media_session_contract_runs_through_dyn_store() {
 }
 
 #[tokio::test]
-async fn terminal_control_ack_is_immutable_and_outlives_route_settlement() {
+async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement() {
     for_each_backend(|store, backend| async move {
         let user = store
             .create_user("terminal-ack-user", "hash", false)
@@ -1546,6 +1546,32 @@ async fn terminal_control_ack_is_immutable_and_outlives_route_settlement() {
             .record_media_session_terminal_ack(&acknowledgement)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repeat acknowledgement: {error}")));
+        assert_eq!(
+            store
+                .media_session_route(session)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: inspect fenced route: {error}"))
+                .map(|route| route.state),
+            Some("ended".to_owned()),
+            "{backend}: the acknowledgement commit must end the exact owner route"
+        );
+        assert!(
+            store
+                .claim_media_session_takeover(&MediaSessionTakeover {
+                    incarnation_id: incarnation.to_owned(),
+                    expected_owner_node_id: "node-terminal".to_owned(),
+                    expected_owner_epoch: 1,
+                    next_owner_node_id: "node-successor".to_owned(),
+                    now_ms: 2_000,
+                    lease_expires_at_ms: 12_000,
+                })
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: attempt takeover after acknowledgement: {error}"
+                ))
+                .is_none(),
+            "{backend}: a crash after the atomic commit cannot resurrect the stream"
+        );
 
         let mut conflict = acknowledgement.clone();
         conflict.sequence += 1;
@@ -1556,10 +1582,6 @@ async fn terminal_control_ack_is_immutable_and_outlives_route_settlement() {
                 "{backend}: reject conflicting acknowledgement: {error}"
             )));
 
-        store
-            .end_media_session(session, 2_000)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: settle route: {error}"));
         assert_eq!(
             store
                 .media_session_terminal_ack(session, 60_999)
@@ -7422,6 +7444,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              DROP TABLE playback_events;
              DROP TABLE network_priors;
              DROP TABLE reading_state;
+             DROP INDEX media_session_terminal_acks_expiry;
+             DROP TABLE media_session_terminal_acks;
              DROP TABLE media_session_requests;
              DROP TABLE media_playback_pointers;
              DROP TABLE media_sessions;
@@ -7493,7 +7517,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 29);
+    assert_eq!(report.tables.len(), 30);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -8908,7 +8932,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 232, "review the Store method count");
+    assert_eq!(declared.len(), 234, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

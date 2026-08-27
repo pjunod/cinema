@@ -2085,9 +2085,10 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         incarnation_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
-    /// Store the first exact terminal-control acknowledgement for a route.
-    /// A conflicting identity/sequence cannot replace the winner; repeating
-    /// the identical write is idempotent.
+    /// Atomically store the first exact terminal-control acknowledgement and
+    /// fence that exact owner route as ended. A conflicting identity/sequence
+    /// cannot replace the winner or end the route; repeating the identical
+    /// write is idempotent.
     async fn record_media_session_terminal_ack(
         &self,
         acknowledgement: &crate::domain::MediaSessionTerminalAck,
