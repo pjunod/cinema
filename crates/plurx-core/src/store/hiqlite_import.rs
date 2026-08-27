@@ -2094,7 +2094,7 @@ mod tests {
         assert!(names.contains(&"cluster_fragment_index_jobs"));
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
-        assert_eq!(names.len(), 29, "review every imported durable table");
+        assert_eq!(names.len(), 30, "review every imported durable table");
     }
 
     #[test]
