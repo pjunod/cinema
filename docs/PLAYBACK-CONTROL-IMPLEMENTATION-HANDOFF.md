@@ -6,14 +6,16 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `3827037aac069e5d212c5e1e2861f2461457bfbc`
-(round 3 returned **REQUEST CHANGES**)
+**Last reviewed exact head:** `ba1280bab3114ed49a09799658db345ffd25c834`
+(round 4 returned **REQUEST CHANGES**)
 **Current repair implementation:**
-`728abc86888c06fe7ebf420e06b6e5383b6f780a` (the documentation refresh follows
+`2e2136b27d25a8943e0422a74ca27246cb65119b` (the documentation refresh follows
 it; resolve the immutable branch tip with `git rev-parse HEAD` before requesting
-round 4)
-**Test state:** no tests, builds, or checks have run for the current slice;
-the adversarial PR review must happen first
+round 5)
+**Test state:** no local tests, builds, or checks have run for the current slice.
+The automatically triggered hosted preflight ran only static policy, failed on
+the now-repaired corrective-history mapping, and skipped all test jobs. A fresh
+adversarial PR review must happen first.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -184,10 +186,28 @@ post-fence denial, and cleanup progress. Direct state tests pin stale
 revision/attempt rejection, and pre-drain duplicate exits increment the
 coalesced counter while preserving the first exact terminal observation.
 
-A fresh exact-head round-4 adversarial review is still required before any
-test, build, or check. Until shared command sequencing lands, the deadline is
-an observation/proof surface only and must not trigger recovery retry, kill,
-replacement, hold, resume, or another recovery action.
+Until shared command sequencing lands, the deadline is an observation/proof
+surface only and must not trigger recovery retry, kill, replacement, hold,
+resume, or another recovery action.
+
+Round 4 reviewed exact head
+`ba1280bab3114ed49a09799658db345ffd25c834`. The primary and independent
+concurrency passes approved the runtime design and regressions with no
+P1/P2/P3 finding. The contract/test/documentation pass returned **REQUEST
+CHANGES** for two repository-gate defects:
+
+1. Corrective runtime commits `a409a194`, `77d90a8e`, and `728abc86`, plus
+   documentation commits `16723536`, `3827037a`, and `ba1280ba`, had no explicit
+   `validation/regressions.d` mapping. Hosted `history-check` confirmed the
+   failure and skipped all test jobs.
+2. The committed implementation sequence omitted its then-current
+   documentation commit `ba1280ba`.
+
+Commit `2e2136b27d25a8943e0422a74ca27246cb65119b` maps all three runtime repairs
+to the retained playback-pipeline and validation evidence and records the
+three documentation commits as non-runtime. This handoff refresh adds the
+missing sequence entries. Because the repair changes the exact head, round 4's
+two approvals do not authorize tests on it: exact-head round 5 is required.
 
 ### PR #619 adversarial review chronology
 
@@ -263,14 +283,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 3 returned
+The action-passive deadline slice is in PR #621. Review round 4 returned
 **REQUEST CHANGES** at exact head
-`3827037aac069e5d212c5e1e2861f2461457bfbc`. The repair implementation is
-committed at `728abc86888c06fe7ebf420e06b6e5383b6f780a`; it and this documentation
-refresh remain untested pending exact-head round 4.
+`ba1280bab3114ed49a09799658db345ffd25c834`. The repair implementation is
+committed at `2e2136b27d25a8943e0422a74ca27246cb65119b`; it and this documentation
+refresh remain untested pending exact-head round 5.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-4 review of that exact commit.
+  adversarial round-5 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -353,6 +373,8 @@ a409a194 fix(playback): fence passive producer cutoff
 77d90a8e fix(playback): sequence physical flow barriers
 3827037a docs(playback): record flow barrier review repairs
 728abc86 fix(playback): fence deferred flow on actor exit
+ba1280ba docs(playback): record actor exit review repairs
+2e2136b2 chore(validation): bind actor exit review evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
