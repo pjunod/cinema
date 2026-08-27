@@ -1498,7 +1498,7 @@ pub(crate) struct RollingLeaseSnapshot {
 /// charge.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
-#[cfg_attr(not(test), allow(dead_code))]
+#[allow(dead_code)]
 pub(crate) enum ProducerDecisionReason {
     StartupDeadline,
     ProgressDeadline,

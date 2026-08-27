@@ -295,12 +295,12 @@ expected_occurrences = 6
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 267
+expected_occurrences = 276
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 33
+expected_occurrences = 32
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -310,7 +310,7 @@ expected_occurrences = 1
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 322
+expected_occurrences = 323
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -330,7 +330,7 @@ expected_occurrences = 59
 [[module_structures]]
 id = "process-capable-launch-method"
 pattern = "\\.(?:spawn|output|status)\\s*\\("
-expected_occurrences = 155
+expected_occurrences = 156
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -345,7 +345,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 248
+expected_occurrences = 256
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -621,7 +621,7 @@ replacement = "one due-first actor ProducerProgressDeadline and immutable Produc
 
 [[entrypoints]]
 id = "producer-decision-transport"
-anchor = "async fn poll_producer_decision("
+anchor = "async fn poll_producer_decision"
 owns = ["decision polling", "executor wake", "executor inbox"]
 replacement = "one retained actor decision slot and one passive weak-reference executor task; no action authority in this slice"
 
