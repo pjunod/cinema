@@ -2364,6 +2364,7 @@ impl RollingProducerIngress {
         pending
     }
 
+    #[cfg(test)]
     fn drain_blocks(&self) -> Vec<RollingProducerIngressBlock> {
         let mut state = self
             .state
@@ -2544,6 +2545,13 @@ struct RollingControlEnvelope {
     preceding_producer: Vec<RollingProducerIngressBlock>,
     sealed_flow_barriers: usize,
     command: RollingControlCommand,
+}
+
+#[cfg(test)]
+struct DeferredProducerAttemptReply {
+    reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+    outcome: Result<u64, ProducerAttemptRejection>,
+    reply_pause: Option<Arc<tokio::sync::Barrier>>,
 }
 
 struct RollingActorRuntime {
@@ -3523,11 +3531,7 @@ impl RollingControlActor {
                 ROLLING_CONTROL_COMMANDS[metric_index].fetch_add(1, Ordering::Relaxed);
             }
             #[cfg(test)]
-            let mut deferred_begin_reply: Option<(
-                tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
-                Result<u64, ProducerAttemptRejection>,
-                Option<Arc<tokio::sync::Barrier>>,
-            )> = None;
+            let mut deferred_begin_reply: Option<DeferredProducerAttemptReply> = None;
             match command {
                 #[cfg(test)]
                 RollingControlCommand::Renew {
@@ -3591,7 +3595,11 @@ impl RollingControlActor {
                         .take();
                     #[cfg(test)]
                     {
-                        deferred_begin_reply = Some((reply, outcome, reply_pause));
+                        deferred_begin_reply = Some(DeferredProducerAttemptReply {
+                            reply,
+                            outcome,
+                            reply_pause,
+                        });
                     }
                     #[cfg(not(test))]
                     let _ = reply.send(outcome);
@@ -3669,10 +3677,18 @@ impl RollingControlActor {
             self.producer_events
                 .release_sealed_flow_barriers(sealed_flow_barriers);
             #[cfg(test)]
-            deferred_begin_reply
+            let deferred_result = deferred_begin_reply;
+            #[cfg(not(test))]
+            let deferred_result = std::marker::PhantomData::<()>;
+            deferred_result
         };
         #[cfg(test)]
-        if let Some((reply, outcome, reply_pause)) = _deferred_begin_reply {
+        if let Some(DeferredProducerAttemptReply {
+            reply,
+            outcome,
+            reply_pause,
+        }) = _deferred_begin_reply
+        {
             if let Some(reply_pause) = reply_pause {
                 reply_pause.wait().await;
                 reply_pause.wait().await;

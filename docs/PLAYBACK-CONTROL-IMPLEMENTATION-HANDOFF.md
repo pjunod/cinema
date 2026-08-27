@@ -441,8 +441,14 @@ test actor future as non-`Send` because it could not prove an explicit
 transition-guard drop preceded the reply-pause await. The repair encloses the
 whole synchronous command transaction in a lexical scope, carries only the
 test reply tuple across the await, and applies `cargo fmt`; that changed head
-must be adversarially approved before focused tests resume. The sequencing and
-projection do not make recovery decisions. Legacy watchdogs, direct replacement/action paths,
+received unanimous round-4 approval as `7b7dfc58`. All 72 rolling-control tests
+and the three changed status/telemetry tests then passed. `make check` passed
+catalog/history and 173 policy/contract tests before Clippy found three static
+cleanup items: a now-test-only drain helper, a production unit binding, and a
+complex test tuple. The behavior-neutral repair gates the helper with
+`cfg(test)`, names the deferred test reply, and uses a zero-sized production
+marker; exact-head review is required before the gate resumes. The sequencing
+and projection do not make recovery decisions. Legacy watchdogs, direct replacement/action paths,
 response admission, cleanup, and process ownership remain active. There is no
 `ProducerDecision`, action executor, retry cutover, or transparent handoff in
 this slice; the v1 wire action remains `none`.
