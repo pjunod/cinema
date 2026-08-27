@@ -2,11 +2,12 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `8c6ccdf7` (PR #616)
-**Current work:** `codex/playback-control-m3-terminal-events` — M3c3 typed,
-actor-owned session end and authority/cluster-fence events plus an exhaustive
-event-order model. This is the final behavior-passive M3 ownership slice before
-M4 moves recovery decisions into the actor and deletes the old server watchdog
-and in-place replacement machinery.
+**Current work:** PR [#617](https://github.com/pjunod/plurx/pull/617),
+`codex/playback-control-m3-terminal-events` — M3c3 typed, actor-owned session
+end and authority/cluster-fence events plus an exhaustive event-order model.
+This is the final behavior-passive M3 ownership slice before M4 moves recovery
+decisions into the actor and deletes the old server watchdog and in-place
+replacement machinery.
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -73,7 +74,7 @@ Review and test state for M3c3:
 
 | Gate | State |
 |---|---|
-| Implementation | **In progress** from merged `8c6ccdf7`. Design and symbol routing are being completed before runtime edits. |
+| Implementation | **Complete for review** on PR #617 at `bcbdb88e`, from merged `8c6ccdf7`. Typed terminal state, end/fence routing, Activity projection, bounded metrics, 5,040-order model coverage, and async race/cancellation regressions are present. |
 | Adversarial diff review | **Pending.** It will run against the exact implementation head before any unit or full local test. |
 | Unit/focused tests | **Intentionally not run yet.** The required adversarial review comes first. |
 | Full local gate | **Pending** exact-head adversarial approval and focused tests. |
