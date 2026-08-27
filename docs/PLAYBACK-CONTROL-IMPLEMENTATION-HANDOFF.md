@@ -2,12 +2,12 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `dba35f98` (PR #624)
-**Active PR:** not opened
+**Active PR:** [#626](https://github.com/pjunod/plurx/pull/626)
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `981ebb51b9d54c5fb71e49232722693e7cf079fe`
-(unanimously approved; no P1/P2/P3 findings)
+**Last reviewed exact head:** `1a0c48cd2e4591a12c9869468031b9a8cf044a73`
+(final targeted approval; runtime head `981ebb51` was unanimously approved)
 **Current implementation:** behavior-neutral decision transport committed at
 `c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
 repairs at `91486148`, absorbing executor-state/poll-contract repairs at
@@ -17,10 +17,8 @@ a passive weak-reference executor, and status projection; post-test inventory,
 enum-warning, and strong lifetime-owner lint repairs are committed through
 `f463d4d4`
 **Test state:** focused Rust playback control passed 85/85 twice without
-warnings; the ownership inventory passed 7/7 after reviewed repairs;
-`make check` passed catalog/history/121+52 tests after the chronology repair,
-then stopped on the strong transport-owner field's production dead-code lint;
-`f463d4d4` documents/allows that field and awaits review; cluster has not run
+warnings; ownership inventory passed 7/7; `make check` and
+`make cluster-check` passed; PR #626 hosted run `33127267123` is queued
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -398,15 +396,16 @@ topology, and daemon-integration contracts.
 ## 4. Immediate continuation procedure
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
-slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `f463d4d4`. Continue in this order:
+slice is PR #626 on `codex/playback-control-m4-producer-decision`; its runtime
+is committed through `f463d4d4` and its tested/documented head is `1a0c48cd`.
+Continue in this order:
 
-1. Obtain targeted ownership/lint review of `f463d4d4` plus its mapping.
-2. Rerun `make check`, then run `make cluster-check`.
-3. Repair any failure, re-review changed code, and repeat the affected gates.
-4. Open/finish the PR, require every hosted check to pass on the exact reviewed
-   head, and merge.
-5. Immediately begin the first authoritative vertical cut: actor-owned
+1. Record the final local evidence and obtain adversarial PR review of the
+   resulting documentation-only head.
+2. Require every hosted PR #626 check to pass on that exact head; repair any
+   failure, re-review changed code, and repeat the affected gates.
+3. Merge PR #626.
+4. Immediately begin the first authoritative vertical cut: actor-owned
    hardware startup retry plus response admission and cleanup, followed by
    deletion of the corresponding legacy watcher/action owner.
 
@@ -509,7 +508,15 @@ is not directly read outside tests. The field is nevertheless the required
 strong lifetime owner for the executor's weak transport reference; removing it
 would recreate the premature transport teardown that the slice explicitly
 tests. Repair `f463d4d4` documents that invariant and applies a field-local
-dead-code allowance. It awaits targeted review before the affected gate rerun.
+dead-code allowance.
+
+Two reviewers approved the ownership/lint repair; one identified a stale hash
+in this handoff, and the one-line correction received final approval at exact
+head `1a0c48cd2e4591a12c9869468031b9a8cf044a73`. The rerun of `make check`
+passed catalog/history, Clippy with warnings denied, the full workspace suite,
+and doc tests. `make cluster-check` then passed vendor WAL/recovery,
+replicated-store, topology, failure-drill, activation, and activity integration
+contracts. PR #626 is open; hosted run `33127267123` is queued.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,

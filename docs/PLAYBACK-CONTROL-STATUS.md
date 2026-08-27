@@ -2,7 +2,8 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `dba35f98` (PR #624)
-**Current work:** M4 decision transport on
+**Current work:** M4 decision transport in
+[PR #626](https://github.com/pjunod/plurx/pull/626) on
 `codex/playback-control-m4-producer-decision` in the disposable clone. Runtime
 commits `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
@@ -25,8 +26,10 @@ and stopped because four corrective mapping commits were not themselves named
 by their existing evidence records. After that reviewed repair, the rerun
 passed catalog, history, 121 validation tests, and 52 additional tests, then
 Clippy identified the intentionally retained strong transport owner as unread
-outside tests. `f463d4d4` documents and allows that one lifetime-owner field and
-awaits review. No cluster test has run for this slice yet.
+outside tests. `f463d4d4` documents and allows that one lifetime-owner field.
+The repair received targeted approval, the corrected handoff received final
+static approval at `1a0c48cd`, `make check` passed, and `make cluster-check`
+passed. Hosted run `33127267123` is queued.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -119,9 +122,9 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Runtime approved; final source-local inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Two reviewers approved the post-test count/warning repair at `f447aa1d`; the rerun then isolated one misplaced entrypoint row, removed by `9d100a04`. |
+| Adversarial implementation review | **Approved.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact runtime head `981ebb51`. Every post-test corrective delta was reviewed before its affected gate reran; the final documentation correction was approved at `1a0c48cd`. PR #626 now awaits hosted evidence. |
 | Unit/focused tests | **Green.** Rust playback control passed 85/85 twice without warnings; after reviewed bookkeeping repairs, the ownership inventory passed 7/7. |
-| Full/cluster/hosted gates | **Full gate reached Clippy; cluster/hosted not run.** After the reviewed history repair, `make check` passed catalog, history, 121 validation tests, and 52 additional tests. Clippy then rejected the strong `decision_transport` lifetime-owner field as unread in production; `f463d4d4` adds its explicit ownership comment/allowance and awaits review before rerun. The validated baseline remains #624. |
+| Full/cluster/hosted gates | **Local full and cluster gates green; hosted queued.** `make check` passed catalog/history, Clippy with warnings denied, the full workspace suite, and doc tests. `make cluster-check` passed vendor WAL/recovery, replicated-store, topology, failure-drill, activation, and activity integration contracts. PR #626 hosted run `33127267123` is queued. |
 
 ## Watchdog-removal ledger
 
