@@ -3400,7 +3400,9 @@ mod tests {
                     let expected = model.terminal.is_none();
                     let accepted = actor.control_at(now, owned_control(&control)).is_ok();
                     assert_eq!(accepted, expected, "order {order:?}");
-                    model.flow_requests += u64::from(expected);
+                    if expected {
+                        model.flow_requests += 1;
+                    }
                 }
             }
 
