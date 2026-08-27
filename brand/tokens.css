@@ -3,7 +3,7 @@
      midnight — dark, default. the terminal at night.
      matinee  — light. daylight noir: the case file at noon.
    semantic tokens remap per theme; components never change.
-   reserved slots: projection (auto, fullscreen) · giallo · silver */
+   reserved slots: projection (auto, fullscreen) · giallo · silver · panovic */
 
 /* ---------- midnight (dark · default) ---------- */
 :root,
@@ -152,4 +152,56 @@
   pointer-events: none;
   opacity: var(--noirr-grain-opacity);
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)'/%3E%3C/svg%3E");
+}
+
+/* ---------- panovic (dark · dark-only) ----------
+   orange/grey/black — the signature of the media-wall layout.
+   true black at the root; bold orange accent carries the active state;
+   neutral grey surfaces and status tokens keep everything legible. */
+[data-theme="panovic"] {
+  color-scheme: dark;
+
+  /* surfaces — pure black root, warm-grey tiers */
+  --noirr-oled:        #000000;
+  --noirr-bg:          #0a0a0a;
+  --noirr-surface:     #181818;
+  --noirr-raised:      #242424;
+  --noirr-line:        rgba(255, 255, 255, 0.06);
+
+  /* ink ramp — neutral greys */
+  --noirr-ink:         #e8e6e1;
+  --noirr-dim:         #9a9aa0;
+  --noirr-faint:       #5c5c60;
+
+  /* accent — the cursor burns orange at night */
+  --noirr-accent:      #f0723b;
+  --noirr-accent-deep: #8e4a1e;
+  --noirr-glow:        rgba(240, 114, 59, 0.35);
+
+  /* panovic at black needs visible structure — shadow lifts panels */
+  --noirr-shadow:      0 4px 14px rgba(0, 0, 0, 0.8);
+
+  /* semantic — coral error is distinct from orange accent; status stays tinted */
+  --noirr-ok:          #5fb582;
+  --noirr-warn:        #d9a05b;
+  --noirr-err:         #ff7a66;
+
+  /* loading shimmer stops */
+  --noirr-skel-a:      var(--noirr-raised);
+  --noirr-skel-b:      #323238;
+
+  --noirr-grain-opacity: 0.025;   /* barely visible — black eats grain */
+}
+
+/* panovic mode on player surfaces (mirrors noir-projection behavior) */
+[data-theme="panovic"] .noirr-projection {
+  --noirr-bg:      var(--noirr-oled);
+  --noirr-surface: var(--noirr-oled);
+  background: var(--noirr-oled);
+}
+
+/* panovic — the cursor has a neon-orange glow */
+[data-theme="panovic"] .noirr-cursor {
+  color: var(--noirr-accent);
+  text-shadow: 0 0 12px var(--noirr-glow), 0 0 36px var(--noirr-glow);
 }
