@@ -2556,17 +2556,17 @@ impl Session {
                 pause.wait().await;
             }
         }
-        let install = match self
+        let install = self
             .control
-            .lock_authorized_producer_install(producer_attempt)
-        {
-            Ok(install) => install,
-            Err(reason) => {
-                let _ = candidate.kill().await;
-                let _ = candidate.wait().await;
-                return Err(reason);
-            }
-        };
+            .lock_authorized_producer_install(producer_attempt);
+        let rejection = install.as_ref().err().copied();
+        if let Some(reason) = rejection {
+            drop(install);
+            let _ = candidate.kill().await;
+            let _ = candidate.wait().await;
+            return Err(reason);
+        }
+        let install = install.expect("producer install authorization checked above");
         *child = Some(candidate);
         drop(install);
         Ok(())
@@ -2716,65 +2716,69 @@ impl Session {
         // successor publication. Only the final in-memory projection crosses
         // it; every filesystem operation above remains independently bounded
         // by the storage layer rather than blocking lifecycle actions.
-        let producer_transition = self.child_transition.lock().await;
-        if self.control.current_producer_attempt() != producer_attempt {
-            return;
-        }
-        let mut index = self.segments.lock().await;
-        let projected_attempt = self
-            .compatibility_attempt
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if *projected_attempt != producer_attempt {
-            return;
-        }
-        let Some(rebuilt) = index.merge_prepared(base_revision, observed) else {
-            // Another same-attempt observation (or retention mutation) landed
-            // while metadata was prepared. Its newer catalog is authoritative;
-            // a later refresh will observe anything this discarded read still
-            // has to add.
-            return;
-        };
-        if rebuilt {
-            tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
-        }
-        // Resolve the frontier against the fresh index: a segment served
-        // before its EXTINF was known gets its real end time now.
-        let high = self.high_segment.load(Relaxed);
-        if high >= 0 {
-            if let Some(end) = index.end_ms_of(high) {
-                self.fetched_end_ms.fetch_max(end, Relaxed);
+        let (published_segment, published_end_ms, next_media_sequence, resolved_fetched_end_ms) = {
+            let producer_transition = self.child_transition.lock().await;
+            if self.control.current_producer_attempt() != producer_attempt {
+                return;
             }
-        }
-        // A cached asset's bytes are not scratch, and must not be counted as
-        // any. The global budget is a sum over every session, and it decides
-        // whether *live* encoders get suspended — so a 6 GB cached 4K title
-        // reported here would blow the budget the moment somebody pressed
-        // play and hold every real encoder on the box. Those bytes are already
-        // accounted for, by the cache's own size budget.
-        if !self.cached {
-            if let Some(ahead) = ahead_of(&index, self.fetched_end_ms.load(Relaxed).max(0)) {
-                self.ahead_bytes.store(ahead.bytes, Relaxed);
-            }
-            let _accounting = self
-                .retention_cleanup_queue
+            let mut index = self.segments.lock().await;
+            let projected_attempt = self
+                .compatibility_attempt
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            self.live_bytes.store(
-                index
-                    .total_bytes()
-                    .saturating_add(self.retention_garbage_bytes.load(Relaxed)),
-                Relaxed,
+            if *projected_attempt != producer_attempt {
+                return;
+            }
+            let Some(rebuilt) = index.merge_prepared(base_revision, observed) else {
+                // Another same-attempt observation (or retention mutation)
+                // landed while metadata was prepared. Its newer catalog is
+                // authoritative; a later refresh will observe anything this
+                // discarded read still has to add.
+                return;
+            };
+            if rebuilt {
+                tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
+            }
+            // Resolve the frontier against the fresh index: a segment served
+            // before its EXTINF was known gets its real end time now.
+            let high = self.high_segment.load(Relaxed);
+            if high >= 0 {
+                if let Some(end) = index.end_ms_of(high) {
+                    self.fetched_end_ms.fetch_max(end, Relaxed);
+                }
+            }
+            // A cached asset's bytes are not scratch, and must not be counted
+            // as any. The global budget is a sum over every session, and it
+            // decides whether live encoders get suspended — so a 6 GB cached
+            // 4K title reported here would blow the budget the moment somebody
+            // pressed play and hold every real encoder on the box. Those bytes
+            // are already accounted for by the cache's own size budget.
+            if !self.cached {
+                if let Some(ahead) = ahead_of(&index, self.fetched_end_ms.load(Relaxed).max(0)) {
+                    self.ahead_bytes.store(ahead.bytes, Relaxed);
+                }
+                let _accounting = self
+                    .retention_cleanup_queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.live_bytes.store(
+                    index
+                        .total_bytes()
+                        .saturating_add(self.retention_garbage_bytes.load(Relaxed)),
+                    Relaxed,
+                );
+            }
+            let result = (
+                index.segs.last().map(|segment| segment.index),
+                index.produced_playable_end_ms(),
+                index.next_media_sequence(),
+                pending_fetched_segment.and_then(|segment| index.end_ms_of(segment)),
             );
-        }
-        let published_segment = index.segs.last().map(|segment| segment.index);
-        let published_end_ms = index.produced_playable_end_ms();
-        let next_media_sequence = index.next_media_sequence();
-        let resolved_fetched_end_ms =
-            pending_fetched_segment.and_then(|segment| index.end_ms_of(segment));
-        drop(projected_attempt);
-        drop(index);
-        drop(producer_transition);
+            drop(projected_attempt);
+            drop(index);
+            drop(producer_transition);
+            result
+        };
         // Never hold a filesystem/process or segment-index lock while waiting
         // on the actor mailbox. A replacement that wins after the projection
         // check increments the attempt first, and the actor rejects this stale
@@ -21776,7 +21780,7 @@ mod tests {
             .watchdog_verdict_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let mut replacement = session
+        let (mut replacement, _) = session
             .kill_child_for_replacement()
             .await
             .expect("a live session may replace its child");
@@ -21882,7 +21886,7 @@ mod tests {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         let replacement_session = Arc::clone(&session);
         let replacement = tokio::spawn(async move {
-            let Some(mut replacement) = replacement_session
+            let Some((mut replacement, _)) = replacement_session
                 .begin_copy_child_replacement()
                 .await
                 .expect("rolling actor must answer replacement admission")
@@ -22012,7 +22016,7 @@ mod tests {
         let replacement = tokio::spawn({
             let session = Arc::clone(&session);
             async move {
-                let mut replacement = session
+                let (mut replacement, _) = session
                     .begin_copy_child_replacement()
                     .await
                     .expect("rolling actor must answer replacement admission")

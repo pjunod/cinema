@@ -3983,6 +3983,7 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+    use std::time::Duration;
 
     #[tokio::test]
     async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
@@ -4981,8 +4982,9 @@ mod tests {
 
         let pause = Arc::new(tokio::sync::Barrier::new(2));
         fixture.pause_response_projection(Arc::clone(&pause));
+        let body_len = body.len();
         let drain = tokio::spawn(async move {
-            axum::body::to_bytes(response.into_body(), body.len() + 1)
+            axum::body::to_bytes(response.into_body(), body_len + 1)
                 .await
                 .expect("predecessor body")
         });
@@ -4993,7 +4995,7 @@ mod tests {
             "successor admission resets the compatibility projection"
         );
         pause.wait().await;
-        assert_eq!(drain.await.expect("body task").len(), body.len());
+        assert_eq!(drain.await.expect("body task").len(), body_len);
         assert_eq!(fixture.fetched_segment(), -1);
         assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
     }
