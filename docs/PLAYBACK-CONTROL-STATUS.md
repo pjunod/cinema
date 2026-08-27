@@ -15,9 +15,12 @@ and a four-variant poll-contract violation. The final defensive pass also made
 the first terminal-or-lost settlement win in either order. The current head
 received unanimous exact-head approval at `981ebb51`. The focused Rust suite
 then passed 85/85; the ownership inventory exposed six stale normalized
-counts/anchors and one warnings-as-errors risk, repaired in `73cd33e9` and
-awaiting targeted review before the failed inventory is rerun. No full or
-cluster test has run for this slice yet.
+counts/anchors and one warnings-as-errors risk. `73cd33e9` fixed the normalized
+counts and warning; the rerun cleared five failures and proved the remaining
+entrypoint row was invalid because that table is deliberately source-local to
+`transcode.rs`. `9d100a04` removes the misplaced row while whole-module
+sentinels continue to cover the transport. It awaits targeted review before
+the inventory is rerun. No full or cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -110,8 +113,8 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Runtime approved; post-test inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Focused testing then exposed only inventory/warning bookkeeping; `73cd33e9` aligns the normalized structural counts/entrypoint and suppresses dead-code warnings for deliberately exhaustive passive reason variants. |
-| Unit/focused tests | **Rust playback control passed 85/85 at approved head `981ebb51`.** The ownership inventory ran 7 tests and failed 6 stale count/anchor assertions; `73cd33e9` repairs their exact parser-observed values and awaits review before rerun. |
+| Adversarial implementation review | **Runtime approved; final source-local inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Two reviewers approved the post-test count/warning repair at `f447aa1d`; the rerun then isolated one misplaced entrypoint row, removed by `9d100a04`. |
+| Unit/focused tests | **Rust playback control passed 85/85 twice and is warning-free.** The first 7-test ownership run failed six stale count/anchor assertions. After `73cd33e9`, the second run cleared the five structural counts and failed only the source-local entrypoint row; `9d100a04` removes that invalid row and awaits review before rerun. |
 | Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
 
 ## Watchdog-removal ledger

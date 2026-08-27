@@ -14,11 +14,12 @@ repairs at `91486148`, absorbing executor-state/poll-contract repairs at
 `ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
 actor slot, non-consuming actor polling, one move-only bounded executor inbox,
 a passive weak-reference executor, and status projection; post-test inventory
-and dead-code warning repair is committed at `73cd33e9`
-**Test state:** focused Rust playback control passed 85/85 at `981ebb51`; the
-7-test ownership inventory failed 6 stale anchor/count assertions, repaired at
-`73cd33e9` and awaiting targeted review before rerun; full/cluster gates have
-not run
+and dead-code warning repairs are committed through `9d100a04`
+**Test state:** focused Rust playback control passed 85/85 twice and is
+warning-free; the first 7-test ownership run failed six stale count/anchor
+assertions, and the second cleared five then isolated one invalid source-local
+entrypoint row; `9d100a04` removes it and awaits review before rerun;
+full/cluster gates have not run
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -397,13 +398,13 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `73cd33e9`. Continue in this order:
+committed through `9d100a04`. Continue in this order:
 
-1. Obtain targeted static/inventory review of `73cd33e9` plus this mapping; it
-   changes only one deliberate dead-code annotation and parser-observed
-   inventory counts/anchor.
-2. Rerun the failed ownership inventory and confirm the focused Rust suite is
-   still warning-free, then run `make check` and `make cluster-check`.
+1. Obtain targeted static/inventory review of `9d100a04` plus this mapping; it
+   only removes an entrypoint row from a table that scans a different source
+   file, while whole-module transport sentinels remain intact.
+2. Rerun the failed ownership inventory, then run `make check` and
+   `make cluster-check`.
 3. Repair any failure, re-review changed code, and repeat the affected gates.
 4. Open/finish the PR, require every hosted check to pass on the exact reviewed
    head, and merge.
@@ -487,9 +488,14 @@ changed normalized structural counts; the replaced spawn shape changed the
 method count; and rustfmt made the decision-poll entrypoint signature multiline.
 The test build also warned that deliberately exhaustive passive decision-reason
 variants are not all constructed yet. Repair `73cd33e9` records the exact
-parser-observed counts, uses a stable unique entrypoint anchor, and makes the
-intentional dead-code allowance apply to test builds. It requires targeted
-review before the failed inventory is rerun.
+parser-observed counts and makes the intentional dead-code allowance apply to
+test builds. Two targeted reviewers approved it. The Rust suite then passed
+85/85 again without warnings, and the inventory rerun cleared all five count
+failures but showed the remaining transport entrypoint row could never match:
+the entrypoint table reads only `transcode.rs`, while the actor poll correctly
+lives in `playback_control.rs`. Repair `9d100a04` removes that misplaced row;
+the whole-module decision transport, wake, inbox, and poll sentinels remain.
+It requires targeted review before the inventory is rerun.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
