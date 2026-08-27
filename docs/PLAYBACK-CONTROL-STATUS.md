@@ -4,9 +4,10 @@
 **Merged baseline:** `origin/main` at `46c08439` (PR #615)
 **Current work:** PR [#616](https://github.com/pjunod/plurx/pull/616),
 `codex/playback-control-m3-producer-events` — M3c2 passive, nonblocking producer
-progress and exact-attempt process-exit observations. Adversarial review of
-initial head `405f6d3e` requested changes; all findings are being remediated
-before any local unit or full-gate run
+progress and exact-attempt process-exit observations. Two adversarial passes
+requested changes on `405f6d3e` and `79d9460b`; both finding sets are remediated
+on the current untested head, which requires a fresh exact-head approval before
+any local unit or full-gate run
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -70,11 +71,11 @@ Review and test state for M3c2:
 
 | Gate | State |
 |---|---|
-| Implementation | Remediation in progress on PR #616 from merged `46c08439`. Initial head `405f6d3e` added the coalesced ingress, actor state, process observation, status, metrics, and model tests. The repair head makes one supervisor the sole child signal/wait/reap owner and closes ingress/status truth gaps. |
-| Adversarial diff review | **Changes requested** on exact head `405f6d3e`: three compile/Clippy blockers, cached-PID reuse risk, held masking exit, equal-attempt exit replacement, false actor-unavailable status, verification gaps, and this stale status row. A new exact-head review is required after remediation. |
-| Unit/focused tests | **Not run**, by design, until the remediated exact head passes adversarial review. Added cases cover a genuinely full command mailbox, same-attempt progress regression, contradictory exits, supervised signals/kill/drop/reap, actor-unavailable status, terminal-over-held priority, joined status fields, and metric names. |
+| Implementation | Remediation is complete but untested on PR #616 from merged `46c08439`. The current implementation has constant-space event ingress, actor-owned facts, a cancel-safe targeted process supervisor, one guarded signal linearization, single-attempt status projection, bounded metrics, and regression mapping. |
+| Adversarial diff review | **Changes requested twice.** Head `405f6d3e`: compile blockers, cached-PID reuse, terminal/held and first-exit ordering, unavailable status, and coverage/status gaps. Head `79d9460b`: guard released before signal, recursive corrective-history classification, mixed N/N+1 status, and per-child `SIGCHLD` fan-out. All are remediated; a third exact-head review is required. |
+| Unit/focused tests | **Not run**, by design, until the remediated exact head passes adversarial review. Added cases cover a genuinely full command mailbox, same-attempt progress regression, contradictory exits, supervised signals/kill/drop/reap, authorization-to-syscall fencing, actor-unavailable status, replacement during status assembly, terminal-over-held priority, joined status fields, and metric names. |
 | Full local gate | Not run. After review: focused tests, `make test`, `make check`, unrestricted `make validate`, and applicable browser contracts. |
-| Hosted CI | GitHub automatically started run `33040710196` on initial head `405f6d3e`; it failed at compile/Clippy before behavioral tests. Automatic remediation run `33041867989` stopped in history preflight because the new mapping filename used the repair commit instead of the first mapped commit. The mapping is renamed on head `77e59aff`; its rerun is pending. Neither automatic failure changes the rule that every required job must be green on the final reviewed and locally validated head. |
+| Hosted CI | Automatic run `33040710196` failed initial-head compile/Clippy. Run `33041867989` found the mapping filename error. Run `33041927855` then found that the filename-fix commit itself had a corrective subject; that commit is now rewritten as neutral `be83782d`, and corrective runtime head `38aac17e` is mapped. A new hosted run will start after push. These automatic runs remain pre-review evidence, not a substitute for the required local sequence. |
 | Merge | Not ready. Requires exact-head approval, local green, hosted green, and no unresolved review findings. |
 
 ## Watchdog-removal ledger
