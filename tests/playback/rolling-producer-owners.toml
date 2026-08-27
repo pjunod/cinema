@@ -262,7 +262,7 @@ expected_occurrences = 57
 [[module_symbols]]
 id = "m4-producer-decision-poll"
 pattern = "PollProducerDecision"
-expected_occurrences = 4
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-producer-decision-install-test"
@@ -282,7 +282,7 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "m4-decision-wake"
 pattern = "RollingDecisionWake"
-expected_occurrences = 6
+expected_occurrences = 7
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
