@@ -7431,6 +7431,7 @@ impl TranscodeManager {
             refresh_after_read_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -10726,6 +10727,7 @@ impl TranscodeManager {
             refresh_after_read_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -11358,6 +11360,7 @@ impl TranscodeManager {
             refresh_after_read_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
