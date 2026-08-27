@@ -1,23 +1,21 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `8e331672` (PR #621)
-**Current work:** PR #624 on `codex/playback-control-m4-command-sequencing`;
-formal round 5 unanimously approved implementation head `dc7c7667`. All 75
-focused tests passed before the final behavior-neutral lint repair, and the
-complete `make check` and `make cluster-check` gates then passed at the approved
-head. Hosted CI and the final evidence-only exact-head review remain before
-merge.
-PR #621 merged as `8e331672` after exact-head round 10 received unanimous
-**APPROVE** verdicts and hosted run `33109297301` passed. The active branch
-adds bounded shared command/producer sequencing, publication-time ordering,
-stale-exit fencing, a partial observation-only actor projection in
-`SessionInfo` and telemetry, and bounded command/deadline metrics. Runtime is
-committed at `383d62d8`, with regression mapping at `de23104d`. These are
-groundwork only: legacy watchdogs and recovery actions remain active, and there is no
-decision, executor, response-admission, or watchdog-deletion cutover yet.
-The active runtime head has received its required exact-head adversarial review
-before unit and full gates were run.
+**Merged baseline:** `origin/main` at `dba35f98` (PR #624)
+**Current work:** M4 decision transport on
+`codex/playback-control-m4-producer-decision` in the disposable clone. Runtime
+commit `c04898e2` adds a behavior-neutral, one-slot immutable actor decision, a
+non-consuming poll command, and one bounded passive executor inbox/task. Root
+static review found and repaired a mailbox self-retention cycle before commit.
+The active slice has not received exact-head adversarial approval, and no unit,
+full, or cluster test has run for it yet.
+PR #624 merged as `dba35f98` after unanimous exact-head review, green local
+`make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
+shared command/producer sequencing, publication-time ordering, stale-exit
+fencing, observation-only actor projection, and command/deadline metrics are
+now the validated baseline. Legacy watchdogs and recovery actions remain
+active. The current decision transport emits no production decision and owns
+no retry, cleanup, response-admission, or process action.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -38,7 +36,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; PR #621 merged as `8e331672`; PR #624 implementation head `dc7c7667` has unanimous round-5 approval and green focused/full/cluster gates for bounded shared command/producer ordering, publication-time ordering, stale-exit fencing, partial observation-only projection, and bounded command/deadline metrics | Finish hosted CI and merge #624; then move decisions, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, and sequenced actor/producer ordering; an unreviewed active slice adds the passive decision transport | Review and merge the transport, then add production decision emission, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -64,6 +62,7 @@ not being counted as complete merely because its foundation has landed.
 | [#618](https://github.com/pjunod/plurx/pull/618) | M4 watchdog-removal ownership, deadline ordering, executor, cleanup, process-capacity, and post-publication proposal contract | Seven exact-head adversarial passes resolved 31 findings; final approval at `96799e60`; `make check`, `make cluster-check`, and hosted PR gate green; merged as `f9cef83b` |
 | [#619](https://github.com/pjunod/plurx/pull/619) | Constant-space cutoff-safe producer progress coverage plus checked whole-module legacy owner/task/timer/process inventory | Thirteen exact-head reviews; final approval at `11315987`; focused tests, `make check`, `make cluster-check`, and hosted PR gate green; merged as `48ea494c` |
 | [#621](https://github.com/pjunod/plurx/pull/621) | Passive producer deadline, cutoff-safe ingress/fencing, and process-flow barriers | Ten exact-head rounds ended unanimously **APPROVED**; hosted run `33109297301` green; merged as `8e331672` |
+| [#624](https://github.com/pjunod/plurx/pull/624) | Bounded shared actor-command/producer sequencing and observation-only operational projection | Formal runtime round 5 unanimously approved; `make check`, `make cluster-check`, and hosted run `33118301414` green; merged as `dba35f98` |
 
 ## Active slice: M4 watchdog removal
 
@@ -72,16 +71,15 @@ seven adversarial passes and green local, cluster, and hosted gates. The actor
 already owns explicit End, authority fence, and exact lease expiry; this slice
 starts moving producer recovery evidence through that same owner.
 
-PR #621 then merged the passive deadline and cutoff-safe ingress foundation as
-`8e331672`, after unanimous round-10 approval and hosted run `33109297301`.
-The active branch, `codex/playback-control-m4-command-sequencing`, has passed
-five formal exact-head review rounds plus its focused, full-workspace, and
-cluster gates. It adds bounded shared
-command/producer sequencing, publication-time ordering, stale-exit fencing,
-partial observation-only actor projection in `SessionInfo` and telemetry, and
-bounded command/deadline metrics. It does not yet move decisions, response admission,
-retry, cleanup, or process actions behind an executor, and it does not delete
-the legacy watchdogs or action owners.
+PR #621 merged the passive deadline and cutoff-safe ingress foundation as
+`8e331672`. PR #624 then merged bounded shared command/producer sequencing,
+publication-time ordering, stale-exit fencing, partial observation-only actor
+projection in `SessionInfo` and telemetry, and bounded command/deadline metrics
+as `dba35f98`. The current decision-transport slice adds
+the immutable typed decision contract, non-consuming `PollProducerDecision`, a
+one-slot actor pending value, and one move-only executor inbox/task. It remains
+observation-only: no production decision is emitted, no `DecisionApplied`
+acknowledgement exists, and the legacy watchdogs/action owners remain active.
 
 M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
@@ -99,13 +97,13 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
+| Static owner inventory | **Merged in #619 and extended in the active slice.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the active branch adds named decision transport, wake, and executor sentinels while leaving every legacy owner count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Merged in #621; active branch extends the foundation.** The merged slice folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. The active branch adds reviewed and locally validated shared command/producer ordering and publication-time barriers. It still emits no recovery action. |
-| Operational projection | **Partial and observation-only.** The active branch exposes bounded actor producer truth through `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry, including deadline/due, process-exit, physical-flow, and last-applied-sequence observations. It does not expose a decision, action, retry, executor, or response-admission verdict. The bounded deadline and command metrics are instrumentation, not recovery authority. |
-| Adversarial implementation review | **Round 5 unanimously approved `dc7c7667`.** Rounds 1–3 resolved two stale P3 comments, inventory counts, and history metadata; round 4 approved the lexical `MutexGuard` scope repair; round 5 approved the behavior-neutral Clippy cleanup. All three reviewers returned **APPROVE** with no P1/P2/P3 finding. |
-| Unit/focused tests | **Green.** All 72 rolling-control tests plus the three changed status/telemetry tests passed before the lint-only repair. The complete workspace suite subsequently passed at approved head `dc7c7667`, covering the same tests after that repair. |
-| Full/cluster/hosted gates | **Local full and cluster gates green at `dc7c7667`; hosted pending.** `make check` passed catalog/history, 173 Python policy/contract tests, formatting, Clippy with warnings denied, and every workspace/doc test. `make cluster-check` passed vendor snapshot/WAL recovery, 63 serialized clustered store contracts with two helper processes ignored, live failure/topology drills, and all nine daemon cluster-activation/activity tests. Hosted CI and final evidence-only exact-head confirmation remain. |
+| Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
+| Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
+| Adversarial implementation review | **Pending for the active slice.** #624 is fully reviewed and merged. The new decision-transport head will be committed and frozen before independent concurrency, lifecycle, and contract reviews. |
+| Unit/focused tests | **Not run for the active slice.** Authored transport/lifecycle tests remain intentionally unexecuted until adversarial approval. |
+| Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
 
 ## Watchdog-removal ledger
 
@@ -113,11 +111,10 @@ The target is not zero timers. The target is no overlapping recovery owners.
 The detailed symbol-by-symbol contract is in the plan's
 [deadline inventory](PLAYBACK-CONTROL-PROTOCOL-PLAN.md#7-deadlines-and-watchdog-inventory).
 
-The active command-sequencing branch has not reached that target: every legacy
+The active decision-transport branch has not reached that target: every legacy
 watchdog, replacement path, action owner, and response-admission compatibility
-path remains active. The new sequencing and projection are observational
-foundations; they do not authorize a retry, kill, replacement, cleanup, or
-transparent handoff.
+path remains active. The new decision path is also observational; it does not
+authorize a retry, kill, replacement, cleanup, or transparent handoff.
 
 ### Server mechanisms still present on merged `main`
 
@@ -159,8 +156,9 @@ playback, replacement, restart, or failure decision. It is not a watchdog.
 
 ## Remaining delivery order
 
-1. Adversarially review and test the active command-sequencing branch, then
-   complete M4 and prove the old server watchdog/replacement symbols are gone.
+1. Adversarially review, test, and merge the active decision-transport slice,
+   then complete M4 and prove the old server watchdog/replacement symbols are
+   gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
 3. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
