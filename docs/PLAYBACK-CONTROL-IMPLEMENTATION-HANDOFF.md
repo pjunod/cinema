@@ -6,10 +6,12 @@
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** none for the active slice
+**Last reviewed exact head:** `ceb8c74d3f078c194769c780e8bb1b39e4b0461a`
+(round 1 requested changes; not approved)
 **Current implementation:** behavior-neutral decision transport committed at
-`c04898e2`: one immutable actor slot, non-consuming actor polling, one move-only
-bounded executor inbox, a passive weak-reference executor, and status projection
+`c04898e2`, with round-1 liveness/compile repairs at `732d3442`: one immutable
+actor slot, non-consuming actor polling, one move-only bounded executor inbox,
+a passive weak-reference executor, and status projection
 **Test state:** no tests or builds run for the active slice; exact-head
 adversarial approval is required first
 
@@ -390,22 +392,19 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed at `c04898e2` and deliberately untested. Continue in this order:
+committed through `732d3442` and deliberately untested. Continue in this order:
 
-1. Finish root static review, including actor-drop liveness, terminal
-   settlement, bounded wake behavior, status projection, and ownership counts.
-2. Bind the runtime commit to the regression catalog, commit the truthful
-   status/handoff update, and freeze one exact head without running tests or
-   builds.
-3. Obtain independent adversarial concurrency/lifecycle, contract/ordering,
+1. Bind the round-1 repair commit to the regression catalog, commit this
+   truthful review ledger, and freeze one exact head without running tests.
+2. Obtain independent adversarial concurrency/lifecycle, contract/ordering,
    and static/test/inventory reviews of that exact head. Fix every actionable
    P1/P2/P3 finding and repeat exact-head review after any runtime/test change.
-4. Only after approval, run focused tests, `make check`, and
+3. Only after approval, run focused tests, `make check`, and
    `make cluster-check`; repair any failure, re-review changed code, and repeat
    the affected gates.
-5. Open/finish the PR, require every hosted check to pass on the exact reviewed
+4. Open/finish the PR, require every hosted check to pass on the exact reviewed
    head, and merge.
-6. Immediately begin the first authoritative vertical cut: actor-owned
+5. Immediately begin the first authoritative vertical cut: actor-owned
    hardware startup retry plus response admission and cleanup, followed by
    deletion of the corresponding legacy watcher/action owner.
 
@@ -430,14 +429,21 @@ earlier shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-The active code has not yet been committed, reviewed, built, or tested. During
-root static review, the initial draft was found to let the actor retain a
-transport containing a sender back into its own mailbox. That cycle is being
-removed by splitting the actor-side capacity-one wake state from the
-handle-owned command transport. The executor cursor is explicitly an
-observation, not an application acknowledgement, and terminal transition
-settles the retained slot. Legacy watchdogs, direct replacement/action paths,
-response admission, cleanup, and process ownership remain active.
+The active code is committed through `732d3442` but has not been built or
+tested. Root static review found and removed an initial cycle in which the
+actor retained a transport containing a sender back into its own mailbox.
+Round 1 at exact head `ceb8c74d` returned one approval and two change requests.
+It found that timer-only lease expiry did not wake the executor, executor task
+loss was invisible, mailbox loss could hide a committed terminal cause, two
+test-only enums would fail warnings-as-errors, one `Arc` map would not compile,
+and the tests did not prove their liveness claims. Repair `732d3442` adds a
+post-cutoff wake, actor-side executor-closure monitoring, a committed terminal-
+cause projection, the compile/lint repairs, and deterministic cancellation,
+retained-notify/full-inbox, timer expiry, executor loss, actor loss, and weak-
+ownership regressions. The executor cursor remains explicitly an observation,
+not an application acknowledgement, and terminal transition settles the
+retained slot. Legacy watchdogs, direct replacement/action paths, response
+admission, cleanup, and process ownership remain active.
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
 there is no `DecisionApplied` acknowledgement, retry cutover, or transparent

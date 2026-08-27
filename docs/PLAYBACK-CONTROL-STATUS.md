@@ -4,11 +4,13 @@
 **Merged baseline:** `origin/main` at `dba35f98` (PR #624)
 **Current work:** M4 decision transport on
 `codex/playback-control-m4-producer-decision` in the disposable clone. Runtime
-commit `c04898e2` adds a behavior-neutral, one-slot immutable actor decision, a
+commits `c04898e2` and `732d3442` add a behavior-neutral, one-slot immutable actor decision, a
 non-consuming poll command, and one bounded passive executor inbox/task. Root
-static review found and repaired a mailbox self-retention cycle before commit.
-The active slice has not received exact-head adversarial approval, and no unit,
-full, or cluster test has run for it yet.
+static review repaired a mailbox self-retention cycle before the first commit.
+Adversarial round 1 at `ceb8c74d` then found timer-only terminal wake, executor-
+loss visibility, terminal-cause projection, compile/lint, and weak test-matrix
+gaps; `732d3442` repairs them. The repair head has not been re-reviewed, and no
+unit, full, or cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -101,7 +103,7 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Pending for the active slice.** #624 is fully reviewed and merged. The new decision-transport head will be committed and frozen before independent concurrency, lifecycle, and contract reviews. |
+| Adversarial implementation review | **Round 1 changes addressed; re-review pending.** At `ceb8c74d`, one reviewer approved and two requested changes for timer-only terminal wake, executor-loss visibility, terminal-cause projection, compile/lint issues, and nondeterministic tests. Runtime repair `732d3442` addresses those findings and awaits exact-head review. |
 | Unit/focused tests | **Not run for the active slice.** Authored transport/lifecycle tests remain intentionally unexecuted until adversarial approval. |
 | Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
 
