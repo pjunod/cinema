@@ -3,10 +3,11 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
-attempt-fenced publication/fetch ledger; three exact-head adversarial reviews
-have driven thirteen concurrency/correctness fixes. The third review's final
-three findings are locally remediated and await exact-head re-review; no tests
-have run before that approval
+attempt-fenced publication/fetch ledger; four exact-head adversarial reviews
+have driven production-build, validation-history, cancellation, path-ownership,
+retention, and exact-publication corrections. The fourth review's findings are
+locally remediated and await another exact-head review; no tests have run before
+that approval
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -72,8 +73,8 @@ Review and test state for M3c1:
 
 | Gate | State |
 |---|---|
-| Implementation | `fe73efaa`, `fbae4eb9`, and `9e0f6c4a`, plus local third-review remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
-| Adversarial diff review | Review 1 requested six changes; review 2 found four further races. Review 3 confirmed those fixes and found three remaining linearization gaps: producer publication after final authorization, predecessor retention deleting reused successor paths, and refresh revisions captured after stale reads. All three now have exact fences and deterministic race tests locally; exact-head re-review is pending and no tests will run first. |
+| Implementation | `fe73efaa`, `fbae4eb9`, `9e0f6c4a`, `af4b8e35`, and `2fbb8a4b`, plus local fourth-review remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
+| Adversarial diff review | Reviews 1–3 drove thirteen ordering/correctness changes. Review 4 caught a production-only `cfg` compile break, its required history mapping, cancellation reopening predecessor paths after actor admission, unbounded retention deletes under the path gate, playlist readiness depending on a fallible second read, and a false→true→false attempt/path sampling ABA across playlist, segment, and refresh. The local remediation is fail-closed, batch-bounds retention handoff, deletes garbage outside the gate, commits exact returned playlist bytes, and adds real-path race tests. Exact-head re-review is pending and no tests will run first. |
 | Unit/focused tests | Not run yet, by required review-before-test ordering |
 | Full local gate | Not run yet |
 | Hosted CI | No PR yet |

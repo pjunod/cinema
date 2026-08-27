@@ -135,19 +135,28 @@ Actor admission intentionally precedes predecessor teardown, so the current
 attempt may already name the successor while predecessor files still exist.
 The replacement marker fences playlist reads, segment opens, and index refresh
 preparation throughout that interval. No observation can attribute those old
-files to the new attempt and merge them after the transition reopens.
+files to the new attempt and merge them after the transition reopens. Each
+reader samples the compatibility attempt before the actor attempt and checks
+the marker on both sides; a complete false→true→false replacement therefore
+cannot masquerade as an unchanged path owner. If a replacement task is
+cancelled after admission, its phase-aware guard leaves paths fenced, records
+a terminal failure, and retires the actor for ordinary cleanup.
 
 Concurrent refreshes within one attempt also capture the in-memory index
 revision before reading the playlist bytes. If another refresh or retention
 mutation lands first, the older preparation is discarded instead of borrowing
 a newer token and overwriting the newer timeline.
 
-Retention owns `child_transition` from its exact-attempt check and doomed-name
-snapshot through every unlink and the matching catalog mutation. Segment paths
-are reused by a successor, so this short-lived compatibility rule is required:
-a replacement that won first makes the retention sample stale, while one that
-arrives later cannot seed successor bytes until all predecessor deletes finish.
-M4 replaces these shared paths with attempt-owned actor state.
+Retention owns `child_transition` for at most 32 same-filesystem metadata
+renames from served segment names to unique attempt/sweep garbage names, plus
+the matching catalog mutation. Payload unlink runs detached after releasing
+the transition and cannot stall another session's repair pass. Segment paths
+are reused by a successor, so this bounded handoff is required: a replacement
+that won first makes the retention sample stale, while one that arrives later
+cannot seed successor bytes until no predecessor cleanup still names a served
+path. Rename failures leave the source path and accounting intact; unlink
+failures remain confined to unservable garbage names. M4 replaces these shared
+paths with attempt-owned actor state.
 
 A replacement is authorized twice: actor admission before the predecessor is
 touched, and exact-attempt authorization after the candidate process is spawned
@@ -166,6 +175,12 @@ Composite subtitle playlists carry the response owner resolved with their
 exact video-playlist bytes. They never reconstruct ownership from a reusable
 session id, whether the source was a rolling attempt or a same-id VOD
 attachment.
+
+Playlist readiness is committed to the actor from the exact validated bytes
+being returned, before the response can renew. Index refresh may still reread
+for byte accounting and pruning, but failure of that second read cannot leave
+client-visible media outside actor ownership or admit a later in-place
+fallback.
 
 ## Instrumentation
 
