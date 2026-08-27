@@ -1441,6 +1441,7 @@ impl VodServe {
     /// sequence moves the existing five-minute VOD activity clock. A fresh
     /// `demand=end` instead tombstones the attachment under this same lifecycle
     /// gate and retains its exact response for an idempotent retry.
+    #[cfg(test)]
     pub(crate) async fn control(
         &self,
         control: crate::playback_control::LocalControlRequest<'_>,

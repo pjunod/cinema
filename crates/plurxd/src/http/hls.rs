@@ -2144,7 +2144,7 @@ async fn control_local_inner(
             }
         }
     } else {
-        local_control_response(&route, &start, &recipe, &request, &result, unix_ms())
+        local_control_response(route, &start, &recipe, &request, &result, unix_ms())
     };
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {

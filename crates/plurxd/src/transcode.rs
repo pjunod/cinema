@@ -12723,6 +12723,7 @@ impl TranscodeManager {
     /// Fenced behavior-neutral control for either HLS presentation. A newly
     /// accepted sequence renews the selected engine's established activity
     /// clock with the explicit `control` reason; replay and rejection do not.
+    #[cfg(test)]
     pub(crate) async fn hls_session_control(
         self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
