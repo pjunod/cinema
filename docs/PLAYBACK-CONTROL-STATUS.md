@@ -3,10 +3,11 @@
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `8e331672` (PR #621)
 **Current work:** PR #624 on `codex/playback-control-m4-command-sequencing`;
-formal round 4 unanimously approved `7b7dfc58`, and all 75 focused tests passed.
-`make check` then passed catalog/history plus 173 policy/contract tests before
-Clippy found three static cleanup items. Their behavior-neutral repair is
-pending exact-head review before `make check` resumes.
+formal round 5 unanimously approved implementation head `dc7c7667`. All 75
+focused tests passed before the final behavior-neutral lint repair, and the
+complete `make check` and `make cluster-check` gates then passed at the approved
+head. Hosted CI and the final evidence-only exact-head review remain before
+merge.
 PR #621 merged as `8e331672` after exact-head round 10 received unanimous
 **APPROVE** verdicts and hosted run `33109297301` passed. The active branch
 adds bounded shared command/producer sequencing, publication-time ordering,
@@ -15,8 +16,8 @@ stale-exit fencing, a partial observation-only actor projection in
 committed at `383d62d8`, with regression mapping at `de23104d`. These are
 groundwork only: legacy watchdogs and recovery actions remain active, and there is no
 decision, executor, response-admission, or watchdog-deletion cutover yet.
-The active branch must receive its own exact-head adversarial review before any
-unit or full gate is run.
+The active runtime head has received its required exact-head adversarial review
+before unit and full gates were run.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -37,7 +38,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; PR #621 merged as `8e331672` after unanimous round-10 approval and hosted run `33109297301`; the active command-sequencing branch adds bounded shared command/producer ordering, publication-time ordering, stale-exit fencing, partial observation-only projection, and bounded command/deadline metrics | Review and test the active branch; then move decisions, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; PR #621 merged as `8e331672`; PR #624 implementation head `dc7c7667` has unanimous round-5 approval and green focused/full/cluster gates for bounded shared command/producer ordering, publication-time ordering, stale-exit fencing, partial observation-only projection, and bounded command/deadline metrics | Finish hosted CI and merge #624; then move decisions, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -73,8 +74,9 @@ starts moving producer recovery evidence through that same owner.
 
 PR #621 then merged the passive deadline and cutoff-safe ingress foundation as
 `8e331672`, after unanimous round-10 approval and hosted run `33109297301`.
-The active branch, `codex/playback-control-m4-command-sequencing`, is a new
-unreviewed and untested implementation slice. It adds bounded shared
+The active branch, `codex/playback-control-m4-command-sequencing`, has passed
+five formal exact-head review rounds plus its focused, full-workspace, and
+cluster gates. It adds bounded shared
 command/producer sequencing, publication-time ordering, stale-exit fencing,
 partial observation-only actor projection in `SessionInfo` and telemetry, and
 bounded command/deadline metrics. It does not yet move decisions, response admission,
@@ -99,11 +101,11 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Merged in #621; active branch extends the foundation.** The merged slice folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. The active branch adds shared command/producer ordering and publication-time barriers, but has not been adversarially reviewed or tested. It still emits no recovery action. |
+| Passive deadline/cutoff | **Merged in #621; active branch extends the foundation.** The merged slice folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. The active branch adds reviewed and locally validated shared command/producer ordering and publication-time barriers. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** The active branch exposes bounded actor producer truth through `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry, including deadline/due, process-exit, physical-flow, and last-applied-sequence observations. It does not expose a decision, action, retry, executor, or response-admission verdict. The bounded deadline and command metrics are instrumentation, not recovery authority. |
-| Adversarial implementation review | **Round 4 unanimously approved `7b7dfc58`; Clippy cleanup pending review.** Rounds 1–3 resolved two stale P3 comments, inventory counts, and history metadata. Round 4 approved the lexical `MutexGuard` scope repair. The next exact head gates the behavior-neutral Clippy cleanup before full checks resume. |
-| Unit/focused tests | **75/75 passed at `7b7dfc58`.** All 72 rolling-control tests plus the three changed status/telemetry tests are green. `make check` then passed catalog/history and 173 policy/contract tests before Clippy stopped on a test-only helper, production unit binding, and complex test tuple; those static items are being corrected before the gate resumes. |
-| Full/cluster/hosted gates | **Not run for the active branch.** The merged #621 evidence is historical; rerun only after exact-head adversarial approval, and bind results to the unchanged reviewed head. |
+| Adversarial implementation review | **Round 5 unanimously approved `dc7c7667`.** Rounds 1–3 resolved two stale P3 comments, inventory counts, and history metadata; round 4 approved the lexical `MutexGuard` scope repair; round 5 approved the behavior-neutral Clippy cleanup. All three reviewers returned **APPROVE** with no P1/P2/P3 finding. |
+| Unit/focused tests | **Green.** All 72 rolling-control tests plus the three changed status/telemetry tests passed before the lint-only repair. The complete workspace suite subsequently passed at approved head `dc7c7667`, covering the same tests after that repair. |
+| Full/cluster/hosted gates | **Local full and cluster gates green at `dc7c7667`; hosted pending.** `make check` passed catalog/history, 173 Python policy/contract tests, formatting, Clippy with warnings denied, and every workspace/doc test. `make cluster-check` passed vendor snapshot/WAL recovery, 63 serialized clustered store contracts with two helper processes ignored, live failure/topology drills, and all nine daemon cluster-activation/activity tests. Hosted CI and final evidence-only exact-head confirmation remain. |
 
 ## Watchdog-removal ledger
 

@@ -2,19 +2,20 @@
 
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `8e331672` (PR #621)
-**Active PR:** pending
+**Active PR:** #624
 **Active branch:** `codex/playback-control-m4-command-sequencing`
 **Last merged exact head:** `8e331672` (PR #621; round-10 unanimous
 **APPROVE** and hosted run `33109297301` green)
-**Last reviewed exact head:** `1e755b290df4639ecbdffa0e7053f7572bb854af`
-(PR #621 round 10 **APPROVED** before merge)
+**Last reviewed exact head:** `dc7c76676be2545d0425112fe19cfed1e86bf362`
+(PR #624 round 5 unanimously **APPROVED**)
 **Current implementation:** bounded shared command/producer sequencing,
 publication-time ordering, stale-exit fencing, partial observation-only actor
 projection in `SessionInfo` and telemetry, and bounded command metrics on the
-active branch; unreviewed and untested
-**Test state:** no tests, builds, or hosted gates have run for the active branch.
-The #621 focused/full/cluster/hosted results are historical evidence for the
-merged head and must not be reused without a new exact-head review.
+active branch; local validation complete, hosted CI pending
+**Test state:** 75 focused tests passed before the final lint-only repair. At
+approved implementation head `dc7c7667`, `make check` and
+`make cluster-check` passed. Hosted CI and evidence-only exact-head confirmation
+remain before merge.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -398,15 +399,17 @@ round-10 approval and hosted run `33109297301` passed. The active branch adds
 behavioral sequencing and projection code, so the merged #621 evidence cannot
 be reused as its validation.
 
-Execute this branch in order:
+The implementation head `dc7c7667` has now completed steps 1–4 locally:
+round 5 returned three **APPROVE** verdicts with no P1/P2/P3 finding,
+`make check` passed, and `make cluster-check` passed. Continue in this order:
 
-1. Finish the implementation and bind the exact immutable candidate head.
-2. Obtain adversarial review of that exact head. Resolve every actionable
-   finding, then repeat review for any changed head.
-3. Only after exact-head approval, run focused tests, then the full local,
-   cluster, and hosted gates required by the repository.
-4. Fix failures, bind the resulting evidence to the unchanged reviewed head,
-   and repeat the adversarial review whenever code changes.
+1. Commit this final evidence-only documentation update and bind its history
+   metadata without changing the reviewed runtime implementation.
+2. Obtain a narrow exact-head review confirming that only evidence/docs changed
+   and that every runtime/validation blob still matches approved `dc7c7667`.
+3. Require every hosted PR gate to pass on that exact documentation head; fix
+   any genuine failure and repeat review before rerunning affected tests.
+4. Merge PR #624 only after the exact hosted head is green.
 5. Keep the legacy watchdogs and actions in place until the actor decision,
    executor, response-admission, and cleanup slices are individually landed
    and reviewed. Do not describe sequencing or projection as recovery cutover.
@@ -447,9 +450,17 @@ catalog/history and 173 policy/contract tests before Clippy found three static
 cleanup items: a now-test-only drain helper, a production unit binding, and a
 complex test tuple. The behavior-neutral repair gates the helper with
 `cfg(test)`, names the deferred test reply, and uses a zero-sized production
-marker; exact-head review is required before the gate resumes. The sequencing
-and projection do not make recovery decisions. Legacy watchdogs, direct replacement/action paths,
-response admission, cleanup, and process ownership remain active. There is no
+marker. Round 5 unanimously approved exact implementation head `dc7c7667` with
+no P1/P2/P3 finding. At that head, `make check` passed catalog/history, the 121-
+and 52-test Python policy/contract suites, formatting, Clippy with warnings
+denied, and the complete Rust workspace/doc suite. `make cluster-check` then
+passed vendor snapshot/WAL recovery, 63 serialized clustered store contracts
+with two helper processes ignored, the live failure/topology campaign, seven
+cluster-activation tests, and two cluster-activity tests. Hosted CI and a
+narrow review of the evidence-only final head remain before merge. The
+sequencing and projection do not make recovery decisions. Legacy watchdogs,
+direct replacement/action paths, response admission, cleanup, and process
+ownership remain active. There is no
 `ProducerDecision`, action executor, retry cutover, or transparent handoff in
 this slice; the v1 wire action remains `none`.
 
