@@ -57,9 +57,10 @@ M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
 with one exact-attempt `ProducerProgressDeadline`. One pre-publication retry is
 allowed only when the actor supplies the validated recipe. After publication,
-failure retains published bytes and produces one stable
-`prepare_replacement` proposal; it never swaps the child in place. A single
-session process executor performs actor-authorized OS child actions. The full
+failure retains published bytes and produces one stable internal replacement
+proposal; it never swaps the child in place or emits an incomplete wire action.
+The existing exact-attempt supervisor remains the sole OS-child/PID owner, and
+a single session executor orchestrates actor-authorized proxy changes. The full
 contract is
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 
@@ -68,9 +69,9 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Drafted on the exact merged M3 baseline.** It defines deadline policy, arm/disarm and event ordering, the one-retry invariant, process-executor ownership, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Complete.** Current recovery authority is split among the first-segment task, lifetime watcher, copy `Unsupported` continuation, `downgrade_one_step`, `child_transition`, `watchdog_active`, and `replacing_child`; M4 maps every one to actor state or the single process executor. |
-| Adversarial design review | **Pending.** The exact implementation contract will be reviewed and corrected before code proceeds. |
-| Implementation | **Pending review.** Actor deadline/decision state, process executor, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
+| Static owner inventory | **In progress.** The first pass found the first-segment task, lifetime watcher, copy continuation, request-side exit verdict, direct copy failures, initial install paths, and every non-replacement duty hidden by `child_transition`. Implementation starts by generating a checked callsite catalog. |
+| Adversarial design review | **Changes requested at `e712ab3d`.** Fourteen P1/P2 findings identified publication/retry linearization, scratch/cancellation settlement, generation retry scope, flow fencing, cutoff ordering, executor loss, PID ownership, premature wire action, copy classification, retained-byte serving, exact retry recipes, hold semantics, completion proof, and inventory/instrumentation gaps. The contract is being corrected before implementation. |
+| Implementation | **Pending corrected-design approval.** Actor deadline/decision state, session executor and exact-attempt supervisor integration, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
 | Unit/focused tests | **Not run by instruction.** They begin only after the cumulative implementation receives adversarial diff review. |
 | Full/cluster/hosted gates | **Pending implementation and review.** |
 
