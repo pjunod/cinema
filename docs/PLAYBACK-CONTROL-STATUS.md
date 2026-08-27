@@ -1,13 +1,13 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-26
+**Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
-attempt-fenced publication/fetch ledger. PR #615 is code-complete at `9f84f0b6`,
-its exact head has adversarial approval, and every local commit-profile check is
-green. Hosted CI is still blocked before checkout by a stale, permission-denied
-ref in one self-hosted runner workspace; a documentation-only status update and
-fresh hosted run are next
+attempt-fenced publication/fetch ledger. PR #615 is code-complete at `9f84f0b6`;
+its documentation-only `45f610f6` head has exact adversarial approval, every
+local commit-profile check is green, and every required hosted job passed after
+the one contaminated self-hosted runner was quarantined from generic work. A
+final truthful status-only head and merge are next
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -77,8 +77,8 @@ Review and test state for M3c1:
 | Adversarial diff review | Repeated exact-head reviews drove production-build, history-mapping, ordering, cancellation, retention, exact-publication, and false→true→false path-ownership corrections. Later reviews closed the actor-mutation/reply gap, silent predecessor cleanup failures, detached-garbage accounting, cleanup-worker fan-out and head-of-line blocking, final-rejection causality, rejected-child termination, completion-gate lifetime, and production-only dead surfaces. Exact head `9f84f0b6` is approved with no open findings. |
 | Unit/focused tests | Began only after exact PR-head approval. All targeted actor-mutation, expiry, final-fence, scratch-clear, retention, cancellation, playlist/segment/refresh ABA, replacement, startup-gate, and subtitle-publication cases pass. The four failures exposed by the first full run were repaired, reviewed, rerun, and none was waived. |
 | Full local gate | Green on reviewed code head `9f84f0b6`. `make test`: `plurxd` passed 1,063 of 1,066 tests with 3 intentionally ignored and zero failures; every other workspace and doc-test target passed. `make check`: catalog lint, history audit, 121 operations tests, 52 benchmark tests, formatting, Clippy with `-D warnings`, and the complete workspace test gate passed. Unrestricted `make validate`: 13 passed, 0 failed, 2 Playwright checks skipped because the package was absent. With the repository-pinned Playwright 1.62.0 in a disposable environment, `web-layout` then passed 60 captures/5,850 structural facts with no console or page errors, and `reader-browser` passed every restore, handoff, search, finish, stale-revision, and hostile-content contract. Effective result: all 15 commit-profile checks passed. |
-| Hosted CI | The run for `9f84f0b6` failed before code checkout on `gha-nynuc-general-02`: `actions/checkout` could not remove stale root-owned `.git/refs/heads/codex/playback-control-m3-demand-lease-v2` (`EACCES`). The job ran no PR code. Nineteen runners are online, so the documentation-only push will request a fresh run on the pool; the contaminated host still needs an operator ownership repair if selected again. |
-| Merge | Code, adversarial review, and local validation are complete. Remaining: exact review of the documentation-only final head, a hosted run that reaches and passes the code, then merge. |
+| Hosted CI | The first two attempts failed before code checkout on `gha-nynuc-general-02`: `actions/checkout` could not remove stale root-owned `.git/refs/heads/codex/playback-control-m3-demand-lease-v2` (`EACCES`). The jobs ran no PR code. Runner 30 was quarantined by removing only its reversible `general` label; it remains registered for operator repair. Attempt 2 then reached the code on healthy runners and passed preflight, validation scope, fast Rust, replicated WAL, replicated Store/topology, cluster daemon, VOD browser acceptance, and web layout/accessibility. Scope-correct mobile, release, image, coverage, and Docker jobs skipped. |
+| Merge | Code, adversarial review, local validation, and a complete hosted run are green. Remaining: exact review and hosted validation of this final status-only head, then merge. |
 
 ## Watchdog-removal ledger
 
@@ -122,9 +122,7 @@ recovery watchdogs.
 
 ## Remaining delivery order
 
-1. Push this M3c1 status update, adversarially review the documentation-only
-   exact head, obtain a hosted run that reaches the code, and merge only when
-   hosted CI is green.
+1. Review and validate this final M3c1 status-only head, then merge PR #615.
 2. Add nonblocking, coalesced producer progress and exact-attempt child-exit
    observations in M3c2, then finish end and cluster-fence event ownership with
    model tests over event reorderings.
