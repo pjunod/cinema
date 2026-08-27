@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["248d675b"]
+reason = "This commit only registers the retained playback and validation evidence for the deferred-flow test-compilation correction; it does not change runtime, test, or validation behavior."
+ignore = true
