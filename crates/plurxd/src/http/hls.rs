@@ -2299,19 +2299,23 @@ async fn subtitle_playlist_local(
         ));
     }
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-    let video = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?.0,
+    let (video, owner) = match state.transcode.vod_playlist(session).await {
+        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
         None => state
             .transcode
-            .playlist(session)
+            .playlist_with_owner(session)
             .await
             .map_err(|err| playlist_error(session, err))?,
     };
     let response = subtitle_media_playlist(&video).into_bytes();
-    // The video-playlist wait may span a valid pre-publication producer
-    // replacement. Bind the subtitle response to the attempt that supplied
-    // those bytes, not to the attempt observed before that wait began.
-    let (_, _, owner) = session_file(state, session).await?;
+    #[cfg(test)]
+    state
+        .transcode
+        .pause_subtitle_playlist_commit_for_test()
+        .await;
+    // Carry the owner resolved with the exact video bytes. A rolling wait may
+    // span fallback, and a VOD attachment may be replaced under the same id;
+    // a fresh lookup here would authorize the wrong incarnation in both cases.
     commit_resolved_media(state, session, &owner, "subtitle-playlist", None, true).await?;
     Ok(playlist_response(response))
 }
@@ -4128,19 +4132,79 @@ mod tests {
         assert!(!range_covers_object(Some((1, 99)), 100));
     }
 
+    async fn add_http_text_subtitle(fixture: &HlsDeliveryFixture) {
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        let probe = plurx_core::domain::ProbeResult {
+            duration_ms: file.duration_ms,
+            container: file.container.clone(),
+            video_codec: file.video_codec.clone(),
+            video_profile: file.video_profile.clone(),
+            width: file.width,
+            height: file.height,
+            bit_depth: file.bit_depth,
+            hdr: file.hdr.clone(),
+            hdr_format: file.hdr_format.clone(),
+            bitrate: file.bitrate,
+            audio_streams: file.audio_streams.clone(),
+            subtitle_streams: vec![SubtitleStream {
+                index: 0,
+                codec: "subrip".into(),
+                language: Some("eng".into()),
+                title: Some("English".into()),
+                default: true,
+                forced: false,
+                hearing_impaired: false,
+            }],
+            raw_json: None,
+            creation_time: None,
+        };
+        fixture
+            .store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("install text subtitle");
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("updated fixture lookup")
+            .expect("updated fixture");
+        tokio::fs::create_dir_all(&fixture.state.subs_dir)
+            .await
+            .expect("subtitle cache");
+        tokio::fs::write(
+            crate::subtitles::vtt_path(&fixture.state.subs_dir, &file, 0),
+            b"WEBVTT\n\n",
+        )
+        .await
+        .expect("published VTT sidecar");
+    }
+
     #[tokio::test]
-    async fn subtitle_playlist_commit_rebinds_after_video_attempt_handoff() {
+    async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
         let dir = crate::test_tempdir().expect("session directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
-        let (_, _, predecessor_owner) = session_file(&fixture.state, "subtitle-handoff")
-            .await
-            .expect("predecessor context");
-        let transcode = Arc::clone(&fixture.state.transcode);
-        let waiting = tokio::spawn(async move { transcode.playlist("subtitle-handoff").await });
+        add_http_text_subtitle(&fixture).await;
+        let state = fixture.state.clone();
+        let waiting =
+            tokio::spawn(
+                async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await },
+            );
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert!(
             !waiting.is_finished(),
-            "video playlist is waiting on predecessor"
+            "subtitle response is waiting on the predecessor's video playlist"
         );
 
         assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
@@ -4156,37 +4220,58 @@ mod tests {
         )
         .await
         .expect("successor playlist");
-        let video = waiting
+        let response = waiting
             .await
-            .expect("playlist task")
-            .expect("successor playlist");
-        assert!(String::from_utf8(video)
-            .expect("playlist text")
-            .contains("seg00001.ts"));
+            .expect("subtitle task")
+            .expect("subtitle response commits against successor owner");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("subtitle playlist body");
+        assert!(String::from_utf8(body.to_vec())
+            .expect("subtitle playlist text")
+            .contains("subtitles/0/seg00001.vtt"));
+        assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
+    }
 
-        assert!(commit_resolved_media(
-            &fixture.state,
-            "subtitle-handoff",
-            &predecessor_owner,
-            "subtitle-playlist",
-            None,
-            true,
-        )
-        .await
-        .is_err());
-        let (_, _, successor_owner) = session_file(&fixture.state, "subtitle-handoff")
+    #[tokio::test]
+    async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
+        let dir = crate::test_tempdir().expect("VOD subtitle directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&fixture).await;
+        let session_id = "vod-subtitle-replaced";
+        let _predecessor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+        let state = fixture.state.clone();
+        let pending =
+            tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
+        pause.wait().await;
+
+        let _successor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let successor_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(session_id)
             .await
-            .expect("successor context");
-        commit_resolved_media(
-            &fixture.state,
-            "subtitle-handoff",
-            &successor_owner,
-            "subtitle-playlist",
-            None,
-            true,
-        )
-        .await
-        .expect("subtitle response commits against successor owner");
+            .expect("successor touch");
+        pause.wait().await;
+
+        assert!(
+            pending.await.expect("subtitle task").is_err(),
+            "predecessor bytes must fail their exact-owner commit"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(session_id)
+                .await,
+            Some(successor_touch),
+            "stale subtitle bytes cannot renew the same-id successor"
+        );
     }
 
     #[test]

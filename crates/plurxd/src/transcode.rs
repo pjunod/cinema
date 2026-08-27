@@ -524,6 +524,10 @@ struct SegmentMeta {
 #[derive(Clone, Debug, Default)]
 struct SegmentIndex {
     segs: Vec<SegmentMeta>,
+    /// Monotonic in-memory catalog revision. Attempt fencing separates
+    /// producer generations; this separates concurrent observations of the
+    /// same attempt so an older rewritten playlist cannot land last.
+    revision: u64,
 }
 
 impl SegmentIndex {
@@ -666,7 +670,14 @@ impl SegmentIndex {
     /// work while the producer-transition gate is held. An exact shorter
     /// prefix is an older concurrent read, not evidence that a newer index
     /// should move backward. A disagreement is a real same-attempt rewrite.
-    fn merge_prepared(&mut self, mut observed: SegmentIndex) -> bool {
+    fn merge_prepared(
+        &mut self,
+        expected_revision: u64,
+        mut observed: SegmentIndex,
+    ) -> Option<bool> {
+        if self.revision != expected_revision {
+            return None;
+        }
         let overlap = self.segs.len().min(observed.segs.len());
         let disagreed =
             self.segs
@@ -681,7 +692,8 @@ impl SegmentIndex {
                 });
         if disagreed {
             self.segs = observed.segs;
-            return true;
+            self.revision = self.revision.wrapping_add(1);
+            return Some(true);
         }
         for (current, observed) in self.segs.iter_mut().zip(observed.segs.iter()).take(overlap) {
             if !current.pruned && current.bytes == 0 && observed.bytes > 0 {
@@ -692,7 +704,8 @@ impl SegmentIndex {
         if observed.segs.len() > known {
             self.segs.extend(observed.segs.drain(known..));
         }
-        false
+        self.revision = self.revision.wrapping_add(1);
+        Some(false)
     }
 }
 
@@ -1806,6 +1819,9 @@ struct Session {
     /// ticket is completed back to a waiting control response.
     #[cfg(test)]
     flow_completion_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous immediately before first-playlist publication.
+    #[cfg(test)]
+    playlist_publication_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     #[cfg(test)]
     response_projection_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only proof that teardown reached the shared transition before a
@@ -2043,6 +2059,38 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    fn compatibility_playlist_published(&self, producer_attempt: u64) -> Option<bool> {
+        let projected_attempt = self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (*projected_attempt == producer_attempt).then(|| self.playlist_published.load(Relaxed))
+    }
+
+    async fn publish_compatibility_playlist(&self, producer_attempt: u64) -> bool {
+        #[cfg(test)]
+        {
+            let pause = self
+                .playlist_publication_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+        let projected_attempt = self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *projected_attempt != producer_attempt {
+            return false;
+        }
+        self.playlist_published.store(true, Relaxed);
+        true
+    }
+
     /// Reset every compatibility projection immediately after the actor
     /// allocates a successor attempt and before the predecessor is touched.
     /// The actor remains authoritative; this short gate exists only until M4
@@ -2266,6 +2314,29 @@ impl Session {
         Ok(Some((replacement, producer_attempt)))
     }
 
+    /// Install a spawned replacement only if the actor still authorizes this
+    /// exact attempt at the install linearization point. Actor expiry can win
+    /// while teardown waits behind `child_transition`; the candidate must not
+    /// become session-owned merely because its earlier admission succeeded.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn install_replacement_child(
+        &self,
+        producer_attempt: u64,
+        mut candidate: Child,
+    ) -> Result<(), crate::playback_control::ProducerAttemptRejection> {
+        if let Err(reason) = self
+            .control
+            .authorize_producer_install(producer_attempt)
+            .await
+        {
+            let _ = candidate.kill().await;
+            let _ = candidate.wait().await;
+            return Err(reason);
+        }
+        *self.child.lock().await = Some(candidate);
+        Ok(())
+    }
+
     /// Stop the encoder, if there is one. A cache hit has no process; a
     /// session whose ffmpeg already exited has one that is already reaped.
     /// Keep the handle in the slot after waiting: detached watchdogs use its
@@ -2351,12 +2422,14 @@ impl Session {
         };
         let mut observed = SegmentIndex {
             segs: parse_playlist(&String::from_utf8_lossy(&raw)),
+            revision: 0,
         };
         // Preserve known sizes and pruning only when this observation agrees
         // with the snapshot it extends. A rewrite describes different files
         // even when it reused their names, so all of those sizes are measured
         // again.
         let previous = self.segments.lock().await.clone();
+        let base_revision = previous.revision;
         let compatible_prefix =
             previous
                 .segs
@@ -2403,7 +2476,14 @@ impl Session {
         if *projected_attempt != producer_attempt {
             return;
         }
-        if index.merge_prepared(observed) {
+        let Some(rebuilt) = index.merge_prepared(base_revision, observed) else {
+            // Another same-attempt observation (or retention mutation) landed
+            // while metadata was prepared. Its newer catalog is authoritative;
+            // a later refresh will observe anything this discarded read still
+            // has to add.
+            return;
+        };
+        if rebuilt {
             tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
         }
         // Resolve the frontier against the fresh index: a segment served
@@ -5305,6 +5385,10 @@ pub struct TranscodeManager {
     /// see [`TranscodeManager::playlist_wait`].
     #[cfg(any(test, feature = "live-hls-recovery"))]
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
+    /// Test-only rendezvous after subtitle playlist bytes and their exact
+    /// owner resolve, before the composite response commits.
+    #[cfg(test)]
+    subtitle_playlist_commit_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 /// Store-free, lock-free projection used by the Prometheus handler.
@@ -5419,6 +5503,8 @@ impl TranscodeManager {
             cached_limits: std::sync::RwLock::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            subtitle_playlist_commit_pause: std::sync::Mutex::new(None),
         }
     }
 
@@ -7268,6 +7354,8 @@ impl TranscodeManager {
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -10505,7 +10593,7 @@ impl TranscodeManager {
             format!("rolling control actor rejected the initial producer: {reason:?}")
         })?;
         progress.begin_fenced_attempt(generation);
-        let child = spawn_ffmpeg(
+        let mut child = spawn_ffmpeg(
             &args,
             encoder.label(),
             &session_id,
@@ -10519,6 +10607,13 @@ impl TranscodeManager {
                 ..FfmpegDescriptors::default()
             },
         )?;
+        if let Err(reason) = control.authorize_producer_install(generation).await {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "rolling control actor rejected initial producer installation: {reason:?}"
+            ));
+        }
 
         tracing::info!(
             session = %session_log_id(&session_id), file_id, target_height, start_seconds,
@@ -10543,6 +10638,8 @@ impl TranscodeManager {
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -10878,8 +10975,15 @@ impl TranscodeManager {
             },
         ) {
             Ok(child) => {
-                *session.child.lock().await = Some(child);
-                let _ = session.control.renew_internal("fallback-start").await;
+                if let Err(reason) = session.install_replacement_child(generation, child).await {
+                    tracing::warn!(
+                        session = %session_log_id(sid),
+                        producer_attempt = generation,
+                        rejection = ?reason,
+                        "rolling actor refused fallback installation after spawn; candidate killed"
+                    );
+                    return opts.effective_rate_control;
+                }
                 // The activity page must stop naming the hardware
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
@@ -11058,7 +11162,7 @@ impl TranscodeManager {
         // unreadable, the reader task respawns this same session on the
         // arguments below, so the worst case is exactly today's behaviour.
         let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
-        let (child, pipe_stdout) = if segmenting {
+        let (mut child, pipe_stdout) = if segmenting {
             let args = transcode::copy_pipe_args_with_dolby_vision(
                 &file,
                 start_seconds,
@@ -11131,6 +11235,14 @@ impl TranscodeManager {
 
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, options, probe_json.as_deref());
+        if let Err(reason) = control.authorize_producer_install(generation).await {
+            drop(pipe_stdout);
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            return Err(format!(
+                "rolling control actor rejected initial copy producer installation: {reason:?}"
+            ));
+        }
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -11152,6 +11264,8 @@ impl TranscodeManager {
             control_applied_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
@@ -11347,8 +11461,17 @@ impl TranscodeManager {
                             FfmpegDescriptors::default(),
                         ) {
                             Ok(child) => {
-                                *session.child.lock().await = Some(child);
-                                let _ = session.control.renew_internal("fallback-start").await;
+                                if let Err(reason) =
+                                    session.install_replacement_child(generation, child).await
+                                {
+                                    tracing::warn!(
+                                        session = %session_log_id(&sid),
+                                        producer_attempt = generation,
+                                        rejection = ?reason,
+                                        "rolling actor refused copy fallback installation after spawn; candidate killed"
+                                    );
+                                    return;
+                                }
                                 spawn_watch_for_stall(
                                     Arc::clone(&session),
                                     dir.clone(),
@@ -12422,6 +12545,19 @@ impl TranscodeManager {
     /// [`PlaylistError`] for why an anonymous `None` was not survivable
     /// downstream.
     pub async fn playlist(&self, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
+        self.playlist_with_owner(session_id)
+            .await
+            .map(|(bytes, _)| bytes)
+    }
+
+    /// Resolve playlist bytes together with the exact rolling attempt that
+    /// supplied them. Composite resources such as native subtitle playlists
+    /// must carry this owner through their own response commit rather than
+    /// reconstructing ownership from a reusable session id afterward.
+    pub(crate) async fn playlist_with_owner(
+        &self,
+        session_id: &str,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistError> {
         let Some(session) = self.live_session(session_id).await else {
             return Err(PlaylistError::SessionGone);
         };
@@ -12517,7 +12653,12 @@ impl TranscodeManager {
                     // first-response gate; cached VOD and copy have already
                     // opened it in their constructors, and every reload after
                     // the publication store below stays on the old fast path.
-                    if !session.playlist_published.load(Relaxed) {
+                    let Some(playlist_published) =
+                        session.compatibility_playlist_published(producer_attempt)
+                    else {
+                        continue;
+                    };
+                    if !playlist_published {
                         if !transcode_first_playlist_ready(&bytes) {
                             if self.playlist_producer_failed(&session, session_id).await {
                                 return Err(session.failure_reason());
@@ -12528,7 +12669,12 @@ impl TranscodeManager {
                             tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
                             continue;
                         }
-                        session.playlist_published.store(true, Relaxed);
+                        if !session
+                            .publish_compatibility_playlist(producer_attempt)
+                            .await
+                        {
+                            continue;
+                        }
                     }
                     // The playlist just told us what is published — the one
                     // moment the segment index can be refreshed for free.
@@ -12551,7 +12697,13 @@ impl TranscodeManager {
                             }
                             return Err(PlaylistError::SessionGone);
                         }
-                        return Ok(bytes);
+                        return Ok((
+                            bytes,
+                            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                                session: Arc::clone(&session),
+                                producer_attempt,
+                            }),
+                        ));
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
                     // A successor begins numbering at its epoch floor, so
@@ -12613,7 +12765,13 @@ impl TranscodeManager {
                         }
                         return Err(PlaylistError::SessionGone);
                     }
-                    return Ok(served);
+                    return Ok((
+                        served,
+                        MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                            session: Arc::clone(&session),
+                            producer_attempt,
+                        }),
+                    ));
                 }
             }
             if session.cached {
@@ -13313,6 +13471,27 @@ impl TranscodeManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_subtitle_playlist_commit_pause(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .subtitle_playlist_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pause_subtitle_playlist_commit_for_test(&self) {
+        let pause = self
+            .subtitle_playlist_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) async fn install_vod_http_test_session(
         &self,
         session_id: &str,
@@ -13654,6 +13833,7 @@ async fn gc_expired_segments(session: &Session) {
             seg.pruned = true;
         }
     }
+    index.revision = index.revision.wrapping_add(1);
     // The budget number follows the deletion now, not at the next refresh:
     // freed disk a suspended session cannot trigger a refresh for should
     // release the global cap on the reaper pass that freed it.
@@ -14212,6 +14392,7 @@ fn test_session(dir: PathBuf) -> Session {
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
         flow_completion_pause: std::sync::Mutex::new(None),
+        playlist_publication_pause: std::sync::Mutex::new(None),
         response_projection_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
@@ -16897,7 +17078,7 @@ mod tests {
         assert_eq!((segs[1].start_ms, segs[1].end_ms), (4_000, 14_500));
         assert_eq!((segs[2].start_ms, segs[2].end_ms), (14_500, 24_500));
 
-        let index = SegmentIndex { segs };
+        let index = SegmentIndex { segs, revision: 0 };
         assert_eq!(index.produced_playable_end_ms(), Some(24_500));
         assert_eq!(index.end_ms_of(1), Some(14_500));
         assert_eq!(index.window_ms_of(1), Some((4_000, 14_500)));
@@ -17259,6 +17440,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:3.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[0].bytes = 111;
         index.segs[1].bytes = 222;
@@ -17299,6 +17481,7 @@ mod tests {
                      #EXTINF:2.0,\nseg00002.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(three),
+            revision: 0,
         };
         index.segs[0].bytes = 999;
         let one = "#EXTM3U\n#EXTINF:4.0,\nseg00000.ts\n";
@@ -17321,6 +17504,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[1].bytes = 555;
         // Same names, but the second segment now cuts at 5s, and a third
@@ -17347,15 +17531,54 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
         let mut current = SegmentIndex {
             segs: parse_playlist(three),
+            revision: 0,
         };
         current.segs[0].bytes = 111;
         let observed = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
 
-        assert!(!current.merge_prepared(observed));
+        assert_eq!(current.merge_prepared(0, observed), Some(false));
         assert_eq!(current.segs.len(), 3, "an older concurrent read is ignored");
         assert_eq!(current.segs[0].bytes, 111, "measured state is retained");
+    }
+
+    #[test]
+    fn an_older_same_attempt_rewrite_cannot_land_after_a_newer_one() {
+        let base = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
+        let newer = "#EXTM3U\n#EXTINF:3.0,\nseg00000.ts\n#EXTINF:3.0,\nseg00001.ts\n";
+        let older = "#EXTM3U\n#EXTINF:4.0,\nseg00000.ts\n#EXTINF:4.0,\nseg00001.ts\n";
+        let mut current = SegmentIndex {
+            segs: parse_playlist(base),
+            revision: 0,
+        };
+        let captured_revision = current.revision;
+
+        assert_eq!(
+            current.merge_prepared(
+                captured_revision,
+                SegmentIndex {
+                    segs: parse_playlist(newer),
+                    revision: 0,
+                },
+            ),
+            Some(true),
+            "the first completed rewrite lands"
+        );
+        assert_eq!(
+            current.merge_prepared(
+                captured_revision,
+                SegmentIndex {
+                    segs: parse_playlist(older),
+                    revision: 0,
+                },
+            ),
+            None,
+            "the out-of-order preparation is fenced by its captured revision"
+        );
+        assert_eq!(current.segs[0].end_ms, 3_000);
+        assert_eq!(current.revision, captured_revision + 1);
     }
 
     /// The two byte figures answer different questions (review §2.7): the
@@ -17376,6 +17599,7 @@ mod tests {
                     pruned: false,
                 })
                 .collect(),
+            revision: 0,
         };
         // Frontier at 20s: five segments ahead of it, five behind it —
         // retained for scrubbing, and every one of them still on disk.
@@ -17442,6 +17666,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[0].bytes = 0;
         index.segs[0].pruned = true;
@@ -17465,6 +17690,7 @@ mod tests {
                     pruned: false,
                 })
                 .collect(),
+            revision: 0,
         };
         // 40s published, nothing fetched → the whole 40s is reserve.
         let a = ahead_of(&index, 0).expect("published");
@@ -17765,6 +17991,7 @@ mod tests {
                         pruned: false,
                     })
                     .collect(),
+                revision: 0,
             })
             .collect();
         let global_live: i64 = indexes.iter().map(SegmentIndex::total_bytes).sum();
@@ -18126,6 +18353,74 @@ mod tests {
             .expect("playlist text")
             .contains("seg00001.ts"));
         assert_eq!(session.control.current_producer_attempt(), successor);
+    }
+
+    #[tokio::test]
+    async fn predecessor_playlist_cannot_open_the_successor_startup_gate() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(5_000, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("publication-handoff".into(), Arc::clone(&session));
+
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist("publication-handoff").await }
+        });
+        pause.wait().await;
+
+        session.replacing_child.store(true, Release);
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("prepublication successor");
+        session.reset_compatibility_delivery(successor).await;
+        pause.wait().await;
+        clear_session_dir(dir.path()).await;
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        session.replacing_child.store(false, Release);
+
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
+        assert!(
+            !playlist.is_finished(),
+            "one successor segment must not inherit the predecessor's open gate"
+        );
+        assert_eq!(
+            session.compatibility_playlist_published(successor),
+            Some(false)
+        );
+
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
+            .await
+            .expect("successor cushion deadline")
+            .expect("playlist task")
+            .expect("successor playlist");
+        assert!(String::from_utf8(bytes)
+            .expect("playlist text")
+            .contains("seg00001.ts"));
+        assert_eq!(
+            session.compatibility_playlist_published(successor),
+            Some(true)
+        );
     }
 
     /// A producer that has already reported an unsuccessful exit cannot make
@@ -18516,6 +18811,42 @@ mod tests {
             .as_mut()
             .is_some_and(|child| matches!(child.try_wait(), Ok(None))));
         session.kill_child().await;
+    }
+
+    #[tokio::test]
+    async fn expired_attempt_cannot_install_a_spawned_replacement() {
+        let dir = crate::test_tempdir().expect("dir");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let (_replacement, producer_attempt) = session
+            .kill_child_for_replacement()
+            .await
+            .expect("admit replacement before expiry");
+        session
+            .control
+            .set_renewal_for_test(
+                Instant::now() - Duration::from_secs(SESSION_IDLE_SECS + 1),
+                "expired-after-admission",
+            )
+            .await;
+
+        let candidate = long_running_child();
+        let candidate_pid = candidate.id();
+        assert!(candidate_pid.is_some());
+        assert_eq!(
+            session
+                .install_replacement_child(producer_attempt, candidate)
+                .await,
+            Err(crate::playback_control::ProducerAttemptRejection::SessionEnded),
+            "final actor authorization must report the expired attempt"
+        );
+        let mut installed = session.child.lock().await;
+        assert_ne!(installed.as_ref().and_then(Child::id), candidate_pid);
+        assert!(
+            installed
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the session retains only its already-dead predecessor handle"
+        );
     }
 
     /// Drive the hardware-to-software fallback itself, paused after it kills
@@ -19763,6 +20094,7 @@ mod tests {
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
             flow_completion_pause: std::sync::Mutex::new(None),
+            playlist_publication_pause: std::sync::Mutex::new(None),
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),

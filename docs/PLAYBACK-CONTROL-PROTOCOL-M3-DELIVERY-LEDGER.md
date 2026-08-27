@@ -36,9 +36,10 @@ starts and every allowed pre-publication fallback reset ffmpeg progress to
 that same attempt before spawning the child. An attempt cannot be replaced
 after its usable playlist has entered actor state.
 
-Attempt admission returns an exact rejection: the session ended, a playlist
-was already published, the attempt counter was exhausted, or the actor mailbox
-was unavailable. Fallback logs that cause and leaves the predecessor process,
+Attempt admission and final installation return an exact rejection: the
+session ended, a playlist was already published, the install attempt was
+stale, the attempt counter was exhausted, or the actor mailbox was unavailable.
+Fallback logs that cause and leaves the predecessor process,
 scratch, admission class, telemetry, and compatibility frontiers unchanged on
 every rejection.
 
@@ -83,6 +84,11 @@ old projection lands first and the successor reset overwrites it, or the reset
 lands first and the old projection is skipped. This preserves the M3b contract
 that response EOF never waits behind `child_transition`.
 
+The first-playlist compatibility flag uses that same attempt-tagged gate. A
+predecessor request that proved its own startup cushion cannot reopen the flag
+after successor reset; the successor must independently publish its required
+cushion.
+
 Playlist readiness becomes authoritative before a playlist response commits.
 A pre-response fallback may win the compatibility child-transition gate after
 the old playlist was read but before its actor observation. In that ordering
@@ -126,6 +132,20 @@ attempt may already name the successor while predecessor files still exist.
 The replacement marker fences playlist reads, segment opens, and index refresh
 preparation throughout that interval. No observation can attribute those old
 files to the new attempt and merge them after the transition reopens.
+
+Concurrent refreshes within one attempt also carry the in-memory index revision
+they prepared from. If another refresh or retention mutation lands first, the
+older preparation is discarded instead of overwriting the newer timeline.
+
+A replacement is authorized twice: actor admission before the predecessor is
+touched, and exact-attempt authorization after the candidate process is spawned
+but before it is installed. Expiry or retirement between those points kills the
+candidate and leaves it outside session ownership.
+
+Composite subtitle playlists carry the response owner resolved with their
+exact video-playlist bytes. They never reconstruct ownership from a reusable
+session id, whether the source was a rolling attempt or a same-id VOD
+attachment.
 
 ## Instrumentation
 

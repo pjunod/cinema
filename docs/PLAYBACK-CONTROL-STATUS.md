@@ -4,8 +4,8 @@
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
 attempt-fenced publication/fetch ledger; the first exact-head review requested
-changes and its concurrency findings are locally remediated, not yet re-reviewed
-or tested
+changes, its first remediation review found four further concurrency findings,
+and those are locally remediated but not yet re-reviewed or tested
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -72,7 +72,7 @@ Review and test state for M3c1:
 | Gate | State |
 |---|---|
 | Implementation | Initial `fe73efaa` plus local remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
-| Adversarial diff review | `fe73efaa` requested changes: playlist attempt pinning, destructive fallback ordering, same-Arc EOF projection, transition-gate storage I/O, pending-end resolution, and typed rejection truth. All are locally remediated, along with a locally found mixed predecessor-scratch/successor-attempt refresh race; exact-head re-review is pending and no tests will run first. |
+| Adversarial diff review | `fe73efaa` requested six changes, all remediated in `fbae4eb9` along with a locally found mixed-scratch race. Review of `fbae4eb9` then found an untagged startup-gate store, missing final producer-install authorization after admission, reconstructed subtitle ownership across rolling/VOD replacement, and out-of-order same-attempt refresh replacement. All four are locally remediated; exact-head re-review is pending and no tests will run first. |
 | Unit/focused tests | Not run yet, by required review-before-test ordering |
 | Full local gate | Not run yet |
 | Hosted CI | No PR yet |

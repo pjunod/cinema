@@ -1101,6 +1101,7 @@ pub(crate) struct RollingPublicationObservation {
 pub(crate) enum ProducerAttemptRejection {
     SessionEnded,
     PlaylistPublished,
+    StaleAttempt,
     AttemptExhausted,
     ControlUnavailable,
 }
@@ -1246,6 +1247,10 @@ enum RollingControlCommand {
     },
     BeginProducerAttempt {
         reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
+    },
+    AuthorizeProducerInstall {
+        producer_attempt: u64,
+        reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
     },
     ObservePublication {
         observation: RollingPublicationObservation,
@@ -1431,6 +1436,19 @@ impl RollingControlActor {
         Ok(attempt)
     }
 
+    fn authorize_producer_install_at(
+        &mut self,
+        now: Instant,
+        producer_attempt: u64,
+    ) -> Result<(), ProducerAttemptRejection> {
+        if producer_attempt != self.delivery.producer_attempt {
+            return Err(ProducerAttemptRejection::StaleAttempt);
+        }
+        self.renew_at(now, "producer-install", RollingRenewalSource::Internal)
+            .then_some(())
+            .ok_or(ProducerAttemptRejection::SessionEnded)
+    }
+
     fn observe_publication_at(
         &mut self,
         now: Instant,
@@ -1562,6 +1580,21 @@ impl RollingControlActor {
             }
             RollingControlCommand::BeginProducerAttempt { reply } => {
                 let _ = reply.send(self.begin_producer_attempt_at(rolling_now()));
+            }
+            RollingControlCommand::AuthorizeProducerInstall {
+                producer_attempt,
+                reply,
+            } => {
+                let transition = Arc::clone(&self.producer_transition);
+                let mut transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                let authorized =
+                    self.authorize_producer_install_at(rolling_now(), producer_attempt);
+                if authorized.is_ok() {
+                    *transition = self.deadline();
+                }
+                let _ = reply.send(authorized);
             }
             RollingControlCommand::ObservePublication { observation, reply } => {
                 let _ = reply.send(self.observe_publication_at(rolling_now(), observation));
@@ -1737,6 +1770,27 @@ impl RollingControlHandle {
             .send(RollingControlCommand::BeginProducerAttempt { reply })
             .await
             .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        response
+            .await
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    pub(crate) async fn authorize_producer_install(
+        &self,
+        producer_attempt: u64,
+    ) -> Result<(), ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .sender
+            .send(RollingControlCommand::AuthorizeProducerInstall {
+                producer_attempt,
+                reply,
+            })
+            .await
+            .is_err()
+        {
+            return Err(ProducerAttemptRejection::ControlUnavailable);
+        }
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
@@ -2617,6 +2671,35 @@ mod tests {
         assert_eq!(actor.delivery.fetched_segment, Some(3));
         assert_eq!(actor.delivery.fetched_end_ms, 9_000);
         assert_eq!(actor.delivery.pending_fetched_segment, None);
+    }
+
+    #[test]
+    fn rolling_producer_install_requires_the_exact_live_attempt() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        assert_eq!(
+            actor.authorize_producer_install_at(
+                started + Duration::from_secs(1),
+                attempt.saturating_sub(1),
+            ),
+            Err(ProducerAttemptRejection::StaleAttempt)
+        );
+        assert_eq!(
+            actor.authorize_producer_install_at(started + Duration::from_secs(1), attempt,),
+            Ok(())
+        );
+        assert_eq!(
+            actor.authorize_producer_install_at(
+                started + Duration::from_secs(1) + ROLLING_LEGACY_LEASE_TIMEOUT,
+                attempt,
+            ),
+            Err(ProducerAttemptRejection::SessionEnded)
+        );
+        assert!(actor.retired);
     }
 
     #[test]
