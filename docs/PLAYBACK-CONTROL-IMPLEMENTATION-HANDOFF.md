@@ -6,14 +6,14 @@
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `c212547ae46e5ee56dbbab6aae50a75ffa58aecc`
-(round 3 requested changes; not approved)
+**Last reviewed exact head:** `3708d37981c9f092855e4a6de09bbd6752b52308`
+(two approvals; one defensive settlement change requested)
 **Current implementation:** behavior-neutral decision transport committed at
 `c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
-repairs at `91486148`, and absorbing executor-state/poll-contract repairs at
-`ba3a504d`: one immutable actor slot, non-consuming actor polling, one
-move-only bounded executor inbox, a passive weak-reference executor, and status
-projection
+repairs at `91486148`, absorbing executor-state/poll-contract repairs at
+`ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
+actor slot, non-consuming actor polling, one move-only bounded executor inbox,
+a passive weak-reference executor, and status projection
 **Test state:** no tests or builds run for the active slice; exact-head
 adversarial approval is required first
 
@@ -394,9 +394,9 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
-committed through `ba3a504d` and deliberately untested. Continue in this order:
+committed through `4d0a0c0f` and deliberately untested. Continue in this order:
 
-1. Bind the round-3 repair commit to the regression catalog, commit this
+1. Bind the final settlement repair to the regression catalog, commit this
    truthful review ledger, and freeze one exact head without running tests.
 2. Obtain independent adversarial concurrency/lifecycle, contract/ordering,
    and static/test/inventory reviews of that exact head. Fix every actionable
@@ -431,7 +431,7 @@ earlier shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-The active runtime is committed through `ba3a504d` but has not been built or
+The active runtime is committed through `4d0a0c0f` but has not been built or
 tested. Root static review found and removed an initial cycle in which the
 actor retained a transport containing a sender back into its own mailbox.
 Round 1 at exact head `ceb8c74d` returned one approval and two change requests.
@@ -469,6 +469,15 @@ explicitly an observation, not an application acknowledgement, and terminal
 transition settles the retained slot. Legacy watchdogs, direct
 replacement/action paths, response admission, cleanup, and process ownership
 remain active.
+
+The exact-head review at `3708d37981c9f092855e4a6de09bbd6752b52308`
+returned two approvals and one defensive change request: although the current
+transport cannot produce uncommitted loss after an actor terminal commit, the
+low-level `settle_lost` helper could overwrite terminal if future call ordering
+changed. Repair `4d0a0c0f` makes both terminal and lost first-winner absorbing
+and directly proves both settlement orders. Only targeted confirmation of that
+exact repair remains before tests.
+
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
 there is no `DecisionApplied` acknowledgement, retry cutover, or transparent
