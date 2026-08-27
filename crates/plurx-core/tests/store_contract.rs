@@ -37,10 +37,11 @@ use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
     ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionTakeover, MetadataPatch, NetworkPriorObservation,
-    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
-    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
+    MediaSessionRequestClaim, MediaSessionTakeover, MediaSessionTerminalAck, MetadataPatch,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
+    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
+    TraktAuth,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
@@ -357,6 +358,8 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "fail_media_session_request",
     "media_session_route",
     "media_session_route_by_incarnation",
+    "record_media_session_terminal_ack",
+    "media_session_terminal_ack",
     "renew_media_sessions",
     "expired_media_sessions",
     "claim_media_session_takeover",
@@ -1489,6 +1492,97 @@ async fn media_session_contract_runs_through_dyn_store() {
             .media_session_route(session_b)
             .await
             .unwrap_or_else(|error| panic!("{backend}: inspect pruned route: {error}"))
+            .is_none());
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn terminal_control_ack_is_immutable_and_outlives_route_settlement() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("terminal-ack-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
+        let incarnation = "00000000-0000-4000-8000-00000000f001";
+        let session = "00000000-0000-4000-8000-00000000f002";
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                user_id: user.id,
+                playback_id: "terminal-ack-playback".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "f".repeat(64),
+                owner_node_id: "node-terminal".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                media_origin_ms: 0,
+                now_ms: 1_000,
+                lease_expires_at_ms: 10_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: activation must win"));
+        let acknowledgement = MediaSessionTerminalAck {
+            incarnation_id: incarnation.to_owned(),
+            session_id: session.to_owned(),
+            owner_node_id: "node-terminal".to_owned(),
+            owner_epoch: 1,
+            client_instance_id: "00000000-0000-4000-8000-00000000f003".to_owned(),
+            sequence: 7,
+            request_fingerprint: "e".repeat(64),
+            response_json: "{\"lease\":\"ended\"}".to_owned(),
+            expires_at_ms: 61_000,
+            updated_at_ms: 1_000,
+        };
+        assert!(store
+            .record_media_session_terminal_ack(&acknowledgement)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: record acknowledgement: {error}")));
+        assert!(store
+            .record_media_session_terminal_ack(&acknowledgement)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: repeat acknowledgement: {error}")));
+
+        let mut conflict = acknowledgement.clone();
+        conflict.sequence += 1;
+        assert!(!store
+            .record_media_session_terminal_ack(&conflict)
+            .await
+            .unwrap_or_else(|error| panic!(
+                "{backend}: reject conflicting acknowledgement: {error}"
+            )));
+
+        store
+            .end_media_session(session, 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: settle route: {error}"));
+        assert_eq!(
+            store
+                .media_session_terminal_ack(session, 60_999)
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: read retained acknowledgement: {error}"
+                )),
+            Some(acknowledgement.clone()),
+            "{backend}: settlement cannot erase the replay window"
+        );
+        assert!(store
+            .media_session_terminal_ack(session, 61_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read expired acknowledgement: {error}"))
+            .is_none());
+        store
+            .maintain_media_sessions(61_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: maintain acknowledgements: {error}"));
+        assert!(store
+            .media_session_terminal_ack(session, 2_000)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect pruned acknowledgement: {error}"))
             .is_none());
     })
     .await;

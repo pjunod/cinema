@@ -20,7 +20,7 @@ use plurx_core::transcode::OutputGrade;
 use serde::{Deserialize, Serialize};
 
 use crate::http::peer_transport::{
-    deadline_after, PeerAuthMode, PeerTransport, PeerTransportError,
+    deadline_after, PeerAuthMode, PeerResponse, PeerTransport, PeerTransportError,
 };
 use crate::media_pool::MediaOfferRequest;
 use crate::state::AppState;
@@ -946,50 +946,42 @@ impl MediaSessionCoordinator {
                 PeerAuthMode::ExactRequest,
             )
             .await?;
-        let status = StatusCode::from_u16(response.status.as_u16()).map_err(|_| {
+        let response = validated_control_relay_response(response, request).map_err(|error| {
             relay_metric.invalid_response();
-            PeerTransportError::InvalidResponse
+            error
         })?;
-        let body = if status.is_success() {
-            let parsed = serde_json::from_slice::<crate::playback_control::ControlResponseV1>(
-                &response.body,
-            )
-            .ok()
-            .filter(|parsed| parsed.is_valid_for(request))
-            .ok_or_else(|| {
-                relay_metric.invalid_response();
-                PeerTransportError::InvalidResponse
-            })?;
-            serde_json::to_vec(&parsed).map_err(|_| {
-                relay_metric.invalid_response();
-                PeerTransportError::InvalidResponse
-            })?
-        } else {
-            let parsed =
-                serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
-                    .ok()
-                    .filter(|parsed| parsed.is_valid_for_status(status.as_u16()))
-                    .ok_or_else(|| {
-                        relay_metric.invalid_response();
-                        PeerTransportError::InvalidResponse
-                    })?;
-            serde_json::to_vec(&parsed).map_err(|_| {
-                relay_metric.invalid_response();
-                PeerTransportError::InvalidResponse
-            })?
-        };
-        let response = Response::builder()
-            .status(status)
-            .header(header::CONTENT_TYPE, "application/json")
-            .header(header::CACHE_CONTROL, "no-store")
-            .body(Body::from(body))
-            .map_err(|_| {
-                relay_metric.invalid_response();
-                PeerTransportError::InvalidResponse
-            })?;
         relay_metric.valid_response();
         Ok(response)
     }
+}
+
+fn validated_control_relay_response(
+    response: PeerResponse,
+    request: &crate::playback_control::ControlRelayRequest,
+) -> Result<Response<Body>, PeerTransportError> {
+    let status = StatusCode::from_u16(response.status.as_u16())
+        .map_err(|_| PeerTransportError::InvalidResponse)?;
+    let body = if status.is_success() {
+        let parsed =
+            serde_json::from_slice::<crate::playback_control::ControlResponseV1>(&response.body)
+                .ok()
+                .filter(|parsed| parsed.is_valid_for(request))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
+    } else {
+        let parsed =
+            serde_json::from_slice::<crate::playback_control::ControlErrorBody>(&response.body)
+                .ok()
+                .filter(|parsed| parsed.is_valid_for_status(status.as_u16()))
+                .ok_or(PeerTransportError::InvalidResponse)?;
+        serde_json::to_vec(&parsed).map_err(|_| PeerTransportError::InvalidResponse)?
+    };
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .map_err(|_| PeerTransportError::InvalidResponse)
 }
 
 fn insert_cached_route(
@@ -1960,6 +1952,94 @@ mod tests {
         }
     }
 
+    fn terminal_relay_request() -> crate::playback_control::ControlRelayRequest {
+        let generation = uuid::Uuid::new_v4().to_string();
+        crate::playback_control::ControlRelayRequest {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            generation: generation.clone(),
+            expected_owner_node_id: "node-terminal".to_owned(),
+            expected_owner_epoch: 1,
+            deadline_unix_ms: unix_ms().saturating_add(4_000),
+            control: crate::playback_control::ControlRequestV1 {
+                protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+                generation,
+                control_epoch: 1,
+                client_instance_id: uuid::Uuid::new_v4().to_string(),
+                sequence: 7,
+                demand: crate::playback_control::PlaybackDemand::End,
+                position_ms: 10_000,
+                buffered_from_ms: Some(9_000),
+                buffered_through_ms: 25_000,
+                playback_rate: 0.0,
+                render_state: crate::playback_control::RenderState::Ended,
+                seek_target_ms: None,
+                observed_download_bps: Some(8_000_000),
+                selection: crate::playback_control::ClientSelection {
+                    quality: crate::playback_control::QualitySelection::Auto,
+                    audio_track: Some(0),
+                    subtitle: crate::playback_control::SubtitleSelection {
+                        mode: crate::playback_control::SubtitleMode::Off,
+                        track: None,
+                    },
+                    audio_offset_ms: 0,
+                    codec: crate::playback_control::CodecPolicy::Auto,
+                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+                },
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Web,
+                    max_height: 2160,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    dual_player_preparation: false,
+                }),
+                observation: None,
+                acknowledgement: None,
+            },
+        }
+    }
+
+    fn terminal_relay_response(
+        request: &crate::playback_control::ControlRelayRequest,
+    ) -> crate::playback_control::ControlResponseV1 {
+        let server_time_unix_ms = unix_ms();
+        crate::playback_control::ControlResponseV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation: request.generation.clone(),
+            control_epoch: 1,
+            accepted_sequence: request.control.sequence,
+            server_time_unix_ms,
+            lease: crate::playback_control::PlaybackLeaseView {
+                state: "ended".to_owned(),
+                renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
+                expires_at_unix_ms: server_time_unix_ms,
+            },
+            delivery: crate::playback_control::DeliveryView {
+                presentation: "vod".to_owned(),
+                producer_state: "complete".to_owned(),
+                produced_through_ms: Some(7_200_000),
+                fetched_through_ms: 25_000,
+                delivered_bps: None,
+                delivered_idle_ms: None,
+                recent_producer_speed: None,
+                client_runway_ms: 15_000,
+                admitted: Some(true),
+                hold_reason: None,
+                owner_node_hash: "n-0123456789abcdef".to_owned(),
+                owner_epoch: 1,
+            },
+            effective_selection: crate::playback_control::EffectiveSelection {
+                quality_auto: true,
+                height: 1080,
+                audio_track: Some(0),
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                codec: "source".to_owned(),
+                dynamic_range: Some("sdr".to_owned()),
+            },
+            action: crate::playback_control::ControlAction::None,
+        }
+    }
+
     /// ffmpeg's HLS muxer carries the segment number through a C `int`. A
     /// number past `i32::MAX` is truncated into a negative filename that no
     /// allowlist accepts, so every segment of that generation 404s — reached
@@ -2547,5 +2627,33 @@ mod tests {
             "relay_response must return before a peer finishes its body"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn terminal_control_relay_accepts_and_replays_the_exact_ended_response() {
+        let request = terminal_relay_request();
+        assert!(request.is_valid());
+        let expected = terminal_relay_response(&request);
+        let body = serde_json::to_vec(&expected).expect("terminal relay response");
+
+        for disposition in ["accepted", "replayed"] {
+            let response = validated_control_relay_response(
+                PeerResponse {
+                    status: reqwest::StatusCode::OK,
+                    body: body.clone(),
+                },
+                &request,
+            )
+            .unwrap_or_else(|error| panic!("{disposition} terminal relay response: {error:?}"));
+            assert_eq!(response.status(), StatusCode::OK);
+            let response_body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("bounded relayed terminal body");
+            let decoded = serde_json::from_slice::<crate::playback_control::ControlResponseV1>(
+                &response_body,
+            )
+            .expect("decode relayed terminal body");
+            assert_eq!(decoded, expected, "{disposition} relay changed the ack");
+        }
     }
 }

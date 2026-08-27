@@ -24,6 +24,9 @@ pub(crate) const NEXT_EXCHANGE_MS: u32 = 5_000;
 pub(crate) const ROLLING_LEASE_TIMEOUT_MS: u32 = 60_000;
 pub(crate) const ROLLING_EXPLICIT_LEASE_TIMEOUT_MS: u32 = 30_000;
 pub(crate) const VOD_LEASE_TIMEOUT_MS: u32 = 300_000;
+/// Bounded idempotency window for an accepted terminal response. This is
+/// retained delivery evidence, not a playback or owner lease.
+pub(crate) const TERMINAL_ACK_REPLAY_TTL_MS: i64 = 60_000;
 
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
 const MAX_OBSERVED_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
@@ -130,7 +133,7 @@ impl ControlRequestV1 {
         if uuid::Uuid::parse_str(&self.client_instance_id).is_err() {
             return Err("client_instance_id");
         }
-        if self.sequence == 0 {
+        if self.sequence == 0 || self.sequence > i64::MAX as u64 {
             return Err("sequence");
         }
         let maximum_position = duration_ms
@@ -197,6 +200,13 @@ impl ControlRequestV1 {
             acknowledgement.validate()?;
         }
         Ok(())
+    }
+
+    /// Canonical digest for binding a retained terminal acknowledgement to
+    /// the complete parsed request, not merely to its sequence number.
+    pub(crate) fn fingerprint(&self) -> Option<String> {
+        let encoded = serde_json::to_vec(self).ok()?;
+        Some(hex::encode(Sha256::digest(encoded)))
     }
 }
 
@@ -454,19 +464,28 @@ pub(crate) struct ControlResponseV1 {
 
 impl ControlResponseV1 {
     pub(crate) fn is_valid_for(&self, request: &ControlRelayRequest) -> bool {
+        let terminal_end = request.control.demand == PlaybackDemand::End;
         self.protocol == PROTOCOL_V1
             && self.generation == request.generation
             && u64::try_from(request.expected_owner_epoch).ok() == Some(self.control_epoch)
             && self.accepted_sequence > 0
-            && self.accepted_sequence <= request.control.sequence
+            && if terminal_end {
+                self.accepted_sequence == request.control.sequence
+            } else {
+                self.accepted_sequence <= request.control.sequence
+            }
             && self.server_time_unix_ms > 0
-            && self.lease.state == "active"
+            && self.lease.state == if terminal_end { "ended" } else { "active" }
             && self.lease.renew_after_ms == NEXT_EXCHANGE_MS
-            && self.lease.expires_at_unix_ms >= self.server_time_unix_ms
-            && self.lease.expires_at_unix_ms
-                <= self
-                    .server_time_unix_ms
-                    .saturating_add(i64::from(VOD_LEASE_TIMEOUT_MS))
+            && if terminal_end {
+                self.lease.expires_at_unix_ms == self.server_time_unix_ms
+            } else {
+                self.lease.expires_at_unix_ms >= self.server_time_unix_ms
+                    && self.lease.expires_at_unix_ms
+                        <= self
+                            .server_time_unix_ms
+                            .saturating_add(i64::from(VOD_LEASE_TIMEOUT_MS))
+            }
             && matches!(self.delivery.presentation.as_str(), "live-recovery" | "vod")
             && matches!(
                 self.delivery.producer_state.as_str(),
@@ -1710,10 +1729,9 @@ impl RollingControlActor {
     ) -> Result<RollingControlOutcome, ControlStateError> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             let replay = (self.terminal == Some(RollingTerminalCause::End)
-                && self
-                    .demand
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.demand == PlaybackDemand::End))
+                && self.demand.as_ref().is_some_and(|snapshot| {
+                    snapshot.demand == PlaybackDemand::End && snapshot == &request.snapshot
+                }))
             .then(|| {
                 self.control.replay_exact(
                     &request.generation,
@@ -2921,6 +2939,13 @@ mod tests {
             .insert("surprise".to_owned(), serde_json::json!(true));
         assert!(serde_json::from_value::<ControlRequestV1>(json).is_err());
 
+        let mut oversized_sequence = request();
+        oversized_sequence.sequence = i64::MAX as u64 + 1;
+        assert_eq!(
+            oversized_sequence.validate(Some(60_000), 2_000),
+            Err("sequence")
+        );
+
         let mut invalid = request();
         invalid.playback_rate = f64::NAN;
         assert_eq!(invalid.validate(Some(60_000), 2_000), Err("playback_rate"));
@@ -3440,15 +3465,13 @@ mod tests {
                         actor.last_renewal = now - actor.mode.timeout();
                     }
                     let claim = actor.claim_expiry_at(now);
-                    assert_eq!(
-                        matches!(claim, RollingExpiryClaim::Claimed(_)),
-                        expected,
-                        "order {order:?}"
-                    );
-                    assert_eq!(
-                        actor.terminal, model.terminal,
-                        "expiry must retain the first terminal cause for order {order:?}"
-                    );
+                    let snapshot = match claim {
+                        RollingExpiryClaim::Claimed(snapshot) if expected => snapshot,
+                        RollingExpiryClaim::Retired(snapshot) if !expected => snapshot,
+                        other => panic!("unexpected expiry result {other:?} for order {order:?}"),
+                    };
+                    assert_eq!(snapshot.terminal, model.terminal, "order {order:?}");
+                    assert_eq!(actor.terminal, model.terminal, "order {order:?}");
                 }
                 TerminalModelEvent::ControlEnd => {
                     let expected = model.terminal(RollingTerminalCause::End);
@@ -3496,7 +3519,9 @@ mod tests {
                 }
                 TerminalModelEvent::Control => {
                     let expected = model.terminal.is_none();
-                    let accepted = actor.control_at(now, owned_control(&control)).is_ok();
+                    let mut active = control.clone();
+                    active.sequence = actor.control.last_sequence.saturating_add(1);
+                    let accepted = actor.control_at(now, owned_control(&active)).is_ok();
                     assert_eq!(accepted, expected, "order {order:?}");
                     if expected {
                         model.flow_requests += 1;
@@ -3635,6 +3660,26 @@ mod tests {
         assert_eq!(replay.accepted_sequence, accepted.accepted_sequence);
         assert_eq!(replay.flow_ticket, accepted.flow_ticket);
         assert_eq!(replay.lease.terminal, Some(RollingTerminalCause::End));
+
+        let mut active_same_sequence = end.clone();
+        active_same_sequence.demand = PlaybackDemand::Active;
+        active_same_sequence.playback_rate = 1.0;
+        active_same_sequence.render_state = RenderState::Rendering;
+        assert_eq!(
+            handle
+                .control(LocalControlRequest {
+                    session_id: "unused",
+                    generation: &active_same_sequence.generation,
+                    owner_node_id: "node-a",
+                    owner_epoch: active_same_sequence.control_epoch,
+                    client_instance_id: &active_same_sequence.client_instance_id,
+                    sequence: active_same_sequence.sequence,
+                    snapshot: PlaybackDemandSnapshot::from(&active_same_sequence),
+                })
+                .await,
+            Err(ControlStateError::SessionEnded),
+            "a sequence replay cannot substitute a different demand payload"
+        );
 
         drop(local);
         end.sequence += 1;
@@ -4621,6 +4666,23 @@ mod tests {
         let mut invented_state = response;
         invented_state.delivery.producer_state = "probably_running".to_owned();
         assert!(!invented_state.is_valid_for(&request));
+
+        let mut terminal_request = request.clone();
+        terminal_request.control.demand = PlaybackDemand::End;
+        terminal_request.control.playback_rate = 0.0;
+        terminal_request.control.render_state = RenderState::Ended;
+        let mut terminal_response = exited;
+        terminal_response.accepted_sequence = terminal_request.control.sequence;
+        terminal_response.lease.state = "ended".to_owned();
+        terminal_response.lease.expires_at_unix_ms = terminal_response.server_time_unix_ms;
+        assert!(terminal_response.is_valid_for(&terminal_request));
+        let mut active_terminal_response = terminal_response.clone();
+        active_terminal_response.lease.state = "active".to_owned();
+        assert!(!active_terminal_response.is_valid_for(&terminal_request));
+        assert!(
+            !terminal_response.is_valid_for(&request),
+            "an ended lease is only valid for the exact terminal demand"
+        );
 
         let unavailable = ControlErrorBody {
             code: "control_unavailable".to_owned(),

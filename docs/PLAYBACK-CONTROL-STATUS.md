@@ -4,7 +4,8 @@
 **Merged baseline:** `origin/main` at `8c6ccdf7` (PR #616)
 **Current work:** PR [#617](https://github.com/pjunod/plurx/pull/617),
 `codex/playback-control-m3-terminal-events` — M3c3 typed, actor-owned session
-end and authority/cluster-fence events plus an exhaustive event-order model.
+end and authority/cluster-fence events, replicated terminal acknowledgements,
+and an exhaustive event-order model.
 This is the final behavior-passive M3 ownership slice before M4 moves recovery
 decisions into the actor and deletes the old server watchdog and in-place
 replacement machinery.
@@ -23,7 +24,7 @@ not being counted as complete merely because its foundation has landed.
 | Design and adversarial review | **Complete** | End-to-end protocol, actor, replacement, cluster, index, observability, and watchdog-deletion contracts | Re-review each implementation PR against the contract |
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
-| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, the M3c1 attempt-fenced delivery ledger, and M3c2 nonblocking progress/exact-exit observations | Add typed end and authority/cluster-fence ownership with exhaustive ordering evidence |
+| M3 — actor and explicit lease | **In progress** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, retirement fence, response commit ownership, the M3c1 attempt-fenced delivery ledger, and M3c2 nonblocking progress/exact-exit observations | Merge typed end and authority/cluster-fence ownership with exhaustive ordering and durable replay evidence |
 | M4 — server watchdog removal | **Not started** | — | One producer deadline; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
@@ -61,8 +62,11 @@ end, fence, control, media, publication, progress, and exit events receive
 truthful terminal verdicts. A newly accepted protocol `demand=end` now enters
 that same terminal transition atomically and can replay its exact terminal
 acknowledgement after response loss. VOD applies the equivalent tombstone and
-reader detach under its lifecycle gate. Physical rolling-child teardown
-remains in the existing manager until M4.
+reader detach under its lifecycle gate. The exact accepted End response is
+retained in replicated storage for a bounded 60-second idempotency window, so
+rolling cleanup, VOD tombstoning, route settlement, client disconnect, and a
+cluster relay cannot erase the reply. Physical rolling-child teardown remains
+in the existing manager until M4.
 
 Activity/status will expose the winning terminal cause and Prometheus will
 count each bounded cause as `won` or `already_terminal`. An exhaustive small
@@ -76,11 +80,11 @@ Review and test state for M3c3:
 
 | Gate | State |
 |---|---|
-| Implementation | **Complete for second review** on PR #617 from merged `8c6ccdf7`. Accepted End and exact replay now span rolling and VOD; already-due expiry wins under the producer-transition fence; production-path regressions and the review ledger are updated. |
-| Adversarial diff review | **Changes requested** at `702cba62`: accepted `demand=end` was not terminal; End/fence could steal an already-due expiry cause; the 5,040-order model bypassed too many production transitions; and this ledger omitted automatic hosted activity. A new exact-head review is required after the fixes are committed. |
+| Implementation | **Revision in progress** on PR #617 from merged `8c6ccdf7`. The current revision adds an immutable replicated terminal-ack record, replay through settled rolling/VOD routes, terminal-aware cluster response validation, cancellation-independent owner execution and VOD reader cleanup, plus corrected production-path model assertions. |
+| Adversarial diff review | **Changes requested** at `619765ab`: terminal relay responses were rejected as non-active; process-local replay did not survive route settlement; VOD detach could be cancelled with the request; two exhaustive-model assertions were incomplete; and the corrective commit lacked history mapping. All five findings are addressed in the working revision; a new exact-head review is required after it is committed. |
 | Unit/focused tests | **Intentionally not run yet.** The required adversarial review comes first. |
 | Full local gate | **Pending** exact-head adversarial approval and focused tests. |
-| Hosted CI | The automatic pre-review run for `702cba62` had validation scope, policy/contract preflight, fast Rust, daemon-cluster, and WAL green. The run at `672c0421` failed the history policy because the corrective runtime commit lacked an explicit regression mapping. The next run at `fe367f18` passed preflight but found a test-only name-shadowing compile error in the fast Rust gate; a compile-only local check reproduced it and the next head fixes it. These runs are recorded separately and are not post-review local evidence. |
+| Hosted CI | The automatic pre-review run for `702cba62` had validation scope, policy/contract preflight, fast Rust, daemon-cluster, and WAL green. The run at `672c0421` failed history policy because the corrective runtime commit lacked an explicit regression mapping. The run at `fe367f18` passed preflight but found a test-only name-shadowing compile error in the fast Rust gate; a compile-only local check reproduced it and `619765ab` corrected it. The `619765ab` run then failed history preflight because that corrective commit was not yet mapped. The working revision maps both corrective commits. These automatic runs are recorded separately and are not post-review local evidence. |
 | Merge | **Not ready.** |
 
 ## Watchdog-removal ledger
@@ -122,6 +126,10 @@ Lease expiry, cluster owner expiry, preparation expiry, retirement grace,
 HTTP/relay limits, admission waits, and control rate windows also remain, but
 they are named lifecycle/network bounds rather than competing playback
 recovery watchdogs.
+
+The 60-second terminal-ack retention window introduced by M3c3 is likewise an
+idempotency bound: it retains one immutable accepted reply and triggers no
+playback, replacement, restart, or failure decision. It is not a watchdog.
 
 ## Remaining delivery order
 

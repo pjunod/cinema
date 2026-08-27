@@ -290,18 +290,6 @@ async fn control_inner(
     if let Err(status) = authorize(&state, &headers, CONTROL_PATH, &body).await {
         return status.into_response();
     }
-    if let Err(retry_after_ms) = state.media_sessions.admit_control(&request.session_id) {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
-        return super::hls::control_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "control_rate_limited",
-            "the owner control budget is exhausted",
-            None,
-            None,
-            Some(retry_after_ms),
-            None,
-        );
-    }
     let route = match state.store.media_session_route(&request.session_id).await {
         Ok(Some(route)) => route,
         Ok(None) => {
@@ -354,6 +342,41 @@ async fn control_inner(
             Some(route.incarnation_id),
             owner_epoch,
             None,
+            None,
+        );
+    }
+    match super::hls::terminal_ack_replay(
+        &state,
+        &route,
+        &request.control,
+        request.deadline_unix_ms,
+    )
+    .await
+    {
+        Ok(Some(response)) => return super::hls::terminal_ack_response(response, &request.control),
+        Ok(None) => {}
+        Err(()) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return super::hls::control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the terminal control acknowledgement is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                owner_epoch,
+                Some(500),
+                None,
+            );
+        }
+    }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&request.session_id) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return super::hls::control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the owner control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
             None,
         );
     }

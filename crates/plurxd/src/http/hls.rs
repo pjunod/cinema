@@ -23,7 +23,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
     MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRequestClaim,
-    MediaSessionRoute, SubtitleStream,
+    MediaSessionRoute, MediaSessionTerminalAck, SubtitleStream,
 };
 use plurx_core::playback::PlaybackMethod;
 use plurx_core::tracks::is_native_text_subtitle;
@@ -1409,6 +1409,68 @@ pub async fn control(
     }
 }
 
+pub(crate) async fn terminal_ack_replay(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: &crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> Result<Option<crate::playback_control::ControlResponseV1>, ()> {
+    if request.demand != crate::playback_control::PlaybackDemand::End {
+        return Ok(None);
+    }
+    let Some(acknowledgement) = state
+        .store
+        .media_session_terminal_ack(&route.session_id, unix_ms())
+        .await
+        .map_err(|_| ())?
+    else {
+        return Ok(None);
+    };
+    if acknowledgement.incarnation_id != route.incarnation_id
+        || acknowledgement.owner_node_id != route.owner_node_id
+        || acknowledgement.owner_epoch != route.owner_epoch
+        || acknowledgement.client_instance_id != request.client_instance_id
+        || u64::try_from(acknowledgement.sequence).ok() != Some(request.sequence)
+        || request.fingerprint().as_deref() != Some(acknowledgement.request_fingerprint.as_str())
+    {
+        return Ok(None);
+    }
+    let relay = crate::playback_control::ControlRelayRequest {
+        session_id: route.session_id.clone(),
+        generation: route.incarnation_id.clone(),
+        expected_owner_node_id: route.owner_node_id.clone(),
+        expected_owner_epoch: route.owner_epoch,
+        deadline_unix_ms,
+        control: request.clone(),
+    };
+    serde_json::from_str::<crate::playback_control::ControlResponseV1>(
+        &acknowledgement.response_json,
+    )
+    .ok()
+    .filter(|response| response.is_valid_for(&relay))
+    .map(Some)
+    .ok_or(())
+}
+
+pub(crate) fn terminal_ack_response(
+    response: crate::playback_control::ControlResponseV1,
+    request: &crate::playback_control::ControlRequestV1,
+) -> Response {
+    crate::playback_control::record(crate::playback_control::MetricOutcome::Replay);
+    if let Some(platform) = request.capabilities.as_ref().map(|caps| caps.platform) {
+        crate::playback_control::record_platform(
+            crate::playback_control::MetricOutcome::Replay,
+            platform,
+        );
+    }
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(response),
+    )
+        .into_response()
+}
+
 async fn control_inner(
     state: AppState,
     session: String,
@@ -1424,18 +1486,6 @@ async fn control_inner(
             None,
             None,
             None,
-            None,
-        );
-    }
-    if let Err(retry_after_ms) = state.media_sessions.admit_control(&session) {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
-        return control_error(
-            StatusCode::TOO_MANY_REQUESTS,
-            "control_rate_limited",
-            "the ingress control budget is exhausted",
-            None,
-            None,
-            Some(retry_after_ms),
             None,
         );
     }
@@ -1499,30 +1549,6 @@ async fn control_inner(
             );
         }
     };
-    if route.state != "active" {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
-        return control_error(
-            StatusCode::GONE,
-            "session_ended",
-            "this media session has ended or been superseded",
-            Some(route.incarnation_id),
-            Some(owner_epoch),
-            None,
-            None,
-        );
-    }
-    if route.lease_expires_at_ms <= unix_ms() {
-        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
-        return control_error(
-            StatusCode::TOO_EARLY,
-            "owner_transition",
-            "the media owner lease expired and takeover is not yet settled",
-            Some(route.incarnation_id),
-            Some(owner_epoch),
-            Some(500),
-            None,
-        );
-    }
     let start = match control_start_response(&route) {
         Some(start) => start,
         None => {
@@ -1589,6 +1615,58 @@ async fn control_inner(
             Some(route.incarnation_id),
             Some(owner_epoch),
             None,
+            None,
+        );
+    }
+    match terminal_ack_replay(&state, &route, &request, deadline_unix_ms).await {
+        Ok(Some(response)) => return terminal_ack_response(response, &request),
+        Ok(None) => {}
+        Err(()) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the terminal control acknowledgement is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&session) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the ingress control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
+            None,
+        );
+    }
+    if route.state != "active" {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+        return control_error(
+            StatusCode::GONE,
+            "session_ended",
+            "this media session has ended or been superseded",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    if route.lease_expires_at_ms <= unix_ms() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+        return control_error(
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the media owner lease expired and takeover is not yet settled",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            Some(500),
             None,
         );
     }
@@ -1664,13 +1742,30 @@ pub(crate) async fn control_local(
     route: &MediaSessionRoute,
     request: crate::playback_control::ControlRequestV1,
 ) -> Response {
-    match tokio::time::timeout(
-        crate::playback_control::EXCHANGE_DEADLINE,
-        control_local_inner(state, route, request),
-    )
-    .await
-    {
-        Ok(response) => response,
+    let exchange_state = state.clone();
+    let exchange_route = route.clone();
+    // Once owner admission has succeeded, the exchange owns its mutation and
+    // durable terminal acknowledgement independently of the HTTP request.
+    // Dropping or timing out the waiter detaches this task; it cannot cancel a
+    // committed rolling terminal event or VOD tombstone before replay evidence
+    // reaches replicated storage.
+    let exchange = tokio::spawn(async move {
+        control_local_inner(&exchange_state, &exchange_route, request).await
+    });
+    match tokio::time::timeout(crate::playback_control::EXCHANGE_DEADLINE, exchange).await {
+        Ok(Ok(response)) => response,
+        Ok(Err(_)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owning worker dropped the control exchange",
+                Some(route.incarnation_id.clone()),
+                u64::try_from(route.owner_epoch).ok(),
+                Some(500),
+                None,
+            )
+        }
         Err(_) => {
             crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
             control_error(
@@ -1889,16 +1984,21 @@ async fn control_local_inner(
             );
         }
     };
+    let server_time_unix_ms = unix_ms();
     let response = crate::playback_control::ControlResponseV1 {
         protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
         generation: route.incarnation_id.clone(),
         control_epoch: owner_epoch,
         accepted_sequence: result.accepted_sequence,
-        server_time_unix_ms: unix_ms(),
+        server_time_unix_ms,
         lease: crate::playback_control::PlaybackLeaseView {
             state: result.lease_state.to_owned(),
             renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
-            expires_at_unix_ms: result.lease_expires_at_unix_ms,
+            expires_at_unix_ms: if result.lease_state == "ended" {
+                server_time_unix_ms
+            } else {
+                result.lease_expires_at_unix_ms
+            },
         },
         delivery: crate::playback_control::DeliveryView::from_status(
             &result.status,
@@ -1914,6 +2014,73 @@ async fn control_local_inner(
         ),
         action: result.action,
     };
+    if result.lease_state == "ended" {
+        if request.demand != crate::playback_control::PlaybackDemand::End {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "a terminal control result did not match the requested demand",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+        let response_json = match serde_json::to_string(&response) {
+            Ok(response) => response,
+            Err(_) => {
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "the terminal control acknowledgement could not be encoded",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            }
+        };
+        let acknowledgement = MediaSessionTerminalAck {
+            incarnation_id: route.incarnation_id.clone(),
+            session_id: route.session_id.clone(),
+            owner_node_id: route.owner_node_id.clone(),
+            owner_epoch: route.owner_epoch,
+            client_instance_id: request.client_instance_id.clone(),
+            sequence: i64::try_from(request.sequence).expect("validated control sequence"),
+            request_fingerprint: request
+                .fingerprint()
+                .expect("validated control request is serializable"),
+            response_json,
+            expires_at_ms: server_time_unix_ms
+                .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
+            updated_at_ms: server_time_unix_ms,
+        };
+        let store = Arc::clone(&state.store);
+        // The task is session-independent and remains detached if the HTTP
+        // request is cancelled while waiting for the replicated commit.
+        let persistence = tokio::spawn(async move {
+            store
+                .record_media_session_terminal_ack(&acknowledgement)
+                .await
+        });
+        let persisted = matches!(persistence.await, Ok(Ok(true)));
+        if !persisted {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the terminal control acknowledgement was not durably committed",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    }
     let outcome = match result.disposition {
         crate::playback_control::ControlDisposition::Accepted => {
             crate::playback_control::MetricOutcome::Accepted
@@ -4087,6 +4254,242 @@ mod tests {
 
         let response = control_local(&fixture.state, &route, request).await;
         assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    }
+
+    #[tokio::test]
+    async fn settled_rolling_and_vod_routes_replay_the_durable_terminal_ack() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-worker").await;
+        let user = fixture
+            .store
+            .create_user("terminal-replay", "hash", false)
+            .await
+            .expect("terminal replay user");
+
+        for (label, presentation, lease_timeout_ms, producer_state, admitted) in [
+            (
+                "rolling",
+                crate::transcode::Presentation::Live,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+                "exited",
+                None,
+            ),
+            (
+                "vod",
+                crate::transcode::Presentation::Vod,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                "complete",
+                Some(true),
+            ),
+        ] {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let client_instance_id = uuid::Uuid::new_v4().to_string();
+            let recipe = RemoteStartRequest {
+                protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                incarnation_id: generation.clone(),
+                user_id: user.id,
+                source_size: 1,
+                source_mtime: 1,
+                typeless_playlist: true,
+                request: crate::transcode::SessionRequest {
+                    file_id: fixture.file_id(),
+                    playback_id: format!("terminal-{label}"),
+                    request_id: Some(generation.clone()),
+                    automatic: true,
+                    previous_session_id: None,
+                    reopen_reason: None,
+                    kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                    start_seconds: 0.0,
+                    audio_index: None,
+                    subtitle_burn: None,
+                    audio_offset_ms: 0,
+                    hdr10: false,
+                    presentation,
+                    block_budget_secs: None,
+                },
+            };
+            let start = StartResponse {
+                session_id: session_id.clone(),
+                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                duration_ms: Some(60_000),
+                start_seconds: 0.0,
+                media_origin_ms: Some(0),
+                height: 720,
+                encoder: "software".to_owned(),
+                vod: label == "vod",
+                ladder: vec![],
+                prior_kbps: None,
+                delivered_dynamic_range: Some("sdr".to_owned()),
+                control: crate::playback_control::ControlBootstrap::new(
+                    &session_id,
+                    &generation,
+                    1,
+                    lease_timeout_ms,
+                ),
+            };
+            let now_ms = unix_ms();
+            let route = fixture
+                .store
+                .activate_media_session(&MediaSessionActivation {
+                    incarnation_id: generation.clone(),
+                    session_id: session_id.clone(),
+                    user_id: user.id,
+                    playback_id: format!("terminal-{label}"),
+                    expected_predecessor_incarnation_id: None,
+                    fence_predecessor: false,
+                    request_id: None,
+                    request_fingerprint: "a".repeat(64),
+                    owner_node_id: fixture.state.node_id.clone(),
+                    lease_expires_at_ms: now_ms.saturating_add(60_000),
+                    recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+                    response_json: serde_json::to_string(&start).expect("start response"),
+                    media_origin_ms: 0,
+                    now_ms,
+                })
+                .await
+                .expect("activate replay route")
+                .expect("activation must win")
+                .route;
+            let request = crate::playback_control::ControlRequestV1 {
+                protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+                generation: generation.clone(),
+                control_epoch: 1,
+                client_instance_id: client_instance_id.clone(),
+                sequence: 7,
+                demand: crate::playback_control::PlaybackDemand::End,
+                position_ms: 1_000,
+                buffered_from_ms: Some(0),
+                buffered_through_ms: 10_000,
+                playback_rate: 0.0,
+                render_state: crate::playback_control::RenderState::Ended,
+                seek_target_ms: None,
+                observed_download_bps: None,
+                selection: crate::playback_control::ClientSelection {
+                    quality: crate::playback_control::QualitySelection::Auto,
+                    audio_track: None,
+                    subtitle: crate::playback_control::SubtitleSelection {
+                        mode: crate::playback_control::SubtitleMode::Off,
+                        track: None,
+                    },
+                    audio_offset_ms: 0,
+                    codec: crate::playback_control::CodecPolicy::Auto,
+                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+                },
+                capabilities: Some(crate::playback_control::DynamicCapabilities {
+                    platform: crate::playback_control::ClientPlatform::Web,
+                    max_height: 1080,
+                    codecs: vec![crate::playback_control::CodecPolicy::H264],
+                    dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                    dual_player_preparation: false,
+                }),
+                observation: None,
+                acknowledgement: None,
+            };
+            let terminal_time_ms = unix_ms();
+            let terminal = crate::playback_control::ControlResponseV1 {
+                protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+                generation: generation.clone(),
+                control_epoch: 1,
+                accepted_sequence: request.sequence,
+                server_time_unix_ms: terminal_time_ms,
+                lease: crate::playback_control::PlaybackLeaseView {
+                    state: "ended".to_owned(),
+                    renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
+                    expires_at_unix_ms: terminal_time_ms,
+                },
+                delivery: crate::playback_control::DeliveryView {
+                    presentation: if label == "vod" {
+                        "vod".to_owned()
+                    } else {
+                        "live-recovery".to_owned()
+                    },
+                    producer_state: producer_state.to_owned(),
+                    produced_through_ms: Some(60_000),
+                    fetched_through_ms: 10_000,
+                    delivered_bps: None,
+                    delivered_idle_ms: None,
+                    recent_producer_speed: None,
+                    client_runway_ms: 9_000,
+                    admitted,
+                    hold_reason: None,
+                    owner_node_hash: "n-0123456789abcdef".to_owned(),
+                    owner_epoch: 1,
+                },
+                effective_selection: crate::playback_control::EffectiveSelection {
+                    quality_auto: true,
+                    height: 720,
+                    audio_track: None,
+                    subtitle_burn: None,
+                    audio_offset_ms: 0,
+                    codec: "server_selected".to_owned(),
+                    dynamic_range: Some("sdr".to_owned()),
+                },
+                action: crate::playback_control::ControlAction::None,
+            };
+            assert!(fixture
+                .store
+                .record_media_session_terminal_ack(&MediaSessionTerminalAck {
+                    incarnation_id: generation.clone(),
+                    session_id: session_id.clone(),
+                    owner_node_id: route.owner_node_id.clone(),
+                    owner_epoch: route.owner_epoch,
+                    client_instance_id,
+                    sequence: i64::try_from(request.sequence).expect("bounded sequence"),
+                    request_fingerprint: request
+                        .fingerprint()
+                        .expect("valid terminal request fingerprint"),
+                    response_json: serde_json::to_string(&terminal).expect("terminal response"),
+                    expires_at_ms: terminal_time_ms.saturating_add(60_000),
+                    updated_at_ms: terminal_time_ms,
+                })
+                .await
+                .expect("record terminal acknowledgement"));
+            assert!(fixture
+                .store
+                .end_media_session(&session_id, unix_ms())
+                .await
+                .expect("settle replay route")
+                .is_some());
+
+            let body = Bytes::from(serde_json::to_vec(&request).expect("terminal request"));
+            let response = control_inner(
+                fixture.state.clone(),
+                session_id,
+                body,
+                unix_ms().saturating_add(4_000),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{label} replay");
+            let response_body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("bounded terminal replay body");
+            assert_eq!(
+                serde_json::from_slice::<crate::playback_control::ControlResponseV1>(
+                    &response_body,
+                )
+                .expect("decode terminal replay"),
+                terminal,
+                "{label} replay must return the exact durable acknowledgement"
+            );
+
+            let mut changed_payload = request.clone();
+            changed_payload.position_ms += 1;
+            let changed_response = control_inner(
+                fixture.state.clone(),
+                route.session_id.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&changed_payload).expect("changed terminal request"),
+                ),
+                unix_ms().saturating_add(4_000),
+            )
+            .await;
+            assert_eq!(
+                changed_response.status(),
+                StatusCode::GONE,
+                "{label} cannot reuse the terminal sequence for a changed payload"
+            );
+        }
     }
 
     #[test]

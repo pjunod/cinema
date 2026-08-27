@@ -25,8 +25,11 @@ later mutation. Late terminal events are acknowledged as already terminal and
 cannot overwrite the winning cause. A newly accepted `demand=end` is that
 terminal `end` event; it is not a lease renewal or a production hold. Its exact
 identity/sequence can replay the same terminal acknowledgement after response
-loss. VOD performs the corresponding tombstone and reader detach under its
-existing per-session lifecycle gate and retains the same bounded reply. M3c3
+loss. The accepted reply is retained for 60 seconds in replicated storage and
+is addressable through the ended durable route, so local cleanup or an owner
+handoff cannot erase the retry result. VOD performs the corresponding
+tombstone and reader detach under its existing per-session lifecycle gate and
+retains the same bounded reply. M3c3
 does not kill, replace, or restart a rolling encoder. Existing rolling physical
 teardown remains outside the actor until M4 moves that one action owner and
 deletes the compatibility watchdogs.
@@ -80,9 +83,25 @@ higher sequence or different identity receives `session_ended`.
 
 VOD applies the same rule under its per-session lifecycle gate. A fresh End
 stores the accepted terminal result, writes the `Deleted` tombstone, and
-detaches the rendition reader before returning. The tombstone admits only the
-exact stored replay; tombstones created by supersession, operator stop,
-revocation, or file replacement have no client acknowledgement to replay.
+starts one session-owned reader cleanup task. The owner exchange waits for
+that task before forming the reply, but the exchange and cleanup are detached
+from the HTTP waiter: disconnect or timeout cannot cancel either. Exact replay,
+ordinary end, and maintenance join the same idempotent cleanup. The tombstone
+admits only the exact stored replay; tombstones created by supersession,
+operator stop, revocation, or file replacement have no client acknowledgement
+to replay.
+
+Before a successful terminal HTTP response is exposed, its complete bounded
+`ControlResponseV1` is inserted immutably into replicated storage under the
+generation, session, owner node/epoch, client instance, sequence, and a
+canonical digest of the complete parsed request.
+The row survives ordinary route settlement and expires after 60 seconds. Both
+public ingress and the exact-write cluster endpoint consult it before active
+route and rate-limit rejection, validate the complete response against the
+exact terminal request, and return it as a replay. A different identity,
+sequence, request payload, owner tuple, active demand, malformed body, or
+expired row receives the ordinary terminal/stale verdict and cannot consume
+the record.
 
 ## Routing table
 
@@ -117,9 +136,12 @@ session terminal action in this slice. After a terminal event wins, both are
 rejected and cannot mutate the frozen snapshot.
 
 Dropping an HTTP request or oneshot receiver does not cancel an enqueued actor
-command. The actor applies the event even when no caller remains to receive its
-verdict. The model therefore includes reply cancellation as an observation,
-not as a state transition.
+command. Once owner admission succeeds, one detached owner-exchange task owns
+the local mutation, VOD cleanup join, and replicated acknowledgement commit.
+The actor applies the event even when no caller remains to receive its verdict,
+and the retained reply remains recoverable after route settlement. The model
+therefore includes reply cancellation as an observation, not as a state
+transition.
 
 ## Exhaustive model
 
@@ -155,9 +177,13 @@ uses the production control-End and expiry-claim transitions; authority-fence
 ordering remains a synchronous state-model operation. Separate real
 async-handle and manager tests exercise the actual mailbox commands, exact
 deadline precedence, accepted End acknowledgement/replay, response loss,
-rolling status joining, VOD tombstone/detach, and concurrent end/fence races.
-Dropping a reply receiver is a transport observation rather than an additional
-actor-state event.
+rolling status joining, VOD tombstone/detach, cancellation-independent reader
+cleanup, settled-route replay for rolling and VOD, terminal response decoding
+through the actual cluster-relay path, and concurrent end/fence races. A
+backend-neutral Store contract proves the acknowledgement is immutable,
+survives route settlement, expires at the exact retention boundary, and is
+pruned on maintenance. Dropping a reply receiver is a transport observation
+rather than an additional actor-state event.
 
 ## Instrumentation
 
@@ -188,7 +214,9 @@ ends the local generation/attachment and returns `lease.state=ended`. Mixed
 nodes remain wire-compatible, although an older owner may retain a session
 until its lease expires after acknowledging End. Rollback restores the generic
 `Retire` command and the old `retired` status label; it does not need to
-recreate a watchdog.
+recreate a watchdog. The 60-second terminal-ack expiry is a bounded idempotency
+retention window: it makes no liveness or recovery decision and is not a
+watchdog.
 
 M4 may begin only after this slice is merged and green. M4 then:
 

@@ -9,7 +9,8 @@ use super::MediaSessionStore;
 use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, OwnedMediaSessionLease,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTerminalAck,
+    OwnedMediaSessionLease,
 };
 use crate::error::StoreError;
 
@@ -22,6 +23,7 @@ const MAX_TAKEOVER_CANDIDATES: usize = 64;
 const MAX_OWNED: i64 = 4_096;
 const MAINTENANCE_BATCH: i64 = 256;
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
+const MAX_TERMINAL_ACK_BYTES: usize = 64 * 1024;
 const TAKEOVER_RECOVERY_MS: i64 = 60 * 1_000;
 const FAILED_RETENTION_MS: i64 = 60 * 60 * 1_000;
 const RESOLVED_RETENTION_MS: i64 = 24 * 60 * 60 * 1_000;
@@ -86,6 +88,24 @@ pub(super) const MEDIA_SESSIONS_RETENTION_INDEX: &str =
     "CREATE INDEX IF NOT EXISTS media_sessions_retention
         ON media_sessions(state, updated_at_ms, incarnation_id)";
 
+pub(super) const MEDIA_SESSION_TERMINAL_ACKS_SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS media_session_terminal_acks (
+    incarnation_id     TEXT NOT NULL UNIQUE,
+    session_id         TEXT PRIMARY KEY,
+    owner_node_id      TEXT NOT NULL,
+    owner_epoch        INTEGER NOT NULL CHECK (owner_epoch > 0),
+    client_instance_id TEXT NOT NULL,
+    sequence           INTEGER NOT NULL CHECK (sequence > 0),
+    request_fingerprint TEXT NOT NULL,
+    response_json      TEXT NOT NULL,
+    expires_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL
+) STRICT";
+
+pub(super) const MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX: &str =
+    "CREATE INDEX IF NOT EXISTS media_session_terminal_acks_expiry
+        ON media_session_terminal_acks(expires_at_ms, session_id)";
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     for sql in [
         MEDIA_SESSION_REQUESTS_SCHEMA,
@@ -96,6 +116,8 @@ pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), Store
         MEDIA_SESSIONS_USER_INDEX,
         MEDIA_SESSIONS_EXPIRY_INDEX,
         MEDIA_SESSIONS_RETENTION_INDEX,
+        MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
+        MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
     ] {
         validate_sql(sql)?;
         for result in timeout_store(client.batch(sql)).await? {
@@ -131,6 +153,25 @@ impl From<&mut Row<'_>> for RouteRow {
             media_origin_ms: row.get("media_origin_ms"),
             media_sequence: row.get("media_sequence"),
             discontinuity_sequence: row.get("discontinuity_sequence"),
+            updated_at_ms: row.get("updated_at_ms"),
+        })
+    }
+}
+
+struct TerminalAckRow(MediaSessionTerminalAck);
+
+impl From<&mut Row<'_>> for TerminalAckRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(MediaSessionTerminalAck {
+            incarnation_id: row.get("incarnation_id"),
+            session_id: row.get("session_id"),
+            owner_node_id: row.get("owner_node_id"),
+            owner_epoch: row.get("owner_epoch"),
+            client_instance_id: row.get("client_instance_id"),
+            sequence: row.get("sequence"),
+            request_fingerprint: row.get("request_fingerprint"),
+            response_json: row.get("response_json"),
+            expires_at_ms: row.get("expires_at_ms"),
             updated_at_ms: row.get("updated_at_ms"),
         })
     }
@@ -189,6 +230,21 @@ impl From<&mut Row<'_>> for RequestRow {
 
 fn valid_uuid(value: &str) -> bool {
     uuid::Uuid::parse_str(value).is_ok()
+}
+
+fn valid_terminal_ack(ack: &MediaSessionTerminalAck) -> bool {
+    valid_uuid(&ack.incarnation_id)
+        && valid_uuid(&ack.session_id)
+        && !ack.owner_node_id.is_empty()
+        && ack.owner_node_id.len() <= 256
+        && ack.owner_epoch > 0
+        && valid_uuid(&ack.client_instance_id)
+        && ack.sequence > 0
+        && valid_fingerprint(&ack.request_fingerprint)
+        && !ack.response_json.is_empty()
+        && ack.response_json.len() <= MAX_TERMINAL_ACK_BYTES
+        && ack.updated_at_ms > 0
+        && ack.expires_at_ms > ack.updated_at_ms
 }
 
 fn valid_fingerprint(value: &str) -> bool {
@@ -903,6 +959,81 @@ impl MediaSessionStore for HiqliteAuthStore {
         route_by(self, "incarnation_id", incarnation_id).await
     }
 
+    async fn record_media_session_terminal_ack(
+        &self,
+        acknowledgement: &MediaSessionTerminalAck,
+    ) -> Result<bool, StoreError> {
+        if !valid_terminal_ack(acknowledgement) {
+            return Err(StoreError::Task(
+                "invalid media-session terminal acknowledgement".to_owned(),
+            ));
+        }
+        self.client()
+            .execute(
+                "INSERT INTO media_session_terminal_acks
+                    (incarnation_id, session_id, owner_node_id, owner_epoch,
+                     client_instance_id, sequence, request_fingerprint, response_json,
+                     expires_at_ms, updated_at_ms)
+                 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9, $10
+                   WHERE EXISTS (SELECT 1 FROM media_sessions
+                     WHERE incarnation_id = $1 AND session_id = $2
+                       AND owner_node_id = $3 AND owner_epoch = $4
+                       AND state IN ('active', 'ended'))
+                 ON CONFLICT(session_id) DO NOTHING",
+                params!(
+                    acknowledgement.incarnation_id.as_str(),
+                    acknowledgement.session_id.as_str(),
+                    acknowledgement.owner_node_id.as_str(),
+                    acknowledgement.owner_epoch,
+                    acknowledgement.client_instance_id.as_str(),
+                    acknowledgement.sequence,
+                    acknowledgement.request_fingerprint.as_str(),
+                    acknowledgement.response_json.as_str(),
+                    acknowledgement.expires_at_ms,
+                    acknowledgement.updated_at_ms
+                ),
+            )
+            .await?;
+        let stored = self
+            .client()
+            .query_consistent_map::<TerminalAckRow, _>(
+                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                        client_instance_id, sequence, request_fingerprint, response_json,
+                        expires_at_ms, updated_at_ms
+                   FROM media_session_terminal_acks WHERE session_id = $1",
+                params!(acknowledgement.session_id.as_str()),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0);
+        Ok(stored.as_ref() == Some(acknowledgement))
+    }
+
+    async fn media_session_terminal_ack(
+        &self,
+        session_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionTerminalAck>, StoreError> {
+        if !valid_uuid(session_id) || now_ms <= 0 {
+            return Ok(None);
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<TerminalAckRow, _>(
+                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch,
+                        client_instance_id, sequence, request_fingerprint, response_json,
+                        expires_at_ms, updated_at_ms
+                   FROM media_session_terminal_acks
+                  WHERE session_id = $1 AND expires_at_ms > $2",
+                params!(session_id, now_ms),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0))
+    }
+
     async fn renew_media_sessions(
         &self,
         owner_node_id: &str,
@@ -1250,6 +1381,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND session.lease_expires_at_ms > $2))
                     OR EXISTS (SELECT 1 FROM media_sessions
                       WHERE state = 'ended' AND updated_at_ms < $4)
+                    OR EXISTS (SELECT 1 FROM media_session_terminal_acks acknowledgement
+                      WHERE acknowledgement.expires_at_ms <= $2
+                         OR NOT EXISTS (SELECT 1 FROM media_sessions session
+                              WHERE session.session_id = acknowledgement.session_id
+                                AND session.incarnation_id = acknowledgement.incarnation_id))
                     OR EXISTS (SELECT 1 FROM job_leases lease
                       WHERE lease.resource LIKE 'session:%' AND lease.updated_at_ms < $4
                         AND NOT EXISTS (SELECT 1 FROM media_sessions session
@@ -1342,6 +1478,16 @@ impl MediaSessionStore for HiqliteAuthStore {
                     WHERE session.state = 'ended' AND session.updated_at_ms < $1
                     ORDER BY session.updated_at_ms, lease.rowid LIMIT $2)",
                 params!(retained_cutoff, MAINTENANCE_BATCH),
+            ),
+            (
+                "DELETE FROM media_session_terminal_acks WHERE rowid IN (
+                   SELECT acknowledgement.rowid FROM media_session_terminal_acks acknowledgement
+                    WHERE acknowledgement.expires_at_ms <= $1
+                       OR NOT EXISTS (SELECT 1 FROM media_sessions session
+                            WHERE session.session_id = acknowledgement.session_id
+                              AND session.incarnation_id = acknowledgement.incarnation_id)
+                    ORDER BY acknowledgement.expires_at_ms, acknowledgement.rowid LIMIT $2)",
+                params!(now_ms, MAINTENANCE_BATCH),
             ),
             (
                 "DELETE FROM media_sessions WHERE rowid IN (

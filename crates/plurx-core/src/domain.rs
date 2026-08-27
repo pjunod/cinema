@@ -790,6 +790,26 @@ pub struct MediaSessionRoute {
     pub updated_at_ms: i64,
 }
 
+/// Bounded, immutable acknowledgement for one accepted terminal control.
+///
+/// The response body is retained independently of the process-local player so
+/// an exact `demand=end` retry can recover after ordinary owner cleanup or
+/// route settlement. `expires_at_ms` bounds that idempotency window; it is not
+/// a playback or ownership lease.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionTerminalAck {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub owner_node_id: String,
+    pub owner_epoch: i64,
+    pub client_instance_id: String,
+    pub sequence: i64,
+    pub request_fingerprint: String,
+    pub response_json: String,
+    pub expires_at_ms: i64,
+    pub updated_at_ms: i64,
+}
+
 /// Result of atomically claiming a user-scoped session-creation request id.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MediaSessionRequestClaim {

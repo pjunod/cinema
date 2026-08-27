@@ -30,7 +30,10 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -383,6 +386,57 @@ impl Rendition {
     }
 }
 
+struct TerminalCleanup {
+    finished: AtomicBool,
+    notify: Notify,
+}
+
+impl TerminalCleanup {
+    fn new() -> Self {
+        Self {
+            finished: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn complete(&self) {
+        self.finished.store(true, Release);
+        self.notify.notify_waiters();
+    }
+
+    fn is_finished(&self) -> bool {
+        self.finished.load(Acquire)
+    }
+
+    async fn wait(&self) {
+        while !self.is_finished() {
+            let notified = self.notify.notified();
+            if self.is_finished() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+struct TerminalCleanupGuard(Arc<TerminalCleanup>);
+
+impl Drop for TerminalCleanupGuard {
+    fn drop(&mut self) {
+        self.0.complete();
+    }
+}
+
+fn terminal_reason(cause: Terminal) -> &'static str {
+    match cause {
+        Terminal::Deleted => "client_released",
+        Terminal::Superseded => "superseded",
+        Terminal::AdminStop => "killed",
+        Terminal::Revoked => "revoked",
+        Terminal::Replaced => "file_replaced",
+    }
+}
+
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 struct Session {
@@ -412,6 +466,13 @@ struct Session {
     /// Exact terminal acknowledgement retained after a client `demand=end`
     /// tombstones the attachment. Other lifecycle causes never populate it.
     control_end: Option<crate::playback_control::LocalControlResult>,
+    /// Complete accepted End payload. Reusing its sequence with different
+    /// observations is a conflict, not an idempotent terminal replay.
+    control_end_snapshot: Option<crate::playback_control::PlaybackDemandSnapshot>,
+    /// Session-owned, idempotent reader detach. It continues if the request
+    /// that committed the tombstone is cancelled and is joined by every later
+    /// replay/end/maintenance path.
+    terminal_cleanup: Option<Arc<TerminalCleanup>>,
     tombstone: Option<Terminal>,
 }
 
@@ -563,6 +624,8 @@ impl VodServe {
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -917,6 +980,8 @@ impl VodServe {
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -1090,6 +1155,38 @@ impl VodServe {
         )
     }
 
+    fn spawn_terminal_cleanup(
+        &self,
+        session_id: String,
+        cleanup: Arc<TerminalCleanup>,
+        rendition: Arc<Rendition>,
+        file_id: i64,
+        height: i64,
+        kind: SessionKind,
+        cause: Terminal,
+    ) {
+        let shared = Arc::clone(&self.shared);
+        tokio::spawn(async move {
+            let _completion = TerminalCleanupGuard(Arc::clone(&cleanup));
+            rendition.detach_reader(&session_id).await;
+            rendition.kick();
+            let serve = VodServe { shared };
+            serve.emit_lifecycle(
+                &session_id,
+                file_id,
+                height,
+                kind,
+                "session_end",
+                Some(terminal_reason(cause)),
+            );
+            tracing::info!(
+                session = %session_log_id(&session_id),
+                rendition = %rendition.key,
+                "vod session ended for good: {cause:?}"
+            );
+        });
+    }
+
     /// End one session for good with a cause; `true` if it was ours.
     /// Idempotent — the first call writes the tombstone and detaches, every
     /// later one only confirms ownership.
@@ -1105,7 +1202,7 @@ impl VodServe {
             )
         };
         let _lifecycle = lifecycle.lock().await;
-        let (rendition, file_id, height, kind) = {
+        let (cleanup, work) = {
             let mut sessions = self.shared.sessions.lock().await;
             let Some(session) = sessions.get_mut(session_id) else {
                 return false;
@@ -1115,38 +1212,35 @@ impl VodServe {
             {
                 return false;
             }
-            if session.tombstone.is_some() {
-                return true;
+            let terminal_cause = *session.tombstone.get_or_insert(cause);
+            if let Some(cleanup) = session.terminal_cleanup.as_ref() {
+                (Arc::clone(cleanup), None)
+            } else {
+                let cleanup = Arc::new(TerminalCleanup::new());
+                session.terminal_cleanup = Some(Arc::clone(&cleanup));
+                let work = (
+                    session_id.to_owned(),
+                    Arc::clone(&session.rendition),
+                    session.rendition.recipe.file.id,
+                    session.target_height,
+                    session.kind,
+                    terminal_cause,
+                );
+                (cleanup, Some(work))
             }
-            session.tombstone = Some(cause);
-            (
-                Arc::clone(&session.rendition),
-                session.rendition.recipe.file.id,
-                session.target_height,
-                session.kind,
-            )
         };
-        rendition.detach_reader(session_id).await;
-        rendition.kick();
-        self.emit_lifecycle(
-            session_id,
-            file_id,
-            height,
-            kind,
-            "session_end",
-            Some(match cause {
-                Terminal::Deleted => "client_released",
-                Terminal::Superseded => "superseded",
-                Terminal::AdminStop => "killed",
-                Terminal::Revoked => "revoked",
-                Terminal::Replaced => "file_replaced",
-            }),
-        );
-        tracing::info!(
-            session = %session_log_id(session_id),
-            rendition = %rendition.key,
-            "vod session ended for good: {cause:?}"
-        );
+        if let Some((session_id, rendition, file_id, height, kind, cause)) = work {
+            self.spawn_terminal_cleanup(
+                session_id,
+                Arc::clone(&cleanup),
+                rendition,
+                file_id,
+                height,
+                kind,
+                cause,
+            );
+        }
+        cleanup.wait().await;
         true
     }
 
@@ -1370,13 +1464,18 @@ impl VodServe {
         // closes every mutation except replay of the exact accepted identity
         // and sequence; no Store read is needed to recover that immutable
         // owner-local result.
-        {
+        let terminal_replay = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(control.session_id)?;
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
                 return None;
             }
             if session.tombstone.is_some() {
+                if session.control_end_snapshot.as_ref() != Some(&control.snapshot) {
+                    return Some(Err(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                    ));
+                }
                 let replay = session.control.lock().expect("control lock").replay_exact(
                     control.generation,
                     control.owner_epoch,
@@ -1398,8 +1497,17 @@ impl VodServe {
                 debug_assert_eq!(result.action, action);
                 debug_assert_eq!(result.platform, platform);
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
-                return Some(Ok(result));
+                let Some(cleanup) = session.terminal_cleanup.as_ref().map(Arc::clone) else {
+                    return Some(Err(crate::playback_control::ControlStateError::Unavailable));
+                };
+                Some((result, cleanup))
+            } else {
+                None
             }
+        };
+        if let Some((result, cleanup)) = terminal_replay {
+            cleanup.wait().await;
+            return Some(Ok(result));
         }
 
         if let Err(error) = crate::playback_control::verify_authority(
@@ -1423,6 +1531,7 @@ impl VodServe {
         enum AppliedControl {
             End {
                 result: crate::playback_control::LocalControlResult,
+                cleanup: Arc<TerminalCleanup>,
                 rendition: Arc<Rendition>,
                 file_id: i64,
                 height: i64,
@@ -1468,10 +1577,14 @@ impl VodServe {
                     status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
                     platform,
                 };
+                let cleanup = Arc::new(TerminalCleanup::new());
+                session.terminal_cleanup = Some(Arc::clone(&cleanup));
                 session.tombstone = Some(Terminal::Deleted);
                 session.control_end = Some(result.clone());
+                session.control_end_snapshot = Some(control.snapshot.clone());
                 Ok::<_, crate::playback_control::ControlStateError>(AppliedControl::End {
                     result,
+                    cleanup,
                     rendition: Arc::clone(&session.rendition),
                     file_id: session.rendition.recipe.file.id,
                     height: session.target_height,
@@ -1502,27 +1615,22 @@ impl VodServe {
             match outcome {
                 AppliedControl::End {
                     result,
+                    cleanup,
                     rendition,
                     file_id,
                     height,
                     kind,
                 } => {
-                    rendition.detach_reader(control.session_id).await;
-                    rendition.kick();
-                    self.emit_lifecycle(
-                        control.session_id,
+                    self.spawn_terminal_cleanup(
+                        control.session_id.to_owned(),
+                        Arc::clone(&cleanup),
+                        rendition,
                         file_id,
                         height,
                         kind,
-                        "session_end",
-                        Some("client_released"),
+                        Terminal::Deleted,
                     );
-                    tracing::info!(
-                        session = %session_log_id(control.session_id),
-                        rendition = %rendition.key,
-                        "vod session ended for good: {:?}",
-                        Terminal::Deleted
-                    );
+                    cleanup.wait().await;
                     return Some(Ok(result));
                 }
                 AppliedControl::Live {
@@ -1635,6 +1743,22 @@ impl VodServe {
     /// owns: dormant-session reap (sliding TTL), dormant-rendition purge
     /// after TTL (un-admitted only), driver kicks.
     pub async fn maintain(&self) {
+        let terminal_cleanups = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
+                .values()
+                .filter(|session| session.tombstone.is_some())
+                .filter_map(|session| session.terminal_cleanup.as_ref().map(Arc::clone))
+                .filter(|cleanup| !cleanup.is_finished())
+                .collect::<Vec<_>>()
+        };
+        futures_util::future::join_all(
+            terminal_cleanups
+                .into_iter()
+                .map(|cleanup| async move { cleanup.wait().await }),
+        )
+        .await;
+
         let now = Instant::now();
         // Idle live sessions vanish — tombstone-free, because an idle reap is
         // the one ending a session may come back from (via the durable route
@@ -3572,6 +3696,8 @@ mod tests {
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -4258,6 +4384,8 @@ mod tests {
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -4330,6 +4458,8 @@ mod tests {
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -4366,6 +4496,8 @@ mod tests {
                 last_touch: StdMutex::new(replacement_touch),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
@@ -4610,12 +4742,122 @@ mod tests {
         );
         assert_eq!(replay.accepted_sequence, accepted.accepted_sequence);
         assert_eq!(replay.lease_state, "ended");
+
+        let active_same_sequence = crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "node-a",
+            owner_epoch: 1,
+            client_instance_id: &client,
+            sequence: 1,
+            snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Apple,
+            ),
+        };
+        assert!(matches!(
+            serve.control(active_same_sequence).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
         assert!(matches!(
             serve.control(request(2)).await,
             Some(Err(
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_vod_end_response_cannot_cancel_terminal_reader_cleanup() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+        let client = uuid::Uuid::new_v4().to_string();
+
+        // Pin the exact detach lock so the session-owned cleanup task cannot
+        // finish before the request future is cancelled.
+        let readers = rendition.readers.lock().await;
+        let pending = {
+            let serve = Arc::clone(&serve);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Apple,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::End;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Ended;
+                serve
+                    .control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "node-a",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+        let cleanup = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let cleanup = serve.shared.sessions.lock().await[&session_id]
+                    .terminal_cleanup
+                    .as_ref()
+                    .map(Arc::clone);
+                if let Some(cleanup) = cleanup {
+                    return cleanup;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("terminal commit publishes session-owned cleanup");
+        assert!(!cleanup.is_finished());
+        pending.abort();
+        let cancellation = match pending.await {
+            Err(error) => error,
+            Ok(_) => panic!("request unexpectedly completed"),
+        };
+        assert!(cancellation.is_cancelled());
+        drop(readers);
+        tokio::time::timeout(Duration::from_secs(1), cleanup.wait())
+            .await
+            .expect("detached cleanup survives request cancellation");
+        assert!(!rendition.readers.lock().await.contains_key(&session_id));
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        snapshot.demand = crate::playback_control::PlaybackDemand::End;
+        snapshot.playback_rate = 0.0;
+        snapshot.render_state = crate::playback_control::RenderState::Ended;
+        let replay = serve
+            .control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "node-a",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 1,
+                snapshot,
+            })
+            .await
+            .expect("terminal VOD session")
+            .expect("terminal replay after cleanup");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
     }
 
     #[tokio::test]
@@ -4645,6 +4887,8 @@ mod tests {
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
                 control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: None,
                 tombstone: None,
             },
         );
