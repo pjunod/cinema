@@ -9,7 +9,8 @@ commits = [
   "78e08970",
   "38184342",
   "27563544",
+  "3383e490",
 ]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
-reason = "The Rust gate compiles the production-spawned delivery futures as Send and retains the real-path rolling regressions for these corrective commits: attempt/path ABA sampling across playlist, segment, and refresh; exact returned-playlist publication; phase-aware fallback cancellation before and after actor reply; terminal install rejection causality plus ESRCH proof that both early and final-fence rejected children are reaped; verified predecessor scratch clearing; successor-safe retention handoff; and one-owner per-item garbage cleanup whose failed bytes remain in session/global hard-cap accounting while independent tail entries are removed."
+reason = "The Rust gate compiles the production-spawned delivery futures as Send and retains the real-path rolling regressions for these corrective commits: attempt/path ABA sampling across playlist, segment, and refresh; exact returned-playlist publication; phase-aware fallback cancellation before and after actor reply; terminal install rejection causality plus ESRCH proof that both early and final-fence rejected children are reaped; completed replacement transactions release their producer transition before later watchdog work; verified predecessor scratch clearing; successor-safe retention handoff; and one-owner per-item garbage cleanup whose failed bytes remain in session/global hard-cap accounting while independent tail entries are removed."
