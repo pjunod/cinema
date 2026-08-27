@@ -4,11 +4,11 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Active PR:** [#619](https://github.com/pjunod/plurx/pull/619)
 **Active branch:** `codex/playback-control-m4-actor-deadline`
-**Last reviewed head:** `5824c8cc0d86c948f250fa0bd71c73d22657de76`
+**Last reviewed head:** `b918fdfd3345a6dd141359941b24596a246d7c8b`
 (changes requested)
 **Current exact head:** resolve
-`origin/codex/playback-control-m4-actor-deadline`; the seventh-review
-successor includes the seventh-pass corrections and this handoff
+`origin/codex/playback-control-m4-actor-deadline`; the eighth-review
+successor includes the eighth-pass corrections and this handoff
 **Test state:** no unit, full, or cluster tests have run for this PR
 
 This is the resumable execution ledger for the playback-control rewrite. Read
@@ -97,11 +97,12 @@ a376727e chore(validation): bind M4 review corrections
 df2389a7 chore(validation): catalog callable construction paths
 252f2a72 test(validation): specify structural syntax contract
 5824c8cc test(validation): specify wrapped ownership syntax
+b918fdfd test(validation): specify callable ownership contexts
 ```
 
 ### Adversarial review chronology
 
-Six exact-head reviews have run. No tests were run during them.
+Eight exact-head reviews have run. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
    coverage; latest progress was hidden by first-gap projection; inventory and
@@ -119,12 +120,15 @@ Six exact-head reviews have run. No tests were run during them.
 7. `5824c8cc`: callable-argument groups could be mistaken for transparent
    wrappers; alias wrappers did not allow interleaved references/parentheses;
    and the immediate-next-step handoff text was stale.
+8. `b918fdfd`: a greedy outer argument-group match prevented a valid inner
+   wrapped invocation from being reconsidered; two chronology/gate sentences
+   in this handoff were stale.
 
 The reviewer has consistently confirmed the producer-ingress and successor
 watermark behavior after the first corrections. The remaining work is the
 static structural contract, not runtime semantics.
 
-### Eighth-review candidate
+### Ninth-review candidate
 
 The candidate:
 
@@ -132,14 +136,14 @@ The candidate:
   actual character literals, and balanced turbofish payloads before structural
   counting;
 - preserves raw source for legacy-name sentinels;
-- normalizes arbitrarily nested parenthesized callable paths only when the
-  wrapper itself is invoked and its opening group is not owned by a preceding
-  callable;
+- iteratively normalizes innermost balanced callable groups so a valid wrapped
+  invocation inside an ordinary argument is found, while a group directly
+  owned by a preceding callable remains untouched;
 - accepts recursively interleaved parenthesis/reference/dereference wrappers
   in forbidden local aliases;
 - catches grouped/absolute `Command` import aliases, absolute `Command` type
   aliases, and `extern crate libc|nix|rustix as ...`;
-- carries 22 exact structural rows, 30 positive syntax-contract cases, two
+- carries 22 exact structural rows, 31 positive syntax-contract cases, two
   negative ordinary-argument cases, and exact required-ID assertions; and
 - has zero real-source structural count mismatches under a read-only static
   count check.
@@ -166,7 +170,7 @@ run tests while that verdict is pending.
   fast-forward the disposable clone to merged `main`, create the next
   `codex/` branch, and continue M4.
 
-Do not skip from step 5 directly to merge because an automatically started
+Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
 review before local unit tests and full verification before merge.
 

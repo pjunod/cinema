@@ -13,10 +13,10 @@ TURBOFISH_START = re.compile(r"::\s*<")
 CHAR_LITERAL = re.compile(
     r"'(?:\\(?:[nrt0\\'\"]|x[0-9A-Fa-f]{2}|u\{[0-9A-Fa-f_]{1,6}\})|[^\\'\r\n])'"
 )
-TRANSPARENT_CALLABLE_PARENS = re.compile(
-    r"(?P<prefix>(?:(?:\(\s*)|(?:&\s*(?:mut\s+)?)|(?:\*\s*))+)"
-    r"(?P<path>(?:::)?(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)"
-    r"(?P<close>(?:\s*\))+)(?=\s*\()"
+TRANSPARENT_CALLABLE_GROUP = re.compile(
+    r"\(\s*(?P<reference>(?:(?:&\s*(?:mut\s+)?)|(?:\*\s*))*)"
+    r"(?P<path>(?:::)?(?:[A-Za-z_]\w*::)*[A-Za-z_]\w*)\s*\)"
+    r"(?=(?:\s*\))*\s*\()"
 )
 EXPRESSION_PREFIX_KEYWORDS = frozenset(
     {"break", "else", "if", "let", "match", "move", "return", "while", "yield"}
@@ -145,15 +145,21 @@ def rust_structural_source(source: str) -> str:
             index += 1
     code = "".join(chars)
 
-    def unwrap(match: re.Match[str]) -> str:
-        prefix = match.group("prefix")
-        if "(" not in prefix or _preceded_by_callable(code, match.start()):
-            return match.group(0)
-        value = prefix.replace("(", "") + match.group("path")
-        padding = len(match.group(0)) - len(value)
-        return " " * (padding // 2) + value + " " * (padding - padding // 2)
+    while True:
+        changed = False
 
-    return TRANSPARENT_CALLABLE_PARENS.sub(unwrap, code)
+        def unwrap(match: re.Match[str]) -> str:
+            nonlocal changed
+            if _preceded_by_callable(code, match.start()):
+                return match.group(0)
+            value = match.group("reference") + match.group("path")
+            padding = len(match.group(0)) - len(value)
+            changed = True
+            return " " * (padding // 2) + value + " " * (padding - padding // 2)
+
+        code = TRANSPARENT_CALLABLE_GROUP.sub(unwrap, code)
+        if not changed:
+            return code
 
 
 class RollingProducerOwnershipInventoryTest(unittest.TestCase):
@@ -197,6 +203,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "parenthesized-task-call",
                 "nested-parenthesized-task-call",
                 "referenced-nested-task-call",
+                "wrapped-task-call-inside-argument",
                 "namespaced-time-turbofish",
                 "bare-time-constructor",
                 "parenthesized-local-timer-alias",
@@ -258,7 +265,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
         self.assertGreaterEqual(len(module_structures), 22)
-        self.assertGreaterEqual(len(contract_cases), 30)
+        self.assertGreaterEqual(len(contract_cases), 31)
         self.assertGreaterEqual(len(negative_cases), 2)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)

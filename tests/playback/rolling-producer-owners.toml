@@ -411,6 +411,11 @@ source = "((&tokio::spawn::<Ready<()>>))(future);"
 must_trigger = ["namespaced-task-spawn"]
 
 [[contract_cases]]
+id = "wrapped-task-call-inside-argument"
+source = "consume((tokio::spawn::<Ready<()>>)(future));"
+must_trigger = ["namespaced-task-spawn"]
+
+[[contract_cases]]
 id = "namespaced-time-turbofish"
 source = "tokio::time::timeout::<Result<(), Error>>(deadline, future);"
 must_trigger = ["namespaced-time-constructor"]
