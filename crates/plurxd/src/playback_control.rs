@@ -6,6 +6,8 @@
 //! leaking into HTTP routing or reintroducing several independent recovery
 //! owners.
 
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -819,11 +821,62 @@ impl TerminalResponseHandoff {
     pub(crate) fn complete(&self) {
         self.pending.store(false, Ordering::Release);
     }
+
+    pub(crate) fn restart(&self) {
+        self.pending.store(true, Ordering::Release);
+    }
 }
 
 #[derive(Clone)]
 pub(crate) struct TerminalCommitReceipt {
     result: tokio::sync::watch::Receiver<Option<Result<ControlResponseV1, ()>>>,
+    retry: Option<Arc<TerminalCommitRetry>>,
+}
+
+struct TerminalCommitRetry {
+    result: tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+    running: Arc<AtomicBool>,
+    transition: Arc<std::sync::Mutex<()>>,
+    start: Arc<dyn Fn(TerminalCommitAttempt) + Send + Sync>,
+}
+
+pub(crate) struct TerminalCommitAttempt {
+    result: tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
+    running: Arc<AtomicBool>,
+    transition: Arc<std::sync::Mutex<()>>,
+}
+
+impl TerminalCommitAttempt {
+    pub(crate) fn complete(self, outcome: Result<ControlResponseV1, ()>) {
+        let _transition = self
+            .transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.running.store(false, Ordering::Release);
+        let _ = self.result.send(Some(outcome));
+    }
+}
+
+impl TerminalCommitRetry {
+    fn start_if_needed(&self) {
+        let transition = Arc::clone(&self.transition);
+        let _transition = transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.result.borrow().as_ref().is_some_and(Result::is_ok)
+            || self.running.swap(true, Ordering::AcqRel)
+        {
+            return;
+        }
+        let _ = self.result.send(None);
+        let attempt = TerminalCommitAttempt {
+            result: self.result.clone(),
+            running: Arc::clone(&self.running),
+            transition: Arc::clone(&transition),
+        };
+        drop(_transition);
+        (self.start)(attempt);
+    }
 }
 
 impl TerminalCommitReceipt {
@@ -832,7 +885,50 @@ impl TerminalCommitReceipt {
         tokio::sync::watch::Sender<Option<Result<ControlResponseV1, ()>>>,
     ) {
         let (sender, result) = tokio::sync::watch::channel(None);
-        (Self { result }, sender)
+        (
+            Self {
+                result,
+                retry: None,
+            },
+            sender,
+        )
+    }
+
+    fn retryable_inner(
+        start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
+        start_now: bool,
+    ) -> Self {
+        let (result, receiver) = tokio::sync::watch::channel(None);
+        let retry = Arc::new(TerminalCommitRetry {
+            result,
+            running: Arc::new(AtomicBool::new(false)),
+            transition: Arc::new(std::sync::Mutex::new(())),
+            start: Arc::new(start),
+        });
+        let receipt = Self {
+            result: receiver,
+            retry: Some(Arc::clone(&retry)),
+        };
+        if start_now {
+            retry.start_if_needed();
+        }
+        receipt
+    }
+
+    pub(crate) fn retryable(start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static) -> Self {
+        Self::retryable_inner(start, true)
+    }
+
+    pub(crate) fn deferred_retryable(
+        start: impl Fn(TerminalCommitAttempt) + Send + Sync + 'static,
+    ) -> Self {
+        Self::retryable_inner(start, false)
+    }
+
+    pub(crate) fn retry(&self) {
+        if let Some(retry) = &self.retry {
+            retry.start_if_needed();
+        }
     }
 
     pub(crate) async fn wait(&self) -> Result<ControlResponseV1, ()> {
@@ -850,6 +946,87 @@ pub(crate) trait TerminalControlCommitter: Send + Sync {
     /// Start the continuation synchronously. The returned receipt may be
     /// awaited by HTTP, but dropping every waiter cannot cancel the commit.
     fn start(&self, result: &LocalControlResult) -> TerminalCommitReceipt;
+}
+
+#[cfg(test)]
+pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> ControlResponseV1 {
+    ControlResponseV1 {
+        protocol: PROTOCOL_V1.to_owned(),
+        generation: "test-terminal-generation".to_owned(),
+        control_epoch: 1,
+        accepted_sequence: result.accepted_sequence,
+        server_time_unix_ms: 1,
+        lease: PlaybackLeaseView {
+            state: "ended".to_owned(),
+            renew_after_ms: NEXT_EXCHANGE_MS,
+            expires_at_unix_ms: 1,
+        },
+        delivery: DeliveryView {
+            presentation: "test".to_owned(),
+            producer_state: "complete".to_owned(),
+            produced_through_ms: None,
+            fetched_through_ms: 0,
+            delivered_bps: None,
+            delivered_idle_ms: None,
+            recent_producer_speed: None,
+            client_runway_ms: 0,
+            admitted: None,
+            hold_reason: None,
+            owner_node_hash: "n-test".to_owned(),
+            owner_epoch: 1,
+        },
+        effective_selection: EffectiveSelection {
+            quality_auto: true,
+            height: 720,
+            audio_track: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            codec: "test".to_owned(),
+            dynamic_range: Some("sdr".to_owned()),
+        },
+        action: result.action.clone(),
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct RecoveringTerminalCommitter {
+    attempts: Arc<AtomicUsize>,
+}
+
+#[cfg(test)]
+impl RecoveringTerminalCommitter {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            attempts: Arc::new(AtomicUsize::new(0)),
+        })
+    }
+
+    pub(crate) fn attempts(&self) -> usize {
+        self.attempts.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+impl TerminalControlCommitter for RecoveringTerminalCommitter {
+    fn start(&self, result: &LocalControlResult) -> TerminalCommitReceipt {
+        let response = terminal_response_for_test(result);
+        let attempts = Arc::clone(&self.attempts);
+        let handoff = result.terminal_handoff.clone();
+        TerminalCommitReceipt::retryable(move |attempt| {
+            if let Some(handoff) = &handoff {
+                handoff.restart();
+            }
+            let index = attempts.fetch_add(1, Ordering::AcqRel);
+            if let Some(handoff) = &handoff {
+                handoff.complete();
+            }
+            attempt.complete(if index == 0 {
+                Err(())
+            } else {
+                Ok(response.clone())
+            });
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -2990,7 +3167,6 @@ pub(crate) fn prometheus() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
 
     struct DropReplyOnTerminalAdmission {
         receiver: std::sync::Mutex<

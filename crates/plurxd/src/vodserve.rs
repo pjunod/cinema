@@ -427,11 +427,54 @@ impl Drop for TerminalCleanupGuard {
     }
 }
 
-struct DeferredTerminalCommit {
+fn deferred_terminal_commit(
     committer: Arc<dyn crate::playback_control::TerminalControlCommitter>,
-    result: crate::playback_control::LocalControlResult,
-    sender:
-        tokio::sync::watch::Sender<Option<Result<crate::playback_control::ControlResponseV1, ()>>>,
+    result: &mut crate::playback_control::LocalControlResult,
+) -> crate::playback_control::TerminalCommitReceipt {
+    let prepared = Arc::new(StdMutex::new(
+        None::<crate::playback_control::LocalControlResult>,
+    ));
+    let inner = Arc::new(StdMutex::new(
+        None::<crate::playback_control::TerminalCommitReceipt>,
+    ));
+    let receipt = crate::playback_control::TerminalCommitReceipt::deferred_retryable({
+        let prepared = Arc::clone(&prepared);
+        let inner = Arc::clone(&inner);
+        move |attempt| {
+            let (receipt, retry) = {
+                let mut inner = inner
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if let Some(receipt) = inner.as_ref() {
+                    (receipt.clone(), true)
+                } else {
+                    let receipt = {
+                        let prepared = prepared
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        committer.start(
+                            prepared
+                                .as_ref()
+                                .expect("deferred VOD terminal result must be installed"),
+                        )
+                    };
+                    *inner = Some(receipt.clone());
+                    (receipt, false)
+                }
+            };
+            if retry {
+                receipt.retry();
+            }
+            tokio::spawn(async move {
+                attempt.complete(receipt.wait().await);
+            });
+        }
+    });
+    result.terminal_commit = Some(receipt.clone());
+    *prepared
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(result.clone());
+    receipt
 }
 
 fn terminal_reason(cause: Terminal) -> &'static str {
@@ -1172,7 +1215,7 @@ impl VodServe {
         height: i64,
         kind: SessionKind,
         cause: Terminal,
-        terminal_commit: Option<Box<DeferredTerminalCommit>>,
+        terminal_commit: Option<Box<crate::playback_control::TerminalCommitReceipt>>,
     ) {
         let shared = Arc::clone(&self.shared);
         tokio::spawn(async move {
@@ -1194,8 +1237,8 @@ impl VodServe {
                 "vod session ended for good: {cause:?}"
             );
             if let Some(terminal_commit) = terminal_commit {
-                let receipt = terminal_commit.committer.start(&terminal_commit.result);
-                let _ = terminal_commit.sender.send(Some(receipt.wait().await));
+                terminal_commit.retry();
+                let _ = terminal_commit.wait().await;
             }
         });
     }
@@ -1526,6 +1569,9 @@ impl VodServe {
                 debug_assert_eq!(result.action, action);
                 debug_assert_eq!(result.platform, platform);
                 result.disposition = crate::playback_control::ControlDisposition::Replay;
+                if let Some(commit) = &result.terminal_commit {
+                    commit.retry();
+                }
                 let Some(cleanup) = session.terminal_cleanup.as_ref().map(Arc::clone) else {
                     return Some(Err(crate::playback_control::ControlStateError::Unavailable));
                 };
@@ -1560,7 +1606,7 @@ impl VodServe {
         enum AppliedControl {
             End {
                 result: crate::playback_control::LocalControlResult,
-                terminal_commit: Option<Box<DeferredTerminalCommit>>,
+                terminal_commit: Option<Box<crate::playback_control::TerminalCommitReceipt>>,
                 cleanup: Arc<TerminalCleanup>,
                 rendition: Arc<Rendition>,
                 file_id: i64,
@@ -1612,25 +1658,16 @@ impl VodServe {
                     terminal_handoff: None,
                     terminal_commit: None,
                 };
-                let terminal_commit = terminal_committer.as_ref().map(|committer| {
-                    let (receipt, sender) =
-                        crate::playback_control::TerminalCommitReceipt::pending();
-                    result.terminal_commit = Some(receipt);
-                    (Arc::clone(committer), sender)
-                });
+                let terminal_commit = terminal_committer
+                    .as_ref()
+                    .map(|committer| deferred_terminal_commit(Arc::clone(committer), &mut result));
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
                 session.tombstone = Some(Terminal::Deleted);
                 session.control_end = Some(result.clone());
                 session.control_end_snapshot = Some(control.snapshot.clone());
                 Ok::<_, crate::playback_control::ControlStateError>(AppliedControl::End {
-                    terminal_commit: terminal_commit.map(|(committer, sender)| {
-                        Box::new(DeferredTerminalCommit {
-                            committer,
-                            result: result.clone(),
-                            sender,
-                        })
-                    }),
+                    terminal_commit: terminal_commit.map(Box::new),
                     result,
                     cleanup,
                     rendition: Arc::clone(&session.rendition),
@@ -3579,6 +3616,7 @@ async fn sync_file(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering::AcqRel};
 
     use plurx_core::store::{FragmentIndexStore, MediaSessionStore as _, SqliteStore};
     use plurx_core::testfixtures;
@@ -3590,12 +3628,13 @@ mod tests {
         session_id: String,
         started: AtomicBool,
         reader_detached: AtomicBool,
+        attempts: Arc<AtomicUsize>,
     }
 
     impl crate::playback_control::TerminalControlCommitter for CleanupObservingCommitter {
         fn start(
             &self,
-            _result: &crate::playback_control::LocalControlResult,
+            result: &crate::playback_control::LocalControlResult,
         ) -> crate::playback_control::TerminalCommitReceipt {
             self.started.store(true, Release);
             let detached = self
@@ -3605,9 +3644,16 @@ mod tests {
                 .ok()
                 .is_some_and(|readers| !readers.contains_key(&self.session_id));
             self.reader_detached.store(detached, Release);
-            let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
-            let _ = sender.send(Some(Err(())));
-            receipt
+            let response = crate::playback_control::terminal_response_for_test(result);
+            let attempts = Arc::clone(&self.attempts);
+            crate::playback_control::TerminalCommitReceipt::retryable(move |attempt| {
+                let index = attempts.fetch_add(1, AcqRel);
+                attempt.complete(if index == 0 {
+                    Err(())
+                } else {
+                    Ok(response.clone())
+                });
+            })
         }
     }
 
@@ -4789,6 +4835,7 @@ mod tests {
             session_id: session_id.clone(),
             started: AtomicBool::new(false),
             reader_detached: AtomicBool::new(false),
+            attempts: Arc::new(AtomicUsize::new(0)),
         });
         let accepted = serve
             .control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
@@ -4828,6 +4875,7 @@ mod tests {
                 .await,
             Err(())
         ));
+        assert_eq!(committer.attempts.load(Acquire), 1);
 
         let replay = serve
             .control(request(1))
@@ -4840,6 +4888,15 @@ mod tests {
         );
         assert_eq!(replay.accepted_sequence, accepted.accepted_sequence);
         assert_eq!(replay.lease_state, "ended");
+        let committed = replay
+            .terminal_commit
+            .as_ref()
+            .expect("retried VOD terminal receipt")
+            .wait()
+            .await
+            .expect("recovered VOD terminal response");
+        assert_eq!(committed.server_time_unix_ms, 1);
+        assert_eq!(committer.attempts.load(Acquire), 2);
 
         let active_same_sequence = crate::playback_control::LocalControlRequest {
             session_id: &session_id,

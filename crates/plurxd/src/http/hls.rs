@@ -1461,6 +1461,7 @@ struct DurableTerminalCommitter {
     start: StartResponse,
     recipe: RemoteStartRequest,
     request: crate::playback_control::ControlRequestV1,
+    faults: Option<Arc<TerminalCommitFaults>>,
 }
 
 const TERMINAL_COMMIT_RETRY_BUDGET: Duration = Duration::from_secs(5);
@@ -1481,73 +1482,113 @@ fn terminal_ack_matches(
         && stored.response_json == acknowledgement.response_json
 }
 
-async fn terminal_ack_is_visible(
+async fn terminal_io_before<T>(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout_at(deadline, operation).await.ok()
+}
+
+async fn terminal_ack_is_visible_before(
     store: &dyn plurx_core::store::Store,
     acknowledgement: &MediaSessionTerminalAck,
+    deadline: tokio::time::Instant,
 ) -> bool {
-    store
-        .media_session_terminal_ack(&acknowledgement.session_id, unix_ms())
-        .await
-        .ok()
-        .flatten()
-        .as_ref()
-        .is_some_and(|stored| terminal_ack_matches(stored, acknowledgement))
+    terminal_io_before(
+        deadline,
+        store.media_session_terminal_ack(&acknowledgement.session_id, unix_ms()),
+    )
+    .await
+    .and_then(Result::ok)
+    .flatten()
+    .as_ref()
+    .is_some_and(|stored| terminal_ack_matches(stored, acknowledgement))
+}
+
+#[derive(Default)]
+struct TerminalCommitFaults {
+    fail_before_commit: std::sync::atomic::AtomicUsize,
+    fail_after_commit: std::sync::atomic::AtomicUsize,
+}
+
+impl TerminalCommitFaults {
+    fn consume(counter: &std::sync::atomic::AtomicUsize) -> bool {
+        counter
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+    }
 }
 
 async fn persist_terminal_ack(
     store: Arc<dyn plurx_core::store::Store>,
     acknowledgement: MediaSessionTerminalAck,
 ) -> bool {
-    persist_terminal_ack_with_failures(store, acknowledgement, None).await
+    persist_terminal_ack_with_faults(store, acknowledgement, None).await
 }
 
-async fn persist_terminal_ack_with_failures(
+async fn persist_terminal_ack_with_faults(
     store: Arc<dyn plurx_core::store::Store>,
     acknowledgement: MediaSessionTerminalAck,
-    forced_failures: Option<&std::sync::atomic::AtomicUsize>,
+    faults: Option<&TerminalCommitFaults>,
 ) -> bool {
     let deadline = tokio::time::Instant::now() + TERMINAL_COMMIT_RETRY_BUDGET;
     let mut delay = TERMINAL_COMMIT_RETRY_MIN;
     loop {
-        let forced_failure = forced_failures.is_some_and(|failures| {
-            failures
-                .fetch_update(
-                    std::sync::atomic::Ordering::AcqRel,
-                    std::sync::atomic::Ordering::Acquire,
-                    |remaining| remaining.checked_sub(1),
-                )
-                .is_ok()
-        });
-        let write = if forced_failure {
-            None
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let fail_before =
+            faults.is_some_and(|faults| TerminalCommitFaults::consume(&faults.fail_before_commit));
+        let write = if fail_before {
+            Some(Err(()))
         } else {
-            Some(
-                store
-                    .record_media_session_terminal_ack(&acknowledgement)
-                    .await,
+            let write = match terminal_io_before(
+                deadline,
+                store.record_media_session_terminal_ack(&acknowledgement),
             )
+            .await
+            {
+                Some(Ok(persisted)) => Ok(persisted),
+                Some(Err(_)) => Err(()),
+                None => return false,
+            };
+            let fail_after = write == Ok(true)
+                && faults
+                    .is_some_and(|faults| TerminalCommitFaults::consume(&faults.fail_after_commit));
+            Some(if fail_after { Err(()) } else { write })
         };
         match write {
-            None => {}
             Some(Ok(true)) => return true,
             Some(Ok(false)) => {
                 // `false` is normally a definitive route/identity conflict,
                 // but first resolve an earlier unknown commit of these exact
                 // immutable bytes.
-                return terminal_ack_is_visible(store.as_ref(), &acknowledgement).await;
+                return terminal_ack_is_visible_before(store.as_ref(), &acknowledgement, deadline)
+                    .await;
             }
-            Some(Err(_)) if terminal_ack_is_visible(store.as_ref(), &acknowledgement).await => {
+            Some(Err(_))
+                if terminal_ack_is_visible_before(store.as_ref(), &acknowledgement, deadline)
+                    .await =>
+            {
                 // The write may have committed before its answer was lost.
                 // Read-after-unknown prevents a second outcome from replacing
                 // the accepted terminal response.
                 return true;
             }
             Some(Err(_)) => {}
+            None => unreachable!("write outcome is always classified"),
         }
-        if tokio::time::Instant::now() >= deadline {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
             return false;
         }
-        tokio::time::sleep(delay).await;
+        let wake = now.checked_add(delay).unwrap_or(deadline).min(deadline);
+        tokio::time::sleep_until(wake).await;
         delay = delay.saturating_mul(2).min(TERMINAL_COMMIT_RETRY_MAX);
     }
 }
@@ -1557,7 +1598,6 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         &self,
         result: &crate::playback_control::LocalControlResult,
     ) -> crate::playback_control::TerminalCommitReceipt {
-        let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
         let server_time_unix_ms = unix_ms();
         let response = local_control_response(
             &self.route,
@@ -1579,6 +1619,7 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
         let (Ok(response_json), (Ok(sequence), Some(request_fingerprint))) =
             (response_json, identity)
         else {
+            let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
             if let Some(handoff) = handoff {
                 handoff.complete();
             }
@@ -1599,14 +1640,34 @@ impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommit
             updated_at_ms: server_time_unix_ms,
         };
         let store = Arc::clone(&self.store);
-        tokio::spawn(async move {
-            let persisted = persist_terminal_ack(store, acknowledgement).await;
-            if let Some(handoff) = handoff {
-                handoff.complete();
+        let faults = self.faults.clone();
+        crate::playback_control::TerminalCommitReceipt::retryable(move |attempt| {
+            let store = Arc::clone(&store);
+            let acknowledgement = acknowledgement.clone();
+            let response = response.clone();
+            let handoff = handoff.clone();
+            let faults = faults.clone();
+            if let Some(handoff) = &handoff {
+                handoff.restart();
             }
-            let _ = sender.send(Some(if persisted { Ok(response) } else { Err(()) }));
-        });
-        receipt
+            tokio::spawn(async move {
+                let persisted = match faults {
+                    Some(faults) => {
+                        persist_terminal_ack_with_faults(
+                            store,
+                            acknowledgement,
+                            Some(faults.as_ref()),
+                        )
+                        .await
+                    }
+                    None => persist_terminal_ack(store, acknowledgement).await,
+                };
+                if let Some(handoff) = handoff {
+                    handoff.complete();
+                }
+                attempt.complete(if persisted { Ok(response) } else { Err(()) });
+            });
+        })
     }
 }
 
@@ -2083,6 +2144,7 @@ async fn control_local_inner(
                 start: start.clone(),
                 recipe: recipe.clone(),
                 request: request.clone(),
+                faults: None,
             }) as Arc<dyn crate::playback_control::TerminalControlCommitter>
         });
     let result = match state
@@ -4300,6 +4362,21 @@ mod tests {
     use crate::transcode::HlsDeliveryFixture;
     use std::time::Duration;
 
+    #[tokio::test(start_paused = true)]
+    async fn terminal_store_wait_uses_the_absolute_attempt_deadline() {
+        let deadline = tokio::time::Instant::now() + TERMINAL_COMMIT_RETRY_BUDGET;
+        let stalled = tokio::spawn(async move {
+            terminal_io_before(deadline, std::future::pending::<()>()).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(TERMINAL_COMMIT_RETRY_BUDGET).await;
+        assert_eq!(
+            stalled.await.expect("bounded Store wait task"),
+            None,
+            "a Store operation cannot outlive the terminal attempt budget"
+        );
+    }
+
     #[tokio::test]
     async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
         let dir = crate::test_tempdir().expect("state dir");
@@ -4803,21 +4880,23 @@ mod tests {
                 expires_at_ms: terminal_time_ms.saturating_add(60_000),
                 updated_at_ms: terminal_time_ms,
             };
-            let forced_failures = std::sync::atomic::AtomicUsize::new(1);
+            let faults = TerminalCommitFaults::default();
+            let injected = if label == "rolling" {
+                &faults.fail_before_commit
+            } else {
+                &faults.fail_after_commit
+            };
+            injected.store(1, std::sync::atomic::Ordering::Release);
             let terminal_store: Arc<dyn plurx_core::store::Store> = fixture.store.clone();
             assert!(
-                persist_terminal_ack_with_failures(
-                    terminal_store,
-                    acknowledgement,
-                    Some(&forced_failures),
-                )
-                .await,
-                "{label} terminal acknowledgement retries one transient Store failure"
+                persist_terminal_ack_with_faults(terminal_store, acknowledgement, Some(&faults),)
+                    .await,
+                "{label} terminal acknowledgement resolves the injected Store failure"
             );
             assert_eq!(
-                forced_failures.load(std::sync::atomic::Ordering::Acquire),
+                injected.load(std::sync::atomic::Ordering::Acquire),
                 0,
-                "{label} consumed the injected first-attempt failure"
+                "{label} consumed its injected before/after-commit failure"
             );
             let retained = terminal_ack_replay(
                 &fixture.state,

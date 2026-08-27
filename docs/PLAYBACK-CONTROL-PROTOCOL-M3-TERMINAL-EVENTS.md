@@ -102,8 +102,13 @@ job lease, removes its playback pointer, and releases its cache pin. There is
 no crash window in which the reply exists while the route remains eligible for
 takeover. The row survives route settlement and expires after 60 seconds. Both
 transient Store failures and unknown write outcomes are retried for a bounded
-window with these same immutable bytes; read-after-unknown recognizes a write
-whose reply was lost without manufacturing a second response timestamp. Both
+five-second attempt with these same immutable bytes; every Store write, read,
+and backoff is capped by that attempt's one absolute deadline. Read-after-
+unknown recognizes a write whose reply was lost without manufacturing a
+second response timestamp. If one attempt expires, the local request fails but
+the prepared response and acknowledgement remain retryable until their
+60-second idempotency bound. A later exact End starts at most one new attempt;
+it never reconstructs the response or its server timestamp. Both
 public ingress and the exact-write cluster endpoint consult it before active
 route and rate-limit rejection, validate the complete response against the
 exact terminal request, and return it as a replay. A different identity,
@@ -148,12 +153,15 @@ deadline is due before actor admission, mutates nothing. Once the actor accepts
 End, however, it synchronously installs one session-owned result receipt and
 starts its continuation before attempting the fallible reply send. Exact
 retries attach to that same receipt. For rolling delivery the continuation
-holds a terminal-response handoff fence through physical-state joining and the
-atomic replicated commit; the reaper observes that fence under the existing
-child-transition gate. VOD reserves its receipt under the lifecycle gate,
-detaches the reader, and only then starts the same durable commit. Accepted End
-therefore settles even when no HTTP waiter remains, while queued nonterminal
-work can never renew state after its caller's deadline.
+holds a terminal-response handoff fence through physical-state joining and
+each bounded replicated-commit attempt; the reaper observes that fence under
+the existing child-transition gate. A bounded manager tombstone retains the
+operation after rolling cleanup, so recovery does not depend on the retired
+worker Arc. VOD reserves its retryable receipt under the lifecycle gate,
+detaches the reader, and only then starts the first durable attempt; its own
+tombstone retains the operation. Accepted End therefore settles even when no
+HTTP waiter remains, while queued nonterminal work can never renew state after
+its caller's deadline.
 
 ## Exhaustive model
 
@@ -197,11 +205,15 @@ are atomic, a crash cannot permit takeover, the reply is immutable, it expires
 at the exact retention boundary, and maintenance prunes it. Deterministic
 regressions drop the actor reply from inside terminal admission, attach two
 simultaneous exact retries while the continuation is paused, run the reaper,
-cancel the original HTTP task, inject a first Store failure for both rolling
-and VOD route shapes, and still require one durable reply plus an ended route.
-A VOD regression observes reader ownership at commit start. Never-polled,
-closed-waiter, and expired-deadline exchanges prove pre-admission cancellation
-has no later mutation.
+cancel the original HTTP task, inject both fail-before-commit and
+commit-then-error Store outcomes, and still require one durable reply plus an
+ended route. Rolling recovery is exercised after the live session has been
+removed; VOD recovery uses its retained tombstone. Both reuse the first
+prepared response timestamp. A paused-time test stalls the exact Store-wait
+wrapper through its absolute attempt deadline, and a VOD regression observes
+reader ownership at commit start. Never-polled, closed-waiter, and
+expired-deadline exchanges prove pre-admission cancellation has no later
+mutation.
 
 ## Instrumentation
 

@@ -2266,6 +2266,45 @@ impl RollingTerminalResultReceipt {
     }
 }
 
+#[derive(Clone)]
+struct RollingTerminalIdentity {
+    generation: String,
+    owner_node_id: String,
+    owner_epoch: u64,
+    client_instance_id: String,
+    sequence: u64,
+    snapshot: crate::playback_control::PlaybackDemandSnapshot,
+}
+
+impl RollingTerminalIdentity {
+    fn from_request(control: &crate::playback_control::LocalControlRequest<'_>) -> Self {
+        Self {
+            generation: control.generation.to_owned(),
+            owner_node_id: control.owner_node_id.to_owned(),
+            owner_epoch: control.owner_epoch,
+            client_instance_id: control.client_instance_id.to_owned(),
+            sequence: control.sequence,
+            snapshot: control.snapshot.clone(),
+        }
+    }
+
+    fn matches(&self, control: &crate::playback_control::LocalControlRequest<'_>) -> bool {
+        self.generation == control.generation
+            && self.owner_node_id == control.owner_node_id
+            && self.owner_epoch == control.owner_epoch
+            && self.client_instance_id == control.client_instance_id
+            && self.sequence == control.sequence
+            && self.snapshot == control.snapshot
+    }
+}
+
+#[derive(Clone)]
+struct RollingTerminalOperation {
+    identity: RollingTerminalIdentity,
+    result: RollingTerminalResultReceipt,
+    expires_at_unix_ms: i64,
+}
+
 struct Session {
     dir: PathBuf,
     /// The ffmpeg producing this session's segments — `None` for a cache hit,
@@ -2314,7 +2353,7 @@ struct Session {
     /// One actor-installed terminal operation shared by the original request
     /// and every exact retry. It owns physical convergence, response
     /// projection and the durable acknowledgement receipt.
-    terminal_control: std::sync::Mutex<Option<RollingTerminalResultReceipt>>,
+    terminal_control: std::sync::Mutex<Option<RollingTerminalOperation>>,
     /// Test-only seam after producer policy is applied but before the flow
     /// ticket is completed back to a waiting control response.
     #[cfg(test)]
@@ -6212,6 +6251,10 @@ pub struct TranscodeManager {
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Bounded terminal operations outlive rolling-session cleanup so an
+    /// exact End can retry the original immutable durable acknowledgement
+    /// after one Store-attempt window expires.
+    terminal_controls: std::sync::Mutex<HashMap<String, RollingTerminalOperation>>,
     cluster_replacement_gates: Arc<ClusterReplacementGates>,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
@@ -6340,6 +6383,7 @@ struct RollingTerminalAdmission {
     manager: Arc<TranscodeManager>,
     session_id: String,
     session: Arc<Session>,
+    identity: RollingTerminalIdentity,
     terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
     #[cfg(test)]
     control_pause: Option<Arc<tokio::sync::Barrier>>,
@@ -6351,6 +6395,12 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
             return;
         }
         let (receipt, sender) = RollingTerminalResultReceipt::pending();
+        let operation = RollingTerminalOperation {
+            identity: self.identity.clone(),
+            result: receipt,
+            expires_at_unix_ms: crate::media_sessions::unix_ms()
+                .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
+        };
         let handoff = {
             let mut shared = self
                 .session
@@ -6363,9 +6413,14 @@ impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmiss
             let handoff = crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
                 &self.session.terminal_response_pending,
             ));
-            *shared = Some(receipt);
+            *shared = Some(operation.clone());
             handoff
         };
+        self.manager
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.session_id.clone(), operation);
         let manager = Arc::clone(&self.manager);
         let session_id = self.session_id.clone();
         let session = Arc::clone(&self.session);
@@ -6445,6 +6500,7 @@ impl TranscodeManager {
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
             sessions: Mutex::new(HashMap::new()),
+            terminal_controls: std::sync::Mutex::new(HashMap::new()),
             cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
@@ -12836,6 +12892,28 @@ impl TranscodeManager {
             .map(|status| HlsSessionInfo::Live(Box::new(status)))
     }
 
+    fn rolling_terminal_operation(
+        &self,
+        control: &crate::playback_control::LocalControlRequest<'_>,
+    ) -> Result<Option<RollingTerminalOperation>, crate::playback_control::ControlStateError> {
+        let mut terminal = self
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(operation) = terminal.get(control.session_id).cloned() else {
+            return Ok(None);
+        };
+        if crate::media_sessions::unix_ms() >= operation.expires_at_unix_ms {
+            terminal.remove(control.session_id);
+            return Ok(None);
+        }
+        if operation.identity.matches(control) {
+            Ok(Some(operation))
+        } else {
+            Err(crate::playback_control::ControlStateError::SessionEnded)
+        }
+    }
+
     /// Fenced behavior-neutral control for either HLS presentation. A newly
     /// accepted sequence renews the selected engine's established activity
     /// clock with the explicit `control` reason; replay and rejection do not.
@@ -12864,6 +12942,21 @@ impl TranscodeManager {
             crate::playback_control::ControlStateError,
         >,
     > {
+        match self.rolling_terminal_operation(&control) {
+            Ok(Some(operation)) => {
+                let mut result = match operation.result.wait().await {
+                    Ok(result) => result,
+                    Err(error) => return Some(Err(error)),
+                };
+                result.disposition = crate::playback_control::ControlDisposition::Replay;
+                if let Some(commit) = &result.terminal_commit {
+                    commit.retry();
+                }
+                return Some(Ok(result));
+            }
+            Err(error) => return Some(Err(error)),
+            Ok(None) => {}
+        }
         if let Some(result) = self
             .vod
             .control_with_terminal(
@@ -12919,6 +13012,7 @@ impl TranscodeManager {
                     manager: Arc::clone(self),
                     session_id: session_id.clone(),
                     session: Arc::clone(&session),
+                    identity: RollingTerminalIdentity::from_request(&control),
                     terminal_committer: terminal_committer.clone(),
                     #[cfg(test)]
                     control_pause: control_pause.clone(),
@@ -12949,7 +13043,18 @@ impl TranscodeManager {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone();
             return Some(match terminal {
-                Some(terminal) => terminal.wait().await,
+                Some(terminal) => match terminal.result.wait().await {
+                    Ok(mut result) => {
+                        result.disposition = disposition;
+                        if disposition == crate::playback_control::ControlDisposition::Replay {
+                            if let Some(commit) = &result.terminal_commit {
+                                commit.retry();
+                            }
+                        }
+                        Ok(result)
+                    }
+                    Err(error) => Err(error),
+                },
                 None => Err(crate::playback_control::ControlStateError::Unavailable),
             });
         }
@@ -14840,6 +14945,11 @@ impl TranscodeManager {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         loop {
             ticker.tick().await;
+            let now_unix_ms = crate::media_sessions::unix_ms();
+            self.terminal_controls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, operation| operation.expires_at_unix_ms > now_unix_ms);
             let limits = self.ahead_limits().await;
             let mut expired = Vec::new();
             let mut live = Vec::new();
@@ -16186,11 +16296,12 @@ mod tests {
                 snapshot,
             }
         };
+        let committer = crate::playback_control::RecoveringTerminalCommitter::new();
 
         let accepted = fixture
             .state
             .transcode
-            .hls_session_control(request(1))
+            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
             .await
             .expect("local worker")
             .expect("end accepted");
@@ -16214,19 +16325,80 @@ mod tests {
                 .terminal,
             Some(crate::playback_control::RollingTerminalCause::End)
         );
+        assert!(matches!(
+            accepted
+                .terminal_commit
+                .as_ref()
+                .expect("rolling terminal receipt")
+                .wait()
+                .await,
+            Err(())
+        ));
+        assert_eq!(committer.attempts(), 1);
+        assert!(
+            fixture
+                .state
+                .transcode
+                .retire_session(&session_id, &fixture.session)
+                .await,
+            "rolling cleanup may remove the retired worker after a bounded failed attempt"
+        );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .sessions
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the retry proof must use the manager terminal tombstone, not the live session"
+        );
 
-        let replay = fixture
-            .state
-            .transcode
-            .hls_session_control(request(1))
-            .await
-            .expect("local terminal worker")
-            .expect("exact end replay");
+        let (replay_a, replay_b) = tokio::join!(
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            ),
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            )
+        );
+        let replay_a = replay_a
+            .expect("first local terminal worker")
+            .expect("first exact end replay");
+        let replay_b = replay_b
+            .expect("second local terminal worker")
+            .expect("second exact end replay");
         assert_eq!(
-            replay.disposition,
+            replay_a.disposition,
             crate::playback_control::ControlDisposition::Replay
         );
-        assert_eq!(replay.lease_state, "ended");
+        assert_eq!(
+            replay_b.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(replay_a.lease_state, "ended");
+        assert_eq!(replay_b.lease_state, "ended");
+        assert_eq!(committer.attempts(), 2);
+        let committed_a = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("first retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("first recovered terminal response");
+        let committed_b = replay_b
+            .terminal_commit
+            .as_ref()
+            .expect("second retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("second recovered terminal response");
+        assert_eq!(committed_a, committed_b);
+        assert_eq!(committed_a.server_time_unix_ms, 1);
         assert!(matches!(
             fixture
                 .state
