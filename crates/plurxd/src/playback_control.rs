@@ -1838,6 +1838,8 @@ struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
     flow_capacity_available: tokio::sync::Notify,
+    #[cfg(test)]
+    flow_capacity_wait_started: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -2056,6 +2058,8 @@ impl RollingProducerIngress {
             state: std::sync::Mutex::new(RollingProducerIngressState::default()),
             notify: tokio::sync::Notify::new(),
             flow_capacity_available: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            flow_capacity_wait_started: tokio::sync::Notify::new(),
         }
     }
 
@@ -2083,11 +2087,18 @@ impl RollingProducerIngress {
     /// Wait until a fixed flow-barrier slot is available. The caller must
     /// re-acquire the transition fence and reserve after this returns: space
     /// is only a wake condition, never authorization for a process syscall.
-    async fn wait_for_flow_barrier_capacity(&self) {
+    async fn wait_for_flow_barrier_capacity(
+        &self,
+        retired: &AtomicBool,
+        actor: &tokio::sync::mpsc::Sender<RollingControlCommand>,
+    ) -> bool {
         loop {
             let notified = self.flow_capacity_available.notified();
             tokio::pin!(notified);
             notified.as_mut().enable();
+            if retired.load(Ordering::Acquire) || actor.is_closed() {
+                return false;
+            }
             let has_capacity = {
                 let state = self
                     .state
@@ -2096,10 +2107,19 @@ impl RollingProducerIngress {
                 state.flow.len() + state.flow_reservations < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY
             };
             if has_capacity {
-                return;
+                return true;
             }
-            notified.as_mut().await;
+            #[cfg(test)]
+            self.flow_capacity_wait_started.notify_one();
+            tokio::select! {
+                _ = notified.as_mut() => {}
+                _ = actor.closed() => return false,
+            }
         }
+    }
+
+    fn notify_flow_capacity_waiters(&self) {
+        self.flow_capacity_available.notify_waiters();
     }
 
     fn finish_reserved_flow_barrier(
@@ -2214,6 +2234,7 @@ impl RollingProducerIngress {
                 // source reports another; only a later attempt can replace
                 // a pending predecessor.
                 if pending.event.event.producer_attempt() >= incoming_attempt {
+                    ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
                     return;
                 }
                 ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
@@ -2339,6 +2360,10 @@ pub(crate) struct RollingControlHandle {
     producer_events: Arc<RollingProducerIngress>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    actor_abort: Option<tokio::task::AbortHandle>,
+    #[cfg(test)]
+    actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
 
 struct OwnedLocalControlRequest {
@@ -2406,6 +2431,36 @@ struct RollingActorRuntime {
     producer_events: Arc<RollingProducerIngress>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    actor_exit_fence_started: Arc<tokio::sync::Notify>,
+}
+
+/// Publishes actor unavailability under the same transition fence used by
+/// every process signal. This local is created inside `run`, so Rust drops it
+/// before the receiver and actor parameters on return, cancellation, or
+/// unwind; `Sender::closed()` therefore cannot become externally visible
+/// before the fail-closed retirement fence has linearized.
+struct RollingActorExitFence {
+    retired: Arc<AtomicBool>,
+    producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
+    flow_sync: Arc<RollingFlowSync>,
+    producer_events: Arc<RollingProducerIngress>,
+    #[cfg(test)]
+    started: Arc<tokio::sync::Notify>,
+}
+
+impl Drop for RollingActorExitFence {
+    fn drop(&mut self) {
+        #[cfg(test)]
+        self.started.notify_one();
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        self.retired.store(true, Ordering::Release);
+        self.producer_events.notify_flow_capacity_waiters();
+        self.flow_sync.request();
+    }
 }
 
 struct RollingControlActor {
@@ -2433,6 +2488,8 @@ struct RollingControlActor {
     last_flow_ticket: u64,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
+    #[cfg(test)]
+    actor_exit_fence_started: Arc<tokio::sync::Notify>,
 }
 
 impl RollingControlActor {
@@ -2450,6 +2507,7 @@ impl RollingControlActor {
                 flow_sync: Arc::new(RollingFlowSync::new()),
                 producer_events: Arc::new(RollingProducerIngress::new()),
                 producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
+                actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
             },
         )
     }
@@ -2467,6 +2525,8 @@ impl RollingControlActor {
             producer_events,
             #[cfg(test)]
             producer_attempt_reply_pause,
+            #[cfg(test)]
+            actor_exit_fence_started,
         } = runtime;
         Self {
             control: ControlState::default(),
@@ -2493,6 +2553,8 @@ impl RollingControlActor {
             last_flow_ticket: 0,
             #[cfg(test)]
             producer_attempt_reply_pause,
+            #[cfg(test)]
+            actor_exit_fence_started,
         }
     }
 
@@ -3215,6 +3277,7 @@ impl RollingControlActor {
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
         self.retired_fence.store(true, Ordering::Release);
+        self.producer_events.notify_flow_capacity_waiters();
         self.last_flow_ticket = self.flow_sync.request();
         ROLLING_TERMINAL_EVENT_OUTCOMES[metric_base].fetch_add(1, Ordering::Relaxed);
         match cause {
@@ -3419,6 +3482,14 @@ impl RollingControlActor {
     }
 
     async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlCommand>) {
+        let _exit_fence = RollingActorExitFence {
+            retired: Arc::clone(&self.retired_fence),
+            producer_transition: Arc::clone(&self.producer_transition),
+            flow_sync: Arc::clone(&self.flow_sync),
+            producer_events: Arc::clone(&self.producer_events),
+            #[cfg(test)]
+            started: Arc::clone(&self.actor_exit_fence_started),
+        };
         loop {
             if self.retired {
                 let producer_events = Arc::clone(&self.producer_events);
@@ -3483,22 +3554,27 @@ impl RollingControlHandle {
         let producer_events = Arc::new(RollingProducerIngress::new());
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
-        tokio::spawn(
-            RollingControlActor::with_runtime(
-                now,
-                initial_kind,
-                RollingActorRuntime {
-                    retired_fence: Arc::clone(&retired),
-                    producer_attempt: Arc::clone(&producer_attempt),
-                    producer_transition: Arc::clone(&producer_transition),
-                    flow_sync: Arc::clone(&flow_sync),
-                    producer_events: Arc::clone(&producer_events),
-                    #[cfg(test)]
-                    producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
-                },
-            )
-            .run(receiver),
+        #[cfg(test)]
+        let actor_exit_fence_started = Arc::new(tokio::sync::Notify::new());
+        let actor = RollingControlActor::with_runtime(
+            now,
+            initial_kind,
+            RollingActorRuntime {
+                retired_fence: Arc::clone(&retired),
+                producer_attempt: Arc::clone(&producer_attempt),
+                producer_transition: Arc::clone(&producer_transition),
+                flow_sync: Arc::clone(&flow_sync),
+                producer_events: Arc::clone(&producer_events),
+                #[cfg(test)]
+                producer_attempt_reply_pause: Arc::clone(&producer_attempt_reply_pause),
+                #[cfg(test)]
+                actor_exit_fence_started: Arc::clone(&actor_exit_fence_started),
+            },
         );
+        let actor_task = tokio::spawn(actor.run(receiver));
+        #[cfg(test)]
+        let actor_abort = Some(actor_task.abort_handle());
+        drop(actor_task);
         Self {
             sender,
             retired,
@@ -3508,6 +3584,10 @@ impl RollingControlHandle {
             producer_events,
             #[cfg(test)]
             producer_attempt_reply_pause,
+            #[cfg(test)]
+            actor_abort,
+            #[cfg(test)]
+            actor_exit_fence_started,
         }
     }
 
@@ -3526,6 +3606,8 @@ impl RollingControlHandle {
             flow_sync: Arc::new(RollingFlowSync::new()),
             producer_events: Arc::new(RollingProducerIngress::new()),
             producer_attempt_reply_pause: Arc::new(std::sync::Mutex::new(None)),
+            actor_abort: None,
+            actor_exit_fence_started: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -3814,6 +3896,43 @@ impl RollingControlHandle {
             })
     }
 
+    #[cfg(test)]
+    pub(crate) fn reserve_producer_flow_capacity_for_test(&self) -> bool {
+        self.producer_events.reserve_flow_barrier()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn release_producer_flow_capacity_for_test(&self) {
+        self.producer_events.finish_reserved_flow_barrier(
+            RollingProducerFlowObservation {
+                producer_attempt: self.current_producer_attempt(),
+                state: ProducerPhysicalFlowState::Running,
+            },
+            false,
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_producer_flow_deferral_for_test(&self) {
+        self.producer_events
+            .flow_capacity_wait_started
+            .notified()
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn abort_actor_for_test(&self) {
+        self.actor_abort
+            .as_ref()
+            .expect("spawned actor abort handle")
+            .abort();
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_actor_exit_fence_for_test(&self) {
+        self.actor_exit_fence_started.notified().await;
+    }
+
     /// Authorize the one physical producer transition guarded by `guard`.
     ///
     /// The actor timer and this check share the same mutex and deadline. A
@@ -3835,7 +3954,10 @@ impl RollingControlHandle {
         _guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
         producer_attempt: u64,
     ) -> bool {
-        if self.is_retired() || self.current_producer_attempt() != producer_attempt {
+        if self.is_retired()
+            || self.sender.is_closed()
+            || self.current_producer_attempt() != producer_attempt
+        {
             return false;
         }
         self.producer_events.reserve_flow_barrier()
@@ -3868,8 +3990,15 @@ impl RollingControlHandle {
     /// attempt transition fence. The child owner rechecks that fence after
     /// waking, so replacement or retirement always wins over the deferred
     /// signal.
-    pub(crate) async fn wait_for_producer_flow_capacity(&self) {
-        self.producer_events.wait_for_flow_barrier_capacity().await;
+    pub(crate) async fn wait_for_producer_flow_capacity(&self) -> bool {
+        let available = self
+            .producer_events
+            .wait_for_flow_barrier_capacity(&self.retired, &self.sender)
+            .await;
+        if !available && !self.is_retired() {
+            self.fence_unavailable();
+        }
+        available
     }
 
     fn producer_transition_is_live_at(
@@ -3877,7 +4006,7 @@ impl RollingControlHandle {
         guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
         now: Instant,
     ) -> bool {
-        !self.is_retired() && now < guard.lease_deadline
+        !self.is_retired() && !self.sender.is_closed() && now < guard.lease_deadline
     }
 
     /// A closed mailbox cannot accept another renewal. The repair loop uses
@@ -3888,6 +4017,7 @@ impl RollingControlHandle {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         self.retired.store(true, Ordering::Release);
+        self.producer_events.notify_flow_capacity_waiters();
         self.flow_sync.request();
     }
 
@@ -4170,7 +4300,7 @@ pub(crate) fn prometheus() -> String {
     output.push_str(
         "# HELP plurx_playback_rolling_producer_event_ingress_total Nonblocking rolling producer observations submitted, including coalesced samples.\n\
          # TYPE plurx_playback_rolling_producer_event_ingress_total counter\n\
-         # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations folded into a bounded same-attempt coverage batch or superseded by a newer attempt before actor drain.\n\
+         # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations folded or deduplicated into bounded same-attempt ingress evidence, or superseded by a newer attempt before actor drain.\n\
          # TYPE plurx_playback_rolling_producer_event_coalesced_total counter\n",
     );
     for (index, event) in ["progress", "exit"].iter().enumerate() {
@@ -5877,6 +6007,35 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_exit_before_one_drain_is_counted_as_coalesced_and_preserves_first() {
+        let started = Instant::now();
+        let first = producer_exit(1, true, Some(0), None, started);
+        let before = ROLLING_PRODUCER_EVENT_COALESCED[1].load(Ordering::Relaxed);
+        let ingress = RollingProducerIngress::new();
+
+        ingress.publish_at(
+            RollingProducerEvent::Exit(first.clone()),
+            true,
+            started + Duration::from_secs(1),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Exit(first.clone()),
+            true,
+            started + Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            ingress.drain(),
+            vec![RollingProducerEvent::Exit(first)],
+            "the first exact terminal observation owns the exit barrier"
+        );
+        assert!(
+            ROLLING_PRODUCER_EVENT_COALESCED[1].load(Ordering::Relaxed) > before,
+            "a duplicate removed before actor delivery is accounted as coalesced"
+        );
+    }
+
+    #[test]
     fn stale_predecessor_exit_cannot_settle_before_timely_successor_progress() {
         let started = Instant::now();
         let successor_started = started + Duration::from_secs(10);
@@ -6079,15 +6238,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stale_flow_revision_or_attempt_cannot_change_state_or_rearm_deadline() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_secs(5),
+            ProducerFlowApplied {
+                revision: 2,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_secs(5),
+            },
+        );
+        assert_eq!(actor.producer_flow_revision, 2);
+        assert_eq!(
+            actor.producer_physical_flow,
+            ProducerPhysicalFlowState::Held
+        );
+        assert_eq!(actor.producer_progress_deadline, None);
+
+        for applied in [
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Running,
+                published_at: started + Duration::from_secs(6),
+            },
+            ProducerFlowApplied {
+                revision: 3,
+                producer_attempt: 0,
+                state: ProducerPhysicalFlowState::Running,
+                published_at: started + Duration::from_secs(7),
+            },
+        ] {
+            actor.apply_producer_flow_applied_at(applied.published_at, applied);
+            assert_eq!(actor.producer_flow_revision, 2);
+            assert_eq!(
+                actor.producer_physical_flow,
+                ProducerPhysicalFlowState::Held
+            );
+            assert_eq!(actor.producer_progress_deadline, None);
+        }
+    }
+
     #[tokio::test]
     async fn flow_barrier_capacity_defers_then_wakes_a_third_signal_before_application() {
         let ingress = RollingProducerIngress::new();
         assert!(ingress.reserve_flow_barrier());
         assert!(ingress.reserve_flow_barrier());
         assert!(!ingress.reserve_flow_barrier());
+        let retired = AtomicBool::new(false);
+        let (actor, _receiver) = tokio::sync::mpsc::channel(1);
 
         let wait_then_reserve = async {
-            ingress.wait_for_flow_barrier_capacity().await;
+            assert!(
+                ingress
+                    .wait_for_flow_barrier_capacity(&retired, &actor)
+                    .await
+            );
             assert!(ingress.reserve_flow_barrier());
             ingress.finish_reserved_flow_barrier(
                 RollingProducerFlowObservation {
@@ -6116,6 +6327,19 @@ mod tests {
             false,
         );
         assert!(ingress.drain_blocks().is_empty());
+    }
+
+    #[tokio::test]
+    async fn closed_actor_mailbox_fences_and_releases_a_full_capacity_waiter() {
+        let control = RollingControlHandle::unavailable_for_test();
+        assert!(control.reserve_producer_flow_capacity_for_test());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+
+        assert!(!control.wait_for_producer_flow_capacity().await);
+        assert!(control.is_retired());
+
+        control.release_producer_flow_capacity_for_test();
+        control.release_producer_flow_capacity_for_test();
     }
 
     #[test]
