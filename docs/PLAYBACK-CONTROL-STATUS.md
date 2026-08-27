@@ -3,15 +3,19 @@
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `48ea494c` (PR #619)
 **Current work:** [PR #621](https://github.com/pjunod/plurx/pull/621) on
-`codex/playback-control-m4-deadline-cutoff` — review round 1 at exact head
-`4f40dc7c32d0ac693505ed714d0d09a79144a9bc` returned **REQUEST CHANGES**.
+`codex/playback-control-m4-deadline-cutoff` — review round 2 at exact head
+`16723536fce2e4362f0945c4f1b1e1eb3841a311` returned **REQUEST CHANGES**;
+the repair implementation is committed at
+`77d90a8eb621d687ca3febe6306dbc7f7c651a83` and awaits exact-head round 3 before
+any tests.
 The action-passive actor deadline consumes the merged constant-space progress
-proof and records one exact provisional due coordinate without retrying,
-killing, or replacing anything. Producer facts are captured under the shared
-transition-plus-ingress fence and exact physical hold/resume acknowledgements
-join that fence. Lifecycle commands do not yet share the ingress sequence, so
-terminal state revokes the non-production observation and the legacy watchdog
-remains the only recovery action owner.
+proof and records one exact provisional due coordinate without starting a
+recovery retry, killing, or replacing anything. Producer facts use the shared
+transition-plus-ingress fence; exact physical hold/resume acknowledgements are
+bounded ordered barriers that preserve preceding progress and wait before the
+syscall when ingress is full. Lifecycle commands do not yet share the ingress
+sequence, so terminal state revokes the non-production observation and the
+legacy watchdog remains the only recovery action owner.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -32,7 +36,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; review-round-1 repairs for the provisional actor deadline implemented locally | Obtain fresh exact-head approval and prove the passive cutoff, then add sequenced commands/decisions and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; round-2 repairs for the provisional actor deadline committed at `77d90a8eb621d687ca3febe6306dbc7f7c651a83` | Obtain exact-head round-3 approval and prove the passive cutoff, then add sequenced commands/decisions, operational projection, and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -83,8 +87,9 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Review-round-1 repairs implemented locally; not tested.** Producer facts now fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, retain coalesced physical hold/resume state, and reject duplicate/regressing rearm evidence. The result remains provisional until command sequencing lands and emits no recovery action. |
-| Adversarial implementation review | **Request changes — round 1.** Exact head `4f40dc7c32d0ac693505ed714d0d09a79144a9bc` requires the seven corrections above and a fresh exact-head approval before tests. |
+| Passive deadline/cutoff | **Round-2 repairs committed; not tested.** Producer facts fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, preserve progress around bounded sequenced physical-flow barriers, wait and re-authorize before a full-capacity STOP/CONT syscall, sample dispatch after both fences, and reject duplicate/regressing rearm evidence. The result remains provisional until command sequencing lands and emits no recovery action. |
+| Operational projection | **Deferred, explicitly.** Armed deadline mode/coordinate, provisional due, process-exit due, flow revision, and physical-flow state remain actor-private and absent from lease snapshots, Activity/status, and Prometheus. Only `plurx_playback_rolling_producer_flow_deferrals_total` is exported. Add the bounded projection in the decision/action slice before watchdog removal. |
+| Adversarial implementation review | **Request changes — round 2.** Exact head `16723536fce2e4362f0945c4f1b1e1eb3841a311` could erase due on late/coalesced flow, discarded progress at flow publication, sampled dispatch before contended fences, and carried stale handoff/status evidence. Commit `77d90a8eb621d687ca3febe6306dbc7f7c651a83` repairs those findings; exact-head round 3 is required before tests. |
 | Unit/focused tests | **Not run for this slice.** Deterministic tests are authored but wait for exact-head adversarial approval after the review findings are fixed. |
 | Full/cluster/hosted gates | **Pending for this slice.** After approval: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 

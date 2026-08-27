@@ -6,9 +6,12 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Current exact head:** `4f40dc7c32d0ac693505ed714d0d09a79144a9bc`
-(`origin/codex/playback-control-m4-deadline-cutoff`); it contains the initial
-runtime commit, validation mapping, and this PR handoff update
+**Last reviewed exact head:** `16723536fce2e4362f0945c4f1b1e1eb3841a311`
+(round 2 returned **REQUEST CHANGES**)
+**Current repair implementation:**
+`77d90a8eb621d687ca3febe6306dbc7f7c651a83` (the documentation refresh follows
+it; resolve the immutable branch tip with `git rev-parse HEAD` before requesting
+round 3)
 **Test state:** no tests, builds, or checks have run for the current slice;
 the adversarial PR review must happen first
 
@@ -87,7 +90,7 @@ The merged branch contains:
 - synchronized Markdown and HTML status pages; and
 - regression-history evidence.
 
-Committed branch sequence through the last pushed head:
+Committed sequence for merged PR #619:
 
 ```text
 dafb2b9f feat(playback): retain producer deadline coverage
@@ -106,7 +109,7 @@ b918fdfd test(validation): specify callable ownership contexts
 10c95e6d test(validation): distinguish raw keyword owners
 ```
 
-### Adversarial review chronology
+### PR #621 adversarial review chronology
 
 PR #621 review round 1 at exact head `4f40dc7c32d0ac693505ed714d0d09a79144a9bc`
 returned **REQUEST CHANGES**. Seven implementation obligations must be fixed
@@ -125,16 +128,37 @@ before validation:
 7. Reject duplicate or regressing rearm evidence by exact-attempt identity and
    monotonic coverage, including exit/successor races.
 
-All seven repairs are now implemented locally: cutoff holds the transition and
-ingress fences through one producer-fact fold; delayed exits use their fenced
-publication coordinate; non-success exit records an immediate typed passive
-outcome; duplicate exit cannot rearm; successful SIGSTOP/SIGCONT publishes an
-exact-attempt physical acknowledgement before the process fence is released;
-and terminal lifecycle state revokes the provisional result. A fresh exact-head
-adversarial review is still required before any test, build, or check. Until
-shared command sequencing lands, the deadline is an observation/proof surface
-only and must not trigger retry, kill, replacement, hold, resume, or other
-recovery action.
+Those seven implementation repairs landed in `a409a194`; `16723536` documented
+them and became the round-2 review head. Round 2 returned **REQUEST CHANGES**:
+
+1. a late or coalesced physical-flow acknowledgement could erase an
+   already-won provisional due coordinate;
+2. flow publication discarded preceding progress instead of sealing it as an
+   ordered barrier; and
+3. this handoff and both status pages still identified the round-1 head.
+
+Independent passes also required true ingress sequencing for physical-flow
+acknowledgements, called out the absent status/Prometheus projection for the
+new actor-private deadline state, found dispatch time sampled before two
+possibly contended fences, and corrected duplicate-exit metrics.
+
+Commit `77d90a8eb621d687ca3febe6306dbc7f7c651a83` repairs that review. Successful
+exact-attempt SIGSTOP/SIGCONT now becomes a bounded sequenced `FlowApplied`
+barrier that seals and preserves preceding progress. A full two-slot barrier
+queue defers before the syscall, waits for actor-drained capacity, then
+re-authorizes the exact attempt under the transition fence. The bounded
+`plurx_playback_rolling_producer_flow_deferrals_total` metric records that
+backpressure. Dispatch time is sampled only after transition and ingress are
+owned, local flow application claims lifecycle expiry first, timely and late
+holds retain their distinct meanings, and duplicate exit stays idempotent
+while counting as rejected.
+
+A fresh exact-head round-3 adversarial review is still required before any
+test, build, or check. Until shared command sequencing lands, the deadline is
+an observation/proof surface only and must not trigger recovery retry, kill,
+replacement, hold, resume, or another recovery action.
+
+### PR #619 adversarial review chronology
 
 Thirteen exact-head reviews ran. No tests were run during them.
 
@@ -208,13 +232,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is pushed in PR #621. Review round 1 returned
+The action-passive deadline slice is in PR #621. Review round 2 returned
 **REQUEST CHANGES** at exact head
-`4f40dc7c32d0ac693505ed714d0d09a79144a9bc`; all seven repairs are local and
-remain untested pending a new exact-head review.
+`16723536fce2e4362f0945c4f1b1e1eb3841a311`. The repair implementation is
+committed at `77d90a8eb621d687ca3febe6306dbc7f7c651a83`; it and this documentation
+refresh remain untested pending exact-head round 3.
 
-- Commit and push the seven review repairs, then request adversarial review of
-  the new exact immutable PR head.
+- Push this candidate, resolve the immutable remote head, and request
+  adversarial round-3 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -226,7 +251,7 @@ review before local unit tests and full verification before merge.
 ## 5. Current bounded M4 slice after #619
 
 A read-only Luna scout inspected the contract and current code without editing
-or testing. Its recommended smallest slice is now implemented locally:
+or testing. Its recommended smallest slice is now in the PR candidate:
 
 - add actor-private `ProducerProgressDeadline` state beside producer facts in
   `RollingControlActor`;
@@ -245,28 +270,39 @@ before cutoff, gives lease/session terminal state priority, and disarms the
 passive deadline after one observation so it cannot spin. Producer cutoff now
 captures under the synchronous transition plus ingress fence and folds once;
 the sole process supervisor publishes successful exact-attempt SIGSTOP/SIGCONT
-state before releasing that fence, so intentional holds disarm the clock and a
-resume grants a fresh full budget. The temporary starting budget is the
-conservative 30-second compatibility value until the next policy-admission
-slice supplies the existing 12-second hardware or 30-second software/copy
-budget. No recovery behavior consults this passive observation.
+as ordered ingress barriers before releasing that fence. Full bounded ingress
+waits before the syscall and re-authorizes after actor drain; intentional holds
+disarm the clock and a resume grants a fresh full budget. The temporary
+starting budget is the conservative 30-second compatibility value until the
+next policy-admission slice supplies the existing 12-second hardware or
+30-second software/copy budget. No recovery behavior consults this passive
+observation.
+
+The armed `ProducerProgressDeadline`, provisional due record, process-exit due,
+flow revision, and physical-flow state remain actor-private. They are not yet
+projected through `RollingLeaseSnapshot`, Activity/status, or Prometheus; only
+bounded flow-capacity deferrals are exported. The decision/action slice must
+add a bounded operational projection before any legacy watchdog is removed.
 
 Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
 
-- `ProgressCoverageBatch` and ingress drain near lines 1787–1904;
-- `RollingControlActor` producer state near lines 2197–2217;
-- `begin_producer_attempt_at` near lines 2407–2427;
-- `observe_producer_progress_at` near lines 2429–2460;
-- `observe_producer_exit_at` near lines 2462–2483; and
-- actor `run` near lines 2810–2861.
+- `ProgressCoverageBatch` and ingress near line 1892;
+- `RollingControlActor` producer state near line 2411;
+- `begin_producer_attempt_at` near line 2758;
+- `observe_producer_progress_at` near line 2826;
+- `observe_producer_exit_at` near line 2849; and
+- actor `run` near line 3421.
 
 Authored but not yet run focused evidence covers exact starting expiry and
-idempotent settlement, scheduler-delayed dispatch, rearm from fenced publication
-time, late/duplicate progress, exact-boundary progress and non-success exit,
-contiguous versus gapped A/B/C coverage, capture while blocked on the transition
-fence, stale-exit/successor-progress ordering, successful-exit classification
-and duplicate rejection, exact physical hold/resume acknowledgement, and
-lifecycle commands before/at/after the provisional producer due coordinate.
+idempotent settlement, scheduler-delayed dispatch, rearm from fenced
+publication time, late/duplicate progress, exact-boundary progress and
+non-success exit, contiguous versus gapped A/B/C coverage, capture while
+blocked on the transition fence, stale-exit/successor-progress ordering,
+successful-exit classification and duplicate rejection, progress sealed around
+ordered physical hold/resume barriers, timely versus late hold, capacity
+deferral/wakeup with exact-attempt re-authorization, exact lifecycle-expiry
+precedence, process-owner flow publication, and lifecycle commands
+before/at/after the provisional producer due coordinate.
 Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
@@ -276,7 +312,10 @@ Committed implementation sequence:
 ```text
 6b602d6c feat(playback): record actor producer deadlines
 dbf12d87 chore(validation): map passive deadline evidence
+4f40dc7c docs(playback): bind passive deadline PR
 a409a194 fix(playback): fence passive producer cutoff
+16723536 docs(playback): record passive cutoff review repairs
+77d90a8e fix(playback): sequence physical flow barriers
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
@@ -293,8 +332,9 @@ After the passive deadline slice:
 1. Add one immutable actor decision and nonblocking session-executor wake.
 2. Move the single allowed pre-publication validated retry behind that owner.
 3. Convert exact exits and copy classification to actor decisions.
-4. Move desired physical hold/resume actions and the now-fenced successful
-   acknowledgements into the shared actor ingress sequence.
+4. Add desired physical hold/resume command/intention barriers to the shared
+   actor sequence; retain the successful physical acknowledgements already in
+   producer ingress.
 5. Delete detached recovery loops, request-side exit verdicts, in-place
    replacement, `child_transition`, `watchdog_active`, and `replacing_child`;
    drive every legacy catalog sentinel to zero.
