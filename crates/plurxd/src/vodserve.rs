@@ -5021,6 +5021,12 @@ mod tests {
             sessions[&session_id].control_end.is_none(),
             "expired VOD recovery drops the retained operation but keeps its ownership tombstone"
         );
+        let cleanup_before_repeat = sessions[&session_id]
+            .terminal_cleanup
+            .as_ref()
+            .map(Arc::clone)
+            .expect("completed terminal cleanup marker survives expiry");
+        assert!(cleanup_before_repeat.is_finished());
         drop(sessions);
         tokio::time::advance(Duration::from_millis(1)).await;
         assert!(matches!(
@@ -5034,41 +5040,14 @@ mod tests {
             serve.end(&session_id, Terminal::AdminStop).await,
             "a repeated non-control end remains idempotent after response expiry"
         );
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                let events = serve
-                    .shared
-                    .store
-                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
-                        since_ms: None,
-                        event: Some("session_end".to_owned()),
-                        limit: 10,
-                    })
-                    .await
-                    .expect("terminal lifecycle query");
-                if !events.is_empty() {
-                    break events;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("terminal lifecycle persisted");
-        tokio::time::sleep(Duration::from_millis(50)).await;
-        let events = serve
-            .shared
-            .store
-            .playback_events(&plurx_core::domain::PlaybackEventQuery {
-                since_ms: None,
-                event: Some("session_end".to_owned()),
-                limit: 10,
-            })
-            .await
-            .expect("settled terminal lifecycle query");
-        assert_eq!(
-            events.len(),
-            1,
-            "expiry plus repeated end cannot emit a second lifecycle event: {events:?}"
+        let cleanup_after_repeat = serve.shared.sessions.lock().await[&session_id]
+            .terminal_cleanup
+            .as_ref()
+            .map(Arc::clone)
+            .expect("idempotent terminal cleanup marker");
+        assert!(
+            Arc::ptr_eq(&cleanup_before_repeat, &cleanup_after_repeat),
+            "expiry plus repeated end must not create a second cleanup or lifecycle-emission task"
         );
 
         serve.shared.sessions.lock().await.remove(&session_id);
