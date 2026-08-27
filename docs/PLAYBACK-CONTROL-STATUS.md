@@ -1,11 +1,12 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `9cd16d05` (PR #617)
-**Current work:** `codex/playback-control-m4-watchdog-removal` — M4 replaces
-the detached startup/lifetime recovery tasks with one actor-owned producer
-deadline, one exact-attempt action stream, and one stable post-publication
-proposal. The detailed slice contract is in
+**Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
+**Current work:** `codex/playback-control-m4-actor-deadline` — the first M4
+runtime slice replaces lossy producer-progress coalescing with the reviewed
+constant-space deadline-chain proof and checks the complete legacy owner
+inventory before the actor deadline is allowed to make recovery decisions.
+The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
@@ -23,7 +24,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Exact deletion and replacement contract frozen on merged M3 baseline | Add one producer deadline/action executor; remove detached recovery loops, in-place post-publication fallback, child-transition locks/atomics; add ownership check |
+| M4 — server watchdog removal | **In progress** | Adversarially reviewed deletion/replacement contract merged in #618; first runtime slice has a checked legacy-owner catalog and deadline-chain ingress in review | Add the active actor deadline/action executor; remove detached recovery loops, in-place post-publication fallback, and child-transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -46,12 +47,14 @@ not being counted as complete merely because its foundation has landed.
 | [#615](https://github.com/pjunod/plurx/pull/615) | M3c1 actor-owned, exact-attempt publication/fetch ledger and fenced producer installation | Exact-head adversarial approval at `7dffa5f3`; full local gate and every required hosted job green; merged as `46c08439` |
 | [#616](https://github.com/pjunod/plurx/pull/616) | M3c2 constant-space producer progress/exit ingress, exact-attempt actor facts, and one cancel-safe process supervisor | Exact-head adversarial approval at `4b818d39`; 12 focused tests, 1,927 full-workspace tests, every local gate, the long cluster gate, and all required hosted jobs green; merged as `8c6ccdf7` |
 | [#617](https://github.com/pjunod/plurx/pull/617) | M3c3 typed actor-owned End, authority fence, and lease expiry; atomic durable terminal acknowledgement and exact replay; cancellation-safe settlement and exhaustive event ordering | Exact-head adversarial approval at `6f127463`; `make check`, `make cluster-check`, and every hosted job green; merged as `9cd16d05` |
+| [#618](https://github.com/pjunod/plurx/pull/618) | M4 watchdog-removal ownership, deadline ordering, executor, cleanup, process-capacity, and post-publication proposal contract | Seven exact-head adversarial passes resolved 31 findings; final approval at `96799e60`; `make check`, `make cluster-check`, and hosted PR gate green; merged as `f9cef83b` |
 
 ## Active slice: M4 watchdog removal
 
-PR #617 completed M3 at merge `9cd16d05`: the actor now owns explicit End,
-authority fence, and exact lease expiry, and durable terminal replay survives
-request cancellation and cleanup.
+PR #618 merged the complete M4 implementation contract at `f9cef83b`, after
+seven adversarial passes and green local, cluster, and hosted gates. The actor
+already owns explicit End, authority fence, and exact lease expiry; this slice
+starts moving producer recovery evidence through that same owner.
 
 M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
@@ -68,12 +71,12 @@ Review and test state for M4:
 
 | Gate | State |
 |---|---|
-| Implementation contract | **Adversarially approved at `1925ab69` on the exact merged M3 baseline.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **In progress.** The first pass found the first-segment task, lifetime watcher, copy continuation, request-side exit verdict, direct copy failures, initial install paths, and every non-replacement duty hidden by `child_transition`. Implementation starts by generating a checked callsite catalog. |
-| Adversarial design review | **Approved.** Seven exact-head passes resolved thirty-one findings. The final pass approved `1925ab69`: command, exit, physical-flow, and classifier/probe facts all fence contiguous progress coverage; every action deadline settles; cleanup and process permits survive until confirmed reap; and no P1/P2 implementation blocker remains. |
-| Implementation | **Pending contract merge.** Actor deadline/decision state, session executor and exact-attempt supervisor integration, compatibility-path migration, deletion, status/metrics, and repository ownership check remain. |
-| Unit/focused tests | **Green at `808bea3b`.** `make check` passed policy/catalog checks, formatting, clippy, and the full workspace suite. |
-| Full/cluster/hosted gates | **Green for the contract PR at `808bea3b`.** `make cluster-check` passed the serial replicated-store suite and live cluster harness; hosted validation scope, policy preflight, and PR gate passed, with runtime/client jobs correctly skipped for this documentation-only diff. Runtime implementation gates remain future work. |
+| Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
+| Static owner inventory | **Implemented on the active branch.** `tests/playback/rolling-producer-owners.toml` names and exact-counts every remaining recovery/election/replacement symbol plus the production entrypoints and their replacement invariants. Repository validation fails on unreviewed owner drift. |
+| Progress ingress | **Implemented on the active branch.** One constant-space `ProgressCoverageBatch` retains first advancing progress, the contiguous covered tail/deadline, the first gap, and latest telemetry; exit seals the preceding batch so progress cannot fold across process death. |
+| Adversarial implementation review | **Pending PR.** It must review the exact implementation head before any unit test runs. |
+| Unit/focused tests | **Not run for this runtime slice.** Per project gate order, tests wait for the adversarial PR review. Contract PR #618 was green before merge. |
+| Full/cluster/hosted gates | **Pending for this runtime slice.** After review findings are fixed: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 
 ## Watchdog-removal ledger
 

@@ -36,6 +36,11 @@ const MAX_ERROR_DETAIL_BYTES: usize = 512;
 const MAX_CAPABILITY_VALUES: usize = 8;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
+/// Behavior-compatible advancing-output horizon used by the M4 producer
+/// ingress proof.  The actor does not yet act on this deadline in this slice;
+/// keeping the value beside the future owner prevents the coalescer from
+/// depending on the compatibility watchdog in `transcode.rs`.
+const PRODUCER_PROGRESS_BUDGET: Duration = Duration::from_secs(10);
 
 /// Preserve the ingress's absolute exchange deadline across a cluster hop.
 /// The cap also prevents a malformed trusted-peer envelope from extending the
@@ -1723,11 +1728,14 @@ impl RollingFlowSync {
 ///
 /// ffmpeg progress is read from a pipe that must never stop draining because
 /// a control request or filesystem observation filled the mailbox. Publishing
-/// here takes one short synchronous mutex, overwrites the prior progress fact,
-/// and wakes the actor; it never awaits. Exit has its own slot so a final
-/// process verdict cannot be overwritten by another progress line. Attempt
-/// numbers are monotonic, therefore a late predecessor line is also prevented
-/// from evicting an already-pending successor observation.
+/// here takes one short synchronous mutex and wakes the actor; it never awaits.
+/// Progress is retained as a constant-space deadline chain instead of only a
+/// first/latest sample: a delayed drain can therefore prove that every A-B-C
+/// link arrived inside the preceding progress horizon, while the first missing
+/// link is retained and later telemetry cannot bridge it. Exit seals the open
+/// batch into its barrier block so progress before and after process death can
+/// never be folded together. Command barriers join this same fence in the next
+/// M4 slice before the actor deadline becomes an active recovery owner.
 struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
@@ -1736,15 +1744,18 @@ struct RollingProducerIngress {
 #[derive(Default)]
 struct RollingProducerIngressState {
     next_sequence: u64,
-    progress: Option<SequencedProducerEvent>,
-    exit: Option<SequencedProducerEvent>,
+    progress: Option<ProgressCoverageBatch>,
+    exit: Option<SequencedProducerBarrier>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct SequencedProducerEvent {
     sequence: u64,
+    published_at: Instant,
     event: RollingProducerEvent,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum RollingProducerEvent {
     Progress(RollingProducerProgressObservation),
     Exit(RollingProducerExitObservation),
@@ -1755,6 +1766,170 @@ impl RollingProducerEvent {
         match self {
             Self::Progress(observation) => observation.producer_attempt,
             Self::Exit(observation) => observation.producer_attempt,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct PublishedProgress {
+    sequence: u64,
+    published_at: Instant,
+    observation: RollingProducerProgressObservation,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ProgressCoverageBatch {
+    producer_attempt: u64,
+    first_advancing: Option<PublishedProgress>,
+    covered_last: Option<PublishedProgress>,
+    covered_deadline: Option<Instant>,
+    first_gap: Option<PublishedProgress>,
+    latest_telemetry: PublishedProgress,
+}
+
+impl ProgressCoverageBatch {
+    fn new(sample: PublishedProgress) -> Self {
+        let producer_attempt = sample.observation.producer_attempt;
+        let advancing = sample
+            .observation
+            .out_time_ms
+            .is_some_and(|out_time_ms| out_time_ms >= 0);
+        let first_advancing = advancing.then(|| sample.clone());
+        let covered_last = first_advancing.clone();
+        let covered_deadline = covered_last.as_ref().map(|progress| {
+            progress
+                .published_at
+                .checked_add(PRODUCER_PROGRESS_BUDGET)
+                .unwrap_or(progress.published_at)
+        });
+        Self {
+            producer_attempt,
+            first_advancing,
+            covered_last,
+            covered_deadline,
+            first_gap: None,
+            latest_telemetry: sample,
+        }
+    }
+
+    fn first_sequence(&self) -> u64 {
+        self.first_advancing
+            .as_ref()
+            .map_or(self.latest_telemetry.sequence, |progress| progress.sequence)
+    }
+
+    fn first_published_at(&self) -> Instant {
+        self.first_advancing
+            .as_ref()
+            .map_or(self.latest_telemetry.published_at, |progress| {
+                progress.published_at
+            })
+    }
+
+    fn push(&mut self, mut sample: PublishedProgress) {
+        debug_assert_eq!(self.producer_attempt, sample.observation.producer_attempt);
+        sample.observation.speed_milli = sample
+            .observation
+            .speed_milli
+            .or(self.latest_telemetry.observation.speed_milli);
+        sample.observation.recent_speed_milli = sample
+            .observation
+            .recent_speed_milli
+            .or(self.latest_telemetry.observation.recent_speed_milli);
+        let advancing = sample
+            .observation
+            .out_time_ms
+            .filter(|out_time_ms| *out_time_ms >= 0)
+            .is_some_and(|out_time_ms| {
+                self.covered_last
+                    .as_ref()
+                    .and_then(|progress| progress.observation.out_time_ms)
+                    .is_none_or(|covered| out_time_ms > covered)
+            });
+
+        if advancing {
+            if self.first_advancing.is_none() {
+                self.first_advancing = Some(sample.clone());
+                self.covered_last = Some(sample.clone());
+                self.covered_deadline = Some(
+                    sample
+                        .published_at
+                        .checked_add(PRODUCER_PROGRESS_BUDGET)
+                        .unwrap_or(sample.published_at),
+                );
+            } else if self.first_gap.is_none()
+                && self
+                    .covered_deadline
+                    .is_some_and(|deadline| sample.published_at <= deadline)
+            {
+                self.covered_last = Some(sample.clone());
+                self.covered_deadline = Some(
+                    sample
+                        .published_at
+                        .checked_add(PRODUCER_PROGRESS_BUDGET)
+                        .unwrap_or(sample.published_at),
+                );
+            } else if self.first_gap.is_none() {
+                self.first_gap = Some(sample.clone());
+            }
+        }
+        self.latest_telemetry = sample;
+    }
+
+    /// Preserve today's one-coalesced-observation actor behavior while the
+    /// active deadline and due-first cutoff are introduced in the next slice.
+    /// The complete deadline-chain evidence remains in the batch until this
+    /// projection is made at actor drain.
+    fn into_observations(self) -> Vec<RollingProducerProgressObservation> {
+        let latest = self.latest_telemetry.observation;
+        let mut observation = self
+            .first_gap
+            .or(self.covered_last)
+            .or(self.first_advancing)
+            .map_or_else(|| latest.clone(), |progress| progress.observation);
+        observation.speed_milli = latest.speed_milli;
+        observation.recent_speed_milli = latest.recent_speed_milli;
+        vec![observation]
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SequencedProducerBarrier {
+    preceding_progress: Option<ProgressCoverageBatch>,
+    event: SequencedProducerEvent,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RollingProducerIngressBlock {
+    Progress(ProgressCoverageBatch),
+    Barrier(SequencedProducerBarrier),
+}
+
+impl RollingProducerIngressBlock {
+    fn order_key(&self) -> (u64, Instant) {
+        match self {
+            Self::Progress(batch) => (batch.first_sequence(), batch.first_published_at()),
+            Self::Barrier(barrier) => (barrier.event.sequence, barrier.event.published_at),
+        }
+    }
+
+    fn into_events(self) -> Vec<RollingProducerEvent> {
+        match self {
+            Self::Progress(batch) => batch
+                .into_observations()
+                .into_iter()
+                .map(RollingProducerEvent::Progress)
+                .collect(),
+            Self::Barrier(barrier) => {
+                let mut events = barrier
+                    .preceding_progress
+                    .into_iter()
+                    .flat_map(ProgressCoverageBatch::into_observations)
+                    .map(RollingProducerEvent::Progress)
+                    .collect::<Vec<_>>();
+                events.push(barrier.event.event);
+                events
+            }
         }
     }
 }
@@ -1776,10 +1951,28 @@ impl RollingProducerIngress {
     }
 
     fn publish(&self, event: RollingProducerEvent, is_exit: bool) {
+        self.publish_with_timestamp(event, is_exit, None);
+    }
+
+    #[cfg(test)]
+    fn publish_at(&self, event: RollingProducerEvent, is_exit: bool, published_at: Instant) {
+        self.publish_with_timestamp(event, is_exit, Some(published_at));
+    }
+
+    fn publish_with_timestamp(
+        &self,
+        event: RollingProducerEvent,
+        is_exit: bool,
+        published_at: Option<Instant>,
+    ) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // The publication coordinate is allocated only after the ingress
+        // fence is held. A producer task cannot obtain a pre-deadline stamp,
+        // lose the CPU, and insert the event after that deadline.
+        let published_at = published_at.unwrap_or_else(rolling_now);
         let metric_index = usize::from(is_exit);
         ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
         let incoming_attempt = event.producer_attempt();
@@ -1789,7 +1982,7 @@ impl RollingProducerIngress {
                 // first observation even if a contradictory waiter or test
                 // source reports another; only a later attempt can replace
                 // a pending predecessor.
-                if pending.event.producer_attempt() >= incoming_attempt {
+                if pending.event.event.producer_attempt() >= incoming_attempt {
                     return;
                 }
                 ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
@@ -1797,7 +1990,7 @@ impl RollingProducerIngress {
         } else if let Some(pending_attempt) = state
             .progress
             .as_ref()
-            .map(|pending| pending.event.producer_attempt())
+            .map(|pending| pending.producer_attempt)
         {
             if pending_attempt > incoming_attempt {
                 return;
@@ -1807,35 +2000,17 @@ impl RollingProducerIngress {
                 let RollingProducerEvent::Progress(incoming) = event else {
                     unreachable!("progress slot accepts only progress events");
                 };
-                {
-                    let pending = state.progress.as_mut().expect("observed progress slot");
-                    let RollingProducerEvent::Progress(current) = &mut pending.event else {
-                        unreachable!("progress slot contains only progress events");
-                    };
-                    let advanced = match (current.out_time_ms, incoming.out_time_ms) {
-                        (Some(current), Some(incoming)) => incoming > current,
-                        (None, Some(_)) => true,
-                        _ => false,
-                    };
-                    if advanced {
-                        current.out_time_ms = incoming.out_time_ms;
-                        current.observed_at = incoming.observed_at;
-                    }
-                    current.speed_milli = incoming.speed_milli.or(current.speed_milli);
-                    current.recent_speed_milli =
-                        incoming.recent_speed_milli.or(current.recent_speed_milli);
-                }
-                // This accepted observation happened after any pending exit,
-                // even though it shares the fixed progress slot. Give the
-                // merged fact its real publication order so terminal exit is
-                // applied first and rejects the later progress.
                 state.next_sequence = state.next_sequence.saturating_add(1);
                 let sequence = state.next_sequence;
                 state
                     .progress
                     .as_mut()
-                    .expect("merged progress slot")
-                    .sequence = sequence;
+                    .expect("merged progress batch")
+                    .push(PublishedProgress {
+                        sequence,
+                        published_at,
+                        observation: incoming,
+                    });
                 drop(state);
                 self.notify.notify_one();
                 return;
@@ -1843,29 +2018,54 @@ impl RollingProducerIngress {
         }
         state.next_sequence = state.next_sequence.saturating_add(1);
         let sequence = state.next_sequence;
-        let sequenced = Some(SequencedProducerEvent { sequence, event });
         if is_exit {
-            state.exit = sequenced;
+            let preceding_progress = state.progress.take();
+            state.exit = Some(SequencedProducerBarrier {
+                preceding_progress,
+                event: SequencedProducerEvent {
+                    sequence,
+                    published_at,
+                    event,
+                },
+            });
         } else {
-            state.progress = sequenced;
+            let RollingProducerEvent::Progress(observation) = event else {
+                unreachable!("progress publication contains a progress event");
+            };
+            state.progress = Some(ProgressCoverageBatch::new(PublishedProgress {
+                sequence,
+                published_at,
+                observation,
+            }));
         }
         drop(state);
         self.notify.notify_one();
     }
 
-    fn drain(&self) -> Vec<RollingProducerEvent> {
+    fn drain_blocks(&self) -> Vec<RollingProducerIngressBlock> {
         let mut pending = {
             let mut state = self
                 .state
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            [state.progress.take(), state.exit.take()]
-                .into_iter()
-                .flatten()
-                .collect::<Vec<_>>()
+            let mut pending = Vec::with_capacity(2);
+            if let Some(exit) = state.exit.take() {
+                pending.push(RollingProducerIngressBlock::Barrier(exit));
+            }
+            if let Some(progress) = state.progress.take() {
+                pending.push(RollingProducerIngressBlock::Progress(progress));
+            }
+            pending
         };
-        pending.sort_by_key(|event| event.sequence);
-        pending.into_iter().map(|event| event.event).collect()
+        pending.sort_by_key(RollingProducerIngressBlock::order_key);
+        pending
+    }
+
+    fn drain(&self) -> Vec<RollingProducerEvent> {
+        self.drain_blocks()
+            .into_iter()
+            .flat_map(RollingProducerIngressBlock::into_events)
+            .collect()
     }
 
     async fn next(&self) -> Vec<RollingProducerEvent> {
@@ -3261,7 +3461,7 @@ pub(crate) fn prometheus() -> String {
     output.push_str(
         "# HELP plurx_playback_rolling_producer_event_ingress_total Nonblocking rolling producer observations submitted, including coalesced samples.\n\
          # TYPE plurx_playback_rolling_producer_event_ingress_total counter\n\
-         # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations overwritten by a newer same-or-successor attempt before actor drain.\n\
+         # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations folded into a bounded same-attempt coverage batch or superseded by a newer attempt before actor drain.\n\
          # TYPE plurx_playback_rolling_producer_event_coalesced_total counter\n",
     );
     for (index, event) in ["progress", "exit"].iter().enumerate() {
@@ -4490,6 +4690,89 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn producer_progress_batch_proves_contiguous_deadlines_and_freezes_the_first_gap() {
+        let started = Instant::now();
+        let contiguous = RollingProducerIngress::new();
+        for (out_time_ms, seconds) in [(100, 0), (200, 9), (300, 18)] {
+            contiguous.publish_at(
+                RollingProducerEvent::Progress(producer_progress(
+                    1,
+                    out_time_ms,
+                    1_000,
+                    900,
+                    started + Duration::from_secs(seconds),
+                )),
+                false,
+                started + Duration::from_secs(seconds),
+            );
+        }
+        let contiguous_blocks = contiguous.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(contiguous)] = contiguous_blocks.as_slice()
+        else {
+            panic!("one contiguous progress block");
+        };
+        assert_eq!(
+            contiguous
+                .first_advancing
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(100)
+        );
+        assert_eq!(
+            contiguous
+                .covered_last
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(300)
+        );
+        assert_eq!(
+            contiguous.covered_deadline,
+            Some(started + Duration::from_secs(28))
+        );
+        assert_eq!(contiguous.first_gap, None);
+
+        let gapped = RollingProducerIngress::new();
+        for (out_time_ms, seconds) in [(100, 0), (200, 11), (300, 12)] {
+            gapped.publish_at(
+                RollingProducerEvent::Progress(producer_progress(
+                    1,
+                    out_time_ms,
+                    1_000,
+                    900,
+                    started + Duration::from_secs(seconds),
+                )),
+                false,
+                started + Duration::from_secs(seconds),
+            );
+        }
+        let gapped_blocks = gapped.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(gapped)] = gapped_blocks.as_slice() else {
+            panic!("one gapped progress block");
+        };
+        assert_eq!(
+            gapped
+                .covered_last
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(100),
+            "late progress cannot extend the proved prefix"
+        );
+        assert_eq!(
+            gapped
+                .first_gap
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(200),
+            "the first missed link is immutable"
+        );
+        assert_eq!(
+            gapped.latest_telemetry.observation.out_time_ms,
+            Some(300),
+            "later telemetry remains visible without bridging the gap"
+        );
+    }
+
     #[tokio::test]
     async fn producer_ingress_survives_a_full_actor_mailbox_with_command_causality() {
         let handle = RollingControlHandle::spawn("session-start");
@@ -4538,7 +4821,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_published_after_exit_drains_after_exit_and_stays_terminal() {
+    fn exit_seals_preceding_progress_and_later_progress_stays_terminal() {
         let started = Instant::now();
         let ingress = RollingProducerIngress::new();
         ingress.publish_progress(producer_progress(1, 100, 900, 800, started));
@@ -4559,11 +4842,12 @@ mod tests {
         let events = ingress.drain();
         assert_eq!(
             events.len(),
-            2,
-            "one retained exit and one retained progress"
+            3,
+            "the exit barrier retains one batch on each side"
         );
-        assert!(matches!(&events[0], RollingProducerEvent::Exit(_)));
-        assert!(matches!(&events[1], RollingProducerEvent::Progress(_)));
+        assert!(matches!(&events[0], RollingProducerEvent::Progress(_)));
+        assert!(matches!(&events[1], RollingProducerEvent::Exit(_)));
+        assert!(matches!(&events[2], RollingProducerEvent::Progress(_)));
 
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
@@ -4576,7 +4860,7 @@ mod tests {
             actor.handle_producer_event(event);
         }
         let delivery = actor.snapshot_at(started + Duration::from_secs(3)).delivery;
-        assert_eq!(delivery.producer_out_time_ms, None);
+        assert_eq!(delivery.producer_out_time_ms, Some(100));
         assert_eq!(
             delivery.producer_exit.as_ref().map(|exit| exit.code),
             Some(Some(7))
