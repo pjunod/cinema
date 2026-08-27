@@ -3,11 +3,15 @@
 **Updated:** 2026-08-27
 **Merged baseline:** `origin/main` at `48ea494c` (PR #619)
 **Current work:** [PR #621](https://github.com/pjunod/plurx/pull/621) on
-`codex/playback-control-m4-deadline-cutoff` — an
-action-passive actor deadline now consumes the merged constant-space progress
-proof, records one exact due coordinate, and performs lifecycle-first cutoff
-without retrying, killing, or replacing anything. The legacy watchdog remains
-the only recovery action owner until command sequencing and decisions land.
+`codex/playback-control-m4-deadline-cutoff` — review round 1 at exact head
+`4f40dc7c32d0ac693505ed714d0d09a79144a9bc` returned **REQUEST CHANGES**.
+The action-passive actor deadline consumes the merged constant-space progress
+proof and records one exact provisional due coordinate without retrying,
+killing, or replacing anything. Producer facts are captured under the shared
+transition-plus-ingress fence and exact physical hold/resume acknowledgements
+join that fence. Lifecycle commands do not yet share the ingress sequence, so
+terminal state revokes the non-production observation and the legacy watchdog
+remains the only recovery action owner.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -28,7 +32,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; action-passive actor deadline implemented locally | Review and prove the passive cutoff, then add sequenced commands/decisions and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Contract merged in #618; cutoff-safe deadline-chain ingress and checked legacy-owner inventory merged in #619; review-round-1 repairs for the provisional actor deadline implemented locally | Obtain fresh exact-head approval and prove the passive cutoff, then add sequenced commands/decisions and the action executor; remove detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -79,9 +83,9 @@ Review and test state for M4:
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
 | Static owner inventory | **Merged in #619.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the current branch adds the one named actor deadline while leaving every legacy count unchanged. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
-| Passive deadline/cutoff | **Implemented locally; not yet reviewed or tested.** `starting`, `advancing`, and `classifying_exit` share one actor-private deadline. Timely coverage rearms from fenced `published_at`; late/gapped progress cannot rescue; the actor records one immutable due coordinate and gives lease terminal state priority. It emits no recovery action. |
-| Adversarial implementation review | **Pending for PR #621.** PR #619 received final approval at `11315987` and merged as `48ea494c`; the new exact PR head must be reviewed before tests. |
-| Unit/focused tests | **Not run for this slice.** Deterministic tests are authored but wait for exact-head adversarial approval. |
+| Passive deadline/cutoff | **Review-round-1 repairs implemented locally; not tested.** Producer facts now fold once under transition plus ingress, use fenced publication timestamps, classify non-success exits immediately, retain coalesced physical hold/resume state, and reject duplicate/regressing rearm evidence. The result remains provisional until command sequencing lands and emits no recovery action. |
+| Adversarial implementation review | **Request changes — round 1.** Exact head `4f40dc7c32d0ac693505ed714d0d09a79144a9bc` requires the seven corrections above and a fresh exact-head approval before tests. |
+| Unit/focused tests | **Not run for this slice.** Deterministic tests are authored but wait for exact-head adversarial approval after the review findings are fixed. |
 | Full/cluster/hosted gates | **Pending for this slice.** After approval: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 
 ## Watchdog-removal ledger

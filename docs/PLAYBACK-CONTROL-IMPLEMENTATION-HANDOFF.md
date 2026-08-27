@@ -6,8 +6,8 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Current exact head:** resolve
-`origin/codex/playback-control-m4-deadline-cutoff`; it contains the initial
+**Current exact head:** `4f40dc7c32d0ac693505ed714d0d09a79144a9bc`
+(`origin/codex/playback-control-m4-deadline-cutoff`); it contains the initial
 runtime commit, validation mapping, and this PR handoff update
 **Test state:** no tests, builds, or checks have run for the current slice;
 the adversarial PR review must happen first
@@ -108,6 +108,34 @@ b918fdfd test(validation): specify callable ownership contexts
 
 ### Adversarial review chronology
 
+PR #621 review round 1 at exact head `4f40dc7c32d0ac693505ed714d0d09a79144a9bc`
+returned **REQUEST CHANGES**. Seven implementation obligations must be fixed
+before validation:
+
+1. Do not claim lifecycle commands already share due-first ordering; command
+   publication sequencing is absent, so the deadline result is provisional and
+   action-passive until that shared sequence exists.
+2. Capture producer facts under the producer-transition and ingress fence.
+3. Settle a due deadline exactly once, with explicit disarm/settled state.
+4. Rearm only from cutoff-safe physical publication timestamps, never delayed
+   observation or telemetry time.
+5. Classify every non-success producer exit immediately at its exit barrier.
+6. Route exact physical hold/resume acknowledgements through fenced actor state;
+   an issued command is not an acknowledgement.
+7. Reject duplicate or regressing rearm evidence by exact-attempt identity and
+   monotonic coverage, including exit/successor races.
+
+All seven repairs are now implemented locally: cutoff holds the transition and
+ingress fences through one producer-fact fold; delayed exits use their fenced
+publication coordinate; non-success exit records an immediate typed passive
+outcome; duplicate exit cannot rearm; successful SIGSTOP/SIGCONT publishes an
+exact-attempt physical acknowledgement before the process fence is released;
+and terminal lifecycle state revokes the provisional result. A fresh exact-head
+adversarial review is still required before any test, build, or check. Until
+shared command sequencing lands, the deadline is an observation/proof surface
+only and must not trigger retry, kill, replacement, hold, resume, or other
+recovery action.
+
 Thirteen exact-head reviews ran. No tests were run during them.
 
 1. `d0667bff`: cross-drain repeated timestamps could manufacture deadline
@@ -180,11 +208,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is pushed in PR #621 but unreviewed and
-untested.
+The action-passive deadline slice is pushed in PR #621. Review round 1 returned
+**REQUEST CHANGES** at exact head
+`4f40dc7c32d0ac693505ed714d0d09a79144a9bc`; all seven repairs are local and
+remain untested pending a new exact-head review.
 
-- Request adversarial review of the exact immutable PR head.
-- Do not run unit tests until the review approves. After approval, run focused
+- Commit and push the seven review repairs, then request adversarial review of
+  the new exact immutable PR head.
+- Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
 
@@ -202,18 +233,23 @@ or testing. Its recommended smallest slice is now implemented locally:
 - arm `starting` in `begin_producer_attempt_at`;
 - rearm `advancing` from accepted ingress `published_at`, never delayed
   `observed_at`;
-- enter `classifying_exit` on exact exit;
+- classify non-success exit immediately and enter `classifying_exit` only for
+  a successful exact exit needing completion proof;
 - choose the nearest lease/producer deadline in `run`, with a post-receive
   due-first cutoff rather than relying only on `tokio::select!` bias; and
 - emit no retry/kill/replace action yet.
 
-The local candidate also retains the exact armed instant in an immutable
-action-passive due record, applies exact-boundary progress before cutoff,
-gives lease terminal state priority on a deadline tie, and disarms the passive
-deadline after one verdict so it cannot spin. The temporary starting budget is
-the conservative 30-second compatibility value until the next policy-admission
+The local candidate retains the exact armed instant in a provisional
+action-passive due record, applies exact-boundary progress or non-success exit
+before cutoff, gives lease/session terminal state priority, and disarms the
+passive deadline after one observation so it cannot spin. Producer cutoff now
+captures under the synchronous transition plus ingress fence and folds once;
+the sole process supervisor publishes successful exact-attempt SIGSTOP/SIGCONT
+state before releasing that fence, so intentional holds disarm the clock and a
+resume grants a fresh full budget. The temporary starting budget is the
+conservative 30-second compatibility value until the next policy-admission
 slice supplies the existing 12-second hardware or 30-second software/copy
-budget. No recovery behavior consults this passive verdict.
+budget. No recovery behavior consults this passive observation.
 
 Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
 
@@ -224,24 +260,29 @@ Primary implementation sites are in `crates/plurxd/src/playback_control.rs`:
 - `observe_producer_exit_at` near lines 2462–2483; and
 - actor `run` near lines 2810–2861.
 
-Authored but not yet run focused evidence covers exact starting expiry,
-scheduler-delayed dispatch, rearm from fenced publication time, late-progress
-cutoff, exact-boundary progress, contiguous versus gapped A/B/C coverage, the
-exit barrier and classification mode, and lease-terminal priority. Command
-publication sequencing remains deliberately outside this action-passive slice;
-it must land before a producer deadline is allowed to emit a decision.
+Authored but not yet run focused evidence covers exact starting expiry and
+idempotent settlement, scheduler-delayed dispatch, rearm from fenced publication
+time, late/duplicate progress, exact-boundary progress and non-success exit,
+contiguous versus gapped A/B/C coverage, capture while blocked on the transition
+fence, stale-exit/successor-progress ordering, successful-exit classification
+and duplicate rejection, exact physical hold/resume acknowledgement, and
+lifecycle commands before/at/after the provisional producer due coordinate.
+Command publication sequencing remains deliberately outside this
+action-passive slice; it must land before a producer deadline is allowed to
+emit a decision.
 
 Committed implementation sequence:
 
 ```text
 6b602d6c feat(playback): record actor producer deadlines
 dbf12d87 chore(validation): map passive deadline evidence
+a409a194 fix(playback): fence passive producer cutoff
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
 `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`,
 `watch_for_stall*`, `playlist_producer_failed`, `downgrade_one_step`,
-`child_transition`, `watchdog_active`, and `replacing_child`. The active actor
+`child_transition`, `watchdog_active`, and `replacing_child`. The passive actor
 deadline observes and records first; later slices move action authority and
 delete legacy owners without two concurrent recovery decision makers.
 
@@ -252,7 +293,8 @@ After the passive deadline slice:
 1. Add one immutable actor decision and nonblocking session-executor wake.
 2. Move the single allowed pre-publication validated retry behind that owner.
 3. Convert exact exits and copy classification to actor decisions.
-4. Fence physical hold/resume actions and acknowledgements.
+4. Move desired physical hold/resume actions and the now-fenced successful
+   acknowledgements into the shared actor ingress sequence.
 5. Delete detached recovery loops, request-side exit verdicts, in-place
    replacement, `child_transition`, `watchdog_active`, and `replacing_child`;
    drive every legacy catalog sentinel to zero.
