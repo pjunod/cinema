@@ -2527,6 +2527,48 @@ impl Session {
     /// while teardown waits behind `child_transition`; the candidate must not
     /// become session-owned merely because its earlier admission succeeded.
     #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn terminate_rejected_candidate(&self, mut candidate: Child, producer_attempt: u64) {
+        let mut first_error = None;
+        for signal_attempt in 1..=2 {
+            match candidate.kill().await {
+                Ok(()) => return,
+                Err(error) => match candidate.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if signal_attempt == 1 => {
+                        first_error = Some(error);
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(None) => {
+                        let first_error = first_error.as_ref().unwrap_or(&error);
+                        tracing::error!(
+                            producer_attempt,
+                            first_error = %first_error,
+                            retry_error = %error,
+                            "rejected replacement remained live after two termination attempts"
+                        );
+                        self.fail(PlaylistError::SessionFailed(format!(
+                            "rejected producer {producer_attempt} could not be terminated: {error}"
+                        )));
+                        return;
+                    }
+                    Err(status_error) => {
+                        tracing::error!(
+                            producer_attempt,
+                            signal_error = %error,
+                            %status_error,
+                            "rejected replacement termination status could not be observed"
+                        );
+                        self.fail(PlaylistError::SessionFailed(format!(
+                            "rejected producer {producer_attempt} termination could not be observed: {status_error}"
+                        )));
+                        return;
+                    }
+                },
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn install_replacement_child(
         &self,
         producer_attempt: u64,
@@ -2556,25 +2598,29 @@ impl Session {
                 pause.wait().await;
             }
         }
-        let install = match self
-            .control
-            .lock_authorized_producer_install(producer_attempt)
-        {
-            Ok(install) => install,
-            Err(reason) => {
-                // The exact-fence verdict is synchronous. Start termination
-                // before returning, then reap outside this future so a
-                // non-Send MutexGuard Result can never cross an await.
-                let _ = candidate.start_kill();
-                tokio::spawn(async move {
-                    let _ = candidate.wait().await;
-                });
-                return Err(reason);
+        let rejected = {
+            match self
+                .control
+                .lock_authorized_producer_install(producer_attempt)
+            {
+                Ok(install) => {
+                    *child = Some(candidate);
+                    drop(install);
+                    None
+                }
+                Err(reason) => Some((candidate, reason)),
             }
         };
-        *child = Some(candidate);
-        drop(install);
-        Ok(())
+        drop(child);
+        let Some((candidate, reason)) = rejected else {
+            return Ok(());
+        };
+        // The std MutexGuard Result is gone before this await. Rejection owns
+        // the candidate until SIGKILL is confirmed and the process is reaped;
+        // no detached task or session slot can lose that lifecycle.
+        self.terminate_rejected_candidate(candidate, producer_attempt)
+            .await;
+        Err(reason)
     }
 
     /// Stop the encoder, if there is one. A cache hit has no process; a
@@ -19558,6 +19604,17 @@ mod tests {
                 .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
             "the session retains only its already-dead predecessor handle"
         );
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(candidate_pid.expect("candidate pid fits u32"))
+                .expect("candidate pid fits i32");
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH),
+                "install rejection returns only after the candidate is reaped"
+            );
+        }
     }
 
     #[tokio::test]
