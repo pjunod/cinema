@@ -405,8 +405,9 @@ round 5 returned three **APPROVE** verdicts with no P1/P2/P3 finding,
 
 1. Commit this final evidence-only documentation update and bind its history
    metadata without changing the reviewed runtime implementation.
-2. Obtain a narrow exact-head review confirming that only evidence/docs changed
-   and that every runtime/validation blob still matches approved `dc7c7667`.
+2. Obtain a narrow exact-head review confirming that only evidence/docs and the
+   new history-coverage record changed, and that every pre-existing runtime,
+   test, and validation blob still matches approved `dc7c7667`.
 3. Require every hosted PR gate to pass on that exact documentation head; fix
    any genuine failure and repeat review before rerunning affected tests.
 4. Merge PR #624 only after the exact hosted head is green.
