@@ -2755,17 +2755,25 @@ impl Session {
                 i64,
                 u32,
                 u64,
+                &'static str,
+                bool,
             ),
             crate::playback_control::ControlStateError,
         >,
     > {
-        if self.control.is_retired() {
-            return None;
-        }
         let outcome = match self.control.control(request).await {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
         };
+        let acknowledged_end = outcome.lease.terminal
+            == Some(crate::playback_control::RollingTerminalCause::End)
+            && outcome.lease.demand.as_ref().is_some_and(|demand| {
+                demand.demand == crate::playback_control::PlaybackDemand::End
+            });
+        let lease_state = outcome.lease.terminal.map_or(
+            "active",
+            crate::playback_control::RollingTerminalCause::status,
+        );
         Some(Ok((
             outcome.disposition,
             outcome.accepted_sequence,
@@ -2774,6 +2782,8 @@ impl Session {
             outcome.lease.expires_at_unix_ms(),
             outcome.lease.timeout_ms(),
             outcome.flow_ticket,
+            lease_state,
+            acknowledged_end,
         )))
     }
 
@@ -12706,13 +12716,12 @@ impl TranscodeManager {
             .get(control.session_id)
             .cloned()?;
         let transition = session.child_transition.lock().await;
-        if session.control.is_retired()
-            || !self
-                .sessions
-                .lock()
-                .await
-                .get(control.session_id)
-                .is_some_and(|current| Arc::ptr_eq(current, &session))
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
         {
             return None;
         }
@@ -12740,6 +12749,8 @@ impl TranscodeManager {
             lease_expires_at_unix_ms,
             lease_timeout_ms,
             flow_ticket,
+            lease_state,
+            acknowledged_end,
         ) = match session.accept_control(control).await? {
             Ok(outcome) => outcome,
             Err(error) => return Some(Err(error)),
@@ -12767,7 +12778,7 @@ impl TranscodeManager {
         // revalidate this Arc against the registry, and keep the gate through
         // the status join so an active success cannot describe a stale child.
         let _final_transition = session.child_transition.lock().await;
-        if session.control.is_retired() {
+        if session.control.is_retired() && !acknowledged_end {
             return Some(Err(
                 crate::playback_control::ControlStateError::SessionEnded,
             ));
@@ -12791,7 +12802,7 @@ impl TranscodeManager {
             global_ahead_bytes,
         )
         .await;
-        if session.control.is_retired() {
+        if session.control.is_retired() && !acknowledged_end {
             return Some(Err(
                 crate::playback_control::ControlStateError::SessionEnded,
             ));
@@ -12813,6 +12824,7 @@ impl TranscodeManager {
             action,
             lease_expires_at_unix_ms,
             lease_timeout_ms,
+            lease_state,
             status: HlsSessionInfo::Live(Box::new(status)),
             platform,
         }))
@@ -15826,12 +15838,16 @@ mod tests {
         // Retirement is another command on the same mailbox. Once it wins,
         // neither a later control nor a later media request can renew.
         fixture.session.end_activity().await;
-        assert!(fixture
-            .state
-            .transcode
-            .hls_session_control(request(3, 1))
-            .await
-            .is_none());
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(3, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
         assert!(
             !fixture
                 .session
@@ -15847,6 +15863,90 @@ mod tests {
             .snapshot()
             .await
             .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = crate::playback_control::PlaybackDemand::End;
+            snapshot.playback_rate = 0.0;
+            snapshot.render_state = crate::playback_control::RenderState::Ended;
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1))
+            .await
+            .expect("local worker")
+            .expect("end accepted");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        assert_eq!(accepted.lease_state, "ended");
+        let HlsSessionInfo::Live(status) = &accepted.status else {
+            panic!("rolling end returned VOD status");
+        };
+        assert_eq!(status.lease_state, "ended");
+        assert_eq!(status.control_demand, Some("end"));
+        assert_eq!(
+            fixture
+                .session
+                .control
+                .snapshot()
+                .await
+                .expect("terminal lease")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::End)
+        );
+
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1))
+            .await
+            .expect("local terminal worker")
+            .expect("exact end replay");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(replay.lease_state, "ended");
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
     }
 
     #[tokio::test]

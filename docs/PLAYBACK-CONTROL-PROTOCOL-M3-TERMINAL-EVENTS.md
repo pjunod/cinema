@@ -2,13 +2,15 @@
 
 **Status:** implementation contract
 **Baseline:** merged PR #616 at `8c6ccdf7`
-**Scope:** behavior-passive terminal ownership for rolling compatibility
-sessions
+**Scope:** terminal ownership for rolling compatibility and VOD session
+handles, including the protocol's orderly client release
 
 ## Outcome
 
 M3c3 gives one rolling-session actor the sole right to decide that a generation
-is terminal. The actor receives three bounded causes:
+is terminal, and gives a VOD attachment one lifecycle-guarded equivalent for
+the protocol's orderly client release. The rolling actor receives three
+bounded causes:
 
 1. `end` — the viewer, operator, replacement coordinator, or local lifecycle
    path deliberately ends the generation;
@@ -20,9 +22,14 @@ is terminal. The actor receives three bounded causes:
 The first terminal event linearized by the actor wins. It publishes the shared
 serving fence and one flow wake, records its immutable cause, and rejects every
 later mutation. Late terminal events are acknowledged as already terminal and
-cannot overwrite the winning cause. M3c3 does not kill, replace, or restart an
-encoder. Existing physical teardown remains outside the actor until M4 moves
-that one action owner and deletes the compatibility watchdogs.
+cannot overwrite the winning cause. A newly accepted `demand=end` is that
+terminal `end` event; it is not a lease renewal or a production hold. Its exact
+identity/sequence can replay the same terminal acknowledgement after response
+loss. VOD performs the corresponding tombstone and reader detach under its
+existing per-session lifecycle gate and retains the same bounded reply. M3c3
+does not kill, replace, or restart a rolling encoder. Existing rolling physical
+teardown remains outside the actor until M4 moves that one action owner and
+deletes the compatibility watchdogs.
 
 ## Why the current retirement flag is insufficient
 
@@ -65,11 +72,24 @@ the existing fail-closed local fence remains the last-resort safety mechanism;
 it cannot invent an actor terminal cause and status therefore reports control
 unavailable rather than fabricated ownership.
 
+Sequence acceptance and `demand=end` terminalization are one actor command.
+The response therefore cannot report an accepted End while the actor remains
+live. Once End wins, the only accepted control operation is replay of that
+exact generation, owner epoch, client instance, platform, and sequence. A
+higher sequence or different identity receives `session_ended`.
+
+VOD applies the same rule under its per-session lifecycle gate. A fresh End
+stores the accepted terminal result, writes the `Deleted` tombstone, and
+detaches the rendition reader before returning. The tombstone admits only the
+exact stored replay; tombstones created by supersession, operator stop,
+revocation, or file replacement have no client acknowledgement to replay.
+
 ## Routing table
 
 | Source | Actor event | Why |
 |---|---|---|
-| viewer release, operator stop, supersession, local replacement cancellation | `end` | local lifecycle intentionally ends this generation |
+| accepted control `demand=end` | `end` plus exact replay record | the protocol's orderly release is a terminal state transition, never a lease renewal |
+| viewer release outside control, operator stop, supersession, local replacement cancellation | `end` | local lifecycle intentionally ends this generation |
 | durable route loss, takeover fencing, quorum/readiness loss | `authority_fence` | this node can no longer prove serving authority |
 | actor monotonic timer or atomic expiry claim | `lease_expired` | playback demand disappeared past the negotiated deadline |
 | producer exit | producer observation only | M3c3 records it but does not choose recovery |
@@ -84,9 +104,11 @@ manager map.
 ## Ordering and cancellation
 
 Mailbox arrival is the linearization order for `end`, `authority_fence`, and
-explicit expiry claims. The exact monotonic deadline is also guarded by the
-existing producer-transition mutex, so a producer install or signal cannot
-cross a terminal decision.
+explicit expiry claims, except that a deadline already due when a terminal
+command acquires the producer-transition mutex is claimed first. Timer
+scheduling therefore cannot let a later End or authority fence steal an
+already-expired terminal cause. The same mutex prevents a producer install or
+signal from crossing that decision.
 
 Producer progress and exit use their independent constant-space ingress. The
 actor drains already-published producer facts before a dequeued lifecycle
@@ -101,11 +123,11 @@ not as a state transition.
 
 ## Exhaustive model
 
-A small deterministic model enumerates permutations of:
+A small deterministic in-memory ordering model enumerates permutations of:
 
 - current-attempt producer exit;
 - lease expiry;
-- explicit end;
+- accepted control End;
 - authority fence;
 - publication;
 - replacement admission; and
@@ -127,10 +149,15 @@ For every explored order it proves:
    dropped; and
 9. no ordering creates a second producer attempt after terminal.
 
-The implementation tests compare actor transition results with this model.
-Separate real async-handle tests cover caller cancellation after enqueue and
-concurrent end/fence races, because dropping a reply receiver is a transport
-observation rather than an additional actor-state event.
+The implementation tests compare actor transition results with this model and
+assert every late typed terminal result returns the retained winner. The model
+uses the production control-End and expiry-claim transitions; authority-fence
+ordering remains a synchronous state-model operation. Separate real
+async-handle and manager tests exercise the actual mailbox commands, exact
+deadline precedence, accepted End acknowledgement/replay, response loss,
+rolling status joining, VOD tombstone/detach, and concurrent end/fence races.
+Dropping a reply receiver is a transport observation rather than an additional
+actor-state event.
 
 ## Instrumentation
 
@@ -155,10 +182,13 @@ the typed metric.
 
 ## Rollout, rollback, and M4 boundary
 
-M3c3 changes no wire request, media URL, producer policy, or physical recovery
-action. Mixed nodes can coexist because typed terminal causes remain local
-actor state. Rollback restores the generic `Retire` command and the old
-`retired` status label; it does not need to recreate a watchdog.
+M3c3 changes no wire shape, media URL, or rolling physical recovery action. It
+corrects the already-defined meaning of `demand=end`: successful delivery now
+ends the local generation/attachment and returns `lease.state=ended`. Mixed
+nodes remain wire-compatible, although an older owner may retain a session
+until its lease expires after acknowledging End. Rollback restores the generic
+`Retire` command and the old `retired` status label; it does not need to
+recreate a watchdog.
 
 M4 may begin only after this slice is merged and green. M4 then:
 

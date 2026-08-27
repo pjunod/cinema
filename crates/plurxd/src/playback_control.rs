@@ -775,6 +775,7 @@ pub(crate) struct LocalControlResult {
     pub action: ControlAction,
     pub lease_expires_at_unix_ms: i64,
     pub lease_timeout_ms: u32,
+    pub lease_state: &'static str,
     pub status: HlsSessionInfo,
     pub platform: ClientPlatform,
 }
@@ -1005,6 +1006,35 @@ impl ControlState {
             self.prior_action.clone(),
             client_platform,
         ))
+    }
+
+    /// Recover the immutable result for the exact accepted identity/sequence
+    /// without advancing any fence. Terminal sessions use this after their
+    /// ordinary mutation path has closed so a lost `demand=end` response can
+    /// still be retried idempotently.
+    pub(crate) fn replay_exact(
+        &self,
+        generation: &str,
+        owner_epoch: u64,
+        client_instance_id: &str,
+        sequence: u64,
+        platform: Option<ClientPlatform>,
+    ) -> Option<(ControlDisposition, u64, ControlAction, ClientPlatform)> {
+        let client_instance_id = uuid::Uuid::parse_str(client_instance_id).ok()?;
+        let client_platform = self.client_platform?;
+        (self.generation.as_deref() == Some(generation)
+            && self.owner_epoch == owner_epoch
+            && self.client_instance_id == Some(client_instance_id)
+            && self.last_sequence == sequence
+            && platform.is_none_or(|platform| platform == client_platform))
+        .then(|| {
+            (
+                ControlDisposition::Replay,
+                self.last_sequence,
+                self.prior_action.clone(),
+                client_platform,
+            )
+        })
     }
 }
 
@@ -1679,7 +1709,32 @@ impl RollingControlActor {
         request: OwnedLocalControlRequest,
     ) -> Result<RollingControlOutcome, ControlStateError> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
-            return Err(ControlStateError::SessionEnded);
+            let replay = (self.terminal == Some(RollingTerminalCause::End)
+                && self
+                    .demand
+                    .as_ref()
+                    .is_some_and(|snapshot| snapshot.demand == PlaybackDemand::End))
+            .then(|| {
+                self.control.replay_exact(
+                    &request.generation,
+                    request.owner_epoch,
+                    &request.client_instance_id,
+                    request.sequence,
+                    request.snapshot.platform(),
+                )
+            })
+            .flatten();
+            let Some((disposition, accepted_sequence, action, platform)) = replay else {
+                return Err(ControlStateError::SessionEnded);
+            };
+            return Ok(RollingControlOutcome {
+                disposition,
+                accepted_sequence,
+                action,
+                platform,
+                lease: self.snapshot_at(now),
+                flow_ticket: self.last_flow_ticket,
+            });
         }
         let (disposition, accepted_sequence, action, platform) = self.control.accept_at(
             now,
@@ -1689,18 +1744,31 @@ impl RollingControlActor {
             request.sequence,
             request.snapshot.platform(),
         )?;
+        let accepted_end = disposition == ControlDisposition::Accepted
+            && request.snapshot.demand == PlaybackDemand::End;
         if disposition == ControlDisposition::Accepted {
-            self.last_renewal = now;
-            self.last_renewal_kind = "control";
             self.mode = RollingLeaseMode::Explicit;
             self.demand = Some(request.snapshot);
-            ROLLING_LEASE_RENEWALS[0].fetch_add(1, Ordering::Relaxed);
+            if accepted_end {
+                self.last_renewal_kind = "control-end";
+            } else {
+                self.last_renewal = now;
+                self.last_renewal_kind = "control";
+                ROLLING_LEASE_RENEWALS[0].fetch_add(1, Ordering::Relaxed);
+            }
         }
         // Accepted mutation and its producer-policy wake are one actor
         // transaction. A replay returns the SAME ticket: the detached worker
         // survives a lost response, and minting new work for an unthrottled
         // equal sequence would turn replay into a flow-control DoS surface.
-        let flow_ticket = if disposition == ControlDisposition::Accepted {
+        let flow_ticket = if accepted_end {
+            let RollingTerminalOutcome::Won(RollingTerminalCause::End) =
+                self.terminate(RollingTerminalCause::End)
+            else {
+                unreachable!("fresh accepted end must win while the actor is live");
+            };
+            self.last_flow_ticket
+        } else if disposition == ControlDisposition::Accepted {
             let ticket = self.flow_sync.request();
             self.last_flow_ticket = ticket;
             ticket
@@ -1918,7 +1986,7 @@ impl RollingControlActor {
         self.terminal = Some(cause);
         self.expiration_claimed = cause == RollingTerminalCause::LeaseExpired;
         self.retired_fence.store(true, Ordering::Release);
-        self.flow_sync.request();
+        self.last_flow_ticket = self.flow_sync.request();
         ROLLING_TERMINAL_EVENT_OUTCOMES[metric_base].fetch_add(1, Ordering::Relaxed);
         match cause {
             RollingTerminalCause::LeaseExpired => {
@@ -1974,10 +2042,9 @@ impl RollingControlActor {
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let outcome = self.control_at(rolling_now(), *request);
-                if outcome
-                    .as_ref()
-                    .is_ok_and(|outcome| outcome.disposition == ControlDisposition::Accepted)
-                {
+                if outcome.as_ref().is_ok_and(|outcome| {
+                    outcome.disposition == ControlDisposition::Accepted && !outcome.lease.retired
+                }) {
                     *transition = self.deadline();
                 }
                 let _ = reply.send(outcome);
@@ -2078,6 +2145,11 @@ impl RollingControlActor {
                 let _transition = transition
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
+                // A lifecycle command dequeued at or after the monotonic
+                // deadline cannot steal the terminal label from an expiry
+                // that is already due merely because the timer branch has not
+                // been scheduled yet.
+                let _ = self.claim_expiry_at(rolling_now());
                 let outcome = self.terminate(cause);
                 let _ = reply.send(outcome);
             }
@@ -3295,7 +3367,7 @@ mod tests {
     enum TerminalModelEvent {
         ProducerExit,
         LeaseExpired,
-        End,
+        ControlEnd,
         AuthorityFence,
         Publication,
         Replacement,
@@ -3348,7 +3420,8 @@ mod tests {
         let control = request();
 
         for (index, event) in order.iter().copied().enumerate() {
-            let now = started + Duration::from_millis((index + 1) as u64);
+            let step = MIN_CONTROL_INTERVAL + Duration::from_millis(1);
+            let now = started + step.saturating_mul((index + 1) as u32);
             match event {
                 TerminalModelEvent::ProducerExit => {
                     let expected = model.terminal.is_none()
@@ -3363,18 +3436,43 @@ mod tests {
                 }
                 TerminalModelEvent::LeaseExpired => {
                     let expected = model.terminal(RollingTerminalCause::LeaseExpired);
-                    let outcome = actor.terminate(RollingTerminalCause::LeaseExpired);
-                    assert_eq!(outcome.won(), expected, "order {order:?}");
+                    if expected {
+                        actor.last_renewal = now - actor.mode.timeout();
+                    }
+                    let claim = actor.claim_expiry_at(now);
+                    assert_eq!(
+                        matches!(claim, RollingExpiryClaim::Claimed(_)),
+                        expected,
+                        "order {order:?}"
+                    );
+                    assert_eq!(
+                        actor.terminal, model.terminal,
+                        "expiry must retain the first terminal cause for order {order:?}"
+                    );
                 }
-                TerminalModelEvent::End => {
+                TerminalModelEvent::ControlEnd => {
                     let expected = model.terminal(RollingTerminalCause::End);
-                    let outcome = actor.terminate(RollingTerminalCause::End);
-                    assert_eq!(outcome.won(), expected, "order {order:?}");
+                    let mut end = control.clone();
+                    end.sequence = actor.control.last_sequence.saturating_add(1);
+                    end.demand = PlaybackDemand::End;
+                    end.playback_rate = 0.0;
+                    end.render_state = RenderState::Ended;
+                    let outcome = actor.control_at(now, owned_control(&end));
+                    assert_eq!(outcome.is_ok(), expected, "order {order:?}");
+                    if let Ok(outcome) = outcome {
+                        assert_eq!(outcome.disposition, ControlDisposition::Accepted);
+                        assert_eq!(outcome.lease.terminal, Some(RollingTerminalCause::End));
+                    }
                 }
                 TerminalModelEvent::AuthorityFence => {
                     let expected = model.terminal(RollingTerminalCause::AuthorityFence);
                     let outcome = actor.terminate(RollingTerminalCause::AuthorityFence);
                     assert_eq!(outcome.won(), expected, "order {order:?}");
+                    assert_eq!(
+                        outcome.cause(),
+                        model.terminal.expect("terminal cause"),
+                        "late fence must report the retained winner for order {order:?}"
+                    );
                 }
                 TerminalModelEvent::Publication => {
                     let expected =
@@ -3460,7 +3558,7 @@ mod tests {
         let mut events = [
             TerminalModelEvent::ProducerExit,
             TerminalModelEvent::LeaseExpired,
-            TerminalModelEvent::End,
+            TerminalModelEvent::ControlEnd,
             TerminalModelEvent::AuthorityFence,
             TerminalModelEvent::Publication,
             TerminalModelEvent::Replacement,
@@ -3501,6 +3599,101 @@ mod tests {
         assert_eq!(
             handle.snapshot().await.expect("terminal snapshot").terminal,
             Some(end.cause())
+        );
+    }
+
+    #[tokio::test]
+    async fn accepted_control_end_is_terminal_and_exactly_replayable() {
+        let handle = RollingControlHandle::spawn("session-start");
+        let mut end = request();
+        end.demand = PlaybackDemand::End;
+        end.playback_rate = 0.0;
+        end.render_state = RenderState::Ended;
+        let local = || LocalControlRequest {
+            session_id: "unused",
+            generation: &end.generation,
+            owner_node_id: "node-a",
+            owner_epoch: end.control_epoch,
+            client_instance_id: &end.client_instance_id,
+            sequence: end.sequence,
+            snapshot: PlaybackDemandSnapshot::from(&end),
+        };
+
+        let accepted = handle.control(local()).await.expect("accepted end");
+        assert_eq!(accepted.disposition, ControlDisposition::Accepted);
+        assert_eq!(accepted.lease.terminal, Some(RollingTerminalCause::End));
+        assert_eq!(accepted.lease.last_renewal_kind, "control-end");
+        assert_eq!(
+            accepted.lease.demand.as_ref().map(|state| state.demand),
+            Some(PlaybackDemand::End)
+        );
+        assert!(accepted.lease.retired);
+        assert!(handle.is_retired());
+
+        let replay = handle.control(local()).await.expect("exact end replay");
+        assert_eq!(replay.disposition, ControlDisposition::Replay);
+        assert_eq!(replay.accepted_sequence, accepted.accepted_sequence);
+        assert_eq!(replay.flow_ticket, accepted.flow_ticket);
+        assert_eq!(replay.lease.terminal, Some(RollingTerminalCause::End));
+
+        drop(local);
+        end.sequence += 1;
+        assert_eq!(
+            handle
+                .control(LocalControlRequest {
+                    session_id: "unused",
+                    generation: &end.generation,
+                    owner_node_id: "node-a",
+                    owner_epoch: end.control_epoch,
+                    client_instance_id: &end.client_instance_id,
+                    sequence: end.sequence,
+                    snapshot: PlaybackDemandSnapshot::from(&end),
+                })
+                .await,
+            Err(ControlStateError::SessionEnded),
+            "only the exact accepted terminal sequence may replay"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_commands_claim_due_expiry_before_end_or_authority_fence() {
+        for cause in [
+            RollingTerminalCause::End,
+            RollingTerminalCause::AuthorityFence,
+        ] {
+            let handle = RollingControlHandle::spawn("session-start");
+            handle
+                .set_renewal_for_test(
+                    rolling_now() - ROLLING_LEGACY_LEASE_TIMEOUT,
+                    "deadline-race",
+                )
+                .await;
+            let outcome = match cause {
+                RollingTerminalCause::End => handle.end().await,
+                RollingTerminalCause::AuthorityFence => handle.authority_fence().await,
+                RollingTerminalCause::LeaseExpired => unreachable!(),
+            }
+            .expect("terminal verdict");
+            assert_eq!(
+                outcome,
+                RollingTerminalOutcome::AlreadyTerminal(RollingTerminalCause::LeaseExpired)
+            );
+            let snapshot = handle.snapshot().await.expect("terminal snapshot");
+            assert_eq!(snapshot.terminal, Some(RollingTerminalCause::LeaseExpired));
+            assert!(snapshot.expiration_claimed);
+        }
+    }
+
+    #[tokio::test]
+    async fn late_terminal_commands_return_the_immutable_winning_cause() {
+        let handle = RollingControlHandle::spawn("session-start");
+        assert_eq!(
+            handle.end().await.expect("end verdict"),
+            RollingTerminalOutcome::Won(RollingTerminalCause::End)
+        );
+        assert_eq!(
+            handle.authority_fence().await.expect("late fence verdict"),
+            RollingTerminalOutcome::AlreadyTerminal(RollingTerminalCause::End)
         );
     }
 
@@ -4288,6 +4481,43 @@ mod tests {
             .await
             .expect("committed request replays");
         assert_eq!(replay.disposition, ControlDisposition::Replay);
+
+        let terminal_control = RollingControlHandle::spawn("session-start");
+        let mut end = request();
+        end.demand = PlaybackDemand::End;
+        end.playback_rate = 0.0;
+        end.render_state = RenderState::Ended;
+        let (reply, dropped) = tokio::sync::oneshot::channel();
+        terminal_control
+            .sender
+            .send(RollingControlCommand::Control {
+                request: Box::new(owned_control(&end)),
+                reply,
+            })
+            .await
+            .expect("terminal control queued");
+        drop(dropped);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !terminal_control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted end publishes its terminal fence after reply loss");
+        let recovered = terminal_control
+            .control(LocalControlRequest {
+                session_id: "unused",
+                generation: &end.generation,
+                owner_node_id: "node-a",
+                owner_epoch: end.control_epoch,
+                client_instance_id: &end.client_instance_id,
+                sequence: end.sequence,
+                snapshot: PlaybackDemandSnapshot::from(&end),
+            })
+            .await
+            .expect("lost terminal response is exactly replayable");
+        assert_eq!(recovered.disposition, ControlDisposition::Replay);
+        assert_eq!(recovered.lease.terminal, Some(RollingTerminalCause::End));
     }
 
     #[tokio::test]

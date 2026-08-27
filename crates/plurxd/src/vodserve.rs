@@ -409,6 +409,9 @@ struct Session {
     last_touch: StdMutex<Instant>,
     /// Owner-local sequence fence kept separate from media-object touches.
     control: StdMutex<crate::playback_control::ControlState>,
+    /// Exact terminal acknowledgement retained after a client `demand=end`
+    /// tombstones the attachment. Other lifecycle causes never populate it.
+    control_end: Option<crate::playback_control::LocalControlResult>,
     tombstone: Option<Terminal>,
 }
 
@@ -559,6 +562,7 @@ impl VodServe {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -912,6 +916,7 @@ impl VodServe {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -1337,8 +1342,10 @@ impl VodServe {
     }
 
     /// Apply one fenced control exchange without conflating a replay or stale
-    /// request with a media-object touch. Only a newly accepted sequence moves
-    /// the existing five-minute VOD activity clock.
+    /// request with a media-object touch. Only a newly accepted non-terminal
+    /// sequence moves the existing five-minute VOD activity clock. A fresh
+    /// `demand=end` instead tombstones the attachment under this same lifecycle
+    /// gate and retains its exact response for an idempotent retry.
     pub(crate) async fn control(
         &self,
         control: crate::playback_control::LocalControlRequest<'_>,
@@ -1350,17 +1357,51 @@ impl VodServe {
     > {
         // Resolve registry ownership before durable I/O, then keep this
         // session's gate held from the authority read through sequence
-        // acceptance and the legacy-clock touch. `end` and idle reap take the
+        // acceptance and any terminal detach. `end` and idle reap take the
         // same per-session gate, so neither can cross the linearization point.
         let lifecycle = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(control.session_id)?;
-            if session.tombstone.is_some() {
-                return None;
-            }
             Arc::clone(&session.lifecycle)
         };
         let lifecycle_guard = lifecycle.lock().await;
+
+        // A client may lose the successful terminal response. The tombstone
+        // closes every mutation except replay of the exact accepted identity
+        // and sequence; no Store read is needed to recover that immutable
+        // owner-local result.
+        {
+            let sessions = self.shared.sessions.lock().await;
+            let session = sessions.get(control.session_id)?;
+            if !Arc::ptr_eq(&session.lifecycle, &lifecycle) {
+                return None;
+            }
+            if session.tombstone.is_some() {
+                let replay = session.control.lock().expect("control lock").replay_exact(
+                    control.generation,
+                    control.owner_epoch,
+                    control.client_instance_id,
+                    control.sequence,
+                    control.snapshot.platform(),
+                );
+                let Some((_, accepted_sequence, action, platform)) = replay else {
+                    return Some(Err(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                    ));
+                };
+                let Some(mut result) = session.control_end.clone() else {
+                    return Some(Err(
+                        crate::playback_control::ControlStateError::SessionEnded,
+                    ));
+                };
+                debug_assert_eq!(result.accepted_sequence, accepted_sequence);
+                debug_assert_eq!(result.action, action);
+                debug_assert_eq!(result.platform, platform);
+                result.disposition = crate::playback_control::ControlDisposition::Replay;
+                return Some(Ok(result));
+            }
+        }
+
         if let Err(error) = crate::playback_control::verify_authority(
             self.shared.store.as_ref(),
             control.session_id,
@@ -1372,9 +1413,32 @@ impl VodServe {
         {
             return Some(Err(error));
         }
+
+        let ending_status =
+            if control.snapshot.demand == crate::playback_control::PlaybackDemand::End {
+                self.status(control.session_id).await
+            } else {
+                None
+            };
+        enum AppliedControl {
+            End {
+                result: crate::playback_control::LocalControlResult,
+                rendition: Arc<Rendition>,
+                file_id: i64,
+                height: i64,
+                kind: SessionKind,
+            },
+            Live {
+                disposition: crate::playback_control::ControlDisposition,
+                accepted_sequence: u64,
+                action: crate::playback_control::ControlAction,
+                platform: crate::playback_control::ClientPlatform,
+                lease_expires_at_unix_ms: i64,
+            },
+        }
         let outcome = {
-            let sessions = self.shared.sessions.lock().await;
-            let session = sessions.get(control.session_id)?;
+            let mut sessions = self.shared.sessions.lock().await;
+            let session = sessions.get_mut(control.session_id)?;
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle) || session.tombstone.is_some() {
                 return None;
             }
@@ -1389,24 +1453,91 @@ impl VodServe {
                 Ok(outcome) => outcome,
                 Err(error) => return Some(Err(error)),
             };
-            let mut last_touch = session.last_touch.lock().expect("touch lock");
-            if disposition == crate::playback_control::ControlDisposition::Accepted {
-                *last_touch = Instant::now();
+
+            if disposition == crate::playback_control::ControlDisposition::Accepted
+                && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
+            {
+                let status = ending_status?;
+                let result = crate::playback_control::LocalControlResult {
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    lease_expires_at_unix_ms: crate::media_sessions::unix_ms(),
+                    lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                    lease_state: "ended",
+                    status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
+                    platform,
+                };
+                session.tombstone = Some(Terminal::Deleted);
+                session.control_end = Some(result.clone());
+                Ok::<_, crate::playback_control::ControlStateError>(AppliedControl::End {
+                    result,
+                    rendition: Arc::clone(&session.rendition),
+                    file_id: session.rendition.recipe.file.id,
+                    height: session.target_height,
+                    kind: session.kind,
+                })
+            } else {
+                let mut last_touch = session.last_touch.lock().expect("touch lock");
+                if disposition == crate::playback_control::ControlDisposition::Accepted {
+                    *last_touch = Instant::now();
+                }
+                let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
+                let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
+                Ok(AppliedControl::Live {
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms: crate::media_sessions::unix_ms()
+                        .saturating_add(remaining_ms),
+                })
             }
-            let remaining = SESSION_IDLE_TTL.saturating_sub(last_touch.elapsed());
-            let remaining_ms = i64::try_from(remaining.as_millis()).unwrap_or(i64::MAX);
-            Ok::<_, crate::playback_control::ControlStateError>((
-                disposition,
-                accepted_sequence,
-                action,
-                platform,
-                crate::media_sessions::unix_ms().saturating_add(remaining_ms),
-            ))
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
         };
         let (disposition, accepted_sequence, action, platform, lease_expires_at_unix_ms) =
             match outcome {
-                Ok(outcome) => outcome,
-                Err(error) => return Some(Err(error)),
+                AppliedControl::End {
+                    result,
+                    rendition,
+                    file_id,
+                    height,
+                    kind,
+                } => {
+                    rendition.detach_reader(control.session_id).await;
+                    rendition.kick();
+                    self.emit_lifecycle(
+                        control.session_id,
+                        file_id,
+                        height,
+                        kind,
+                        "session_end",
+                        Some("client_released"),
+                    );
+                    tracing::info!(
+                        session = %session_log_id(control.session_id),
+                        rendition = %rendition.key,
+                        "vod session ended for good: {:?}",
+                        Terminal::Deleted
+                    );
+                    return Some(Ok(result));
+                }
+                AppliedControl::Live {
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms,
+                } => (
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms,
+                ),
             };
         drop(lifecycle_guard);
         let status = self.status(control.session_id).await?;
@@ -1416,6 +1547,7 @@ impl VodServe {
             action,
             lease_expires_at_unix_ms,
             lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            lease_state: "active",
             status: crate::transcode::HlsSessionInfo::Vod(Box::new(status)),
             platform,
         }))
@@ -3439,6 +3571,7 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -4124,6 +4257,7 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -4195,6 +4329,7 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(Instant::now()),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -4230,6 +4365,7 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(replacement_touch),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );
@@ -4409,6 +4545,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn accepted_vod_control_end_tombstones_detaches_and_replays_exactly() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_control_route(store.as_ref(), &session_id, &generation).await;
+        let serve = VodServe::new(base.path().to_path_buf(), store);
+        let rendition = synthetic_rendition(base.path()).await;
+        let before = Instant::now() - Duration::from_secs(10);
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), before).await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Apple,
+            );
+            snapshot.demand = crate::playback_control::PlaybackDemand::End;
+            snapshot.playback_rate = 0.0;
+            snapshot.render_state = crate::playback_control::RenderState::Ended;
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "node-a",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+
+        let accepted = serve
+            .control(request(1))
+            .await
+            .expect("VOD registry owner")
+            .expect("end accepted");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        assert_eq!(accepted.lease_state, "ended");
+        assert_eq!(
+            *serve.shared.sessions.lock().await[&session_id]
+                .last_touch
+                .lock()
+                .expect("touch lock"),
+            before,
+            "terminal control is not a five-minute lease renewal"
+        );
+        assert_eq!(
+            serve.shared.sessions.lock().await[&session_id].tombstone,
+            Some(Terminal::Deleted)
+        );
+        assert!(!rendition.readers.lock().await.contains_key(&session_id));
+        assert!(serve.status(&session_id).await.is_none());
+
+        let replay = serve
+            .control(request(1))
+            .await
+            .expect("terminal VOD registry owner")
+            .expect("exact terminal replay");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(replay.accepted_sequence, accepted.accepted_sequence);
+        assert_eq!(replay.lease_state, "ended");
+        assert!(matches!(
+            serve.control(request(2)).await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+    }
+
+    #[tokio::test]
     async fn materialize_watchdog_spans_http_retries_and_fails_typed() {
         let base = crate::test_tempdir().expect("base");
         let serve = bare_serve(base.path());
@@ -4434,6 +4644,7 @@ mod tests {
                 incarnation: Arc::new(()),
                 last_touch: StdMutex::new(touched),
                 control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
                 tombstone: None,
             },
         );

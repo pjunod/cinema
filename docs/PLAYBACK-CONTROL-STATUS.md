@@ -58,9 +58,11 @@ with typed `End` and `AuthorityFence` events. Lease expiry is the third bounded
 terminal cause. The first terminal event linearized by the actor wins once,
 publishes the immediate serving fence once, and remains immutable while late
 end, fence, control, media, publication, progress, and exit events receive
-truthful terminal verdicts. Physical child teardown remains in the existing
-manager until M4; this slice changes ownership and evidence, not recovery
-policy.
+truthful terminal verdicts. A newly accepted protocol `demand=end` now enters
+that same terminal transition atomically and can replay its exact terminal
+acknowledgement after response loss. VOD applies the equivalent tombstone and
+reader detach under its lifecycle gate. Physical rolling-child teardown
+remains in the existing manager until M4.
 
 Activity/status will expose the winning terminal cause and Prometheus will
 count each bounded cause as `won` or `already_terminal`. An exhaustive small
@@ -74,11 +76,11 @@ Review and test state for M3c3:
 
 | Gate | State |
 |---|---|
-| Implementation | **Complete for review** on PR #617 at `bcbdb88e`, from merged `8c6ccdf7`. Typed terminal state, end/fence routing, Activity projection, bounded metrics, 5,040-order model coverage, and async race/cancellation regressions are present. |
-| Adversarial diff review | **Pending.** It will run against the exact implementation head before any unit or full local test. |
+| Implementation | **Complete for second review** on PR #617 from merged `8c6ccdf7`. Accepted End and exact replay now span rolling and VOD; already-due expiry wins under the producer-transition fence; production-path regressions and the review ledger are updated. |
+| Adversarial diff review | **Changes requested** at `702cba62`: accepted `demand=end` was not terminal; End/fence could steal an already-due expiry cause; the 5,040-order model bypassed too many production transitions; and this ledger omitted automatic hosted activity. A new exact-head review is required after the fixes are committed. |
 | Unit/focused tests | **Intentionally not run yet.** The required adversarial review comes first. |
 | Full local gate | **Pending** exact-head adversarial approval and focused tests. |
-| Hosted CI | **Pending** pushed PR head. |
+| Hosted CI | GitHub automatically started pre-review CI for `702cba62`. Validation scope, policy/contract preflight, fast Rust, daemon-cluster, and WAL jobs were green when review fixes began; this automatic run is recorded separately and is not post-review local evidence. |
 | Merge | **Not ready.** |
 
 ## Watchdog-removal ledger
