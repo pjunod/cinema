@@ -6,8 +6,8 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Current exact head:** local action-passive deadline candidate; resolve after
-the initial commit and push
+**Current exact head:** local validation-mapping successor of `6b602d6c`;
+resolve after commit and push
 **Test state:** no tests, builds, or checks have run for the current slice;
 the adversarial PR review must happen first
 
@@ -231,6 +231,12 @@ cutoff, exact-boundary progress, contiguous versus gapped A/B/C coverage, the
 exit barrier and classification mode, and lease-terminal priority. Command
 publication sequencing remains deliberately outside this action-passive slice;
 it must land before a producer deadline is allowed to emit a decision.
+
+Committed implementation sequence:
+
+```text
+6b602d6c feat(playback): record actor producer deadlines
+```
 
 Leave all compatibility owners unchanged and active in that slice:
 `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`,

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6b602d6c"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The rolling actor now owns one action-passive ProducerProgressDeadline with starting, advancing, and classifying-exit modes. Deterministic regressions pin exact startup expiry and scheduler-delayed verdict coordinates, rearm from fenced ingress publication time rather than source observation time, reject late progress, accept exact-boundary progress before cutoff, distinguish contiguous A/B/C coverage from the first missing deadline link, preserve the exit barrier and classification deadline, and give an exact playback-lease tie terminal priority. The whole-module ownership catalog admits the named deadline while every legacy watchdog, replacement, and transition count remains unchanged; this slice emits no retry, kill, replacement, or other recovery action."
