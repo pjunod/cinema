@@ -1877,6 +1877,8 @@ struct AttemptChild {
     pid: Option<u32>,
     terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
     commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
+    #[cfg(test)]
+    signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
 }
 
 #[derive(Clone)]
@@ -1914,51 +1916,27 @@ impl AttemptChild {
         let terminal = Arc::new(std::sync::Mutex::new(None));
         let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
         let supervisor_terminal = Arc::clone(&terminal);
+        #[cfg(test)]
+        let signal_after_authorization_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
+        #[cfg(test)]
+        let supervisor_signal_pause = Arc::clone(&signal_after_authorization_pause);
         tokio::spawn(async move {
-            let mut child_exits = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::child(),
-            ) {
-                Ok(signal) => Some(signal),
-                Err(error) => {
-                    tracing::error!(
-                        producer_attempt,
-                        %error,
-                        "SIGCHLD listener unavailable; producer supervisor using bounded reap polling"
-                    );
-                    None
-                }
-            };
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
             let terminal = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        Self::observe_status(&control, producer_attempt, &status);
-                        break AttemptChildTerminal::Exited(status, Instant::now());
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        tracing::error!(
-                            producer_attempt,
-                            %error,
-                            "producer process exit could not be observed"
-                        );
-                        break AttemptChildTerminal::WaitFailed(error.kind(), error.to_string());
-                    }
-                }
-
-                let wait_for_exit = async {
-                    if let Some(child_exits) = child_exits.as_mut() {
-                        let _ = child_exits.recv().await;
-                    } else {
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                };
                 if !command_open {
-                    wait_for_exit.await;
-                    continue;
+                    break Self::record_wait_result(&control, producer_attempt, child.wait().await);
                 }
                 tokio::select! {
+                    // `Child::wait` is cancel safe. Poll it first so a ready
+                    // reap always wins over a simultaneous signal command;
+                    // the cached pid therefore cannot have been reused when
+                    // the command branch runs.
+                    biased;
+                    result = child.wait() => {
+                        break Self::record_wait_result(&control, producer_attempt, result);
+                    }
                     command = command_receiver.recv() => {
                         let Some(command) = command else {
                             command_open = false;
@@ -1966,20 +1944,29 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let authorized = {
-                                    let transition = control.lock_producer_transition();
-                                    control.current_producer_attempt() == producer_attempt
-                                        && control.producer_transition_is_live(&transition)
-                                };
-                                let result = if authorized {
-                                    signal_owned_child(&child, producer_attempt, signal)
+                                let transition = control.lock_producer_transition();
+                                let result = if control.current_producer_attempt()
+                                    == producer_attempt
+                                    && control.producer_transition_is_live(&transition)
+                                {
+                                    #[cfg(test)]
+                                    if let Some(pause) = supervisor_signal_pause
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .take()
+                                    {
+                                        pause.wait();
+                                        pause.wait();
+                                    }
+                                    signal_owned_pid(pid, producer_attempt, signal)
                                 } else {
                                     Ok(false)
                                 };
+                                drop(transition);
                                 let _ = reply.send(result);
                             }
                             AttemptChildCommand::Terminate { reply } => {
-                                match signal_owned_child(&child, producer_attempt, libc::SIGKILL) {
+                                match signal_owned_pid(pid, producer_attempt, libc::SIGKILL) {
                                     Ok(_) => {
                                         if let Some(reply) = reply {
                                             terminate_replies.push(reply);
@@ -2000,7 +1987,6 @@ impl AttemptChild {
                             }
                         }
                     }
-                    _ = wait_for_exit => {}
                 }
             };
             *supervisor_terminal
@@ -2015,6 +2001,29 @@ impl AttemptChild {
             pid,
             terminal,
             commands,
+            #[cfg(test)]
+            signal_after_authorization_pause,
+        }
+    }
+
+    fn record_wait_result(
+        control: &crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+        result: std::io::Result<std::process::ExitStatus>,
+    ) -> AttemptChildTerminal {
+        match result {
+            Ok(status) => {
+                Self::observe_status(control, producer_attempt, &status);
+                AttemptChildTerminal::Exited(status, Instant::now())
+            }
+            Err(error) => {
+                tracing::error!(
+                    producer_attempt,
+                    %error,
+                    "producer process exit could not be observed"
+                );
+                AttemptChildTerminal::WaitFailed(error.kind(), error.to_string())
+            }
         }
     }
 
@@ -2064,6 +2073,14 @@ impl AttemptChild {
             .flatten()
     }
 
+    #[cfg(test)]
+    fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
+        *self
+            .signal_after_authorization_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
     async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
         if self
             .terminal
@@ -2083,8 +2100,9 @@ impl AttemptChild {
         }
         match response.await {
             Ok(result) => result,
-            Err(_) => self
-                .signal_result_or_broken_pipe("producer supervisor stopped before signaling"),
+            Err(_) => {
+                self.signal_result_or_broken_pipe("producer supervisor stopped before signaling")
+            }
         }
     }
 
@@ -2172,14 +2190,15 @@ impl Drop for AttemptChild {
     }
 }
 
-/// Signal a child only from its supervisor task. Until that same task reaps
-/// it, the OS cannot reuse its pid; no other task ever performs this call.
-fn signal_owned_child(
-    child: &Child,
+/// Signal a pid only from the task that owns and has not reaped its Child.
+/// A biased, cancel-safe `Child::wait` select proves the pid is still reserved
+/// before the command branch can reach this call.
+fn signal_owned_pid(
+    pid: Option<u32>,
     producer_attempt: u64,
     signal: libc::c_int,
 ) -> std::io::Result<bool> {
-    let Some(pid) = child.id() else {
+    let Some(pid) = pid else {
         return Ok(false);
     };
     let pid = i32::try_from(pid).map_err(|_| {
@@ -2238,8 +2257,9 @@ struct Session {
     /// has decided to replace but reaches the gate after the watchdog.
     #[cfg(test)]
     watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous at the first per-session activity read. It proves
-    /// the manager registry lock was released before telemetry can wait.
+    /// Test-only rendezvous after the actor snapshot for a per-session
+    /// activity read. It proves the manager registry lock was released before
+    /// telemetry can wait and makes attempt replacement interleavings exact.
     #[cfg(test)]
     activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after the control actor has accepted and ticketed a
@@ -3273,6 +3293,7 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    let lease = s.control.snapshot().await;
     #[cfg(test)]
     {
         let pause = s
@@ -3285,7 +3306,6 @@ async fn session_info(
             pause.wait().await;
         }
     }
-    let lease = s.control.snapshot().await;
     let fetched_end_ms = lease.as_ref().map_or_else(
         || s.fetched_end_ms.load(Relaxed),
         |lease| lease.delivery.fetched_end_ms,
@@ -3355,14 +3375,25 @@ async fn session_info(
     } else {
         None
     };
-    let current_producer_attempt = s.control.current_producer_attempt();
+    let status_owner_attempt = delivery.map_or_else(
+        || s.control.current_producer_attempt(),
+        |delivery| delivery.producer_attempt,
+    );
+    let actor_available = delivery.is_some();
     let (child_is_running, fallback_exit) = {
         let child = s.child.lock().await;
         child.as_ref().map_or((false, None), |child| {
-            if child.producer_attempt != current_producer_attempt {
+            if child.producer_attempt != status_owner_attempt {
                 return (false, None);
             }
-            (child.id().is_some(), child.terminal_exit_snapshot())
+            (
+                child.id().is_some(),
+                if actor_available {
+                    None
+                } else {
+                    child.terminal_exit_snapshot()
+                },
+            )
         })
     };
     let producer_exit = delivery
@@ -3382,22 +3413,6 @@ async fn session_info(
         "running"
     } else {
         "complete"
-    };
-    let compatibility_progress_is_exact = s.progress.generation() == current_producer_attempt;
-    let (
-        compatibility_speed,
-        compatibility_recent_speed,
-        compatibility_out_time_ms,
-        compatibility_progress_idle_ms,
-    ) = if compatibility_progress_is_exact {
-        (
-            s.progress.speed(),
-            s.progress.recent_speed(),
-            s.progress.out_time_ms(),
-            s.progress.stalled_for().as_millis().min(i64::MAX as u128) as i64,
-        )
-    } else {
-        (None, None, None, -1)
     };
     SessionInfo {
         id: id.to_owned(),
@@ -3422,25 +3437,19 @@ async fn session_info(
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
         producer_state,
-        producer_attempt: delivery.map(|delivery| delivery.producer_attempt),
+        producer_attempt: Some(status_owner_attempt),
         playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
         published_segment: delivery.and_then(|delivery| delivery.published_segment),
         next_media_sequence: delivery.map(|delivery| delivery.next_media_sequence),
         pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
         speed: delivery
             .and_then(|delivery| delivery.producer_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0)
-            .or(compatibility_speed),
+            .map(|speed| speed as f64 / 1_000.0),
         recent_speed: delivery
             .and_then(|delivery| delivery.producer_recent_speed_milli)
-            .map(|speed| speed as f64 / 1_000.0)
-            .or(compatibility_recent_speed),
-        out_time_ms: delivery
-            .and_then(|delivery| delivery.producer_out_time_ms)
-            .or(compatibility_out_time_ms),
-        progress_idle_ms: delivery.map_or(compatibility_progress_idle_ms, |delivery| {
-            delivery.producer_progress_idle_ms
-        }),
+            .map(|speed| speed as f64 / 1_000.0),
+        out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
+        progress_idle_ms: delivery.map_or(-1, |delivery| delivery.producer_progress_idle_ms),
         producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
         producer_exit_code: producer_exit.as_ref().and_then(|exit| exit.code),
         producer_exit_signal: producer_exit.as_ref().and_then(|exit| exit.signal),
@@ -4293,8 +4302,9 @@ pub struct SessionInfo {
     /// Honest current producer verdict. Additive to the legacy status shape;
     /// control uses it instead of inferring health from suspension alone.
     pub producer_state: &'static str,
-    /// Actor-owned rolling attempt and delivery coordinates. `None` denotes
-    /// immutable VOD or an unavailable rolling actor, while attempt zero is a
+    /// Actor-owned rolling attempt and delivery coordinates. Immutable VOD is
+    /// `None`; an unavailable rolling actor reports the once-sampled fallback
+    /// attempt so exact terminal facts remain attributable. Attempt zero is a
     /// valid compatibility cache generation with no child process.
     pub producer_attempt: Option<u64>,
     pub playlist_ready: Option<bool>,
@@ -18179,6 +18189,62 @@ mod tests {
         assert_eq!(exit.signal, Some(libc::SIGKILL));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn producer_signal_and_retirement_share_one_authorization_linearization() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-fence");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = Arc::new(AttemptChild::new(
+            attempt,
+            long_running_child(),
+            control.clone(),
+        ));
+        let pause = Arc::new(std::sync::Barrier::new(2));
+        child.pause_signal_after_authorization(Arc::clone(&pause));
+        let signal = {
+            let child = Arc::clone(&child);
+            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+        };
+
+        // The supervisor has authorized the exact attempt and still owns the
+        // transition guard immediately before the syscall.
+        pause.wait();
+        let (fenced, observed) = std::sync::mpsc::channel();
+        let fence = {
+            let control = control.clone();
+            std::thread::spawn(move || {
+                control.fence_unavailable();
+                fenced.send(()).expect("fence observation");
+            })
+        };
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retirement cannot linearize between authorization and signal"
+        );
+        pause.wait();
+        assert!(signal
+            .await
+            .expect("signal task")
+            .expect("supervised signal"));
+        observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement follows the physical signal");
+        fence.join().expect("fence thread");
+        assert!(control.is_retired());
+        assert!(
+            !child
+                .signal(libc::SIGCONT)
+                .await
+                .expect("retired signal verdict"),
+            "no signal can land after the newer retirement fence"
+        );
+
+        let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
+        child.kill().await.expect("reap stopped child");
+    }
+
     #[tokio::test]
     async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
         let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
@@ -18267,29 +18333,114 @@ mod tests {
         .await;
         assert_eq!(status.lease_state, "unavailable");
         assert_eq!(status.producer_state, "exited", "terminal precedes held");
+        assert_eq!(status.producer_attempt, Some(0));
         assert_eq!(status.producer_exit_success, Some(false));
         assert_eq!(status.producer_exit_code, Some(1));
-        assert_eq!(status.speed, Some(1.25));
-        assert_eq!(status.recent_speed, Some(1.1));
-        assert_eq!(status.out_time_ms, Some(2_500));
+        assert_eq!(status.speed, None);
+        assert_eq!(status.recent_speed, None);
+        assert_eq!(status.out_time_ms, None);
+        assert_eq!(status.progress_idle_ms, -1);
+    }
 
-        session.progress.generation.store(1, Relaxed);
-        let unknown_progress = session_info(
-            "actor-unavailable",
-            &session,
-            AheadLimits {
-                max_secs: 0,
-                max_bytes: 0,
-                global_max_bytes: 0,
-            },
-            0,
-            0,
-        )
-        .await;
-        assert_eq!(unknown_progress.speed, None);
-        assert_eq!(unknown_progress.recent_speed, None);
-        assert_eq!(unknown_progress.out_time_ms, None);
-        assert_eq!(unknown_progress.progress_idle_ms, -1);
+    #[tokio::test]
+    async fn status_snapshot_never_combines_successor_process_facts_with_predecessor_actor_state() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let session = Arc::new(test_session(dir.path().to_owned()));
+        let predecessor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        session.progress.begin_fenced_attempt(predecessor);
+        session.progress.note_out_time(1_000);
+        session.progress.speed_milli.store(900, Relaxed);
+        session.progress.recent_milli.store(800, Relaxed);
+        session
+            .control
+            .observe_producer_progress(predecessor, Some(1_000), Some(900), Some(800));
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("predecessor snapshot")
+                .delivery
+                .producer_out_time_ms,
+            Some(1_000)
+        );
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let reader = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move {
+                session_info(
+                    "attempt-coherence",
+                    &session,
+                    AheadLimits {
+                        max_secs: 0,
+                        max_bytes: 0,
+                        global_max_bytes: 0,
+                    },
+                    0,
+                    0,
+                )
+                .await
+            })
+        };
+        pause.wait().await;
+
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        session.progress.begin_fenced_attempt(successor);
+        session.progress.note_out_time(99_000);
+        session.progress.speed_milli.store(9_000, Relaxed);
+        session.progress.recent_milli.store(8_000, Relaxed);
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("reap predecessor fixture");
+        }
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn successor terminal producer");
+        *session.child.lock().await =
+            Some(AttemptChild::new(successor, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let terminal = session
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor terminal observation");
+        pause.wait().await;
+
+        let status = reader.await.expect("status reader");
+        assert_eq!(status.producer_attempt, Some(predecessor));
+        assert_eq!(status.out_time_ms, Some(1_000));
+        assert_eq!(status.speed, Some(0.9));
+        assert_eq!(status.recent_speed, Some(0.8));
+        assert_eq!(status.producer_exit_success, None);
+        assert_eq!(status.producer_exit_code, None);
+        assert_ne!(status.producer_state, "exited");
     }
 
     /// Cumulative speed hides a slowdown behind a fast start; the recent rate

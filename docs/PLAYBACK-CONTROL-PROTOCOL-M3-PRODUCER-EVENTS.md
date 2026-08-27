@@ -124,12 +124,13 @@ supervisor rechecks the actor's exact-attempt and live-transition fence while
 the owned child is still unreaped. Compatibility readers consult the
 supervisor's terminal cell instead of calling `Child::try_wait()` themselves.
 
-On Unix, the supervisor reacts to `SIGCHLD` and reaps with `try_wait`. If a
-`SIGCHLD` listener cannot be installed, it logs that fault and uses a bounded
-100 ms reap fallback; this fallback detects process lifecycle only and never
-evaluates health or chooses recovery. Explicit kill, hold, and resume are typed
-commands to that same owner. Dropping a live session requests `SIGKILL`; the
-supervisor still reaps it and publishes the final status. This prevents a
+The supervisor selects between the cancel-safe `Child::wait()` future and its
+typed command channel, with a ready process result taking priority. There is no
+per-child `SIGCHLD` listener and no exit polling interval: one child exit wakes
+only its own waiter. Explicit kill, hold, and resume are commands to that same
+owner. The exact-attempt transition guard stays held from authorization through
+the synchronous signal syscall. Dropping a live session requests `SIGKILL`;
+the supervisor still reaps it and publishes the final status. This prevents a
 waiter from reaping a process between another task's PID lookup and signal,
 which could otherwise signal an unrelated process after PID reuse.
 
@@ -149,12 +150,14 @@ The rolling delivery snapshot adds:
 - exit signal; and
 - exit observation age.
 
-Rolling Activity/status projects those actor fields directly. If the actor is
-unavailable, status uses compatibility progress and the supervisor terminal
-cell only when their attempt still equals the exact current attempt; it does
-not fabricate zero motion or a running child. An unavailable, mismatched
-progress source is explicit as `progress_idle_ms = -1` with null rates and
-output time. `producer_state` reports
+Rolling Activity/status chooses one owner attempt from its actor snapshot. It
+projects no child or progress fact from another attempt even if replacement
+lands while status is being assembled. If the actor is unavailable, status
+samples the fallback attempt once, attributes an exact matching supervisor
+terminal cell to that attempt, and reports compatibility progress explicitly
+unknown as `progress_idle_ms = -1` with null rates and output time. It does not
+try to reconstruct a coherent snapshot from resettable progress atomics.
+`producer_state` reports
 `complete` for a successful supervised exit and `exited` for another terminal
 status unless an existing explicit session failure has the stronger `failed`
 verdict. A terminal process verdict also precedes a stale `held` projection.
@@ -184,10 +187,10 @@ M3c2 removes no recovery mechanism. Exact inventory after this slice:
 | process supervisor | Sole child signal/wait/reap owner; delivers exact exit once and never decides an action | Retain as the producer lifecycle event source |
 | VOD materialization deadline | Unchanged | Retain as an approved progress deadline |
 
-The process supervisor is not a health watchdog. Its normal path is event
-driven by `SIGCHLD`; its platform-listener failure path polls only for process
-termination. It has no progress threshold and chooses no recovery action: it
-is the asynchronous equivalent of collecting a process return value.
+The process supervisor is not a health watchdog. It awaits the process's own
+completion future, has no poll interval or progress threshold, and chooses no
+recovery action: it is the asynchronous equivalent of collecting a process
+return value.
 
 ## Failure behavior
 
@@ -223,8 +226,9 @@ head must cover:
 11. a full real command mailbox cannot block or reorder accepted progress;
 12. contradictory same-attempt exits preserve the first outcome;
 13. actor-unavailable and held-terminal status remains truthful;
-14. Activity/status and Prometheus expose the new facts; and
-15. focused tests, full local gates, browser contracts, and every required
+14. a replacement during status assembly cannot mix two attempts;
+15. Activity/status and Prometheus expose the new facts; and
+16. focused tests, full local gates, browser contracts, and every required
     hosted job pass on the final reviewed head.
 
 ## Rollout and rollback
