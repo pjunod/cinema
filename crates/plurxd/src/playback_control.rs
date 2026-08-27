@@ -2797,7 +2797,11 @@ impl RollingExecutorObservation {
     }
 
     fn settle_lost(&self) {
-        self.state.store(4, Ordering::Release);
+        let _ = self
+            .state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (!matches!(state, 3 | 4)).then_some(4)
+            });
     }
 }
 
@@ -9116,6 +9120,25 @@ mod tests {
             Some(()),
             "one coalesced wake remains available"
         );
+    }
+
+    #[test]
+    fn terminal_and_lost_executor_observations_are_first_winner_absorbing() {
+        let terminal_first = RollingExecutorObservation::default();
+        assert!(terminal_first.begin_observing());
+        terminal_first.settle_terminal();
+        terminal_first.settle_lost();
+        assert_eq!(terminal_first.state(), "terminal");
+        assert!(!terminal_first.begin_observing());
+        assert!(!terminal_first.finish_observing());
+
+        let lost_first = RollingExecutorObservation::default();
+        assert!(lost_first.begin_observing());
+        lost_first.settle_lost();
+        lost_first.settle_terminal();
+        assert_eq!(lost_first.state(), "lost");
+        assert!(!lost_first.begin_observing());
+        assert!(!lost_first.finish_observing());
     }
 
     #[tokio::test]
