@@ -1938,7 +1938,7 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let transition = control.lock_producer_transition();
+                                let mut transition = control.lock_producer_transition();
                                 let result = if control.current_producer_attempt()
                                     == producer_attempt
                                     && control.producer_transition_is_live(&transition)
@@ -1952,7 +1952,17 @@ impl AttemptChild {
                                         pause.wait();
                                         pause.wait();
                                     }
-                                    signal_owned_pid(pid, producer_attempt, signal)
+                                    let result = signal_owned_pid(pid, producer_attempt, signal);
+                                    if matches!(result, Ok(true))
+                                        && (signal == libc::SIGSTOP || signal == libc::SIGCONT)
+                                    {
+                                        control.record_producer_flow_applied(
+                                            &mut transition,
+                                            producer_attempt,
+                                            signal == libc::SIGSTOP,
+                                        );
+                                    }
+                                    result
                                 } else {
                                     Ok(false)
                                 };
@@ -18838,11 +18848,26 @@ mod tests {
         let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
         let pid = child.id().expect("running producer pid");
 
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            None,
+            "a newly admitted producer has no physical-flow acknowledgement"
+        );
         assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "SIGSTOP is acknowledged for this attempt only after the supervisor's successful syscall"
+        );
         assert!(child
             .signal(libc::SIGCONT)
             .await
             .expect("supervised continue"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, false)),
+            "SIGCONT replaces the held acknowledgement with a running acknowledgement"
+        );
         child.kill().await.expect("supervised kill waits for reap");
         let status = child
             .try_wait()
@@ -18918,17 +18943,32 @@ mod tests {
             .await
             .expect("signal task")
             .expect("supervised signal"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "the successful SIGSTOP publishes the held flow for the authorized attempt"
+        );
         observed
             .recv_timeout(Duration::from_secs(1))
             .expect("retirement follows the physical signal");
         fence.join().expect("fence thread");
         assert!(control.is_retired());
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "retirement does not fabricate a flow acknowledgement"
+        );
         assert!(
             !child
                 .signal(libc::SIGCONT)
                 .await
                 .expect("retired signal verdict"),
             "no signal can land after the newer retirement fence"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "a stale SIGCONT cannot publish a running acknowledgement"
         );
 
         let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
