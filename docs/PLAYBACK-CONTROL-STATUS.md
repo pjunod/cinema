@@ -80,7 +80,7 @@ Review and test state for M3c3:
 | Adversarial diff review | **Changes requested** at `702cba62`: accepted `demand=end` was not terminal; End/fence could steal an already-due expiry cause; the 5,040-order model bypassed too many production transitions; and this ledger omitted automatic hosted activity. A new exact-head review is required after the fixes are committed. |
 | Unit/focused tests | **Intentionally not run yet.** The required adversarial review comes first. |
 | Full local gate | **Pending** exact-head adversarial approval and focused tests. |
-| Hosted CI | The automatic pre-review run for `702cba62` had validation scope, policy/contract preflight, fast Rust, daemon-cluster, and WAL green. The next automatic run at `672c0421` failed only the history policy because the corrective runtime commit lacked an explicit regression mapping; all later jobs were consequently skipped. The mapping is now part of the next review head. These runs are recorded separately and are not post-review local evidence. |
+| Hosted CI | The automatic pre-review run for `702cba62` had validation scope, policy/contract preflight, fast Rust, daemon-cluster, and WAL green. The run at `672c0421` failed the history policy because the corrective runtime commit lacked an explicit regression mapping. The next run at `fe367f18` passed preflight but found a test-only name-shadowing compile error in the fast Rust gate; a compile-only local check reproduced it and the next head fixes it. These runs are recorded separately and are not post-review local evidence. |
 | Merge | **Not ready.** |
 
 ## Watchdog-removal ledger

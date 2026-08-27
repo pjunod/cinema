@@ -4483,7 +4483,7 @@ mod tests {
         assert_eq!(replay.disposition, ControlDisposition::Replay);
 
         let terminal_control = RollingControlHandle::spawn("session-start");
-        let mut end = request();
+        let mut end = request.clone();
         end.demand = PlaybackDemand::End;
         end.playback_rate = 0.0;
         end.render_state = RenderState::Ended;
