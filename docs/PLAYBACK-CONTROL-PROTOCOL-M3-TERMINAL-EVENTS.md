@@ -91,11 +91,14 @@ admits only the exact stored replay; tombstones created by supersession,
 operator stop, revocation, or file replacement have no client acknowledgement
 to replay.
 
-Before a successful terminal HTTP response is exposed, its complete bounded
-`ControlResponseV1` is inserted immutably into replicated storage under the
-generation, session, owner node/epoch, client instance, sequence, and a
-canonical digest of the complete parsed request.
-The row survives ordinary route settlement and expires after 60 seconds. Both
+Before a successful terminal HTTP response is exposed, one session-owned
+continuation inserts its complete bounded `ControlResponseV1` immutably into
+replicated storage under the generation, session, owner node/epoch, client
+instance, sequence, and a canonical digest of the complete parsed request.
+That same Store transaction fences the exact owner route as ended, clamps its
+job lease, removes its playback pointer, and releases its cache pin. There is
+no crash window in which the reply exists while the route remains eligible for
+takeover. The row survives route settlement and expires after 60 seconds. Both
 public ingress and the exact-write cluster endpoint consult it before active
 route and rate-limit rejection, validate the complete response against the
 exact terminal request, and return it as a replay. A different identity,
@@ -136,12 +139,14 @@ session terminal action in this slice. After a terminal event wins, both are
 rejected and cannot mutate the frozen snapshot.
 
 Dropping an HTTP request or oneshot receiver does not cancel an enqueued actor
-command. Once owner admission succeeds, one detached owner-exchange task owns
-the local mutation, VOD cleanup join, and replicated acknowledgement commit.
-The actor applies the event even when no caller remains to receive its verdict,
-and the retained reply remains recoverable after route settlement. The model
-therefore includes reply cancellation as an observation, not as a state
-transition.
+command. Admission and every nonterminal exchange remain inside the ingress's
+absolute deadline and are cancelled with it. Only after End linearizes does
+ownership transfer to one session-owned continuation. For rolling delivery it
+holds a terminal-response handoff fence through physical-state joining and the
+atomic replicated commit; the reaper observes that fence under the existing
+child-transition gate. VOD starts the same commit continuation while holding
+its lifecycle gate and joins its independent reader-cleanup task. The actor
+applies End and the durable reply settles even when no HTTP waiter remains.
 
 ## Exhaustive model
 
@@ -180,10 +185,13 @@ deadline precedence, accepted End acknowledgement/replay, response loss,
 rolling status joining, VOD tombstone/detach, cancellation-independent reader
 cleanup, settled-route replay for rolling and VOD, terminal response decoding
 through the actual cluster-relay path, and concurrent end/fence races. A
-backend-neutral Store contract proves the acknowledgement is immutable,
-survives route settlement, expires at the exact retention boundary, and is
-pruned on maintenance. Dropping a reply receiver is a transport observation
-rather than an additional actor-state event.
+backend-neutral Store contract proves the acknowledgement and exact-route end
+are atomic, a crash cannot permit takeover, the reply is immutable, it expires
+at the exact retention boundary, and maintenance prunes it. A deterministic
+rolling regression pauses after actor End, forces the reaper to run before the
+final join, cancels the HTTP task, and still requires exactly one durable reply
+plus an ended route. A never-polled exchange proves pre-admission cancellation
+has no later mutation.
 
 ## Instrumentation
 

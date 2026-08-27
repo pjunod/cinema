@@ -185,6 +185,20 @@
     </details>
   </section>
 
+  <!-- ══════════ Playback control rewrite ══════════ -->
+  <section>
+    <h2>Playback control rewrite <span class="chip prog">🚧 PR #617 revision</span> <span class="ev">PLAYBACK-CONTROL-STATUS.md · updated 2026-08-27</span></h2>
+    <div class="meter"><div class="track"><div class="fill" style="width:36%"></div></div><div class="n">M1 merged · M2 partial · M3c3 under adversarial correction · M4–M9 remain</div></div>
+    <details open><summary>Current exact state</summary>
+      <ul class="items">
+        <li class="done-item"><span class="m done">✓ merged</span><span class="t">PRs #600, #602, #605, and #611–#616 established the reviewed protocol, passive web reporter, bounded rolling actor, explicit demand/pacing, exact-attempt delivery ledger, and constant-space producer progress/exit events.</span></li>
+        <li><span class="m partial">◐ PR #617</span><span class="t">M3c3 makes End, authority loss, and lease expiry typed actor-owned terminal events. The current correction makes terminal reply persistence and exact-route shutdown one replicated transaction; leaves admission and nonterminal work under the inherited deadline; transfers only an accepted End to one session-owned continuation; fences the rolling reaper until that commit; shares one exact reply across concurrent retries; and retains replay platform telemetry without depending on optional retry capabilities.</span></li>
+        <li><span class="m partial">◐ review</span><span class="t">The adversarial review at <code>de32c386</code> requested four lifecycle corrections. All four are implemented in the working revision with deterministic cancellation, reaper, crash/takeover, and capability-free replay coverage. Exact-head re-review is next; local unit tests remain intentionally unrun until approval.</span></li>
+        <li><span class="m todo">○ next</span><span class="t">After approval: focused tests, full unit/workspace gates, hosted CI repair, merge #617, then M4 removes the old server watchdog and in-place replacement owners. Apple/Android control reporters, prepared quality/HDR/track/node handoff, semantic intro/credits indexing, and clustered takeover remain later milestones.</span></li>
+      </ul>
+    </details>
+  </section>
+
   <!-- ══════════ Performance ══════════ -->
   <section>
     <h2>Performance — start latency, 4K, pre-cache <span class="chip prog">🚧 in progress</span> <span class="ev">PERF-PLAN.md · PERF2-PLAN.md · STUTTER-4K.md · SEGMENTER-PLAN.md · VOD-PRESENTATION-PLAN.md</span></h2>
