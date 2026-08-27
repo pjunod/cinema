@@ -15,11 +15,11 @@ repairs at `91486148`, absorbing executor-state/poll-contract repairs at
 actor slot, non-consuming actor polling, one move-only bounded executor inbox,
 a passive weak-reference executor, and status projection; post-test inventory
 and dead-code warning repairs are committed through `9d100a04`
-**Test state:** focused Rust playback control passed 85/85 twice and is
-warning-free; the first 7-test ownership run failed six stale count/anchor
-assertions, and the second cleared five then isolated one invalid source-local
-entrypoint row; `9d100a04` removes it and awaits review before rerun;
-full/cluster gates have not run
+**Test state:** focused Rust playback control passed 85/85 twice without
+warnings; the ownership inventory passed 7/7 after reviewed repairs;
+`make check` reached history validation and stopped on four missing mapping-
+commit chronology links, now added and awaiting targeted review; cluster has
+not run
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -400,11 +400,9 @@ PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is on `codex/playback-control-m4-producer-decision`; its runtime is
 committed through `9d100a04`. Continue in this order:
 
-1. Obtain targeted static/inventory review of `9d100a04` plus this mapping; it
-   only removes an entrypoint row from a table that scans a different source
-   file, while whole-module transport sentinels remain intact.
-2. Rerun the failed ownership inventory, then run `make check` and
-   `make cluster-check`.
+1. Obtain targeted history/static review of the four exact mapping-commit IDs
+   added to their existing regression records.
+2. Rerun `make check`, then run `make cluster-check`.
 3. Repair any failure, re-review changed code, and repeat the affected gates.
 4. Open/finish the PR, require every hosted check to pass on the exact reviewed
    head, and merge.
@@ -495,7 +493,14 @@ failures but showed the remaining transport entrypoint row could never match:
 the entrypoint table reads only `transcode.rs`, while the actor poll correctly
 lives in `playback_control.rs`. Repair `9d100a04` removes that misplaced row;
 the whole-module decision transport, wake, inbox, and poll sentinels remain.
-It requires targeted review before the inventory is rerun.
+
+Targeted review approved exact head `021a44ee`; the ownership inventory then
+passed 7/7. The first full `make check` reached the history gate and stopped:
+commits `ff6ba47d`, `c212547a`, `f447aa1d`, and `021a44ee` use corrective
+subjects, so the chronology checker requires those mapping commits themselves
+to appear beside their runtime commit in regression evidence. The existing
+four records now include those exact IDs. This is a history-only repair; no
+runtime, test, owner count, or behavior changed.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,

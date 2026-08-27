@@ -19,8 +19,11 @@ counts/anchors and one warnings-as-errors risk. `73cd33e9` fixed the normalized
 counts and warning; the rerun cleared five failures and proved the remaining
 entrypoint row was invalid because that table is deliberately source-local to
 `transcode.rs`. `9d100a04` removes the misplaced row while whole-module
-sentinels continue to cover the transport. It awaits targeted review before
-the inventory is rerun. No full or cluster test has run for this slice yet.
+sentinels continue to cover the transport. Targeted review approved that
+repair and the inventory passed 7/7. `make check` then reached the history gate
+and stopped because four corrective mapping commits were not themselves named
+by their existing evidence records; that chronology-only repair awaits review.
+No cluster test has run for this slice yet.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -114,8 +117,8 @@ Review and test state for M4:
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
 | Adversarial implementation review | **Runtime approved; final source-local inventory repair pending targeted review.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact head `981ebb51`. Two reviewers approved the post-test count/warning repair at `f447aa1d`; the rerun then isolated one misplaced entrypoint row, removed by `9d100a04`. |
-| Unit/focused tests | **Rust playback control passed 85/85 twice and is warning-free.** The first 7-test ownership run failed six stale count/anchor assertions. After `73cd33e9`, the second run cleared the five structural counts and failed only the source-local entrypoint row; `9d100a04` removes that invalid row and awaits review before rerun. |
-| Full/cluster/hosted gates | **Not run for the active slice.** The validated baseline is #624: local full and cluster gates plus hosted run `33118301414` passed. |
+| Unit/focused tests | **Green.** Rust playback control passed 85/85 twice without warnings; after reviewed bookkeeping repairs, the ownership inventory passed 7/7. |
+| Full/cluster/hosted gates | **Full gate stopped at history chronology; cluster/hosted not run.** `make check` passed the catalog audit, then `history-check` required the four corrective mapping commits to be added to their existing evidence records. No code or unit assertion failed. The validated baseline remains #624. |
 
 ## Watchdog-removal ledger
 
