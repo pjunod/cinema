@@ -1140,57 +1140,57 @@
      carried by paint rather than by pretending a media library is a globe:
      signal telemetry, smoked glass, mono microcopy and fine instrument lines.
      Artwork and information hierarchy remain Cinema's. */
-  :is([data-theme=panoptic],[data-theme=redline]) body{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) body{
     background-color:var(--bg);
     background-image:
       radial-gradient(ellipse at 50% -18%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 42%),
       repeating-linear-gradient(180deg,transparent 0 3px,color-mix(in srgb,var(--accent) 1.8%,transparent) 3px 4px)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) header.top,
-  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-side,
-  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-tabs{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) header.top,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic])[data-layout=catalog] .px-side,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic])[data-layout=catalog] .px-tabs{
     background:var(--glass-strong);border-color:var(--hairline);
     -webkit-backdrop-filter:blur(24px) saturate(1.35);backdrop-filter:blur(24px) saturate(1.35);
     box-shadow:inset 0 1px rgba(255,255,255,.035),0 10px 30px rgba(0,0,0,.26)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .logo{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .logo{
     background:none;-webkit-background-clip:initial;background-clip:initial;color:var(--text);
     font-family:var(--font-mono);font-size:16px;font-weight:700;letter-spacing:.28em;
     text-transform:uppercase;text-shadow:0 0 24px var(--glow)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .logo::after{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .logo::after{
     content:"";display:inline-block;width:6px;height:6px;margin-left:8px;border:1px solid var(--accent);
     border-radius:50%;vertical-align:2px;box-shadow:0 0 9px var(--glow),inset 0 0 5px var(--glow)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) header.top nav a,
-  :is([data-theme=panoptic],[data-theme=redline]) .px-nav a,
-  :is([data-theme=panoptic],[data-theme=redline]) .th-nav a{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) header.top nav a,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .px-nav a,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .th-nav a{
     font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) h2.section{
     display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:11px;font-weight:700;
     letter-spacing:.22em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section::before{content:"//";color:var(--accent);text-shadow:0 0 10px var(--glow)}
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section::after{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) h2.section::before{content:"//";color:var(--accent);text-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) h2.section::after{
     content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hairline),transparent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .card,
-  :is([data-theme=panoptic],[data-theme=redline]) .version,
-  :is([data-theme=panoptic],[data-theme=redline]) .filebox,
-  :is([data-theme=panoptic],[data-theme=redline]) .amenu,
-  :is([data-theme=panoptic],[data-theme=redline]) .pmenu,
-  :is([data-theme=panoptic],[data-theme=redline]) .toast,
-  :is([data-theme=panoptic],[data-theme=redline]) .statsov{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .card,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .version,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .filebox,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .amenu,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .pmenu,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .toast,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .statsov{
     background:var(--glass);border-color:var(--hairline);
     -webkit-backdrop-filter:blur(20px) saturate(1.3);backdrop-filter:blur(20px) saturate(1.3);
     box-shadow:var(--shadow),inset 0 1px rgba(255,255,255,.035)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn){
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) button:not(.ghost):not(.pbtn){
     background:var(--accent-dim);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 42%,transparent);
     box-shadow:inset 0 1px rgba(255,255,255,.035);letter-spacing:.02em
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn):hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) button:not(.ghost):not(.pbtn):hover{
     background:var(--accent);color:var(--btn-ink);border-color:var(--accent);box-shadow:0 0 16px var(--glow)
   }
   /* Settings tabs are navigation, not six equal primary actions. Their old
@@ -1198,72 +1198,72 @@
      the same accent wash and border. Keep inactive tabs neutral; the current
      one has a solid fill, heavier type and a contrasting inset marker, so the
      state remains obvious without relying on hue alone. */
-  :is([data-theme=panoptic],[data-theme=redline]) .settabs{gap:6px;border-bottom-color:var(--hairline)}
-  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab:not(.ghost):not(.pbtn){
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .settabs{gap:6px;border-bottom-color:var(--hairline)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .settabs>button.settab:not(.ghost):not(.pbtn){
     background:rgba(255,255,255,.025);color:var(--muted);border:1px solid var(--hairline);
     border-bottom:3px solid transparent;box-shadow:none;letter-spacing:.01em
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab:not(.active):not(.ghost):not(.pbtn):hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .settabs>button.settab:not(.active):not(.ghost):not(.pbtn):hover{
     background:color-mix(in srgb,var(--accent) 9%,transparent);color:var(--text);
     border-color:color-mix(in srgb,var(--accent) 48%,transparent);box-shadow:none
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab.active:not(.ghost):not(.pbtn),
-  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab.active:not(.ghost):not(.pbtn):hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .settabs>button.settab.active:not(.ghost):not(.pbtn),
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .settabs>button.settab.active:not(.ghost):not(.pbtn):hover{
     background:var(--accent);color:var(--btn-ink);border-color:var(--accent);
     border-bottom-color:var(--btn-ink);font-weight:700;
     box-shadow:0 0 18px var(--glow),inset 0 -2px var(--btn-ink)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button.ghost{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) button.ghost{
     background:rgba(255,255,255,.035);border-color:var(--hairline);color:var(--text)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button.ghost:hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) button.ghost:hover{
     background:color-mix(in srgb,var(--accent) 9%,transparent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);color:var(--accent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) input,
-  :is([data-theme=panoptic],[data-theme=redline]) select{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) input,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) select{
     background:color-mix(in srgb,var(--bg) 82%,transparent);border-color:var(--hairline);caret-color:var(--accent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) input:focus,
-  :is([data-theme=panoptic],[data-theme=redline]) select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
-  :is([data-theme=panoptic],[data-theme=redline]) .chip,
-  :is([data-theme=panoptic],[data-theme=redline]) .pill,
-  :is([data-theme=panoptic],[data-theme=redline]) .vbadge,
-  :is([data-theme=panoptic],[data-theme=redline]) .missbadge,
-  :is([data-theme=panoptic],[data-theme=redline]) .specs,
-  :is([data-theme=panoptic],[data-theme=redline]) .activity{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) input:focus,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .chip,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .pill,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .vbadge,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .missbadge,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .specs,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .activity{
     font-family:var(--font-mono);letter-spacing:.045em;text-transform:uppercase
   }
   /* Cockpit labels benefit from terse uppercase instrumentation; values and
      operator explanations do not. Applying tracking and text-transform to the
      whole definition list produced the spaced all-caps paragraph in System's
      "Right now" row and encouraged mid-word wrapping. */
-  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid{font-family:var(--font-mono)}
-  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid dt{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .kvgrid{font-family:var(--font-mono)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .kvgrid dt{
     font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid dd{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .kvgrid dd{
     line-height:1.55;letter-spacing:0;text-transform:none;word-break:normal;overflow-wrap:anywhere
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .system-grid{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .system-grid{
     grid-template-columns:minmax(108px,max-content) minmax(0,1fr);gap:0 20px
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>dt,
-  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>dd{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .system-grid>dt,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .system-grid>dd{
     padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--hairline) 72%,transparent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>:nth-last-child(-n+2){border-bottom:0}
-  :is([data-theme=panoptic],[data-theme=redline]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
-  :is([data-theme=panoptic],[data-theme=redline]) .poster:hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .system-grid>:nth-last-child(-n+2){border-bottom:0}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .poster:hover{
     transform:none;border-color:color-mix(in srgb,var(--accent) 62%,var(--line));
     box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent),0 0 20px color-mix(in srgb,var(--accent) 12%,transparent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .poster .prog>i,
-  :is([data-theme=panoptic],[data-theme=redline]) .hprog>i{box-shadow:0 0 10px var(--glow)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::selection{background:var(--accent);color:var(--btn-ink)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar{width:10px;height:10px}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-track{background:var(--bg)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb{background:var(--hairline);border:2px solid var(--bg)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .poster .prog>i,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) .hprog>i{box-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) ::selection{background:var(--accent);color:var(--btn-ink)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) ::-webkit-scrollbar{width:10px;height:10px}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) ::-webkit-scrollbar-track{background:var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) ::-webkit-scrollbar-thumb{background:var(--hairline);border:2px solid var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic]) ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
   /* Paper — deliberately plain: no grain, no glow, no animated brand. The
      rule that earns its keep is the reading measure, because an editorial
      theme whose prose runs the full width of a 1400px column is not one. */
@@ -2702,6 +2702,11 @@ const THEMES={
   redline:{name:"Redline", darkOnly:true,
     dark:{"--bg":"#070708","--panel":"#111214","--panel2":"#191a1d","--line":"rgba(255,122,128,.17)","--text":"#f0eded","--muted":"#aaa1a3","--accent":"#ff5964","--accent2":"#d62e3d","--good":"#6ccf9a","--bad":"#ff9f70","--warn":"#f6c760","--radius":"12px","--btn-ink":"#170204","--prose":"#d4ccce","--font":FONT_INTER,"--font-mono":FONT_MONO,
       "--accent-dim":"rgba(255,89,100,.13)","--glow":"rgba(255,55,70,.32)","--glass":"rgba(16,13,15,.80)","--glass-strong":"rgba(10,9,11,.92)","--hairline":"rgba(255,122,128,.17)","--shadow":"0 12px 34px rgba(0,0,0,.62)"}},
+  // Panovic — true-black intelligence cockpit: orange telemetry on neutral grey.
+  // Dark-only. Accent is the active signal; grey carries hierarchy without competing.
+  panovic:{name:"Panovic", darkOnly:true,
+    dark:{"--bg":"#000000","--panel":"#181818","--panel2":"#242424","--line":"rgba(255,255,255,.06)","--text":"#e8e6e1","--muted":"#9a9aa0","--accent":"#f0723b","--accent2":"#8e4a1e","--good":"#5fb582","--bad":"#ff7a66","--warn":"#d9a05b","--radius":"10px","--btn-ink":"#140a00","--prose":"#c8c6c1","--font":FONT_INTER,"--font-mono":FONT_MONO,
+      "--glow":"rgba(240,114,59,.35)","--shadow":"0 4px 14px rgba(0,0,0,.8)"}},
 };
 // Favicons: the noirr theme wears the kit icon (icon-a — n + cursor, midnight
 // in both showtimes); everything else gets a neutral play mark.
