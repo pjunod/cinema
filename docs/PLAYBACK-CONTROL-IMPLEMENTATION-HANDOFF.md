@@ -6,16 +6,16 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `ba1280bab3114ed49a09799658db345ffd25c834`
-(round 4 returned **REQUEST CHANGES**)
-**Current repair implementation:**
-`2e2136b27d25a8943e0422a74ca27246cb65119b` (the documentation refresh follows
-it; resolve the immutable branch tip with `git rev-parse HEAD` before requesting
-round 5)
+**Last reviewed exact head:** `4899799846e56b05b56c4a9f4c221a683794ff9e`
+(round 5 returned **REQUEST CHANGES**)
+**Current repair:** documentation-only ledger corrections in this snapshot;
+resolve the immutable branch tip with `git rev-parse HEAD` before requesting
+round 6
 **Test state:** no local tests, builds, or checks have run for the current slice.
-The automatically triggered hosted preflight ran only static policy, failed on
-the now-repaired corrective-history mapping, and skipped all test jobs. A fresh
-adversarial PR review must happen first.
+The automatically triggered hosted workflow at round-5 head `48997998` passed
+its fast static preflight and may run test jobs, but those results are not gate
+evidence for this changed documentation head. A fresh adversarial PR review
+must happen first.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -205,9 +205,27 @@ CHANGES** for two repository-gate defects:
 
 Commit `2e2136b27d25a8943e0422a74ca27246cb65119b` maps all three runtime repairs
 to the retained playback-pipeline and validation evidence and records the
-three documentation commits as non-runtime. This handoff refresh adds the
-missing sequence entries. Because the repair changes the exact head, round 4's
-two approvals do not authorize tests on it: exact-head round 5 is required.
+then-current three documentation commits as non-runtime. This handoff refresh
+adds the missing sequence entries. Because the repair changes the exact head,
+round 4's two approvals do not authorize tests on it: exact-head round 5 is
+required.
+
+Round 5 reviewed exact head
+`4899799846e56b05b56c4a9f4c221a683794ff9e`. The runtime-identity pass proved
+the production, playback-test, and ownership-inventory blobs were byte-for-byte
+identical to the two runtime-approved round-4 passes. The primary pass returned
+**REQUEST CHANGES** for two documentation-ledger defects:
+
+1. The round-4 chronology still said three documentation commits were mapped
+   after `d3d5703b` made the mapping contain four.
+2. The committed sequence stopped at `2e2136b2` without either listing
+   `d3d5703b` and `48997998` or declaring a boundary for the self-referential
+   documentation snapshot.
+
+This documentation-only repair names the count at the point it was made and
+defines the sequence boundary explicitly. It changes no runtime, test,
+ownership-inventory, or validation behavior. Exact-head round 6 is required
+before local tests.
 
 ### PR #619 adversarial review chronology
 
@@ -283,14 +301,14 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 4 returned
+The action-passive deadline slice is in PR #621. Review round 5 returned
 **REQUEST CHANGES** at exact head
-`ba1280bab3114ed49a09799658db345ffd25c834`. The repair implementation is
-committed at `2e2136b27d25a8943e0422a74ca27246cb65119b`; it and this documentation
-refresh remain untested pending exact-head round 5.
+`4899799846e56b05b56c4a9f4c221a683794ff9e`. The repair is documentation-only
+and contained in this snapshot; local validation remains unrun pending
+exact-head round 6.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-5 review of that exact commit.
+  adversarial round-6 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -362,7 +380,13 @@ Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
 
-Committed implementation sequence:
+Committed implementation and review-repair sequence through the history
+binding preceding this documentation snapshot:
+
+The documentation commit containing this list and any later metadata-only
+binding are intentionally resolved with `git log`; a commit cannot list its
+own content-derived hash. They do not alter the candidate behavior described
+here.
 
 ```text
 6b602d6c feat(playback): record actor producer deadlines
@@ -375,6 +399,8 @@ a409a194 fix(playback): fence passive producer cutoff
 728abc86 fix(playback): fence deferred flow on actor exit
 ba1280ba docs(playback): record actor exit review repairs
 2e2136b2 chore(validation): bind actor exit review evidence
+d3d5703b docs(playback): record history review repairs
+48997998 chore(validation): bind history review evidence
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
