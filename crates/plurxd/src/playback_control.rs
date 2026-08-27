@@ -2632,6 +2632,9 @@ pub(crate) struct RollingControlHandle {
     producer_transition: Arc<std::sync::Mutex<RollingProducerTransitionFence>>,
     flow_sync: Arc<RollingFlowSync>,
     producer_events: Arc<RollingProducerIngress>,
+    /// Strong lifetime owner for the weak executor transport. Dropping the
+    /// final handle must close the actor rather than leave a self-owned task.
+    #[allow(dead_code)]
     decision_transport: Arc<RollingDecisionTransport>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
