@@ -2582,8 +2582,9 @@ impl Session {
             .authorize_producer_install(producer_attempt)
             .await
         {
-            let _ = candidate.kill().await;
-            let _ = candidate.wait().await;
+            drop(child);
+            self.terminate_rejected_candidate(candidate, producer_attempt)
+                .await;
             return Err(reason);
         }
         #[cfg(test)]
@@ -19749,6 +19750,17 @@ mod tests {
             candidate_pid,
             "the retired session cannot own the spawned candidate"
         );
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(candidate_pid.expect("candidate pid fits u32"))
+                .expect("candidate pid fits i32");
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH),
+                "final-fence rejection returns only after the candidate is reaped"
+            );
+        }
     }
 
     /// Drive the hardware-to-software fallback itself, paused after it kills
