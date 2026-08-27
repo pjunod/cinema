@@ -3,9 +3,10 @@
 **Updated:** 2026-08-26
 **Merged baseline:** `origin/main` at `5908e838` (PR #614)
 **Current work:** `codex/playback-control-m3-delivery-ledger` — M3c1 passive,
-attempt-fenced publication/fetch ledger; the first exact-head review requested
-changes, its first remediation review found four further concurrency findings,
-and those are locally remediated but not yet re-reviewed or tested
+attempt-fenced publication/fetch ledger; three exact-head adversarial reviews
+have driven thirteen concurrency/correctness fixes. The third review's final
+three findings are locally remediated and await exact-head re-review; no tests
+have run before that approval
 **Source of truth:** this page tracks delivery; the design and acceptance
 contracts remain in
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md).
@@ -71,8 +72,8 @@ Review and test state for M3c1:
 
 | Gate | State |
 |---|---|
-| Implementation | Initial `fe73efaa` plus local remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
-| Adversarial diff review | `fe73efaa` requested six changes, all remediated in `fbae4eb9` along with a locally found mixed-scratch race. Review of `fbae4eb9` then found an untagged startup-gate store, missing final producer-install authorization after admission, reconstructed subtitle ownership across rolling/VOD replacement, and out-of-order same-attempt refresh replacement. All four are locally remediated; exact-head re-review is pending and no tests will run first. |
+| Implementation | `fe73efaa`, `fbae4eb9`, and `9e0f6c4a`, plus local third-review remediation on `codex/playback-control-m3-delivery-ledger` from merged `5908e838` |
+| Adversarial diff review | Review 1 requested six changes; review 2 found four further races. Review 3 confirmed those fixes and found three remaining linearization gaps: producer publication after final authorization, predecessor retention deleting reused successor paths, and refresh revisions captured after stale reads. All three now have exact fences and deterministic race tests locally; exact-head re-review is pending and no tests will run first. |
 | Unit/focused tests | Not run yet, by required review-before-test ordering |
 | Full local gate | Not run yet |
 | Hosted CI | No PR yet |

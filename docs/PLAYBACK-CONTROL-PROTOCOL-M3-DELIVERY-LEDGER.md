@@ -39,9 +39,13 @@ after its usable playlist has entered actor state.
 Attempt admission and final installation return an exact rejection: the
 session ended, a playlist was already published, the install attempt was
 stale, the attempt counter was exhausted, or the actor mailbox was unavailable.
-Fallback logs that cause and leaves the predecessor process,
-scratch, admission class, telemetry, and compatibility frontiers unchanged on
-every rejection.
+An admission rejection happens before fallback touches the predecessor and
+therefore leaves its process, scratch, admission class, telemetry, and
+compatibility frontiers unchanged. A final-install rejection happens after an
+accepted transition may already have killed the predecessor and spawned a
+candidate. It kills that candidate without publishing it; it does not pretend
+to roll the predecessor back, and the terminal actor/ordinary teardown owns
+the remaining cleanup.
 
 ```text
  producer start/replacement
@@ -133,14 +137,30 @@ The replacement marker fences playlist reads, segment opens, and index refresh
 preparation throughout that interval. No observation can attribute those old
 files to the new attempt and merge them after the transition reopens.
 
-Concurrent refreshes within one attempt also carry the in-memory index revision
-they prepared from. If another refresh or retention mutation lands first, the
-older preparation is discarded instead of overwriting the newer timeline.
+Concurrent refreshes within one attempt also capture the in-memory index
+revision before reading the playlist bytes. If another refresh or retention
+mutation lands first, the older preparation is discarded instead of borrowing
+a newer token and overwriting the newer timeline.
+
+Retention owns `child_transition` from its exact-attempt check and doomed-name
+snapshot through every unlink and the matching catalog mutation. Segment paths
+are reused by a successor, so this short-lived compatibility rule is required:
+a replacement that won first makes the retention sample stale, while one that
+arrives later cannot seed successor bytes until all predecessor deletes finish.
+M4 replaces these shared paths with attempt-owned actor state.
 
 A replacement is authorized twice: actor admission before the predecessor is
 touched, and exact-attempt authorization after the candidate process is spawned
-but before it is installed. Expiry or retirement between those points kills the
-candidate and leaves it outside session ownership.
+but before it is installed. The actor's exact producer/deadline fence then stays
+held through the synchronous child assignment. Expiry, retirement, or a newer
+attempt that wins before that fence kills the candidate and leaves it outside
+session ownership.
+
+Initial sessions use the equivalent publication rule. They take the potentially
+delayed registry lock first, reauthorize the exact attempt, and hold the actor's
+producer/deadline fence through the synchronous registry insertion. Serving
+authority and actor ownership are both rechecked after every asynchronous wait;
+an unregistered rejected child is killed and its admission resources returned.
 
 Composite subtitle playlists carry the response owner resolved with their
 exact video-playlist bytes. They never reconstruct ownership from a reusable

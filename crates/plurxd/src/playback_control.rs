@@ -1579,6 +1579,14 @@ impl RollingControlActor {
                 let _ = reply.send(outcome);
             }
             RollingControlCommand::BeginProducerAttempt { reply } => {
+                // Installation holds this exact fence through synchronous
+                // child/registry publication. A newer attempt must not pass
+                // that linearization point and make the just-published owner
+                // stale before the publication itself completes.
+                let transition = Arc::clone(&self.producer_transition);
+                let _transition = transition
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let _ = reply.send(self.begin_producer_attempt_at(rolling_now()));
             }
             RollingControlCommand::AuthorizeProducerInstall {
@@ -1794,6 +1802,30 @@ impl RollingControlHandle {
         response
             .await
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    /// Hold the actor's exact producer-deadline fence across a synchronous
+    /// ownership publication. Callers renew through
+    /// [`Self::authorize_producer_install`] first, then acquire this guard
+    /// immediately before assigning a child or inserting its session.
+    pub(crate) fn lock_authorized_producer_install(
+        &self,
+        producer_attempt: u64,
+    ) -> Result<std::sync::MutexGuard<'_, Instant>, ProducerAttemptRejection> {
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.sender.is_closed() {
+            return Err(ProducerAttemptRejection::ControlUnavailable);
+        }
+        if self.retired.load(Ordering::Acquire) || rolling_now() >= *transition {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
+        if self.producer_attempt.load(Ordering::Acquire) != producer_attempt {
+            return Err(ProducerAttemptRejection::StaleAttempt);
+        }
+        Ok(transition)
     }
 
     pub(crate) async fn observe_publication(
