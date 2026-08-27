@@ -1075,6 +1075,21 @@ pub(crate) struct RollingLeaseSnapshot {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct RollingDeliverySnapshot {
     pub producer_attempt: u64,
+    /// Latest actor-accepted ffmpeg timeline coordinate for this exact
+    /// attempt. Producer telemetry is deliberately distinct from publication:
+    /// frames can still be moving while the current segment is incomplete.
+    pub producer_out_time_ms: Option<i64>,
+    /// Cumulative and recent encode rates, scaled by 1,000 to keep the actor
+    /// state exact and equality-friendly (`1.85x` is `1850`).
+    pub producer_speed_milli: Option<i64>,
+    pub producer_recent_speed_milli: Option<i64>,
+    /// Wall-clock age of the last advancing output timestamp. This begins at
+    /// attempt admission, so a producer that never emits telemetry is measured
+    /// by the same coordinate as one that later stops.
+    pub producer_progress_idle_ms: i64,
+    /// Exact-attempt terminal process observation. Recovery remains with the
+    /// compatibility watchdog until M4; this is an ordered fact only.
+    pub producer_exit: Option<RollingProducerExitSnapshot>,
     pub playlist_ready: bool,
     pub published_segment: Option<i64>,
     pub published_end_ms: Option<i64>,
@@ -1082,6 +1097,32 @@ pub(crate) struct RollingDeliverySnapshot {
     pub fetched_segment: Option<i64>,
     pub fetched_end_ms: i64,
     pub pending_fetched_segment: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RollingProducerExitSnapshot {
+    pub success: bool,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub observed_idle_ms: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RollingProducerProgressObservation {
+    producer_attempt: u64,
+    out_time_ms: Option<i64>,
+    speed_milli: Option<i64>,
+    recent_speed_milli: Option<i64>,
+    observed_at: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RollingProducerExitObservation {
+    producer_attempt: u64,
+    success: bool,
+    code: Option<i32>,
+    signal: Option<i32>,
+    observed_at: Instant,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1218,6 +1259,126 @@ impl RollingFlowSync {
     }
 }
 
+/// A bounded, coalescing producer-event ingress independent of the actor's
+/// command mailbox.
+///
+/// ffmpeg progress is read from a pipe that must never stop draining because
+/// a control request or filesystem observation filled the mailbox. Publishing
+/// here takes one short synchronous mutex, overwrites the prior progress fact,
+/// and wakes the actor; it never awaits. Exit has its own slot so a final
+/// process verdict cannot be overwritten by another progress line. Attempt
+/// numbers are monotonic, therefore a late predecessor line is also prevented
+/// from evicting an already-pending successor observation.
+struct RollingProducerIngress {
+    state: std::sync::Mutex<RollingProducerIngressState>,
+    notify: tokio::sync::Notify,
+}
+
+#[derive(Default)]
+struct RollingProducerIngressState {
+    next_sequence: u64,
+    progress: Option<SequencedProducerEvent>,
+    exit: Option<SequencedProducerEvent>,
+}
+
+struct SequencedProducerEvent {
+    sequence: u64,
+    event: RollingProducerEvent,
+}
+
+enum RollingProducerEvent {
+    Progress(RollingProducerProgressObservation),
+    Exit(RollingProducerExitObservation),
+}
+
+impl RollingProducerEvent {
+    fn producer_attempt(&self) -> u64 {
+        match self {
+            Self::Progress(observation) => observation.producer_attempt,
+            Self::Exit(observation) => observation.producer_attempt,
+        }
+    }
+}
+
+impl RollingProducerIngress {
+    fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(RollingProducerIngressState::default()),
+            notify: tokio::sync::Notify::new(),
+        }
+    }
+
+    fn publish_progress(&self, observation: RollingProducerProgressObservation) {
+        self.publish(RollingProducerEvent::Progress(observation), false);
+    }
+
+    fn publish_exit(&self, observation: RollingProducerExitObservation) {
+        self.publish(RollingProducerEvent::Exit(observation), true);
+    }
+
+    fn publish(&self, event: RollingProducerEvent, is_exit: bool) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let metric_index = usize::from(is_exit);
+        ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
+        let pending_attempt = if is_exit {
+            state
+                .exit
+                .as_ref()
+                .map(|pending| pending.event.producer_attempt())
+        } else {
+            state
+                .progress
+                .as_ref()
+                .map(|pending| pending.event.producer_attempt())
+        };
+        if pending_attempt.is_some_and(|pending| pending > event.producer_attempt()) {
+            return;
+        }
+        if pending_attempt.is_some() {
+            ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
+        }
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let sequence = state.next_sequence;
+        let sequenced = Some(SequencedProducerEvent { sequence, event });
+        if is_exit {
+            state.exit = sequenced;
+        } else {
+            state.progress = sequenced;
+        }
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    fn drain(&self) -> Vec<RollingProducerEvent> {
+        let mut pending = {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            [state.progress.take(), state.exit.take()]
+                .into_iter()
+                .flatten()
+                .collect::<Vec<_>>()
+        };
+        pending.sort_by_key(|event| event.sequence);
+        pending.into_iter().map(|event| event.event).collect()
+    }
+
+    async fn next(&self) -> Vec<RollingProducerEvent> {
+        loop {
+            let pending = self.drain();
+            if !pending.is_empty() {
+                return pending;
+            }
+            // `notify_one` retains a permit, closing the check-to-await race.
+            self.notify.notified().await;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct RollingControlHandle {
     sender: tokio::sync::mpsc::Sender<RollingControlCommand>,
@@ -1225,6 +1386,7 @@ pub(crate) struct RollingControlHandle {
     producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    producer_events: Arc<RollingProducerIngress>,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
 }
@@ -1290,12 +1452,15 @@ struct RollingControlActor {
     mode: RollingLeaseMode,
     demand: Option<PlaybackDemandSnapshot>,
     delivery: RollingDeliverySnapshot,
+    producer_progress_at: Option<Instant>,
+    producer_exit_at: Option<Instant>,
     retired: bool,
     expiration_claimed: bool,
     retired_fence: Arc<AtomicBool>,
     producer_attempt: Arc<AtomicU64>,
     producer_transition: Arc<std::sync::Mutex<Instant>>,
     flow_sync: Arc<RollingFlowSync>,
+    producer_events: Arc<RollingProducerIngress>,
     last_flow_ticket: u64,
     #[cfg(test)]
     producer_attempt_reply_pause: Arc<std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>>,
@@ -1311,6 +1476,7 @@ impl RollingControlActor {
             Arc::new(AtomicU64::new(0)),
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT)),
             Arc::new(RollingFlowSync::new()),
+            Arc::new(RollingProducerIngress::new()),
             Arc::new(std::sync::Mutex::new(None)),
         )
     }
@@ -1322,6 +1488,7 @@ impl RollingControlActor {
         producer_attempt: Arc<AtomicU64>,
         producer_transition: Arc<std::sync::Mutex<Instant>>,
         flow_sync: Arc<RollingFlowSync>,
+        producer_events: Arc<RollingProducerIngress>,
         #[cfg(test)] producer_attempt_reply_pause: Arc<
             std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
         >,
@@ -1333,12 +1500,15 @@ impl RollingControlActor {
             mode: RollingLeaseMode::Legacy,
             demand: None,
             delivery: RollingDeliverySnapshot::default(),
+            producer_progress_at: None,
+            producer_exit_at: None,
             retired: false,
             expiration_claimed: false,
             retired_fence,
             producer_attempt,
             producer_transition,
             flow_sync,
+            producer_events,
             last_flow_ticket: 0,
             #[cfg(test)]
             producer_attempt_reply_pause,
@@ -1349,6 +1519,18 @@ impl RollingControlActor {
         let idle_for = now.saturating_duration_since(self.last_renewal);
         let timeout = self.mode.timeout();
         let deadline = self.deadline();
+        let mut delivery = self.delivery.clone();
+        delivery.producer_progress_idle_ms = self.producer_progress_at.map_or(0, |observed_at| {
+            i64::try_from(now.saturating_duration_since(observed_at).as_millis())
+                .unwrap_or(i64::MAX)
+        });
+        if let (Some(exit), Some(observed_at)) =
+            (delivery.producer_exit.as_mut(), self.producer_exit_at)
+        {
+            exit.observed_idle_ms =
+                i64::try_from(now.saturating_duration_since(observed_at).as_millis())
+                    .unwrap_or(i64::MAX);
+        }
         RollingLeaseSnapshot {
             mode: self.mode,
             idle_for,
@@ -1356,7 +1538,7 @@ impl RollingControlActor {
             deadline,
             last_renewal_kind: self.last_renewal_kind,
             demand: self.demand.clone(),
-            delivery: self.delivery.clone(),
+            delivery,
             retired: self.retired,
             expiration_claimed: self.expiration_claimed,
         }
@@ -1443,8 +1625,80 @@ impl RollingControlActor {
             producer_attempt: attempt,
             ..RollingDeliverySnapshot::default()
         };
+        self.producer_progress_at = Some(now);
+        self.producer_exit_at = None;
         self.producer_attempt.store(attempt, Ordering::Release);
         Ok(attempt)
+    }
+
+    fn observe_producer_progress_at(
+        &mut self,
+        now: Instant,
+        observation: RollingProducerProgressObservation,
+    ) -> bool {
+        if self.retired
+            || observation.producer_attempt != self.delivery.producer_attempt
+            || self.delivery.producer_exit.is_some()
+        {
+            return false;
+        }
+        let mut advanced = false;
+        if let Some(out_time_ms) = observation.out_time_ms.filter(|value| *value >= 0) {
+            if self
+                .delivery
+                .producer_out_time_ms
+                .is_none_or(|current| out_time_ms > current)
+            {
+                self.delivery.producer_out_time_ms = Some(out_time_ms);
+                self.producer_progress_at = Some(observation.observed_at.min(now));
+                advanced = true;
+            }
+        }
+        if let Some(speed_milli) = observation.speed_milli.filter(|value| *value >= 0) {
+            self.delivery.producer_speed_milli = Some(speed_milli);
+        }
+        if let Some(recent_speed_milli) = observation.recent_speed_milli.filter(|value| *value >= 0)
+        {
+            self.delivery.producer_recent_speed_milli = Some(recent_speed_milli);
+        }
+        advanced || observation.speed_milli.is_some() || observation.recent_speed_milli.is_some()
+    }
+
+    fn observe_producer_exit_at(
+        &mut self,
+        now: Instant,
+        observation: RollingProducerExitObservation,
+    ) -> bool {
+        if self.retired || observation.producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        if let Some(exit) = &self.delivery.producer_exit {
+            return exit.success == observation.success
+                && exit.code == observation.code
+                && exit.signal == observation.signal;
+        }
+        self.delivery.producer_exit = Some(RollingProducerExitSnapshot {
+            success: observation.success,
+            code: observation.code,
+            signal: observation.signal,
+            observed_idle_ms: 0,
+        });
+        self.producer_exit_at = Some(observation.observed_at.min(now));
+        true
+    }
+
+    fn handle_producer_event(&mut self, event: RollingProducerEvent) {
+        let now = rolling_now();
+        let (metric_index, accepted) = match event {
+            RollingProducerEvent::Progress(observation) => {
+                (0, self.observe_producer_progress_at(now, observation))
+            }
+            RollingProducerEvent::Exit(observation) => {
+                (2, self.observe_producer_exit_at(now, observation))
+            }
+        };
+        ROLLING_PRODUCER_EVENT_OUTCOMES[metric_index + usize::from(!accepted)]
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     fn authorize_producer_install_at(
@@ -1711,19 +1965,41 @@ impl RollingControlActor {
     async fn run(mut self, mut receiver: tokio::sync::mpsc::Receiver<RollingControlCommand>) {
         loop {
             if self.retired {
-                let Some(command) = receiver.recv().await else {
-                    break;
-                };
-                self.handle_command(command).await;
+                let producer_events = Arc::clone(&self.producer_events);
+                tokio::select! {
+                    command = receiver.recv() => {
+                        let Some(command) = command else {
+                            break;
+                        };
+                        for event in self.producer_events.drain() {
+                            self.handle_producer_event(event);
+                        }
+                        self.handle_command(command).await;
+                    }
+                    events = producer_events.next() => {
+                        for event in events {
+                            self.handle_producer_event(event);
+                        }
+                    }
+                }
                 continue;
             }
             let deadline = self.deadline();
+            let producer_events = Arc::clone(&self.producer_events);
             tokio::select! {
                 command = receiver.recv() => {
                     let Some(command) = command else {
                         break;
                     };
+                    for event in self.producer_events.drain() {
+                        self.handle_producer_event(event);
+                    }
                     self.handle_command(command).await;
+                }
+                events = producer_events.next() => {
+                    for event in events {
+                        self.handle_producer_event(event);
+                    }
                 }
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     // The timer itself is the exact actor-owned deadline. Use
@@ -1749,6 +2025,7 @@ impl RollingControlHandle {
         let producer_transition =
             Arc::new(std::sync::Mutex::new(now + ROLLING_LEGACY_LEASE_TIMEOUT));
         let flow_sync = Arc::new(RollingFlowSync::new());
+        let producer_events = Arc::new(RollingProducerIngress::new());
         #[cfg(test)]
         let producer_attempt_reply_pause = Arc::new(std::sync::Mutex::new(None));
         tokio::spawn(
@@ -1759,6 +2036,7 @@ impl RollingControlHandle {
                 Arc::clone(&producer_attempt),
                 Arc::clone(&producer_transition),
                 Arc::clone(&flow_sync),
+                Arc::clone(&producer_events),
                 #[cfg(test)]
                 Arc::clone(&producer_attempt_reply_pause),
             )
@@ -1770,6 +2048,7 @@ impl RollingControlHandle {
             producer_attempt,
             producer_transition,
             flow_sync,
+            producer_events,
             #[cfg(test)]
             producer_attempt_reply_pause,
         }
@@ -1800,6 +2079,46 @@ impl RollingControlHandle {
 
     pub(crate) fn current_producer_attempt(&self) -> u64 {
         self.producer_attempt.load(Ordering::Acquire)
+    }
+
+    /// Publish the latest ffmpeg telemetry without awaiting actor mailbox
+    /// capacity. The coalescer retains the newest fact for this attempt and
+    /// refuses a late predecessor observation to evict successor telemetry.
+    pub(crate) fn observe_producer_progress(
+        &self,
+        producer_attempt: u64,
+        out_time_ms: Option<i64>,
+        speed_milli: Option<i64>,
+        recent_speed_milli: Option<i64>,
+    ) {
+        self.producer_events
+            .publish_progress(RollingProducerProgressObservation {
+                producer_attempt,
+                out_time_ms,
+                speed_milli,
+                recent_speed_milli,
+                observed_at: rolling_now(),
+            });
+    }
+
+    /// Publish one exact-attempt terminal process fact without making a
+    /// recovery decision. The actor rejects stale attempts and preserves the
+    /// first terminal observation for the current one.
+    pub(crate) fn observe_producer_exit(
+        &self,
+        producer_attempt: u64,
+        success: bool,
+        code: Option<i32>,
+        signal: Option<i32>,
+    ) {
+        self.producer_events
+            .publish_exit(RollingProducerExitObservation {
+                producer_attempt,
+                success,
+                code,
+                signal,
+                observed_at: rolling_now(),
+            });
     }
 
     pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
@@ -2069,6 +2388,10 @@ static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_RESUMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+/// Progress accepted/rejected, then exit accepted/rejected.
+static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 const RELAY_VALID_RESPONSE: usize = 0;
 const RELAY_TRANSPORT_ERROR: usize = 1;
@@ -2252,6 +2575,33 @@ pub(crate) fn prometheus() -> String {
             ROLLING_PRODUCER_HOLDS[index].load(Ordering::Relaxed),
             ROLLING_PRODUCER_RESUMES[index].load(Ordering::Relaxed)
         ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_rolling_producer_event_ingress_total Nonblocking rolling producer observations submitted, including coalesced samples.\n\
+         # TYPE plurx_playback_rolling_producer_event_ingress_total counter\n\
+         # HELP plurx_playback_rolling_producer_event_coalesced_total Rolling producer observations overwritten by a newer same-or-successor attempt before actor drain.\n\
+         # TYPE plurx_playback_rolling_producer_event_coalesced_total counter\n",
+    );
+    for (index, event) in ["progress", "exit"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_rolling_producer_event_ingress_total{{event=\"{event}\"}} {}\n\
+             plurx_playback_rolling_producer_event_coalesced_total{{event=\"{event}\"}} {}\n",
+            ROLLING_PRODUCER_EVENT_INGRESS[index].load(Ordering::Relaxed),
+            ROLLING_PRODUCER_EVENT_COALESCED[index].load(Ordering::Relaxed),
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_rolling_producer_event_outcomes_total Rolling producer observations accepted or rejected by the exact-attempt actor fence.\n\
+         # TYPE plurx_playback_rolling_producer_event_outcomes_total counter\n",
+    );
+    for (event_index, event) in ["progress", "exit"].iter().enumerate() {
+        for (outcome_index, outcome) in ["accepted", "rejected"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_rolling_producer_event_outcomes_total{{event=\"{event}\",outcome=\"{outcome}\"}} {}\n",
+                ROLLING_PRODUCER_EVENT_OUTCOMES[event_index * 2 + outcome_index]
+                    .load(Ordering::Relaxed),
+            ));
+        }
     }
     output
 }
@@ -2714,6 +3064,201 @@ mod tests {
             Err(ProducerAttemptRejection::PlaylistPublished),
             "client-visible publication returns an exact rejection cause"
         );
+    }
+
+    fn producer_progress(
+        producer_attempt: u64,
+        out_time_ms: i64,
+        speed_milli: i64,
+        recent_speed_milli: i64,
+        observed_at: Instant,
+    ) -> RollingProducerProgressObservation {
+        RollingProducerProgressObservation {
+            producer_attempt,
+            out_time_ms: Some(out_time_ms),
+            speed_milli: Some(speed_milli),
+            recent_speed_milli: Some(recent_speed_milli),
+            observed_at,
+        }
+    }
+
+    fn producer_exit(
+        producer_attempt: u64,
+        success: bool,
+        code: Option<i32>,
+        signal: Option<i32>,
+        observed_at: Instant,
+    ) -> RollingProducerExitObservation {
+        RollingProducerExitObservation {
+            producer_attempt,
+            success,
+            code,
+            signal,
+            observed_at,
+        }
+    }
+
+    #[test]
+    fn rolling_producer_progress_and_exit_are_exact_attempt_terminal_facts() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let predecessor = actor
+            .begin_producer_attempt_at(started)
+            .expect("predecessor attempt");
+        assert!(actor.observe_producer_progress_at(
+            started + Duration::from_secs(1),
+            producer_progress(
+                predecessor,
+                1_000,
+                900,
+                800,
+                started + Duration::from_secs(1),
+            ),
+        ));
+        let moving = actor.snapshot_at(started + Duration::from_secs(3)).delivery;
+        assert_eq!(moving.producer_out_time_ms, Some(1_000));
+        assert_eq!(moving.producer_speed_milli, Some(900));
+        assert_eq!(moving.producer_recent_speed_milli, Some(800));
+        assert_eq!(moving.producer_progress_idle_ms, 2_000);
+
+        assert!(actor.observe_producer_progress_at(
+            started + Duration::from_secs(4),
+            producer_progress(predecessor, 900, 700, 600, started + Duration::from_secs(4),),
+        ));
+        let non_regressing = actor.snapshot_at(started + Duration::from_secs(5)).delivery;
+        assert_eq!(non_regressing.producer_out_time_ms, Some(1_000));
+        assert_eq!(non_regressing.producer_progress_idle_ms, 4_000);
+        assert_eq!(non_regressing.producer_speed_milli, Some(700));
+
+        let successor = actor
+            .begin_producer_attempt_at(started + Duration::from_secs(5))
+            .expect("successor attempt");
+        assert!(!actor.observe_producer_progress_at(
+            started + Duration::from_secs(6),
+            producer_progress(
+                predecessor,
+                20_000,
+                2_000,
+                2_000,
+                started + Duration::from_secs(6),
+            ),
+        ));
+        assert!(!actor.observe_producer_exit_at(
+            started + Duration::from_secs(6),
+            producer_exit(
+                predecessor,
+                false,
+                Some(1),
+                None,
+                started + Duration::from_secs(6),
+            ),
+        ));
+        assert!(actor.observe_producer_progress_at(
+            started + Duration::from_secs(6),
+            producer_progress(
+                successor,
+                500,
+                1_100,
+                1_000,
+                started + Duration::from_secs(6),
+            ),
+        ));
+        let exit = producer_exit(
+            successor,
+            false,
+            None,
+            Some(9),
+            started + Duration::from_secs(7),
+        );
+        assert!(actor.observe_producer_exit_at(started + Duration::from_secs(7), exit.clone()));
+        assert!(
+            actor.observe_producer_exit_at(started + Duration::from_secs(8), exit),
+            "an identical re-observation is idempotent"
+        );
+        assert!(!actor.observe_producer_exit_at(
+            started + Duration::from_secs(8),
+            producer_exit(
+                successor,
+                true,
+                Some(0),
+                None,
+                started + Duration::from_secs(8),
+            ),
+        ));
+        assert!(!actor.observe_producer_progress_at(
+            started + Duration::from_secs(8),
+            producer_progress(
+                successor,
+                1_000,
+                1_200,
+                1_100,
+                started + Duration::from_secs(8),
+            ),
+        ));
+        let terminal = actor.snapshot_at(started + Duration::from_secs(9)).delivery;
+        assert_eq!(terminal.producer_out_time_ms, Some(500));
+        assert_eq!(
+            terminal.producer_exit,
+            Some(RollingProducerExitSnapshot {
+                success: false,
+                code: None,
+                signal: Some(9),
+                observed_idle_ms: 2_000,
+            })
+        );
+        actor.retired = true;
+        assert!(!actor.observe_producer_progress_at(
+            started + Duration::from_secs(10),
+            producer_progress(
+                successor,
+                2_000,
+                1_300,
+                1_200,
+                started + Duration::from_secs(10),
+            ),
+        ));
+        assert!(!actor.observe_producer_exit_at(
+            started + Duration::from_secs(10),
+            producer_exit(
+                successor,
+                false,
+                None,
+                Some(9),
+                started + Duration::from_secs(10),
+            ),
+        ));
+    }
+
+    #[tokio::test]
+    async fn producer_ingress_coalesces_without_mailbox_capacity_or_stale_eviction() {
+        let ingress = RollingProducerIngress::new();
+        let started = Instant::now();
+        ingress.publish_progress(producer_progress(2, 100, 900, 800, started));
+        for out_time_ms in 101..=10_000 {
+            ingress.publish_progress(producer_progress(2, out_time_ms, 900, 800, started));
+        }
+        ingress.publish_progress(producer_progress(1, 99_999, 9_000, 9_000, started));
+        ingress.publish_exit(producer_exit(2, false, Some(7), None, started));
+
+        let events = ingress.next().await;
+        assert_eq!(events.len(), 2, "one progress slot and one exit slot");
+        assert!(matches!(
+            &events[0],
+            RollingProducerEvent::Progress(RollingProducerProgressObservation {
+                producer_attempt: 2,
+                out_time_ms: Some(10_000),
+                ..
+            })
+        ));
+        assert!(matches!(
+            &events[1],
+            RollingProducerEvent::Exit(RollingProducerExitObservation {
+                producer_attempt: 2,
+                code: Some(7),
+                ..
+            })
+        ));
     }
 
     #[test]
