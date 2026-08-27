@@ -806,6 +806,11 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
             "readrate": info.readrate,
             "suspend_count": info.suspend_count,
             "progress_idle_ms": info.progress_idle_ms,
+            "producer_state": info.producer_state,
+            "producer_exit_success": info.producer_exit_success,
+            "producer_exit_code": info.producer_exit_code,
+            "producer_exit_signal": info.producer_exit_signal,
+            "producer_exit_idle_ms": info.producer_exit_idle_ms,
             "producer_attempt": info.producer_attempt,
             "playlist_ready": info.playlist_ready,
             "published_segment": info.published_segment,
@@ -3853,6 +3858,10 @@ mod tests {
             recent_speed: Some(1.7),
             out_time_ms: Some(10_000),
             progress_idle_ms: 15,
+            producer_exit_success: Some(false),
+            producer_exit_code: Some(23),
+            producer_exit_signal: None,
+            producer_exit_idle_ms: Some(7),
             published_end_ms: Some(44_000),
             fetched_end_ms: 10_000,
             fetched_segment: Some(4),
@@ -3904,6 +3913,14 @@ mod tests {
             serde_json::from_str(row.extra.as_deref().expect("joined status JSON"))
                 .expect("valid joined status JSON");
         assert_eq!(extra["server"]["progress_idle_ms"], 15);
+        assert_eq!(extra["server"]["producer_state"], "held");
+        assert_eq!(extra["server"]["producer_exit_success"], false);
+        assert_eq!(extra["server"]["producer_exit_code"], 23);
+        assert_eq!(
+            extra["server"]["producer_exit_signal"],
+            serde_json::Value::Null
+        );
+        assert_eq!(extra["server"]["producer_exit_idle_ms"], 7);
         assert_eq!(extra["server"]["producer_attempt"], 3);
         assert_eq!(extra["server"]["playlist_ready"], true);
         assert_eq!(extra["server"]["published_segment"], 5);

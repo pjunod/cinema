@@ -464,9 +464,11 @@ impl Progress {
     }
 
     pub fn speed(&self) -> Option<f64> {
-        Some(self.speed_milli.load(Relaxed))
-            .filter(|v| *v >= 0)
-            .map(|v| v as f64 / 1000.0)
+        self.speed_milli().map(|v| v as f64 / 1000.0)
+    }
+
+    fn speed_milli(&self) -> Option<i64> {
+        Some(self.speed_milli.load(Relaxed)).filter(|v| *v >= 0)
     }
 
     /// The rate over the last few seconds, which is the one that predicts a
@@ -474,9 +476,11 @@ impl Progress {
     /// reporting a session's lifetime average as "recent" is how a slowdown
     /// stays invisible.
     pub fn recent_speed(&self) -> Option<f64> {
-        Some(self.recent_milli.load(Relaxed))
-            .filter(|v| *v >= 0)
-            .map(|v| v as f64 / 1000.0)
+        self.recent_speed_milli().map(|v| v as f64 / 1000.0)
+    }
+
+    fn recent_speed_milli(&self) -> Option<i64> {
+        Some(self.recent_milli.load(Relaxed)).filter(|v| *v >= 0)
     }
 
     /// Restart the motion clock without touching anything measured.
@@ -1212,17 +1216,17 @@ fn should_suspend(
 /// `speed` on a copy that has not been running long enough to estimate),
 /// which parses to nothing rather than to zero — zero would read as "stalled"
 /// and zero would read as "not moving" respectively, both wrong.
-pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
+pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) -> bool {
     // A line from a superseded attempt is not evidence about the running one.
     if progress.generation() != generation {
-        return;
+        return false;
     }
     let Some((key, value)) = line.split_once('=') else {
-        return;
+        return false;
     };
     let value = value.trim();
     if value.is_empty() || value == "N/A" {
-        return;
+        return false;
     }
     match key.trim() {
         // Both are microseconds despite the `_ms` name — an ffmpeg quirk, not
@@ -1231,14 +1235,36 @@ pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
         "out_time_us" | "out_time_ms" => {
             if let Ok(us) = value.parse::<i64>() {
                 progress.note_out_time(us / 1000);
+                return true;
             }
         }
         "speed" => {
             if let Ok(x) = value.trim_end_matches('x').parse::<f64>() {
                 progress.speed_milli.store((x * 1000.0) as i64, Relaxed);
+                return true;
             }
         }
         _ => {}
+    }
+    false
+}
+
+fn apply_and_observe_progress_line(
+    progress: &Progress,
+    control: Option<&crate::playback_control::RollingControlHandle>,
+    generation: u64,
+    line: &str,
+) {
+    if !apply_progress_line(progress, generation, line) {
+        return;
+    }
+    if let Some(control) = control {
+        control.observe_producer_progress(
+            generation,
+            progress.out_time_ms(),
+            progress.speed_milli(),
+            progress.recent_speed_milli(),
+        );
     }
 }
 
@@ -1252,12 +1278,49 @@ struct FfmpegDescriptors {
     subtitle: Option<std::os::fd::RawFd>,
 }
 
+#[derive(Clone)]
+struct FfmpegProgressObserver {
+    progress: Arc<Progress>,
+    generation: u64,
+    control: Option<crate::playback_control::RollingControlHandle>,
+}
+
+impl FfmpegProgressObserver {
+    fn offline(progress: Arc<Progress>, generation: u64) -> Self {
+        Self {
+            progress,
+            generation,
+            control: None,
+        }
+    }
+
+    fn rolling(
+        progress: Arc<Progress>,
+        generation: u64,
+        control: crate::playback_control::RollingControlHandle,
+    ) -> Self {
+        Self {
+            progress,
+            generation,
+            control: Some(control),
+        }
+    }
+
+    fn apply_line(&self, line: &str) {
+        apply_and_observe_progress_line(
+            &self.progress,
+            self.control.as_ref(),
+            self.generation,
+            line,
+        );
+    }
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
 ) -> Result<Child, String> {
@@ -1324,7 +1387,7 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                apply_progress_line(&progress, generation, &line);
+                progress_observer.apply_line(&line);
             }
         });
     }
@@ -1363,8 +1426,7 @@ fn spawn_ffmpeg(
 fn spawn_ffmpeg_pipe(
     args: &[String],
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
 ) -> Result<(Child, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
@@ -1391,7 +1453,7 @@ fn spawn_ffmpeg_pipe(
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if is_progress_line(&line) {
-                    apply_progress_line(&progress, generation, &line);
+                    progress_observer.apply_line(&line);
                 } else {
                     log_ffmpeg_stderr(&sid, "copy", &line);
                 }
@@ -1512,7 +1574,7 @@ async fn observed_watch_next(session: &Session) -> WatchNext {
         let replacing_child = session.replacing_child.load(Acquire);
         let exited = child
             .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
+            .is_some_and(|child| matches!(child.try_wait_observed(&session.control), Ok(Some(_))));
         (replacing_child, exited)
     };
     if replacing_child {
@@ -1806,6 +1868,357 @@ struct CacheOfferVerification {
     revoke_shared_member: bool,
 }
 
+/// A process handle paired permanently with the actor attempt that installed
+/// it. The attempt cannot be reconstructed from current session state: actor
+/// admission advances before a replacement kills its predecessor, and that
+/// exact overlap is where an untagged exit gets blamed on the successor.
+struct AttemptChild {
+    producer_attempt: u64,
+    pid: Option<u32>,
+    terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
+    commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
+    #[cfg(test)]
+    signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
+}
+
+#[derive(Clone)]
+enum AttemptChildTerminal {
+    Exited(std::process::ExitStatus, Instant),
+    WaitFailed(std::io::ErrorKind, String),
+}
+
+enum AttemptChildCommand {
+    Signal {
+        signal: libc::c_int,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
+    },
+    Terminate {
+        reply: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
+    },
+}
+
+impl AttemptChildTerminal {
+    fn wait_result(&self) -> std::io::Result<()> {
+        match self {
+            Self::Exited(_, _) => Ok(()),
+            Self::WaitFailed(kind, message) => Err(std::io::Error::new(*kind, message.clone())),
+        }
+    }
+}
+
+impl AttemptChild {
+    fn new(
+        producer_attempt: u64,
+        mut child: Child,
+        control: crate::playback_control::RollingControlHandle,
+    ) -> Self {
+        let pid = child.id();
+        let terminal = Arc::new(std::sync::Mutex::new(None));
+        let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let supervisor_terminal = Arc::clone(&terminal);
+        #[cfg(test)]
+        let signal_after_authorization_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
+        #[cfg(test)]
+        let supervisor_signal_pause = Arc::clone(&signal_after_authorization_pause);
+        tokio::spawn(async move {
+            let mut command_open = true;
+            let mut terminate_replies = Vec::new();
+            let terminal = loop {
+                if !command_open {
+                    break Self::record_wait_result(&control, producer_attempt, child.wait().await);
+                }
+                tokio::select! {
+                    // `Child::wait` is cancel safe. Poll it first so a ready
+                    // reap always wins over a simultaneous signal command;
+                    // the cached pid therefore cannot have been reused when
+                    // the command branch runs.
+                    biased;
+                    result = child.wait() => {
+                        break Self::record_wait_result(&control, producer_attempt, result);
+                    }
+                    command = command_receiver.recv() => {
+                        let Some(command) = command else {
+                            command_open = false;
+                            continue;
+                        };
+                        match command {
+                            AttemptChildCommand::Signal { signal, reply } => {
+                                let transition = control.lock_producer_transition();
+                                let result = if control.current_producer_attempt()
+                                    == producer_attempt
+                                    && control.producer_transition_is_live(&transition)
+                                {
+                                    #[cfg(test)]
+                                    if let Some(pause) = supervisor_signal_pause
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                        .take()
+                                    {
+                                        pause.wait();
+                                        pause.wait();
+                                    }
+                                    signal_owned_pid(pid, producer_attempt, signal)
+                                } else {
+                                    Ok(false)
+                                };
+                                drop(transition);
+                                let _ = reply.send(result);
+                            }
+                            AttemptChildCommand::Terminate { reply } => {
+                                match signal_owned_pid(pid, producer_attempt, libc::SIGKILL) {
+                                    Ok(_) => {
+                                        if let Some(reply) = reply {
+                                            terminate_replies.push(reply);
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if let Some(reply) = reply {
+                                            let _ = reply.send(Err(error));
+                                        } else {
+                                            tracing::error!(
+                                                producer_attempt,
+                                                %error,
+                                                "dropped producer could not be terminated"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            *supervisor_terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal.clone());
+            for reply in terminate_replies {
+                let _ = reply.send(terminal.wait_result());
+            }
+        });
+        Self {
+            producer_attempt,
+            pid,
+            terminal,
+            commands,
+            #[cfg(test)]
+            signal_after_authorization_pause,
+        }
+    }
+
+    fn record_wait_result(
+        control: &crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+        result: std::io::Result<std::process::ExitStatus>,
+    ) -> AttemptChildTerminal {
+        match result {
+            Ok(status) => {
+                Self::observe_status(control, producer_attempt, &status);
+                AttemptChildTerminal::Exited(status, Instant::now())
+            }
+            Err(error) => {
+                tracing::error!(
+                    producer_attempt,
+                    %error,
+                    "producer process exit could not be observed"
+                );
+                AttemptChildTerminal::WaitFailed(error.kind(), error.to_string())
+            }
+        }
+    }
+
+    fn observe_status(
+        control: &crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+        status: &std::process::ExitStatus,
+    ) {
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        control.observe_producer_exit(producer_attempt, status.success(), status.code(), signal);
+    }
+
+    fn try_wait_observed(
+        &mut self,
+        _control: &crate::playback_control::RollingControlHandle,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            None => Ok(None),
+            Some(AttemptChildTerminal::Exited(status, _)) => Ok(Some(status)),
+            Some(AttemptChildTerminal::WaitFailed(kind, message)) => {
+                Err(std::io::Error::new(kind, message))
+            }
+        }
+    }
+
+    fn id(&self) -> Option<u32> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+            .then_some(self.pid)
+            .flatten()
+    }
+
+    #[cfg(test)]
+    fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
+        *self
+            .signal_after_authorization_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Signal { signal, reply })
+            .is_err()
+        {
+            return self.signal_result_or_broken_pipe("producer exited before signal request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.signal_result_or_broken_pipe("producer supervisor stopped before signaling")
+            }
+        }
+    }
+
+    async fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(terminal) = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return terminal.wait_result();
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: Some(reply) })
+            .is_err()
+        {
+            return self.terminal_result_or_broken_pipe("producer exited before terminate request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.terminal_result_or_broken_pipe("producer supervisor stopped before reaping")
+            }
+        }
+    }
+
+    fn terminal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<()> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or_else(
+                || Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message)),
+                |terminal| terminal.wait_result(),
+            )
+    }
+
+    fn signal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            Ok(false)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message))
+        }
+    }
+
+    fn terminal_exit_snapshot(
+        &self,
+    ) -> Option<crate::playback_control::RollingProducerExitSnapshot> {
+        let terminal = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let AttemptChildTerminal::Exited(status, observed_at) = terminal else {
+            return None;
+        };
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        Some(crate::playback_control::RollingProducerExitSnapshot {
+            success: status.success(),
+            code: status.code(),
+            signal,
+            observed_idle_ms: observed_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        })
+    }
+}
+
+impl Drop for AttemptChild {
+    fn drop(&mut self) {
+        let _ = self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: None });
+    }
+}
+
+/// Signal a pid only from the task that owns and has not reaped its Child.
+/// A biased, cancel-safe `Child::wait` select proves the pid is still reserved
+/// before the command branch can reach this call.
+fn signal_owned_pid(
+    pid: Option<u32>,
+    producer_attempt: u64,
+    signal: libc::c_int,
+) -> std::io::Result<bool> {
+    let Some(pid) = pid else {
+        return Ok(false);
+    };
+    let pid = i32::try_from(pid).map_err(|_| {
+        std::io::Error::other(format!(
+            "producer attempt {producer_attempt} pid does not fit pid_t"
+        ))
+    })?;
+    // SAFETY: this runs only in the task that owns the unreaped Child. The pid
+    // cannot be reused until this task's later try_wait returns a status.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
 #[cfg(any(test, feature = "live-hls-recovery"))]
 struct PreparedSharedCacheRead {
     dir: PathBuf,
@@ -1817,7 +2230,7 @@ struct Session {
     /// The ffmpeg producing this session's segments — `None` for a cache hit,
     /// where the segments already exist and there is nothing to run, watch,
     /// suspend or kill.
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<AttemptChild>>,
     /// Serializes a fallback's kill-to-successor interval with any terminal
     /// playlist or watchdog verdict. Observations may happen without it, but
     /// every action is re-confirmed while holding it so a replacement cannot
@@ -1844,8 +2257,9 @@ struct Session {
     /// has decided to replace but reaches the gate after the watchdog.
     #[cfg(test)]
     watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous at the first per-session activity read. It proves
-    /// the manager registry lock was released before telemetry can wait.
+    /// Test-only rendezvous after the actor snapshot for a per-session
+    /// activity read. It proves the manager registry lock was released before
+    /// telemetry can wait and makes attempt replacement interleavings exact.
     #[cfg(test)]
     activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only seam after the control actor has accepted and ticketed a
@@ -2486,7 +2900,7 @@ impl Session {
             let Some(child) = child.as_mut() else {
                 return Ok(None);
             };
-            match child.try_wait() {
+            match child.try_wait_observed(&self.control) {
                 Ok(None) => {}
                 Ok(Some(_)) => {}
                 Err(_) => return Ok(None),
@@ -2506,8 +2920,12 @@ impl Session {
                 }
             };
             self.reset_compatibility_delivery(producer_attempt).await;
-            if child.try_wait().is_ok_and(|status| status.is_none()) {
+            if child
+                .try_wait_observed(&self.control)
+                .is_ok_and(|status| status.is_none())
+            {
                 let _ = child.kill().await;
+                let _ = child.try_wait_observed(&self.control);
             }
             producer_attempt
         };
@@ -2609,7 +3027,11 @@ impl Session {
                 .lock_authorized_producer_install(producer_attempt)
             {
                 Ok(install) => {
-                    *child = Some(candidate);
+                    *child = Some(AttemptChild::new(
+                        producer_attempt,
+                        candidate,
+                        self.control.clone(),
+                    ));
                     drop(install);
                     None
                 }
@@ -2636,6 +3058,7 @@ impl Session {
     async fn kill_child(&self) {
         if let Some(child) = self.child.lock().await.as_mut() {
             let _ = child.kill().await;
+            let _ = child.try_wait_observed(&self.control);
         }
     }
 
@@ -2870,6 +3293,7 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    let lease = s.control.snapshot().await;
     #[cfg(test)]
     {
         let pause = s
@@ -2882,7 +3306,6 @@ async fn session_info(
             pause.wait().await;
         }
     }
-    let lease = s.control.snapshot().await;
     let fetched_end_ms = lease.as_ref().map_or_else(
         || s.fetched_end_ms.load(Relaxed),
         |lease| lease.delivery.fetched_end_ms,
@@ -2952,16 +3375,42 @@ async fn session_info(
     } else {
         None
     };
+    let status_owner_attempt = delivery.map_or_else(
+        || s.control.current_producer_attempt(),
+        |delivery| delivery.producer_attempt,
+    );
+    let actor_available = delivery.is_some();
+    let (child_is_running, fallback_exit) = {
+        let child = s.child.lock().await;
+        child.as_ref().map_or((false, None), |child| {
+            if child.producer_attempt != status_owner_attempt {
+                return (false, None);
+            }
+            (
+                child.id().is_some(),
+                if actor_available {
+                    None
+                } else {
+                    child.terminal_exit_snapshot()
+                },
+            )
+        })
+    };
+    let producer_exit = delivery
+        .and_then(|delivery| delivery.producer_exit.clone())
+        .or(fallback_exit);
     let producer_state = if s.failed.load(Relaxed) {
         "failed"
-    } else if s.cached {
+    } else if s.cached || producer_exit.as_ref().is_some_and(|exit| exit.success) {
         "complete"
+    } else if producer_exit.is_some() {
+        "exited"
     } else if suspended {
         "held"
-    } else if s.child.lock().await.is_some() {
+    } else if child_is_running {
         "running"
     } else {
-        "complete"
+        "waiting"
     };
     SessionInfo {
         id: id.to_owned(),
@@ -2986,15 +3435,23 @@ async fn session_info(
         production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
         production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
         producer_state,
-        producer_attempt: delivery.map(|delivery| delivery.producer_attempt),
+        producer_attempt: Some(status_owner_attempt),
         playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
         published_segment: delivery.and_then(|delivery| delivery.published_segment),
         next_media_sequence: delivery.map(|delivery| delivery.next_media_sequence),
         pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
-        speed: s.progress.speed(),
-        recent_speed: s.progress.recent_speed(),
-        out_time_ms: s.progress.out_time_ms(),
-        progress_idle_ms: s.progress.stalled_for().as_millis().min(i64::MAX as u128) as i64,
+        speed: delivery
+            .and_then(|delivery| delivery.producer_speed_milli)
+            .map(|speed| speed as f64 / 1_000.0),
+        recent_speed: delivery
+            .and_then(|delivery| delivery.producer_recent_speed_milli)
+            .map(|speed| speed as f64 / 1_000.0),
+        out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
+        progress_idle_ms: delivery.map_or(-1, |delivery| delivery.producer_progress_idle_ms),
+        producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
+        producer_exit_code: producer_exit.as_ref().and_then(|exit| exit.code),
+        producer_exit_signal: producer_exit.as_ref().and_then(|exit| exit.signal),
+        producer_exit_idle_ms: producer_exit.as_ref().map(|exit| exit.observed_idle_ms),
         published_end_ms,
         fetched_end_ms,
         fetched_segment: lease.as_ref().map_or_else(
@@ -3065,6 +3522,10 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         recent_speed: None,
         out_time_ms: None,
         progress_idle_ms: 0,
+        producer_exit_success: None,
+        producer_exit_code: None,
+        producer_exit_signal: None,
+        producer_exit_idle_ms: None,
         published_end_ms: None,
         fetched_end_ms: 0,
         fetched_segment: None,
@@ -3839,8 +4300,9 @@ pub struct SessionInfo {
     /// Honest current producer verdict. Additive to the legacy status shape;
     /// control uses it instead of inferring health from suspension alone.
     pub producer_state: &'static str,
-    /// Actor-owned rolling attempt and delivery coordinates. `None` denotes
-    /// immutable VOD or an unavailable rolling actor, while attempt zero is a
+    /// Actor-owned rolling attempt and delivery coordinates. Immutable VOD is
+    /// `None`; an unavailable rolling actor reports the once-sampled fallback
+    /// attempt so exact terminal facts remain attributable. Attempt zero is a
     /// valid compatibility cache generation with no child process.
     pub producer_attempt: Option<u64>,
     pub playlist_ready: Option<bool>,
@@ -3858,8 +4320,17 @@ pub struct SessionInfo {
     pub out_time_ms: Option<i64>,
     /// Wall time since ffmpeg's output timestamp last advanced. Unlike
     /// `recent_speed`, this remains decisive when the producer has stopped
-    /// emitting samples entirely.
+    /// emitting samples entirely. `-1` is explicit unknown when neither an
+    /// actor snapshot nor an exact-attempt compatibility projection exists.
     pub progress_idle_ms: i64,
+    /// Exact process terminal facts for the actor attempt above. `code` is
+    /// present for ordinary exits; `signal` is present for Unix signal exits.
+    /// Success is kept separately because platforms may report neither code
+    /// nor signal for a terminal status.
+    pub producer_exit_success: Option<bool>,
+    pub producer_exit_code: Option<i32>,
+    pub producer_exit_signal: Option<i32>,
+    pub producer_exit_idle_ms: Option<i64>,
     /// End of the newest complete, fetchable segment on the session timeline.
     pub published_end_ms: Option<i64>,
     /// End of the highest segment the client has requested.
@@ -8871,8 +9342,7 @@ impl TranscodeManager {
                 &args,
                 encoder.label(),
                 hash,
-                Arc::clone(&progress),
-                generation,
+                FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
                 &self.runtime_cache,
                 FfmpegDescriptors {
                     source: bound_source_fd,
@@ -10947,8 +11417,7 @@ impl TranscodeManager {
             &args,
             encoder.label(),
             &session_id,
-            Arc::clone(&progress),
-            generation,
+            FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
             &self.runtime_cache,
             FfmpegDescriptors {
                 subtitle: subtitle_handle
@@ -10972,7 +11441,7 @@ impl TranscodeManager {
 
         let session = Arc::new(Session {
             dir: dir.clone(),
-            child: Mutex::new(Some(child)),
+            child: Mutex::new(Some(AttemptChild::new(generation, child, control.clone()))),
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
@@ -11131,9 +11600,9 @@ impl TranscodeManager {
                         }
                         let exited = {
                             let mut child = session.child.lock().await;
-                            child
-                                .as_mut()
-                                .is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))))
+                            child.as_mut().is_some_and(|child| {
+                                matches!(child.try_wait_observed(&session.control), Ok(Some(_)))
+                            })
                         };
                         if exited {
                             // Died before producing: the playlist and segment
@@ -11337,8 +11806,11 @@ impl TranscodeManager {
             &sw_args,
             retry_encoder.label(),
             sid,
-            Arc::clone(&session.progress),
-            generation,
+            FfmpegProgressObserver::rolling(
+                Arc::clone(&session.progress),
+                generation,
+                session.control.clone(),
+            ),
             runtime_cache,
             FfmpegDescriptors {
                 subtitle: session
@@ -11556,8 +12028,7 @@ impl TranscodeManager {
             match spawn_ffmpeg_pipe(
                 &args,
                 &session_id,
-                Arc::clone(&progress),
-                generation,
+                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
                 &self.runtime_cache,
             ) {
                 Ok((child, stdout)) => (child, Some(stdout)),
@@ -11578,8 +12049,11 @@ impl TranscodeManager {
                         &args,
                         "copy",
                         &session_id,
-                        Arc::clone(&progress),
-                        generation,
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            control.clone(),
+                        ),
                         &self.runtime_cache,
                         FfmpegDescriptors::default(),
                     )?;
@@ -11597,8 +12071,7 @@ impl TranscodeManager {
                 &args,
                 "copy",
                 &session_id,
-                Arc::clone(&progress),
-                generation,
+                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
                 &self.runtime_cache,
                 FfmpegDescriptors::default(),
             )?;
@@ -11625,7 +12098,7 @@ impl TranscodeManager {
             // reads its range off the source and `preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             dir: dir.clone(),
-            child: Mutex::new(Some(child)),
+            child: Mutex::new(Some(AttemptChild::new(generation, child, control.clone()))),
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
@@ -11858,8 +12331,11 @@ impl TranscodeManager {
                             &args,
                             "copy",
                             &sid,
-                            progress,
-                            generation,
+                            FfmpegProgressObserver::rolling(
+                                progress,
+                                generation,
+                                session.control.clone(),
+                            ),
                             &runtime_cache,
                             FfmpegDescriptors::default(),
                         ) {
@@ -12962,10 +13438,12 @@ impl TranscodeManager {
             if session.replacing_child.load(Acquire) {
                 return false;
             }
-            child.as_mut().and_then(|child| match child.try_wait() {
-                Ok(Some(status)) if !status.success() => Some(status),
-                _ => None,
-            })
+            child
+                .as_mut()
+                .and_then(|child| match child.try_wait_observed(&session.control) {
+                    Ok(Some(status)) if !status.success() => Some(status),
+                    _ => None,
+                })
         };
         let Some(status) = unsuccessful_exit else {
             return false;
@@ -13590,9 +14068,9 @@ impl TranscodeManager {
             }
             let exited = {
                 let mut child = session.child.lock().await;
-                child
-                    .as_mut()
-                    .is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))))
+                child.as_mut().is_some_and(|child| {
+                    matches!(child.try_wait_observed(&session.control), Ok(Some(_)))
+                })
             };
             let timed_out = Instant::now() >= deadline;
             if exited || timed_out {
@@ -13798,25 +14276,12 @@ impl TranscodeManager {
         };
         let sent = {
             let child = session.child.lock().await;
-            // The actor's exact timer can fire without entering the async
-            // compatibility gate. Its short synchronous transition fence
-            // makes the expiry/control/retirement verdict and this one
-            // kill(2) call strictly ordered without holding it across an
-            // await. A signal that wins is before the fence; a fence that
-            // wins makes this decision a no-op.
-            let producer_transition = session.control.lock_producer_transition();
-            if !session
-                .control
-                .producer_transition_is_live(&producer_transition)
-            {
-                return;
-            }
-            match child.as_ref().and_then(|c| c.id()) {
-                // SAFETY: `kill(2)` with a pid this process owns and a signal
-                // constant. The child is alive as far as we know; a race with
-                // its exit yields ESRCH, which the return check handles.
-                Some(pid) => unsafe { libc::kill(pid as libc::pid_t, signal) == 0 },
-                None => false, // already reaped
+            match child.as_ref() {
+                // The sole process owner rechecks the actor's exact attempt
+                // and deadline fence immediately before signaling. No caller
+                // can race its cached pid against reaping or reuse.
+                Some(child) => child.signal(signal).await.unwrap_or(false),
+                None => false,
             }
         };
         if !sent {
@@ -15050,9 +15515,10 @@ fn test_session(dir: PathBuf) -> Session {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn placeholder child");
+    let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
-        child: Mutex::new(Some(child)),
+        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone()))),
         child_transition: Mutex::new(()),
         watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
@@ -15078,7 +15544,7 @@ fn test_session(dir: PathBuf) -> Session {
         subtitle_handle: None,
         cache_manifest: None,
         cache_location: None,
-        control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+        control,
         flow_worker_started: AtomicBool::new(false),
         file_id: 1,
         item_id: 1,
@@ -17601,6 +18067,398 @@ mod tests {
         assert_eq!(p.out_time_ms(), Some(2_000));
     }
 
+    #[tokio::test]
+    async fn process_supervisor_reports_current_exit_and_fences_predecessor_exit() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-test");
+        let current_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("current attempt");
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn exiting producer");
+        let mut current = AttemptChild::new(current_attempt, child, control.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if current
+                    .try_wait()
+                    .expect("current producer status")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor observes current exit without a watchdog poll");
+        let current_delivery = control.snapshot().await.expect("actor snapshot").delivery;
+        assert_eq!(current_delivery.producer_attempt, current_attempt);
+        assert_eq!(
+            current_delivery
+                .producer_exit
+                .as_ref()
+                .map(|exit| (exit.success, exit.code)),
+            Some((false, Some(1)))
+        );
+
+        let predecessor_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        let child = tokio::process::Command::new("sh")
+            .args(["-c", "sleep 0.05; exit 7"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn delayed predecessor");
+        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone());
+        let successor_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if predecessor
+                    .try_wait()
+                    .expect("predecessor status")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor observes delayed predecessor exit");
+        let successor_delivery = control.snapshot().await.expect("actor snapshot").delivery;
+        assert_eq!(successor_delivery.producer_attempt, successor_attempt);
+        assert_eq!(
+            successor_delivery.producer_exit, None,
+            "a reaped predecessor cannot terminate its already-admitted successor"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_supervisor_owns_signals_termination_and_reaping() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-signal");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+
+        assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert!(child
+            .signal(libc::SIGCONT)
+            .await
+            .expect("supervised continue"));
+        child.kill().await.expect("supervised kill waits for reap");
+        let status = child
+            .try_wait()
+            .expect("reaped status")
+            .expect("terminal status");
+        assert_eq!(child.id(), None, "a reaped owner never exposes its old pid");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        let exit = control
+            .snapshot()
+            .await
+            .expect("actor snapshot")
+            .delivery
+            .producer_exit
+            .expect("exact attempt exit");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn producer_signal_and_retirement_share_one_authorization_linearization() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-fence");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = Arc::new(AttemptChild::new(
+            attempt,
+            long_running_child(),
+            control.clone(),
+        ));
+        let pause = Arc::new(std::sync::Barrier::new(2));
+        child.pause_signal_after_authorization(Arc::clone(&pause));
+        let signal = {
+            let child = Arc::clone(&child);
+            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+        };
+
+        // The supervisor has authorized the exact attempt and still owns the
+        // transition guard immediately before the syscall.
+        pause.wait();
+        assert!(
+            control.producer_transition_guard_is_held_for_test(),
+            "the paused supervisor must own the transition guard"
+        );
+        let (started, contender_started) = std::sync::mpsc::channel();
+        let (fenced, observed) = std::sync::mpsc::channel();
+        let fence = {
+            let control = control.clone();
+            std::thread::spawn(move || {
+                started.send(()).expect("contender started");
+                control.fence_unavailable();
+                fenced.send(()).expect("fence observation");
+            })
+        };
+        contender_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fence contender reached the guarded operation");
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retirement cannot linearize between authorization and signal"
+        );
+        pause.wait();
+        assert!(signal
+            .await
+            .expect("signal task")
+            .expect("supervised signal"));
+        observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement follows the physical signal");
+        fence.join().expect("fence thread");
+        assert!(control.is_retired());
+        assert!(
+            !child
+                .signal(libc::SIGCONT)
+                .await
+                .expect("retired signal verdict"),
+            "no signal can land after the newer retirement fence"
+        );
+
+        let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
+        child.kill().await.expect("reap stopped child");
+    }
+
+    #[tokio::test]
+    async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+        drop(child);
+
+        let exit = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(exit) = control
+                    .snapshot()
+                    .await
+                    .and_then(|lease| lease.delivery.producer_exit)
+                {
+                    break exit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered supervisor reap");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_falls_back_to_exact_process_facts_when_actor_is_unavailable() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let mut session = test_session(dir.path().to_owned());
+        if let Some(child) = session.child.get_mut().take() {
+            let mut child = child;
+            child.kill().await.expect("remove fixture child");
+        }
+        session.control = crate::playback_control::RollingControlHandle::unavailable_for_test();
+        session.progress.note_out_time(2_500);
+        session.progress.speed_milli.store(1_250, Relaxed);
+        session.progress.recent_milli.store(1_100, Relaxed);
+        session.suspended.store(true, Relaxed);
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn terminal producer");
+        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if session
+                    .child
+                    .get_mut()
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor terminal observation");
+
+        let status = session_info(
+            "actor-unavailable",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(status.lease_state, "unavailable");
+        assert_eq!(status.producer_state, "exited", "terminal precedes held");
+        assert_eq!(status.producer_attempt, Some(0));
+        assert_eq!(status.producer_exit_success, Some(false));
+        assert_eq!(status.producer_exit_code, Some(1));
+        assert_eq!(status.speed, None);
+        assert_eq!(status.recent_speed, None);
+        assert_eq!(status.out_time_ms, None);
+        assert_eq!(status.progress_idle_ms, -1);
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_never_combines_successor_process_facts_with_predecessor_actor_state() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let session = Arc::new(test_session(dir.path().to_owned()));
+        let predecessor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        session.progress.begin_fenced_attempt(predecessor);
+        session.progress.note_out_time(1_000);
+        session.progress.speed_milli.store(900, Relaxed);
+        session.progress.recent_milli.store(800, Relaxed);
+        session
+            .control
+            .observe_producer_progress(predecessor, Some(1_000), Some(900), Some(800));
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("predecessor snapshot")
+                .delivery
+                .producer_out_time_ms,
+            Some(1_000)
+        );
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("remove fixture child");
+        }
+        *session.child.lock().await = Some(AttemptChild::new(
+            predecessor,
+            long_running_child(),
+            session.control.clone(),
+        ));
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let reader = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move {
+                session_info(
+                    "attempt-coherence",
+                    &session,
+                    AheadLimits {
+                        max_secs: 0,
+                        max_bytes: 0,
+                        global_max_bytes: 0,
+                    },
+                    0,
+                    0,
+                )
+                .await
+            })
+        };
+        pause.wait().await;
+
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        session.progress.begin_fenced_attempt(successor);
+        session.progress.note_out_time(99_000);
+        session.progress.speed_milli.store(9_000, Relaxed);
+        session.progress.recent_milli.store(8_000, Relaxed);
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("reap predecessor fixture");
+        }
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn successor terminal producer");
+        *session.child.lock().await =
+            Some(AttemptChild::new(successor, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let terminal = session
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor terminal observation");
+        pause.wait().await;
+
+        let status = reader.await.expect("status reader");
+        assert_eq!(status.producer_attempt, Some(predecessor));
+        assert_eq!(status.out_time_ms, Some(1_000));
+        assert_eq!(status.speed, Some(0.9));
+        assert_eq!(status.recent_speed, Some(0.8));
+        assert_eq!(status.producer_exit_success, None);
+        assert_eq!(status.producer_exit_code, None);
+        assert_eq!(status.producer_state, "waiting");
+    }
+
     /// Cumulative speed hides a slowdown behind a fast start; the recent rate
     /// is what predicts whether the viewer's reserve is about to drain. The
     /// smoothing is tested as arithmetic — a test that had to sleep to make a
@@ -18949,7 +19807,11 @@ mod tests {
                 .await
                 .expect("write successor segment");
         }
-        *session.child.lock().await = Some(long_running_child());
+        *session.child.lock().await = Some(AttemptChild::new(
+            session.control.current_producer_attempt(),
+            long_running_child(),
+            session.control.clone(),
+        ));
         replacement.complete();
         attempt
     }
@@ -19619,7 +20481,10 @@ mod tests {
             "terminal rejection remains path-fenced"
         );
         let mut installed = session.child.lock().await;
-        assert_ne!(installed.as_ref().and_then(Child::id), candidate_pid);
+        assert_ne!(
+            installed.as_ref().and_then(|child| child.id()),
+            candidate_pid
+        );
         assert!(
             installed
                 .as_mut()
@@ -19767,7 +20632,12 @@ mod tests {
         assert!(!session.failed.load(Relaxed));
         assert!(session.replacing_child.load(Acquire));
         assert_ne!(
-            session.child.lock().await.as_ref().and_then(Child::id),
+            session
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|child| child.id()),
             candidate_pid,
             "the retired session cannot own the spawned candidate"
         );
@@ -20382,7 +21252,11 @@ mod tests {
                 clear_session_dir(&path).await.expect("clear predecessor");
                 session.confirm_predecessor_scratch_cleared();
                 seeded_session_dir(&path, 2, 2.0).await;
-                *session.child.lock().await = Some(long_running_child());
+                *session.child.lock().await = Some(AttemptChild::new(
+                    session.control.current_producer_attempt(),
+                    long_running_child(),
+                    session.control.clone(),
+                ));
                 replacement.complete();
                 attempt
             }
@@ -21511,9 +22385,10 @@ mod tests {
     /// child process, a directory the test controls, and telemetry the test
     /// can backdate.
     fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
+        let control = crate::playback_control::RollingControlHandle::spawn("test-start");
         Arc::new(Session {
             dir: dir.to_path_buf(),
-            child: Mutex::new(child),
+            child: Mutex::new(child.map(|child| AttemptChild::new(0, child, control.clone()))),
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
@@ -21539,7 +22414,7 @@ mod tests {
             subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
-            control: crate::playback_control::RollingControlHandle::spawn("test-start"),
+            control,
             flow_worker_started: AtomicBool::new(false),
             file_id: 1,
             item_id: 1,
@@ -21886,7 +22761,11 @@ mod tests {
             .kill_child_for_replacement()
             .await
             .expect("a live session may replace its child");
-        *session.child.lock().await = Some(long_running_child());
+        *session.child.lock().await = Some(AttemptChild::new(
+            session.control.current_producer_attempt(),
+            long_running_child(),
+            session.control.clone(),
+        ));
         replacement.complete();
         pause.wait().await;
 
@@ -21995,7 +22874,11 @@ mod tests {
             else {
                 return false;
             };
-            *replacement_session.child.lock().await = Some(long_running_child());
+            *replacement_session.child.lock().await = Some(AttemptChild::new(
+                replacement_session.control.current_producer_attempt(),
+                long_running_child(),
+                replacement_session.control.clone(),
+            ));
             spawn_watch_for_stall(
                 Arc::clone(&replacement_session),
                 replacement_session.dir.clone(),
@@ -22123,7 +23006,11 @@ mod tests {
                     .await
                     .expect("rolling actor must answer replacement admission")
                     .expect("the live copy session may begin fallback");
-                *session.child.lock().await = Some(long_running_child());
+                *session.child.lock().await = Some(AttemptChild::new(
+                    session.control.current_producer_attempt(),
+                    long_running_child(),
+                    session.control.clone(),
+                ));
                 replacement.complete();
             }
         });
@@ -22235,7 +23122,7 @@ mod tests {
             .lock()
             .await
             .as_ref()
-            .and_then(tokio::process::Child::id)
+            .and_then(AttemptChild::id)
             .expect("placeholder process id");
         let predecessor_generation = session.progress.generation();
         mgr.sessions

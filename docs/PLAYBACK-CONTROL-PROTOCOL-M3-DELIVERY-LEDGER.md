@@ -211,10 +211,11 @@ measurements. Attempt fencing is covered by structured warnings when an old
 fallback is rejected and by regression tests that hold an old response open
 across replacement.
 
-M3c2 will add coalesced producer-progress observations and exact-attempt child
-exit observations. That slice must not block ffmpeg's stdout/stderr drain on
-the actor mailbox. It still will not move recovery actions; M4 performs that
-cutover only after the actor has all required facts.
+M3c2 adds coalesced producer-progress observations and exact-attempt process
+exit observations through an ingress independent of the actor mailbox. It does
+not move recovery actions; M4 performs that cutover only after the actor has all
+required facts. Its implementation and verification contract is in
+[`PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md`](PLAYBACK-CONTROL-PROTOCOL-M3-PRODUCER-EVENTS.md).
 
 ## Verification contract
 
