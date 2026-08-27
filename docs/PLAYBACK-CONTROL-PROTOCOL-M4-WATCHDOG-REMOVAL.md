@@ -232,7 +232,7 @@ reserved permit, and release the fence. It cannot receive a pre-deadline stamp
 and then be descheduled before insertion.
 
 Nonblocking producer ingress is bounded but deadline-chain aware. Under that
-same fence, each command-free interval accumulates one
+same fence, each barrier-free interval accumulates one
 `ProgressCoverageBatch`:
 
 ```text
@@ -266,21 +266,37 @@ wins. Thus delayed A/B/C is accepted only when every link was timely, while a
 missing middle sample cannot either create a false timeout or bridge a real
 stall.
 
-A command is an ordering barrier. After reserving its one bounded mailbox
-permit and taking the ingress fence, the sender seals the current open producer
-batch into `command.preceding_producer_batch`, resets the open batch, then
-allocates and publishes the command sequence. Producer facts after that command
-enter a new batch and can never be folded across it. At most one sealed batch
-belongs to each bounded command envelope, plus one open batch, so memory stays
-constant at `O(mailbox_capacity)`, not progress rate.
+Every state-changing non-progress fact is an ordering barrier:
 
-Exit, physical-flow-acknowledgement, and classifier-result facts occupy fixed
-non-overwritable slots inside their command interval. They retain original
-sequence and `published_at` plus exact attempt and operation/probe sequence;
-duplicate publication is rejected. A higher admitted attempt may replace
-predecessor slots only while the actor and ingress fences are held and after
-the predecessor batch has been drained or declared stale. A late
-lower-attempt publisher cannot evict a successor fact.
+- after reserving its one bounded mailbox permit and taking the ingress fence,
+  a command sender seals the current open progress batch into
+  `command.preceding_progress_batch`, resets the open batch, then allocates and
+  publishes the command sequence; and
+- before publishing an exit, physical-flow acknowledgement, or classifier/
+  probe result, the nonblocking publisher takes the fence, verifies that the
+  exact fixed event slot is empty, seals the open progress batch into that
+  event's `preceding_progress_batch`, resets the open batch, then allocates the
+  event sequence and fills the slot. A duplicate is rejected before sealing or
+  allocating anything.
+
+Progress after any barrier occupies a distinct batch and can never be folded
+across the state change. Drain turns each fixed producer slot into the ordered
+block `preceding_progress_batch -> barrier event`, sorts those blocks by the
+barrier's original sequence alongside command envelopes, and places the final
+open progress batch last. The actor applies each block in that order. Thus
+`progress A -> FlowApplied(held) -> progress B`, `A -> FlowApplied(resumed) ->
+B`, `A -> exit -> B`, and `A -> classifier -> B` cannot be collapsed into one
+coverage proof or rearm from the wrong physical phase.
+
+The bound remains fixed: at most one sealed batch belongs to each bounded
+command envelope; the exact current exit, flow-acknowledgement, and classifier
+slots each own at most one sealed batch; and there is one open batch. Memory is
+`O(mailbox_capacity + fixed_event_slots)`, not progress rate. Each fixed slot
+retains original sequence and `published_at` plus exact attempt and
+operation/probe sequence. A higher admitted attempt may replace predecessor
+slots only while the actor and ingress fences are held and after the predecessor
+blocks have been drained or declared stale. A late lower-attempt publisher
+cannot evict a successor fact.
 
 Actor dispatch is due-first: before every receive it compares the nearest
 deadline with `now`, and its `tokio::select!` is biased with the deadline branch
@@ -294,9 +310,9 @@ cutoff starts, the actor performs it without awaiting external work:
 
 1. acquire the synchronous actor transition fence and the ingress fence, then
    record the deadline instant plus the ingress high-water sequence;
-2. close and drain the sealed command batches plus the open producer batch
-   published through that sequence, preserving original publication metadata
-   and command barriers;
+2. close and drain the command and fixed producer barrier blocks plus the open
+   progress batch published through that sequence, preserving original
+   publication metadata and every state-change barrier;
 3. retain the already-selected envelope, then `try_recv` at most the bounded
    mailbox capacity into an actor-owned deque capped at mailbox capacity plus
    that one selected envelope; process
@@ -821,6 +837,10 @@ misclassified as a watchdog.
 | advancing A followed by speed-only B after the original deadline | A remains coverage evidence and rearms; B neither erases nor extends it |
 | progress published after the armed deadline | one timeout decision |
 | producer batch, command barrier, producer batch | batches are evaluated on their own sides of the command; coverage never crosses it |
+| progress A, successful physical hold acknowledgement, progress B | A is applied before hold; B is a distinct held-phase batch and cannot rearm |
+| progress A, successful physical resume acknowledgement, progress B | resume grants its fresh budget before the distinct B batch is evaluated |
+| progress A, exact exit, progress B | exit enters classification before B; B cannot extend the exited attempt |
+| progress A, classifier/probe result, progress B | classification settles before B; late progress cannot relabel or rearm it |
 | command reserved before deadline but published after | post-deadline command; cannot reverse verdict |
 | deadline becomes due while receive branches are ready | due-first cutoff runs before ordinary dispatch |
 | timer polls pending, deadline passes, then receive wakes | selected envelope retained; cutoff runs before handling it |
