@@ -1238,6 +1238,7 @@ struct OwnedLocalControlRequest {
 }
 
 enum RollingControlCommand {
+    #[cfg(test)]
     Renew {
         kind: &'static str,
         source: RollingRenewalSource,
@@ -1559,6 +1560,7 @@ impl RollingControlActor {
 
     async fn handle_command(&mut self, command: RollingControlCommand) {
         match command {
+            #[cfg(test)]
             RollingControlCommand::Renew {
                 kind,
                 source,
@@ -1773,6 +1775,7 @@ impl RollingControlHandle {
         }
     }
 
+    #[cfg(test)]
     async fn renew(&self, kind: &'static str, source: RollingRenewalSource) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
@@ -1790,12 +1793,9 @@ impl RollingControlHandle {
         response.await.unwrap_or(false)
     }
 
+    #[cfg(test)]
     pub(crate) async fn renew_media(&self, kind: &'static str) -> bool {
         self.renew(kind, RollingRenewalSource::Media).await
-    }
-
-    pub(crate) async fn renew_internal(&self, kind: &'static str) -> bool {
-        self.renew(kind, RollingRenewalSource::Internal).await
     }
 
     pub(crate) fn current_producer_attempt(&self) -> u64 {

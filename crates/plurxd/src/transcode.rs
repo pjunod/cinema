@@ -613,6 +613,7 @@ impl SegmentIndex {
     /// the last *known* entry's duration and index rather than the count.
     /// A rebuild drops carried sizes on purpose: they described files a
     /// replaced timeline no longer contains.
+    #[cfg(test)]
     fn extend_from_playlist(&mut self, text: &str) -> bool {
         let known = self.segs.len();
         let mut seen = 0usize;
@@ -3178,17 +3179,29 @@ pub(crate) struct SegmentDelivery {
     _snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
 }
 
+struct SegmentDeliveryContext {
+    store: Arc<dyn Store>,
+    session: Arc<Session>,
+    producer_attempt: u64,
+    session_id: String,
+    segment: String,
+    encoder: String,
+}
+
 impl SegmentDelivery {
     fn new(
-        store: Arc<dyn Store>,
-        session: Arc<Session>,
-        producer_attempt: u64,
-        session_id: &str,
-        segment: &str,
-        encoder: String,
+        context: SegmentDeliveryContext,
         expected_bytes: u64,
         snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
     ) -> Self {
+        let SegmentDeliveryContext {
+            store,
+            session,
+            producer_attempt,
+            session_id,
+            segment,
+            encoder,
+        } = context;
         let method = match session.method {
             crate::delivery::Method::Direct => "direct_play",
             crate::delivery::Method::Remux | crate::delivery::Method::HlsCopy => "remux",
@@ -3198,8 +3211,8 @@ impl SegmentDelivery {
             store,
             session,
             producer_attempt,
-            session_id: session_id.to_owned(),
-            segment: segment.to_owned(),
+            session_id,
+            segment,
             method,
             encoder,
             purpose: DeliveryPurpose::ClientResponse,
@@ -13521,12 +13534,14 @@ impl TranscodeManager {
                 }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
                 let delivery = SegmentDelivery::new(
-                    Arc::clone(&self.store),
-                    Arc::clone(&session),
-                    producer_attempt,
-                    session_id,
-                    name,
-                    encoder,
+                    SegmentDeliveryContext {
+                        store: Arc::clone(&self.store),
+                        session: Arc::clone(&session),
+                        producer_attempt,
+                        session_id: session_id.to_owned(),
+                        segment: name.to_owned(),
+                        encoder,
+                    },
                     len,
                     snapshot_lease,
                 );
@@ -18777,12 +18792,14 @@ mod tests {
         raw_session.file_id = file_id;
         let session = Arc::new(raw_session);
         let mut delivery = SegmentDelivery::new(
-            Arc::clone(&store),
-            Arc::clone(&session),
-            session.control.current_producer_attempt(),
-            "delivery-test",
-            "seg00001.m4s",
-            "test".to_owned(),
+            SegmentDeliveryContext {
+                store: Arc::clone(&store),
+                session: Arc::clone(&session),
+                producer_attempt: session.control.current_producer_attempt(),
+                session_id: "delivery-test".to_owned(),
+                segment: "seg00001.m4s".to_owned(),
+                encoder: "test".to_owned(),
+            },
             1_024,
             None,
         );
