@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["da8d689a"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The rolling actor tests exercise the deferred producer-attempt reply while the actor itself is spawned on Tokio's Send-required executor. Keeping the synchronous transition transaction in a lexical scope proves its non-Send MutexGuard is destroyed before the test-only barrier await, while the existing paused-reply regressions require producer ordering and flow capacity to remain intact across that boundary."
