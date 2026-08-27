@@ -1938,35 +1938,64 @@ impl AttemptChild {
                         };
                         match command {
                             AttemptChildCommand::Signal { signal, reply } => {
-                                let mut transition = control.lock_producer_transition();
-                                let result = if control.current_producer_attempt()
-                                    == producer_attempt
-                                    && control.producer_transition_is_live(&transition)
-                                {
-                                    #[cfg(test)]
-                                    if let Some(pause) = supervisor_signal_pause
-                                        .lock()
-                                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                        .take()
-                                    {
-                                        pause.wait();
-                                        pause.wait();
-                                    }
-                                    let result = signal_owned_pid(pid, producer_attempt, signal);
-                                    if matches!(result, Ok(true))
-                                        && (signal == libc::SIGSTOP || signal == libc::SIGCONT)
-                                    {
-                                        control.record_producer_flow_applied(
-                                            &mut transition,
-                                            producer_attempt,
-                                            signal == libc::SIGSTOP,
-                                        );
-                                    }
-                                    result
-                                } else {
-                                    Ok(false)
+                                let flow_signal =
+                                    signal == libc::SIGSTOP || signal == libc::SIGCONT;
+                                let result = loop {
+                                    let deferred = {
+                                        let transition = control.lock_producer_transition();
+                                        if control.current_producer_attempt() != producer_attempt
+                                            || !control
+                                                .producer_transition_is_live(&transition)
+                                        {
+                                            break Ok(false);
+                                        }
+                                        #[cfg(test)]
+                                        if let Some(pause) = supervisor_signal_pause
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .take()
+                                        {
+                                            pause.wait();
+                                            pause.wait();
+                                        }
+                                        if flow_signal
+                                            && !control.reserve_producer_flow_applied(
+                                                &transition,
+                                                producer_attempt,
+                                            )
+                                        {
+                                            // Attempt changes and retirement
+                                            // use this same fence, so after
+                                            // the liveness check `false`
+                                            // means only bounded capacity.
+                                            true
+                                        } else {
+                                            // The syscall and successful
+                                            // acknowledgement publication are
+                                            // one exact-attempt transaction.
+                                            // A failed syscall only releases
+                                            // the reserved barrier slot.
+                                            let result =
+                                                signal_owned_pid(pid, producer_attempt, signal);
+                                            if flow_signal {
+                                                control.finish_producer_flow_applied(
+                                                    &transition,
+                                                    producer_attempt,
+                                                    signal == libc::SIGSTOP,
+                                                    matches!(&result, Ok(true)),
+                                                );
+                                            }
+                                            break result;
+                                        }
+                                    };
+                                    debug_assert!(deferred);
+                                    // Never wait while holding the transition
+                                    // fence: the actor needs that fence to
+                                    // drain the barriers that make capacity.
+                                    // After waking, re-authorize the attempt;
+                                    // retirement or replacement may have won.
+                                    control.wait_for_producer_flow_capacity().await;
                                 };
-                                drop(transition);
                                 let _ = reply.send(result);
                             }
                             AttemptChildCommand::Terminate { reply } => {

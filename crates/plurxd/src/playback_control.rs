@@ -1424,6 +1424,10 @@ impl ControlState {
 }
 
 const ROLLING_ACTOR_MAILBOX_CAPACITY: usize = 128;
+/// One complete physical hold/resume cycle may wait behind actor dispatch.
+/// A third transition waits before its syscall until the actor drains one of
+/// these fixed barrier slots, then re-authorizes its exact producer attempt.
+const ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY: usize = 2;
 const ROLLING_LEGACY_LEASE_TIMEOUT: Duration =
     Duration::from_millis(ROLLING_LEASE_TIMEOUT_MS as u64);
 const ROLLING_EXPLICIT_LEASE_TIMEOUT: Duration =
@@ -1587,6 +1591,12 @@ struct RollingProducerExitObservation {
     observed_at: Instant,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RollingProducerFlowObservation {
+    producer_attempt: u64,
+    state: ProducerPhysicalFlowState,
+}
+
 /// The actor's sole rolling-producer candidate clock. This slice deliberately
 /// records expiry without emitting a recovery action, so the compatibility
 /// watchdog remains the only component that can still retry or replace.
@@ -1634,6 +1644,7 @@ enum ProducerExitAcceptance {
 }
 
 impl ProducerExitAcceptance {
+    #[cfg(test)]
     fn accepted(self) -> bool {
         !matches!(self, Self::Rejected)
     }
@@ -1658,40 +1669,11 @@ struct ProducerFlowApplied {
 /// still authorized, before the guard is released.
 pub(crate) struct RollingProducerTransitionFence {
     lease_deadline: Instant,
-    flow_revision: u64,
-    flow_applied: Option<ProducerFlowApplied>,
-    /// Sticky until the actor consumes the fence. This preserves a physical
-    /// Held -> Running transition even when both acknowledgements arrive
-    /// before one actor wake, without an unbounded event queue.
-    flow_held_since_actor: bool,
 }
 
 impl RollingProducerTransitionFence {
     fn new(lease_deadline: Instant) -> Self {
-        Self {
-            lease_deadline,
-            flow_revision: 0,
-            flow_applied: None,
-            flow_held_since_actor: false,
-        }
-    }
-
-    fn record_flow(
-        &mut self,
-        producer_attempt: u64,
-        state: ProducerPhysicalFlowState,
-        published_at: Instant,
-    ) -> ProducerFlowApplied {
-        self.flow_revision = self.flow_revision.saturating_add(1);
-        let applied = ProducerFlowApplied {
-            revision: self.flow_revision,
-            producer_attempt,
-            state,
-            published_at,
-        };
-        self.flow_held_since_actor |= state == ProducerPhysicalFlowState::Held;
-        self.flow_applied = Some(applied);
-        applied
+        Self { lease_deadline }
     }
 }
 
@@ -1847,13 +1829,15 @@ impl RollingFlowSync {
 /// Progress is retained as a constant-space deadline chain instead of only a
 /// first/latest sample: a delayed drain can therefore prove that every A-B-C
 /// link arrived inside the preceding progress horizon, while the first missing
-/// link is retained and later telemetry cannot bridge it. Exit seals the open
-/// batch into its barrier block so progress before and after process death can
-/// never be folded together. Command barriers join this same fence in the next
+/// link is retained and later telemetry cannot bridge it. Exit and successful
+/// exact-attempt physical-flow acknowledgements seal the open batch into
+/// barrier blocks, so progress cannot fold across process death or a physical
+/// hold/resume transition. Command barriers join this same fence in the next
 /// M4 slice before the actor deadline becomes an active recovery owner.
 struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
+    flow_capacity_available: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -1867,6 +1851,10 @@ struct RollingProducerIngressState {
     progress_watermark_out_time_ms: Option<i64>,
     progress: Option<ProgressCoverageBatch>,
     exit: Option<SequencedProducerBarrier>,
+    flow: std::collections::VecDeque<SequencedProducerBarrier>,
+    flow_reservations: usize,
+    #[cfg(test)]
+    last_flow_applied: Option<RollingProducerFlowObservation>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1880,6 +1868,7 @@ struct SequencedProducerEvent {
 enum RollingProducerEvent {
     Progress(RollingProducerProgressObservation),
     Exit(RollingProducerExitObservation),
+    FlowApplied(RollingProducerFlowObservation),
 }
 
 impl RollingProducerEvent {
@@ -1887,6 +1876,7 @@ impl RollingProducerEvent {
         match self {
             Self::Progress(observation) => observation.producer_attempt,
             Self::Exit(observation) => observation.producer_attempt,
+            Self::FlowApplied(observation) => observation.producer_attempt,
         }
     }
 }
@@ -2065,6 +2055,7 @@ impl RollingProducerIngress {
         Self {
             state: std::sync::Mutex::new(RollingProducerIngressState::default()),
             notify: tokio::sync::Notify::new(),
+            flow_capacity_available: tokio::sync::Notify::new(),
         }
     }
 
@@ -2074,6 +2065,96 @@ impl RollingProducerIngress {
 
     fn publish_exit(&self, observation: RollingProducerExitObservation) {
         self.publish(RollingProducerEvent::Exit(observation), true);
+    }
+
+    fn reserve_flow_barrier(&self) -> bool {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.flow.len() + state.flow_reservations >= ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY {
+            ROLLING_PRODUCER_FLOW_DEFERRALS.fetch_add(1, Ordering::Relaxed);
+            return false;
+        }
+        state.flow_reservations += 1;
+        true
+    }
+
+    /// Wait until a fixed flow-barrier slot is available. The caller must
+    /// re-acquire the transition fence and reserve after this returns: space
+    /// is only a wake condition, never authorization for a process syscall.
+    async fn wait_for_flow_barrier_capacity(&self) {
+        loop {
+            let notified = self.flow_capacity_available.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let has_capacity = {
+                let state = self
+                    .state
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                state.flow.len() + state.flow_reservations < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY
+            };
+            if has_capacity {
+                return;
+            }
+            notified.as_mut().await;
+        }
+    }
+
+    fn finish_reserved_flow_barrier(
+        &self,
+        observation: RollingProducerFlowObservation,
+        applied: bool,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        debug_assert!(state.flow_reservations > 0);
+        state.flow_reservations = state.flow_reservations.saturating_sub(1);
+        if !applied {
+            drop(state);
+            self.flow_capacity_available.notify_one();
+            return;
+        }
+        let published_at = rolling_now();
+        Self::push_flow_barrier(&mut state, observation, published_at);
+        drop(state);
+        self.notify.notify_one();
+    }
+
+    fn push_flow_barrier(
+        state: &mut RollingProducerIngressState,
+        observation: RollingProducerFlowObservation,
+        published_at: Instant,
+    ) {
+        debug_assert!(state.flow.len() < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY);
+        state.next_sequence = state.next_sequence.saturating_add(1);
+        let sequence = state.next_sequence;
+        let preceding_progress = state.progress.take();
+        #[cfg(test)]
+        state.last_flow_applied = Some(observation);
+        state.flow.push_back(SequencedProducerBarrier {
+            preceding_progress,
+            event: SequencedProducerEvent {
+                sequence,
+                published_at,
+                event: RollingProducerEvent::FlowApplied(observation),
+            },
+        });
+    }
+
+    #[cfg(test)]
+    fn publish_flow_at(&self, observation: RollingProducerFlowObservation, published_at: Instant) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(state.flow.len() < ROLLING_PRODUCER_FLOW_BARRIER_CAPACITY);
+        Self::push_flow_barrier(&mut state, observation, published_at);
+        drop(state);
+        self.notify.notify_one();
     }
 
     fn publish(&self, event: RollingProducerEvent, is_exit: bool) {
@@ -2193,10 +2274,16 @@ impl RollingProducerIngress {
     }
 
     fn take_blocks(state: &mut RollingProducerIngressState) -> Vec<RollingProducerIngressBlock> {
-        let mut pending = Vec::with_capacity(2);
+        let mut pending = Vec::with_capacity(2 + state.flow.len());
         if let Some(exit) = state.exit.take() {
             pending.push(RollingProducerIngressBlock::Barrier(exit));
         }
+        pending.extend(
+            state
+                .flow
+                .drain(..)
+                .map(RollingProducerIngressBlock::Barrier),
+        );
         if let Some(progress) = state.progress.take() {
             pending.push(RollingProducerIngressBlock::Progress(progress));
         }
@@ -2209,7 +2296,13 @@ impl RollingProducerIngress {
             .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::take_blocks(&mut state)
+        let freed_flow_capacity = !state.flow.is_empty();
+        let blocks = Self::take_blocks(&mut state);
+        drop(state);
+        if freed_flow_capacity {
+            self.flow_capacity_available.notify_waiters();
+        }
+        blocks
     }
 
     fn drain(&self) -> Vec<RollingProducerEvent> {
@@ -2477,7 +2570,11 @@ impl RollingControlActor {
     /// coordinate makes scheduler-delay tests assert the armed instant rather
     /// than dispatch time and prevents an ordinary late event from rearming.
     fn settle_producer_deadline_at(&mut self, now: Instant) -> Option<ProducerDeadlineDue> {
-        if self.producer_physical_flow == ProducerPhysicalFlowState::Held {
+        if self.producer_physical_flow == ProducerPhysicalFlowState::Held
+            && self.producer_progress_deadline.is_some_and(|deadline| {
+                !matches!(deadline.mode, ProducerProgressDeadlineMode::ClassifyingExit)
+            })
+        {
             self.producer_progress_deadline = None;
             return None;
         }
@@ -2503,47 +2600,62 @@ impl RollingControlActor {
         self.settle_producer_deadline_at(now)
     }
 
-    /// Consume the newest exact physical-flow acknowledgement copied from the
-    /// synchronous process fence. Hold discards the running budget. Resume
-    /// grants one fresh full budget from the successful SIGCONT publication.
-    fn apply_producer_flow_applied(
-        &mut self,
-        applied: Option<ProducerFlowApplied>,
-        held_since_actor: bool,
-    ) {
-        let Some(applied) = applied.filter(|applied| {
-            applied.revision > self.producer_flow_revision
-                && applied.producer_attempt == self.delivery.producer_attempt
-        }) else {
+    /// Apply one exact sequenced physical-flow acknowledgement. A timely Hold
+    /// discards the running budget; a late Hold preserves the already-won due
+    /// coordinate. Resume grants a fresh full budget only after an eligible
+    /// Held state was actually applied.
+    fn apply_producer_flow_applied_at(&mut self, now: Instant, applied: ProducerFlowApplied) {
+        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return;
-        };
+        }
+        if !(applied.revision > self.producer_flow_revision
+            && applied.producer_attempt == self.delivery.producer_attempt)
+        {
+            return;
+        }
         self.producer_flow_revision = applied.revision;
         let previous = self.producer_physical_flow;
-        self.producer_physical_flow = applied.state;
         match applied.state {
             ProducerPhysicalFlowState::Held => {
-                self.producer_progress_deadline = None;
-                // This remains a provisional observation until commands join
-                // the ingress sequence. Exact physical hold is authoritative
-                // evidence that an action-passive timeout must not survive.
-                self.producer_deadline_due = None;
+                if self.producer_progress_deadline.is_some_and(|deadline| {
+                    deadline.producer_attempt == applied.producer_attempt
+                        && !matches!(deadline.mode, ProducerProgressDeadlineMode::ClassifyingExit)
+                        && applied.published_at > deadline.instant
+                }) {
+                    let _ = self.settle_producer_deadline_at(applied.published_at);
+                }
+                self.producer_physical_flow = ProducerPhysicalFlowState::Held;
+                if self.producer_deadline_due.is_none()
+                    && self.producer_progress_deadline.is_some_and(|deadline| {
+                        deadline.producer_attempt == applied.producer_attempt
+                            && !matches!(
+                                deadline.mode,
+                                ProducerProgressDeadlineMode::ClassifyingExit
+                            )
+                            && applied.published_at <= deadline.instant
+                    })
+                {
+                    self.producer_progress_deadline = None;
+                }
             }
-            ProducerPhysicalFlowState::Running
-                if (previous == ProducerPhysicalFlowState::Held || held_since_actor)
+            ProducerPhysicalFlowState::Running => {
+                self.producer_physical_flow = ProducerPhysicalFlowState::Running;
+                if previous == ProducerPhysicalFlowState::Held
                     && !self.retired
-                    && self.delivery.producer_exit.is_none() =>
-            {
-                self.producer_deadline_due = None;
-                self.arm_producer_deadline(
-                    applied.producer_attempt,
-                    ProducerProgressDeadlineMode::Advancing,
-                    applied
-                        .published_at
-                        .checked_add(PRODUCER_PROGRESS_BUDGET)
-                        .unwrap_or(applied.published_at),
-                );
+                    && self.delivery.producer_exit.is_none()
+                    && self.producer_deadline_due.is_none()
+                    && self.producer_process_exit_due.is_none()
+                {
+                    self.arm_producer_deadline(
+                        applied.producer_attempt,
+                        ProducerProgressDeadlineMode::Advancing,
+                        applied
+                            .published_at
+                            .checked_add(PRODUCER_PROGRESS_BUDGET)
+                            .unwrap_or(applied.published_at),
+                    );
+                }
             }
-            ProducerPhysicalFlowState::Running => {}
         }
     }
 
@@ -2853,7 +2965,11 @@ impl RollingControlActor {
         accepted
     }
 
-    fn handle_sequenced_producer_event_at(&mut self, sequenced: SequencedProducerEvent) {
+    fn handle_sequenced_producer_event_at(
+        &mut self,
+        now: Instant,
+        sequenced: SequencedProducerEvent,
+    ) {
         if self.producer_progress_deadline.is_some_and(|deadline| {
             deadline.producer_attempt == sequenced.event.producer_attempt()
                 && sequenced.published_at > deadline.instant
@@ -2869,8 +2985,20 @@ impl RollingControlActor {
             }
             RollingProducerEvent::Exit(observation) => {
                 let accepted = self.observe_producer_exit_at(sequenced.published_at, observation);
-                ROLLING_PRODUCER_EVENT_OUTCOMES[2 + usize::from(!accepted.accepted())]
-                    .fetch_add(1, Ordering::Relaxed);
+                ROLLING_PRODUCER_EVENT_OUTCOMES
+                    [2 + usize::from(!matches!(accepted, ProducerExitAcceptance::Accepted))]
+                .fetch_add(1, Ordering::Relaxed);
+            }
+            RollingProducerEvent::FlowApplied(observation) => {
+                self.apply_producer_flow_applied_at(
+                    now,
+                    ProducerFlowApplied {
+                        revision: sequenced.sequence,
+                        producer_attempt: observation.producer_attempt,
+                        state: observation.state,
+                        published_at: sequenced.published_at,
+                    },
+                );
             }
         }
     }
@@ -2888,7 +3016,7 @@ impl RollingControlActor {
                     ROLLING_PRODUCER_EVENT_OUTCOMES[usize::from(!accepted)]
                         .fetch_add(1, Ordering::Relaxed);
                 }
-                self.handle_sequenced_producer_event_at(barrier.event);
+                self.handle_sequenced_producer_event_at(now, barrier.event);
             }
         }
     }
@@ -2910,9 +3038,18 @@ impl RollingControlActor {
         let _ = self.settle_producer_deadline_at(now);
     }
 
+    fn run_due_first_cutoff(&mut self) {
+        self.run_due_first_cutoff_with_now(None);
+    }
+
+    #[cfg(test)]
     fn run_due_first_cutoff_at(&mut self, now: Instant) {
+        self.run_due_first_cutoff_with_now(Some(now));
+    }
+
+    fn run_due_first_cutoff_with_now(&mut self, test_now: Option<Instant>) {
         let transition = Arc::clone(&self.producer_transition);
-        let mut transition = transition
+        let _transition = transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let producer_events = Arc::clone(&self.producer_events);
@@ -2924,11 +3061,17 @@ impl RollingControlActor {
         // settlement. A producer cannot publish B between capture of A and
         // the due observation; its publication coordinate is allocated only
         // after this ingress guard is released.
+        let freed_flow_capacity = !ingress.flow.is_empty();
         let blocks = RollingProducerIngress::take_blocks(&mut ingress);
-        let held_since_actor = transition.flow_held_since_actor;
-        transition.flow_held_since_actor = false;
-        self.apply_producer_flow_applied(transition.flow_applied, held_since_actor);
+        // Production samples dispatch only after both possibly-contended
+        // fences are owned. Test callers may inject an exact monotonic point.
+        let now = test_now.unwrap_or_else(rolling_now);
         self.handle_producer_blocks_at(now, blocks);
+        drop(ingress);
+        drop(_transition);
+        if freed_flow_capacity {
+            producer_events.flow_capacity_available.notify_waiters();
+        }
     }
 
     fn handle_producer_event(&mut self, event: RollingProducerEvent) {
@@ -2939,8 +3082,23 @@ impl RollingControlActor {
             }
             RollingProducerEvent::Exit(observation) => (
                 2,
-                self.observe_producer_exit_at(now, observation).accepted(),
+                matches!(
+                    self.observe_producer_exit_at(now, observation),
+                    ProducerExitAcceptance::Accepted
+                ),
             ),
+            RollingProducerEvent::FlowApplied(observation) => {
+                self.apply_producer_flow_applied_at(
+                    now,
+                    ProducerFlowApplied {
+                        revision: self.producer_flow_revision.saturating_add(1),
+                        producer_attempt: observation.producer_attempt,
+                        state: observation.state,
+                        published_at: now,
+                    },
+                );
+                return;
+            }
         };
         ROLLING_PRODUCER_EVENT_OUTCOMES[metric_index + usize::from(!accepted)]
             .fetch_add(1, Ordering::Relaxed);
@@ -3292,8 +3450,7 @@ impl RollingControlActor {
                 _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {
                     // Bias is not the proof. Capture producer facts only after
                     // taking the transition and ingress fences together.
-                    let now = rolling_now();
-                    self.run_due_first_cutoff_at(now);
+                    self.run_due_first_cutoff();
                 }
                 command = receiver.recv() => {
                     let Some(command) = command else {
@@ -3302,12 +3459,11 @@ impl RollingControlActor {
                     // Retain the selected envelope while the due-first cutoff
                     // consumes producer facts that may have been published at
                     // or before the armed deadline.
-                    let now = rolling_now();
-                    self.run_due_first_cutoff_at(now);
+                    self.run_due_first_cutoff();
                     self.handle_command(command).await;
                 }
                 _ = producer_events.wait_for_activity() => {
-                    self.run_due_first_cutoff_at(rolling_now());
+                    self.run_due_first_cutoff();
                 }
             }
         }
@@ -3645,10 +3801,11 @@ impl RollingControlHandle {
 
     #[cfg(test)]
     pub(crate) fn producer_flow_applied_for_test(&self) -> Option<(u64, bool)> {
-        self.producer_transition
+        self.producer_events
+            .state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .flow_applied
+            .last_flow_applied
             .map(|applied| {
                 (
                     applied.producer_attempt,
@@ -3670,38 +3827,49 @@ impl RollingControlHandle {
         self.producer_transition_is_live_at(guard, rolling_now())
     }
 
-    /// Publish the exact successful SIGSTOP/SIGCONT outcome before the sole
-    /// process owner releases the authorization fence. The actor is woken by
-    /// a retained permit and consumes the newest monotonic revision before it
-    /// can settle a producer deadline.
-    pub(crate) fn record_producer_flow_applied(
+    /// Reserve one of the fixed flow-barrier slots before the process syscall.
+    /// A full slot set defers the physical transition rather than applying a
+    /// state change whose acknowledgement the actor could not retain.
+    pub(crate) fn reserve_producer_flow_applied(
         &self,
-        guard: &mut std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
+        _guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
+        producer_attempt: u64,
+    ) -> bool {
+        if self.is_retired() || self.current_producer_attempt() != producer_attempt {
+            return false;
+        }
+        self.producer_events.reserve_flow_barrier()
+    }
+
+    /// Settle a reserved physical transition before releasing the exact PID
+    /// authorization fence. Success seals and preserves preceding progress as
+    /// a sequenced barrier; failure only releases the reservation.
+    pub(crate) fn finish_producer_flow_applied(
+        &self,
+        _guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
         producer_attempt: u64,
         held: bool,
+        applied: bool,
     ) {
-        if self.is_retired() || self.current_producer_attempt() != producer_attempt {
-            return;
-        }
-        // A physical state transition is an ordering barrier. Discard only
-        // the still-unconsumed progress proof on its earlier side so a later
-        // resume cannot bridge coverage across an intentional suspension.
-        // The actor's already-applied delivery telemetry remains intact.
-        self.producer_events
-            .state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .progress = None;
-        guard.record_flow(
-            producer_attempt,
-            if held {
-                ProducerPhysicalFlowState::Held
-            } else {
-                ProducerPhysicalFlowState::Running
+        self.producer_events.finish_reserved_flow_barrier(
+            RollingProducerFlowObservation {
+                producer_attempt,
+                state: if held {
+                    ProducerPhysicalFlowState::Held
+                } else {
+                    ProducerPhysicalFlowState::Running
+                },
             },
-            rolling_now(),
+            applied,
         );
-        self.producer_events.notify.notify_one();
+    }
+
+    /// Await actor-drained flow-barrier capacity without holding the exact
+    /// attempt transition fence. The child owner rechecks that fence after
+    /// waking, so replacement or retirement always wins over the deferred
+    /// signal.
+    pub(crate) async fn wait_for_producer_flow_capacity(&self) {
+        self.producer_events.wait_for_flow_barrier_capacity().await;
     }
 
     fn producer_transition_is_live_at(
@@ -3795,6 +3963,7 @@ static ROLLING_PRODUCER_EVENT_INGRESS: [AtomicU64; 2] = [const { AtomicU64::new(
 static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 /// Progress accepted/rejected, then exit accepted/rejected.
 static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -4025,6 +4194,12 @@ pub(crate) fn prometheus() -> String {
             ));
         }
     }
+    output.push_str(&format!(
+        "# HELP plurx_playback_rolling_producer_flow_deferrals_total Physical STOP or CONT transitions deferred before the syscall while bounded actor-ingress barrier capacity was full.\n\
+         # TYPE plurx_playback_rolling_producer_flow_deferrals_total counter\n\
+         plurx_playback_rolling_producer_flow_deferrals_total {}\n",
+        ROLLING_PRODUCER_FLOW_DEFERRALS.load(Ordering::Relaxed),
+    ));
     output
 }
 
@@ -5798,14 +5973,14 @@ mod tests {
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
         assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
 
-        actor.apply_producer_flow_applied(
-            Some(ProducerFlowApplied {
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_secs(25),
+            ProducerFlowApplied {
                 revision: 1,
                 producer_attempt: 1,
                 state: ProducerPhysicalFlowState::Held,
                 published_at: started + Duration::from_secs(25),
-            }),
-            true,
+            },
         );
         assert_eq!(
             actor.settle_due_deadlines_at(started + Duration::from_secs(40)),
@@ -5814,14 +5989,14 @@ mod tests {
         );
         assert_eq!(actor.producer_progress_deadline, None);
 
-        actor.apply_producer_flow_applied(
-            Some(ProducerFlowApplied {
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_secs(45),
+            ProducerFlowApplied {
                 revision: 2,
                 producer_attempt: 1,
                 state: ProducerPhysicalFlowState::Running,
                 published_at: started + Duration::from_secs(45),
-            }),
-            false,
+            },
         );
         assert_eq!(
             actor.producer_progress_deadline,
@@ -5856,25 +6031,40 @@ mod tests {
         let mut actor =
             RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
         assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
-        {
-            let transition = Arc::clone(&actor.producer_transition);
-            let mut transition = transition
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            transition.record_flow(
-                1,
-                ProducerPhysicalFlowState::Held,
-                started + Duration::from_secs(25),
-            );
-            transition.record_flow(
-                1,
-                ProducerPhysicalFlowState::Running,
-                started + Duration::from_secs(45),
-            );
-        }
+        let ingress = Arc::clone(&actor.producer_events);
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
+            false,
+            started + Duration::from_secs(20),
+        );
+        ingress.publish_flow_at(
+            RollingProducerFlowObservation {
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+            },
+            started + Duration::from_secs(25),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 200, 900, 800, started)),
+            false,
+            started + Duration::from_secs(30),
+        );
+        ingress.publish_flow_at(
+            RollingProducerFlowObservation {
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Running,
+            },
+            started + Duration::from_secs(45),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 300, 900, 800, started)),
+            false,
+            started + Duration::from_secs(50),
+        );
 
-        actor.run_due_first_cutoff_at(started + Duration::from_secs(46));
+        actor.run_due_first_cutoff_at(started + Duration::from_secs(51));
         assert_eq!(actor.producer_deadline_due, None);
+        assert_eq!(actor.delivery.producer_out_time_ms, Some(300));
         assert_eq!(
             actor.producer_physical_flow,
             ProducerPhysicalFlowState::Running
@@ -5884,9 +6074,114 @@ mod tests {
             Some(ProducerProgressDeadline {
                 producer_attempt: 1,
                 mode: ProducerProgressDeadlineMode::Advancing,
-                instant: started + Duration::from_secs(55),
+                instant: started + Duration::from_secs(60),
             })
         );
+    }
+
+    #[tokio::test]
+    async fn flow_barrier_capacity_defers_then_wakes_a_third_signal_before_application() {
+        let ingress = RollingProducerIngress::new();
+        assert!(ingress.reserve_flow_barrier());
+        assert!(ingress.reserve_flow_barrier());
+        assert!(!ingress.reserve_flow_barrier());
+
+        let wait_then_reserve = async {
+            ingress.wait_for_flow_barrier_capacity().await;
+            assert!(ingress.reserve_flow_barrier());
+            ingress.finish_reserved_flow_barrier(
+                RollingProducerFlowObservation {
+                    producer_attempt: 1,
+                    state: ProducerPhysicalFlowState::Held,
+                },
+                false,
+            );
+        };
+        let release_capacity = async {
+            tokio::task::yield_now().await;
+            ingress.finish_reserved_flow_barrier(
+                RollingProducerFlowObservation {
+                    producer_attempt: 1,
+                    state: ProducerPhysicalFlowState::Held,
+                },
+                false,
+            );
+        };
+        tokio::join!(wait_then_reserve, release_capacity);
+        ingress.finish_reserved_flow_barrier(
+            RollingProducerFlowObservation {
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Running,
+            },
+            false,
+        );
+        assert!(ingress.drain_blocks().is_empty());
+    }
+
+    #[test]
+    fn flow_application_never_outranks_exact_session_expiry() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+
+        actor.apply_producer_flow_applied_at(
+            started + ROLLING_LEGACY_LEASE_TIMEOUT,
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_secs(1),
+            },
+        );
+
+        assert!(actor.retired);
+        assert_eq!(actor.terminal, Some(RollingTerminalCause::LeaseExpired));
+        assert_eq!(actor.producer_flow_revision, 0);
+        assert_eq!(
+            actor.producer_physical_flow,
+            ProducerPhysicalFlowState::Running
+        );
+    }
+
+    #[test]
+    fn physical_hold_before_or_at_deadline_disarms_but_late_hold_preserves_due() {
+        let started = Instant::now();
+        for (offset_ms, due) in [(-1_i64, false), (0, false), (1, true)] {
+            let mut actor = RollingControlActor::new(
+                started,
+                "session-start",
+                Arc::new(AtomicBool::new(false)),
+            );
+            assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+            let published_at = if offset_ms < 0 {
+                started + PRODUCER_STARTUP_BUDGET - Duration::from_millis(offset_ms.unsigned_abs())
+            } else {
+                started + PRODUCER_STARTUP_BUDGET + Duration::from_millis(offset_ms as u64)
+            };
+            actor.apply_producer_flow_applied_at(
+                published_at,
+                ProducerFlowApplied {
+                    revision: 1,
+                    producer_attempt: 1,
+                    state: ProducerPhysicalFlowState::Held,
+                    published_at,
+                },
+            );
+            assert_eq!(actor.producer_deadline_due.is_some(), due);
+            assert_eq!(actor.producer_progress_deadline, None);
+
+            actor.apply_producer_flow_applied_at(
+                published_at + Duration::from_secs(1),
+                ProducerFlowApplied {
+                    revision: 2,
+                    producer_attempt: 1,
+                    state: ProducerPhysicalFlowState::Running,
+                    published_at: published_at + Duration::from_secs(1),
+                },
+            );
+            assert_eq!(actor.producer_progress_deadline.is_none(), due);
+        }
     }
 
     #[test]
@@ -6943,6 +7238,7 @@ mod tests {
         assert!(metrics.contains(
             "plurx_playback_rolling_producer_event_outcomes_total{event=\"exit\",outcome=\"rejected\"}"
         ));
+        assert!(metrics.contains("plurx_playback_rolling_producer_flow_deferrals_total"));
     }
 
     async fn activate_route(
