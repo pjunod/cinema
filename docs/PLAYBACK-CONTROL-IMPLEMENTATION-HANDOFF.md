@@ -6,16 +6,15 @@
 **Active branch:** `codex/playback-control-m4-deadline-cutoff`
 **Last merged exact head:** `113159871228c157883439a33422fef0405a3e9d`
 (approved on review pass 13; merged as `48ea494c`)
-**Last reviewed exact head:** `4899799846e56b05b56c4a9f4c221a683794ff9e`
-(round 5 returned **REQUEST CHANGES**)
-**Current repair:** documentation-only ledger corrections in this snapshot;
-resolve the immutable branch tip with `git rev-parse HEAD` before requesting
-round 6
-**Test state:** no local tests, builds, or checks have run for the current slice.
-The automatically triggered hosted workflow at round-5 head `48997998` passed
-its fast static preflight and may run test jobs, but those results are not gate
-evidence for this changed documentation head. A fresh adversarial PR review
-must happen first.
+**Last reviewed exact head:** `5ac31a5c193eee75b4f3868a7614bfeb192383c6`
+(round 6 **APPROVED**)
+**Current repair implementation:**
+`97916906c774a26242ba417a23c446aca213772d`, with history binding
+`248d675b60dbd92c55bb460f93fe7782ca7889f9`; this documentation snapshot
+follows them, so resolve the immutable branch tip before requesting round 7
+**Test state:** the first authorized focused command reached the Rust compiler
+but ran zero tests because of three test-build errors. The errors are repaired
+but not recompiled or retested; exact-head round 7 must approve first.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -227,6 +226,28 @@ defines the sequence boundary explicitly. It changes no runtime, test,
 ownership-inventory, or validation behavior. Exact-head round 6 is required
 before local tests.
 
+Round 6 reviewed exact head
+`5ac31a5c193eee75b4f3868a7614bfeb192383c6`. All three passes **APPROVED**: the
+runtime/test/ownership trees remained byte-identical to the earlier runtime
+approval, the history mapping was unique and complete, and the documentation
+boundary was truthful. The focused test gate opened.
+
+The first authorized command was
+`cargo test -p plurxd playback_control::tests -- --nocapture`. Compilation
+stopped before any test executed:
+
+1. `#[cfg(test)]` was attached directly to an assignment expression, which is
+   unstable (`E0658`).
+2. Two process-level regressions kept pinned `child.signal(...)` futures alive
+   through later mutable `child.kill()` cleanup (`E0502`).
+
+Commit `97916906c774a26242ba417a23c446aca213772d` wraps the test-only assignment
+in a stable block and scopes each pinned signal future so its immutable borrow
+ends before cleanup. Two independent static passes approved the narrow repair;
+`248d675b60dbd92c55bb460f93fe7782ca7889f9` maps it to the retained evidence.
+Because the fix changes code, exact-head round 7 is required before the focused
+command may be retried.
+
 ### PR #619 adversarial review chronology
 
 Thirteen exact-head reviews ran. No tests were run during them.
@@ -301,14 +322,13 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-The action-passive deadline slice is in PR #621. Review round 5 returned
-**REQUEST CHANGES** at exact head
-`4899799846e56b05b56c4a9f4c221a683794ff9e`. The repair is documentation-only
-and contained in this snapshot; local validation remains unrun pending
-exact-head round 6.
+The action-passive deadline slice is in PR #621. Review round 6 **APPROVED**
+exact head `5ac31a5c193eee75b4f3868a7614bfeb192383c6`. The first focused command found
+three compile errors before running tests; repair commits `97916906` and
+`248d675b` remain uncompiled and untested pending exact-head round 7.
 
 - Push this candidate, resolve the immutable remote head, and request
-  adversarial round-6 review of that exact commit.
+  adversarial round-7 review of that exact commit.
 - Do not run unit tests until that review approves. After approval, run focused
   deadline/ingress tests, then `make check`, `make cluster-check`, and hosted
   CI. Fix every failure and re-review any changed head before merge.
@@ -380,8 +400,8 @@ Command publication sequencing remains deliberately outside this
 action-passive slice; it must land before a producer deadline is allowed to
 emit a decision.
 
-Committed implementation and review-repair sequence through the history
-binding preceding this documentation snapshot:
+Committed implementation and review-repair sequence through the compile-fix
+history binding preceding this documentation snapshot:
 
 The documentation commit containing this list and any later metadata-only
 binding are intentionally resolved with `git log`; a commit cannot list its
@@ -401,6 +421,10 @@ ba1280ba docs(playback): record actor exit review repairs
 2e2136b2 chore(validation): bind actor exit review evidence
 d3d5703b docs(playback): record history review repairs
 48997998 chore(validation): bind history review evidence
+40160841 docs(playback): define review ledger boundary
+5ac31a5c chore(validation): bind ledger boundary evidence
+97916906 fix(playback): compile deferred flow regressions
+248d675b chore(validation): map deferred flow compile repair
 ```
 
 Leave all compatibility owners unchanged and active in that slice:
