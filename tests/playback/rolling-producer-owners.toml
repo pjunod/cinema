@@ -1,6 +1,7 @@
 version = 1
 source = "crates/plurxd/src/transcode.rs"
-production_end_anchor = "#[cfg(test)]\nmod tests {"
+production_end_anchor = "/// A live HLS session published into a real"
+module_root = "crates/plurxd/src"
 
 # This catalog is intentionally mechanical.  Each count is taken only from
 # the production half of transcode.rs.  Removing a legacy owner must update
@@ -15,6 +16,34 @@ kind = "recovery_owner"
 replacement = "RollingControlActor::ProducerProgressDeadline"
 
 [[symbols]]
+id = "hardware-startup-grace"
+pattern = "FIRST_SEGMENT_GRACE"
+expected_occurrences = 4
+kind = "recovery_timer"
+replacement = "ProducerProgressDeadline mode=starting with the admitted hardware policy"
+
+[[symbols]]
+id = "software-startup-grace"
+pattern = "SOFTWARE_GRACE"
+expected_occurrences = 5
+kind = "recovery_timer"
+replacement = "ProducerProgressDeadline mode=starting with the admitted software policy"
+
+[[symbols]]
+id = "advancing-progress-stall"
+pattern = "PROGRESS_STALL"
+expected_occurrences = 4
+kind = "recovery_timer"
+replacement = "ProducerProgressDeadline mode=advancing"
+
+[[symbols]]
+id = "watchdog-poll-cadence"
+pattern = "WATCHDOG_POLL"
+expected_occurrences = 5
+kind = "recovery_timer"
+replacement = "deleted; actor sleeps directly to its exact monotonic deadline"
+
+[[symbols]]
 id = "detached-watchdog-launch"
 pattern = "spawn_watch_for_stall"
 expected_occurrences = 3
@@ -24,21 +53,21 @@ replacement = "RollingControlActor decision wake to the session executor"
 [[symbols]]
 id = "watchdog-election-flag"
 pattern = "watchdog_active"
-expected_occurrences = 7
+expected_occurrences = 6
 kind = "recovery_election"
 replacement = "the actor's single optional producer deadline"
 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 22
+expected_occurrences = 21
 kind = "recovery_election"
 replacement = "exact producer attempt identity and actor disposition"
 
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 12
+expected_occurrences = 11
 kind = "mixed_ownership_lock"
 replacement = "specific actor, attempt, response-admission, resource, or catalog-revision fences"
 
@@ -79,15 +108,15 @@ replacement = "the actor's exact-attempt exit/classification disposition"
 
 [[symbols]]
 id = "direct-session-failure"
-pattern = "session\\.fail\\("
-expected_occurrences = 11
+pattern = "(?:self|session)\\.fail\\("
+expected_occurrences = 13
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only its prepublication failure projects Session::failed"
 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 4
+expected_occurrences = 3
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -125,6 +154,118 @@ pattern = "\\.commit_media\\("
 expected_occurrences = 2
 kind = "response_admission"
 replacement = "retained as response-EOF fetched-frontier evidence, not retry authorization"
+
+[[symbols]]
+id = "all-detached-tokio-tasks"
+pattern = "tokio::spawn\\("
+expected_occurrences = 13
+kind = "structural_task_scan"
+replacement = "every new detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
+
+[[symbols]]
+id = "all-runtime-owned-async-tasks"
+pattern = "\\.spawn\\(async move"
+expected_occurrences = 1
+kind = "structural_task_scan"
+replacement = "every new runtime-owned detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
+
+[[symbols]]
+id = "all-async-sleeps"
+pattern = "tokio::time::sleep\\("
+expected_occurrences = 17
+kind = "structural_timer_scan"
+replacement = "every new sleep requires classification; producer recovery polls are deleted in favor of exact actor deadlines"
+
+[[symbols]]
+id = "all-async-intervals"
+pattern = "tokio::time::interval\\("
+expected_occurrences = 3
+kind = "structural_timer_scan"
+replacement = "intervals remain only for named sampling, repair, or lifecycle work and cannot decide producer recovery"
+
+[[symbols]]
+id = "all-ffmpeg-process-starts"
+pattern = "\\bspawn_ffmpeg\\("
+expected_occurrences = 7
+kind = "process_start_scan"
+replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
+
+[[symbols]]
+id = "all-piped-ffmpeg-process-starts"
+pattern = "\\bspawn_ffmpeg_pipe\\("
+expected_occurrences = 2
+kind = "process_start_scan"
+replacement = "one session executor acquires process capacity and cleanup registration before every rolling copy spawn"
+
+# Module-wide sentinel counts cover every Rust playback-server module, not
+# only the compatibility implementation. They intentionally describe today's
+# pre-deletion state. Later M4 slices drive the legacy counts to zero and may
+# add only the actor-owned deadline names at their actual construction sites.
+
+[[module_symbols]]
+id = "legacy-first-segment-grace"
+pattern = "FIRST_SEGMENT_GRACE"
+expected_occurrences = 6
+
+[[module_symbols]]
+id = "legacy-software-grace"
+pattern = "SOFTWARE_GRACE"
+expected_occurrences = 8
+
+[[module_symbols]]
+id = "legacy-progress-stall"
+pattern = "PROGRESS_STALL"
+expected_occurrences = 10
+
+[[module_symbols]]
+id = "legacy-watchdog-poll"
+pattern = "WATCHDOG_POLL"
+expected_occurrences = 11
+
+[[module_symbols]]
+id = "legacy-child-transition"
+pattern = "child_transition"
+expected_occurrences = 30
+
+[[module_symbols]]
+id = "legacy-watchdog-election"
+pattern = "watchdog_active"
+expected_occurrences = 11
+
+[[module_symbols]]
+id = "legacy-replacement-mask"
+pattern = "replacing_child"
+expected_occurrences = 32
+
+[[module_symbols]]
+id = "legacy-downgrade-owner"
+pattern = "downgrade_one_step"
+expected_occurrences = 6
+
+[[module_symbols]]
+id = "legacy-stall-watch-owner"
+pattern = "watch_for_stall"
+expected_occurrences = 17
+
+[[module_symbols]]
+id = "future-rolling-progress-deadline"
+pattern = "ProducerProgressDeadline"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "future-rolling-action-deadline"
+pattern = "ProducerActionDeadline"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "future-client-progress-deadline"
+pattern = "PlaybackProgressDeadline"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "future-vod-materialization-deadline"
+pattern = "SegmentMaterializationDeadline"
+expected_occurrences = 0
 
 [[entrypoints]]
 id = "transcode-start"

@@ -1744,6 +1744,12 @@ struct RollingProducerIngress {
 #[derive(Default)]
 struct RollingProducerIngressState {
     next_sequence: u64,
+    /// Greatest timeline coordinate already admitted to some current/open
+    /// batch for this exact attempt. It deliberately survives actor drains:
+    /// a repeated timestamp in the next batch is speed telemetry, not the
+    /// first unconsumed increase that may establish another deadline chain.
+    progress_watermark_attempt: u64,
+    progress_watermark_out_time_ms: Option<i64>,
     progress: Option<ProgressCoverageBatch>,
     exit: Option<SequencedProducerBarrier>,
 }
@@ -1784,6 +1790,7 @@ struct ProgressCoverageBatch {
     covered_last: Option<PublishedProgress>,
     covered_deadline: Option<Instant>,
     first_gap: Option<PublishedProgress>,
+    latest_progress: Option<PublishedProgress>,
     latest_telemetry: PublishedProgress,
 }
 
@@ -1796,6 +1803,7 @@ impl ProgressCoverageBatch {
             .is_some_and(|out_time_ms| out_time_ms >= 0);
         let first_advancing = advancing.then(|| sample.clone());
         let covered_last = first_advancing.clone();
+        let latest_progress = first_advancing.clone();
         let covered_deadline = covered_last.as_ref().map(|progress| {
             progress
                 .published_at
@@ -1808,6 +1816,7 @@ impl ProgressCoverageBatch {
             covered_last,
             covered_deadline,
             first_gap: None,
+            latest_progress,
             latest_telemetry: sample,
         }
     }
@@ -1848,6 +1857,7 @@ impl ProgressCoverageBatch {
             });
 
         if advancing {
+            self.latest_progress = Some(sample.clone());
             if self.first_advancing.is_none() {
                 self.first_advancing = Some(sample.clone());
                 self.covered_last = Some(sample.clone());
@@ -1883,7 +1893,8 @@ impl ProgressCoverageBatch {
     fn into_observations(self) -> Vec<RollingProducerProgressObservation> {
         let latest = self.latest_telemetry.observation;
         let mut observation = self
-            .first_gap
+            .latest_progress
+            .or(self.first_gap)
             .or(self.covered_last)
             .or(self.first_advancing)
             .map_or_else(|| latest.clone(), |progress| progress.observation);
@@ -1961,7 +1972,7 @@ impl RollingProducerIngress {
 
     fn publish_with_timestamp(
         &self,
-        event: RollingProducerEvent,
+        mut event: RollingProducerEvent,
         is_exit: bool,
         published_at: Option<Instant>,
     ) {
@@ -1975,6 +1986,30 @@ impl RollingProducerIngress {
         let published_at = published_at.unwrap_or_else(rolling_now);
         let metric_index = usize::from(is_exit);
         ROLLING_PRODUCER_EVENT_INGRESS[metric_index].fetch_add(1, Ordering::Relaxed);
+        if let RollingProducerEvent::Progress(observation) = &mut event {
+            let attempt = observation.producer_attempt;
+            if attempt < state.progress_watermark_attempt {
+                ROLLING_PRODUCER_EVENT_COALESCED[metric_index].fetch_add(1, Ordering::Relaxed);
+                return;
+            }
+            if attempt > state.progress_watermark_attempt {
+                state.progress_watermark_attempt = attempt;
+                state.progress_watermark_out_time_ms = None;
+            }
+            if let Some(out_time_ms) = observation.out_time_ms.filter(|value| *value >= 0) {
+                if state
+                    .progress_watermark_out_time_ms
+                    .is_some_and(|watermark| out_time_ms <= watermark)
+                {
+                    // Repeated or regressing output is telemetry, not a new
+                    // deadline link. Keep speed/status in the open batch but
+                    // do not let this sample initialize or extend coverage.
+                    observation.out_time_ms = None;
+                } else {
+                    state.progress_watermark_out_time_ms = Some(out_time_ms);
+                }
+            }
+        }
         let incoming_attempt = event.producer_attempt();
         if is_exit {
             if let Some(pending) = state.exit.as_ref() {
@@ -4770,6 +4805,93 @@ mod tests {
             gapped.latest_telemetry.observation.out_time_ms,
             Some(300),
             "later telemetry remains visible without bridging the gap"
+        );
+
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        for event in gapped_blocks
+            .clone()
+            .into_iter()
+            .flat_map(RollingProducerIngressBlock::into_events)
+        {
+            actor.handle_producer_event(event);
+        }
+        assert_eq!(
+            actor
+                .snapshot_at(started + Duration::from_secs(13))
+                .delivery
+                .producer_out_time_ms,
+            Some(300),
+            "the inactive deadline slice preserves the old latest-progress status"
+        );
+    }
+
+    #[test]
+    fn producer_progress_watermark_rejects_a_cross_drain_repeat_as_deadline_evidence() {
+        let started = Instant::now();
+        let ingress = RollingProducerIngress::new();
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(1, 100, 900, 800, started)),
+            false,
+            started,
+        );
+        let initial_blocks = ingress.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(initial)] = initial_blocks.as_slice() else {
+            panic!("initial progress batch");
+        };
+        assert_eq!(
+            initial
+                .first_advancing
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(100)
+        );
+
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                100,
+                950,
+                850,
+                started + Duration::from_secs(5),
+            )),
+            false,
+            started + Duration::from_secs(5),
+        );
+        ingress.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                1,
+                150,
+                1_000,
+                900,
+                started + Duration::from_secs(14),
+            )),
+            false,
+            started + Duration::from_secs(14),
+        );
+        let repeated_blocks = ingress.drain_blocks();
+        let [RollingProducerIngressBlock::Progress(repeated)] = repeated_blocks.as_slice() else {
+            panic!("post-drain progress batch");
+        };
+        assert_eq!(
+            repeated
+                .first_advancing
+                .as_ref()
+                .and_then(|sample| sample.observation.out_time_ms),
+            Some(150)
+        );
+        assert_eq!(
+            repeated
+                .first_advancing
+                .as_ref()
+                .map(|sample| sample.published_at),
+            Some(started + Duration::from_secs(14)),
+            "the repeated 100 at 5s cannot manufacture a deadline link"
+        );
+        assert_eq!(
+            repeated.covered_deadline,
+            Some(started + Duration::from_secs(24))
         );
     }
 

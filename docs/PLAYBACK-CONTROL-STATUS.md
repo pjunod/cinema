@@ -4,8 +4,9 @@
 **Merged baseline:** `origin/main` at `f9cef83b` (PR #618)
 **Current work:** `codex/playback-control-m4-actor-deadline` — the first M4
 runtime slice replaces lossy producer-progress coalescing with the reviewed
-constant-space deadline-chain proof and checks the complete legacy owner
-inventory before the actor deadline is allowed to make recovery decisions.
+constant-space deadline-chain proof and establishes the production/module-wide
+legacy-owner baseline before the actor deadline is allowed to make recovery
+decisions. The final zero-legacy-owner §8 check lands with deletion.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 **Source of truth:** this page tracks delivery; the design and acceptance
@@ -72,9 +73,9 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Implemented on the active branch.** `tests/playback/rolling-producer-owners.toml` names and exact-counts every remaining recovery/election/replacement symbol plus the production entrypoints and their replacement invariants. Repository validation fails on unreviewed owner drift. |
-| Progress ingress | **Implemented on the active branch.** One constant-space `ProgressCoverageBatch` retains first advancing progress, the contiguous covered tail/deadline, the first gap, and latest telemetry; exit seals the preceding batch so progress cannot fold across process death. |
-| Adversarial implementation review | **Pending PR.** It must review the exact implementation head before any unit test runs. |
+| Static owner inventory | **Interim baseline implemented on the active branch.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners, all production async task/sleep/interval sites, process starts, response admissions, and module-wide legacy/deadline sentinels. It catches unreviewed structural drift now; the final §8 check drives every legacy sentinel to zero when deletion lands. |
+| Progress ingress | **Review corrections implemented locally.** One constant-space `ProgressCoverageBatch` retains first advancing progress, the contiguous covered tail/deadline, the first gap, latest progress, and latest telemetry. A persistent exact-attempt ingress watermark prevents a repeated/regressing timestamp after a drain from manufacturing a new deadline link; exit seals the preceding batch. |
+| Adversarial implementation review | **Changes requested at `d0667bff`.** One P1, two P2s, and one P3 status correction are being fixed; the corrected head requires a fresh exact-head review before tests. |
 | Unit/focused tests | **Not run for this runtime slice.** Per project gate order, tests wait for the adversarial PR review. Contract PR #618 was green before merge. |
 | Full/cluster/hosted gates | **Pending for this runtime slice.** After review findings are fixed: focused tests, `make check`, `make cluster-check`, hosted CI, then merge. |
 
