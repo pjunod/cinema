@@ -8,6 +8,7 @@ commits = [
   "b5c43854",
   "78e08970",
   "38184342",
+  "27563544",
 ]
 points = ["playback.pipeline"]
 checks = ["rust-gate"]
