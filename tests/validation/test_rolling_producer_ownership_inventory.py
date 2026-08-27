@@ -45,18 +45,25 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "bare-time-constructor",
                 "tokio-time-import",
                 "process-command-construction",
+                "process-capable-launch-method",
+                "process-command-ufcs-launch",
                 "low-level-process-start",
                 "process-lifecycle-method",
+                "free-or-ufcs-process-lifecycle",
                 "kill-on-drop-construction",
                 "rolling-supervisor-construction",
                 "forbidden-timer-or-task-alias",
                 "forbidden-command-alias",
+                "forbidden-low-level-function-alias",
+                "forbidden-command-type-alias",
+                "forbidden-command-callable-alias",
+                "forbidden-low-level-callable-alias",
             },
             set(module_structure_ids),
         )
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
-        self.assertGreaterEqual(len(module_structures), 13)
+        self.assertGreaterEqual(len(module_structures), 20)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
 
