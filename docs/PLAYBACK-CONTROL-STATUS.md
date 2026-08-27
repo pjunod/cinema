@@ -64,7 +64,8 @@ policy.
 Activity/status will expose the winning terminal cause and Prometheus will
 count each bounded cause as `won` or `already_terminal`. An exhaustive small
 model will explore permutations of producer exit, expiry, explicit end,
-authority fence, publication, control cancellation, and replacement admission.
+authority fence, publication, control acceptance, and replacement admission;
+real async tests cover reply cancellation and concurrent terminal calls.
 The full contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md`](PLAYBACK-CONTROL-PROTOCOL-M3-TERMINAL-EVENTS.md).
 

@@ -983,13 +983,7 @@ fn flow_event_extra(
         crate::playback_control::RollingLeaseMode::Legacy => "legacy",
         crate::playback_control::RollingLeaseMode::Explicit => "explicit",
     };
-    let lease_state = if lease.expiration_claimed {
-        "expired"
-    } else if lease.retired {
-        "retired"
-    } else {
-        "active"
-    };
+    let lease_state = lease.terminal.map_or("active", |cause| cause.status());
     let demand = lease.demand.as_ref();
     serde_json::json!({
         "lease_mode": lease_mode,
@@ -2557,8 +2551,7 @@ impl ChildReplacement<'_> {
         let control = self.session.control.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                control.retire().await;
-                if !control.is_retired() {
+                if control.end().await.is_err() || !control.is_retired() {
                     control.fence_unavailable();
                 }
             });
@@ -2718,8 +2711,25 @@ impl Session {
     /// Fence every later renewal in the control actor before publishing the
     /// process-local serving verdict. Actor ordering replaces the old
     /// check-plus-two-lock activity-clock protocol.
-    async fn fence_activity(&self) {
-        self.control.retire().await;
+    async fn end_activity(&self) {
+        match self.control.end().await {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling session end observed");
+            }
+            Err(_) => self.control.fence_unavailable(),
+        }
+    }
+
+    /// Fence this generation because the node can no longer prove durable or
+    /// cluster serving authority. This cause must survive later cleanup so
+    /// failover is never misreported as an ordinary lifecycle end.
+    async fn fence_authority(&self) {
+        match self.control.authority_fence().await {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling authority fence observed");
+            }
+            Err(_) => self.control.fence_unavailable(),
+        }
     }
 
     /// Renew the actor-owned playback lease only if no serving fence
@@ -3335,9 +3345,7 @@ async fn session_info(
         None => "unavailable",
     };
     let lease_state = match lease.as_ref() {
-        Some(lease) if lease.expiration_claimed => "expired",
-        Some(lease) if lease.retired => "retired",
-        Some(_) => "active",
+        Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
         None => "unavailable",
     };
     let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
@@ -12906,7 +12914,7 @@ impl TranscodeManager {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     return Err(replacement_deadline_error());
                 }
-                session.fence_activity().await;
+                session.end_activity().await;
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
             }
@@ -12979,7 +12987,10 @@ impl TranscodeManager {
         // Rejection occurred before registry publication, so ordinary
         // retire_session cannot find this Arc. Tear it down explicitly and
         // promptly; Child::kill_on_drop is only the last-resort backstop.
-        session.fence_activity().await;
+        match rejection {
+            SessionRegistrationRejection::ServingFence => session.fence_authority().await,
+            SessionRegistrationRejection::Producer(_) => session.end_activity().await,
+        }
         session.release_hardware();
         session.release_software();
         session.kill_child().await;
@@ -13075,7 +13086,7 @@ impl TranscodeManager {
         let sessions = self.sessions.lock().await;
         for session_id in session_ids {
             if let Some(session) = sessions.get(session_id) {
-                session.fence_activity().await;
+                session.fence_authority().await;
             }
         }
     }
@@ -13092,7 +13103,7 @@ impl TranscodeManager {
             // Serving authority is lost now, not after a producer transition
             // happens to unblock. Lease renewal and every media path observe
             // this bit while detached teardown catches up.
-            session.fence_activity().await;
+            session.fence_authority().await;
         }
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
@@ -15814,7 +15825,7 @@ mod tests {
 
         // Retirement is another command on the same mailbox. Once it wins,
         // neither a later control nor a later media request can renew.
-        fixture.session.fence_activity().await;
+        fixture.session.end_activity().await;
         assert!(fixture
             .state
             .transcode
@@ -16115,7 +16126,7 @@ mod tests {
         // retirement but before it entered manager teardown. The actor-level
         // regression drops the actual oneshot reply; this exercises the real
         // repair loop that must recover the committed fence.
-        fixture.session.control.retire().await;
+        fixture.session.control.end().await.expect("end verdict");
         assert!(fixture.session.control.is_retired());
         assert!(!fixture
             .state
@@ -20618,7 +20629,7 @@ mod tests {
         let install = session.install_replacement_child(producer_attempt, candidate);
         let retire = async {
             pause.wait().await;
-            session.control.retire().await;
+            session.control.end().await.expect("end verdict");
             pause.wait().await;
         };
         let (result, ()) = tokio::join!(install, retire);
@@ -22591,7 +22602,7 @@ mod tests {
             !registration.is_finished(),
             "the fixture must actually wait behind the registry lock"
         );
-        session.control.retire().await;
+        session.control.end().await.expect("end verdict");
         drop(registry);
 
         assert_eq!(
@@ -23090,6 +23101,15 @@ mod tests {
 
         manager.fence_sessions(&["fenced-renewal".to_owned()]).await;
         assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("authority-fenced snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        );
+        assert_eq!(
             manager.active_session_ids().await,
             vec!["fenced-renewal".to_owned()],
             "the teardown barrier keeps the worker discoverable for cleanup"
@@ -23100,6 +23120,16 @@ mod tests {
         );
         drop(transition);
         assert!(manager.stop_session("fenced-renewal", "test").await);
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("cleanup preserves terminal snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence),
+            "later cleanup cannot relabel authority loss as an ordinary end"
+        );
     }
 
     /// The inverse transition ordering matters too: a hardware fallback can

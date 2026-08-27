@@ -109,7 +109,7 @@ A small deterministic model enumerates permutations of:
 - authority fence;
 - publication;
 - replacement admission; and
-- caller cancellation after enqueue.
+- control acceptance.
 
 For every explored order it proves:
 
@@ -127,9 +127,10 @@ For every explored order it proves:
    dropped; and
 9. no ordering creates a second producer attempt after terminal.
 
-The implementation tests compare actor transition results with this model and
-also exercise the real async handle for cancellation and concurrent end/fence
-races.
+The implementation tests compare actor transition results with this model.
+Separate real async-handle tests cover caller cancellation after enqueue and
+concurrent end/fence races, because dropping a reply receiver is a transport
+observation rather than an additional actor-state event.
 
 ## Instrumentation
 
