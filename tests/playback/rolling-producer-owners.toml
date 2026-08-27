@@ -416,6 +416,11 @@ source = "consume((tokio::spawn::<Ready<()>>)(future));"
 must_trigger = ["namespaced-task-spawn"]
 
 [[contract_cases]]
+id = "for-in-wrapped-task-call"
+source = "for handle in (tokio::spawn::<Ready<()>>)(future) { consume(handle); }"
+must_trigger = ["namespaced-task-spawn"]
+
+[[contract_cases]]
 id = "namespaced-time-turbofish"
 source = "tokio::time::timeout::<Result<(), Error>>(deadline, future);"
 must_trigger = ["namespaced-time-constructor"]
@@ -489,6 +494,11 @@ must_trigger = ["forbidden-command-alias"]
 id = "absolute-command-type-alias"
 source = "type C = ::tokio::process::Command; C::output(&mut command);"
 must_trigger = ["forbidden-command-type-alias"]
+
+[[contract_cases]]
+id = "labeled-break-command-call"
+source = "let status = 'done: loop { break 'done (std::process::Command::status)(&mut command); };"
+must_trigger = ["process-command-ufcs-launch"]
 
 [[contract_cases]]
 id = "namespaced-process-clone"

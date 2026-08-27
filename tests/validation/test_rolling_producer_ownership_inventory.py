@@ -19,7 +19,20 @@ TRANSPARENT_CALLABLE_GROUP = re.compile(
     r"(?=(?:\s*\))*\s*\()"
 )
 EXPRESSION_PREFIX_KEYWORDS = frozenset(
-    {"break", "else", "if", "let", "match", "move", "return", "while", "yield"}
+    {
+        "become",
+        "box",
+        "break",
+        "else",
+        "if",
+        "in",
+        "let",
+        "match",
+        "move",
+        "return",
+        "while",
+        "yield",
+    }
 )
 
 
@@ -42,7 +55,19 @@ def _preceded_by_callable(source: str, start: int) -> bool:
     end = index + 1
     while index >= 0 and (source[index].isalnum() or source[index] == "_"):
         index -= 1
-    return source[index + 1 : end] not in EXPRESSION_PREFIX_KEYWORDS
+    word = source[index + 1 : end]
+    if word in EXPRESSION_PREFIX_KEYWORDS:
+        return False
+    if index >= 0 and source[index] == "'":
+        index -= 1
+        while index >= 0 and source[index].isspace():
+            index -= 1
+        label_owner_end = index + 1
+        while index >= 0 and (source[index].isalnum() or source[index] == "_"):
+            index -= 1
+        if source[index + 1 : label_owner_end] in {"break", "continue"}:
+            return False
+    return True
 
 
 def rust_structural_source(source: str) -> str:
@@ -204,6 +229,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "nested-parenthesized-task-call",
                 "referenced-nested-task-call",
                 "wrapped-task-call-inside-argument",
+                "for-in-wrapped-task-call",
                 "namespaced-time-turbofish",
                 "bare-time-constructor",
                 "parenthesized-local-timer-alias",
@@ -219,6 +245,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
                 "grouped-command-import-alias",
                 "absolute-command-import-alias",
                 "absolute-command-type-alias",
+                "labeled-break-command-call",
                 "namespaced-process-clone",
                 "bare-imported-process-start",
                 "grouped-process-namespace-alias",
@@ -265,7 +292,7 @@ class RollingProducerOwnershipInventoryTest(unittest.TestCase):
         self.assertGreaterEqual(len(symbols), 28)
         self.assertGreaterEqual(len(module_symbols), 13)
         self.assertGreaterEqual(len(module_structures), 22)
-        self.assertGreaterEqual(len(contract_cases), 31)
+        self.assertGreaterEqual(len(contract_cases), 33)
         self.assertGreaterEqual(len(negative_cases), 2)
         self.assertGreaterEqual(len(entries), 7)
         self.assertGreaterEqual(len(self.module_paths), 20)
