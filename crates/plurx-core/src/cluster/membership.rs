@@ -346,6 +346,16 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          node_id TEXT PRIMARY KEY, \
          requested_at INTEGER NOT NULL, \
          acknowledged_at INTEGER) STRICT",
+    // Restart preparation and maintenance share one replicated slot. A local
+    // drain flag is necessary to linearize process admissions but cannot stop
+    // another node from preparing concurrently; this lease is the cluster-wide
+    // arbitration point and expires without operator cleanup after a crash.
+    "CREATE TABLE IF NOT EXISTS cluster_operation_leases (\
+         singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+         node_id TEXT NOT NULL, \
+         operation TEXT NOT NULL CHECK (operation IN ('restart', 'maintenance')), \
+         claim_id TEXT NOT NULL UNIQUE, \
+         expires_at INTEGER NOT NULL) STRICT",
     // Transaction-local proof for the maintenance-aware heartbeat. Once a
     // maintenance row exists, the trigger below makes a rollback to a binary
     // that does not understand the fence fail before that process can bind its
@@ -458,6 +468,10 @@ const MAX_JOIN_HOSTNAME_BYTES: usize = 253;
 const INTERNAL_AUTH_NONCE_BYTES: usize = 36;
 const ED25519_SIGNATURE_HEX_BYTES: usize = 128;
 const MAX_ACTIVITY_KEY_LOOKUPS_PER_SECOND: u8 = 4;
+/// Keep cluster-wide ownership slightly longer than the target's local drain
+/// timer so a second claimant cannot win in the gap between replicated claim
+/// commit and local monotonic-fence installation.
+const CLUSTER_OPERATION_LEASE_EXPIRY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, thiserror::Error)]
 pub enum MembershipError {
@@ -598,6 +612,8 @@ pub enum MembershipError {
     QuorumLoss,
     #[error("node maintenance operation for {0} conflicts with another cluster lifecycle change")]
     MaintenanceConflict(String),
+    #[error("another node already owns the cluster's planned-outage lease")]
+    ClusterOperationPending,
     #[error(
         "putting voter {0} into maintenance would leave fewer reachable voters than the cluster quorum during its restart"
     )]
@@ -678,6 +694,7 @@ impl MembershipError {
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
             Self::MaintenanceConflict(_) => "maintenance_conflict",
+            Self::ClusterOperationPending => "cluster_operation_pending",
             Self::MaintenanceWouldLoseQuorum(_) => "maintenance_would_lose_quorum",
             Self::MaintenanceResumeUnsafe(_) => "maintenance_resume_unsafe",
             Self::ElectionQuorumUnavailable => "election_quorum_unavailable",
@@ -1622,6 +1639,7 @@ fn begin_removal_attempt_sql(drain_media: bool) -> String {
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
          SELECT $1, $2 WHERE {ready} \
            AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
            AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions WHERE node_id = $1)\
            {active_media_guard}"
     )
@@ -1638,6 +1656,27 @@ fn maintenance_preserves_quorum(
         || voting_nodes <= 1
         || reachable_voters.saturating_sub(usize::from(target_reachable)) >= voting_quorum
 }
+
+const ACQUIRE_CLUSTER_OPERATION_LEASE_SQL: &str = "INSERT INTO cluster_operation_leases \
+       (singleton, node_id, operation, claim_id, expires_at) \
+     SELECT 1, $1, $2, $3, $4 \
+     WHERE EXISTS (SELECT 1 FROM cluster_nodes node \
+         WHERE node.node_id = $1 AND node.removed_at IS NULL) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_removal_attempts) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
+       AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
+     ON CONFLICT(singleton) DO UPDATE SET \
+       node_id = excluded.node_id, operation = excluded.operation, \
+       claim_id = excluded.claim_id, expires_at = excluded.expires_at \
+     WHERE cluster_operation_leases.expires_at <= $5";
+
+const RELEASE_CLUSTER_OPERATION_LEASE_SQL: &str = "DELETE FROM cluster_operation_leases \
+     WHERE singleton = 1 AND node_id = $1 AND operation = $2 AND claim_id = $3";
+
+const RELEASE_RESTART_PREPARATION_SQL: &str = "DELETE FROM cluster_operation_leases \
+     WHERE singleton = 1 AND node_id = $1 AND operation = 'restart'";
 
 const EXIT_MAINTENANCE_SQL: &str = "DELETE FROM cluster_node_maintenance WHERE node_id = $1 \
        AND acknowledged_at IS NOT NULL \
@@ -1746,6 +1785,15 @@ pub struct ArtworkPeerAuth {
     pub node_id: String,
     pub timestamp_ms: i64,
     pub signature: String,
+}
+
+/// Exact ownership proof for the one cluster-wide planned-outage slot.
+/// Callers cannot construct one; the replicated compare-and-swap does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterOperationLease {
+    node_id: String,
+    operation: &'static str,
+    claim_id: String,
 }
 
 /// Fencing proof for one leader-arbitrated source repair.
@@ -2669,6 +2717,7 @@ impl MembershipManager {
                      WHERE token_hash = $1 AND raft_id = $2 AND state = 'issued' \
                        AND expires_at > $3 AND role = 'learner' \
                        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                      RETURNING token_hash"
                     .to_owned(),
                 params!(request.token_digest.as_str(), request.raft_id as i64, now),
@@ -2688,6 +2737,7 @@ impl MembershipManager {
                        WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
                      AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                      AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                      AND NOT EXISTS (\
                        SELECT 1 FROM cluster_node_http owner_http \
                        JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
@@ -2720,6 +2770,7 @@ impl MembershipManager {
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                      RETURNING node_id"
                         .to_owned(),
                     vec![
@@ -2739,6 +2790,7 @@ impl MembershipManager {
                        AND state = 'redeeming' \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                        AND {} \
                      RETURNING node_id",
                     unchanged_protocol_range_predicate(4, 5)
@@ -2760,6 +2812,7 @@ impl MembershipManager {
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
                        AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                        AND {} \
                      RETURNING node_id",
                     unchanged_protocol_range_predicate(4, 5)
@@ -3179,6 +3232,10 @@ impl MembershipManager {
         let voter_role_persisted = inner.local_voter_role_persisted.load(Ordering::Acquire);
         let to_sql = |value: u64| i64::try_from(value).unwrap_or(i64::MAX);
         let mut statements = vec![
+            (
+                "DELETE FROM cluster_operation_leases WHERE expires_at <= $1".to_owned(),
+                params!(now),
+            ),
             (
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
@@ -3955,14 +4012,102 @@ impl MembershipManager {
         trigger_election(&inner.local.api_address, &inner.secrets.api).await
     }
 
+    /// Acquire the one replicated planned-outage slot before this process
+    /// fences any local restart admissions.
+    pub async fn acquire_restart_preparation(
+        &self,
+        node_id: &str,
+        duration: Duration,
+    ) -> Result<ClusterOperationLease, MembershipError> {
+        self.acquire_cluster_operation_lease(node_id, "restart", duration)
+            .await
+    }
+
+    /// Acquire the same slot for maintenance. The returned proof must be
+    /// consumed by `enter_maintenance`; it cannot authorize any other node.
+    pub async fn acquire_maintenance_preparation(
+        &self,
+        node_id: &str,
+        duration: Duration,
+    ) -> Result<ClusterOperationLease, MembershipError> {
+        self.acquire_cluster_operation_lease(node_id, "maintenance", duration)
+            .await
+    }
+
+    async fn acquire_cluster_operation_lease(
+        &self,
+        node_id: &str,
+        operation: &'static str,
+        duration: Duration,
+    ) -> Result<ClusterOperationLease, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let now = unix_ms()?;
+        let lease_duration = duration.saturating_add(CLUSTER_OPERATION_LEASE_EXPIRY_GRACE);
+        let duration_ms = i64::try_from(lease_duration.as_millis()).unwrap_or(i64::MAX);
+        let expires_at = now.saturating_add(duration_ms);
+        let claim_id = uuid::Uuid::new_v4().to_string();
+        let changed = inner
+            .client
+            .execute(
+                ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                params!(node_id, operation, claim_id.as_str(), expires_at, now),
+            )
+            .await?;
+        if changed != 1 {
+            return Err(MembershipError::ClusterOperationPending);
+        }
+        Ok(ClusterOperationLease {
+            node_id: node_id.to_owned(),
+            operation,
+            claim_id,
+        })
+    }
+
+    /// Release one exact failed claim. A successor claim, even for the same
+    /// node, cannot be cleared by a delayed failure path.
+    pub async fn release_cluster_operation_lease(
+        &self,
+        lease: &ClusterOperationLease,
+    ) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        inner
+            .client
+            .execute(
+                RELEASE_CLUSTER_OPERATION_LEASE_SQL,
+                params!(
+                    lease.node_id.as_str(),
+                    lease.operation,
+                    lease.claim_id.as_str()
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Direct cancellation intentionally means "cancel the current restart
+    /// preparation on this node", including a retried request after the
+    /// original HTTP response was lost.
+    pub async fn release_restart_preparation(&self, node_id: &str) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        inner
+            .client
+            .execute(RELEASE_RESTART_PREPARATION_SQL, params!(node_id))
+            .await?;
+        Ok(())
+    }
+
     /// Enter reversible maintenance for one node. Leadership moves first;
     /// only then is the replicated admission fence committed. The target's
     /// next heartbeat acknowledges after its local atomics have observed it.
     pub async fn enter_maintenance(
         &self,
         node_id: &str,
+        lease: &ClusterOperationLease,
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
+        if lease.node_id != node_id || lease.operation != "maintenance" {
+            return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+        }
         self.require_maintenance_capability().await?;
         let status = self.status().await?;
         let target = status
@@ -3995,34 +4140,49 @@ impl MembershipManager {
             self.handoff_leadership(target.raft_id, &status).await?;
         }
         let now = unix_ms()?;
-        let changed = inner
+        let transition = inner
             .client
-            .execute(
-                format!(
-                    "INSERT INTO cluster_node_maintenance (node_id, requested_at, acknowledged_at) \
-                     SELECT $1, $2, NULL WHERE {} \
-                       AND EXISTS (SELECT 1 FROM cluster_nodes node \
-                         WHERE node.node_id = $1 AND node.removed_at IS NULL) \
-                       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
-                       AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
-                       AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
-                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
-                     ON CONFLICT(node_id) DO NOTHING",
-                    capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
+            .txn(vec![
+                (
+                    format!(
+                        "INSERT INTO cluster_node_maintenance \
+                           (node_id, requested_at, acknowledged_at) \
+                         SELECT $1, $2, NULL WHERE {} \
+                           AND EXISTS (SELECT 1 FROM cluster_nodes node \
+                             WHERE node.node_id = $1 AND node.removed_at IS NULL) \
+                           AND EXISTS (SELECT 1 FROM cluster_operation_leases lease \
+                             WHERE lease.singleton = 1 AND lease.node_id = $1 \
+                               AND lease.operation = 'maintenance' \
+                               AND lease.claim_id = $3 AND lease.expires_at > $2) \
+                           AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
+                           AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
+                           AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
+                           AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                         ON CONFLICT(node_id) DO NOTHING RETURNING node_id",
+                        capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
+                    ),
+                    params!(node_id, now, lease.claim_id.as_str()),
                 ),
-                params!(node_id, now),
-            )
-            .await?;
-        if changed != 1 {
-            let current = self.status().await?;
-            if current
-                .nodes
-                .iter()
-                .any(|node| node.node_id == node_id && node.maintenance)
-            {
-                return Ok(current);
+                (
+                    "DELETE FROM cluster_operation_leases \
+                     WHERE singleton = 1 AND node_id = $1 \
+                       AND operation = 'maintenance' AND claim_id = $2"
+                        .to_owned(),
+                    vec![
+                        Param::StmtOutputNamed(0, "node_id".into()),
+                        Param::Text(lease.claim_id.clone()),
+                    ],
+                ),
+            ])
+            .await;
+        match transition {
+            Ok(results) => {
+                results.into_iter().collect::<Result<Vec<_>, _>>()?;
             }
-            return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+            Err(error) if error.to_string().contains("StmtIndex(") => {
+                return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+            }
+            Err(error) => return Err(error.into()),
         }
         if node_id == inner.identity.node_id {
             self.refresh_local_maintenance(inner).await?;
@@ -4177,7 +4337,8 @@ impl MembershipManager {
         let rows = inner
             .client
             .query_consistent_map::<CountRow, _>(
-                "SELECT COUNT(*) AS count FROM cluster_node_maintenance",
+                "SELECT (SELECT COUNT(*) FROM cluster_node_maintenance) \
+                   + (SELECT COUNT(*) FROM cluster_operation_leases) AS count",
                 params!(),
             )
             .await?;
@@ -5341,6 +5502,7 @@ impl MembershipManager {
                  SELECT $1, $2, NULL, $3 \
                  WHERE NOT EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1) \
                    AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_operation_leases) \
                  ON CONFLICT(node_id) DO NOTHING",
                     params!(node_id, attempt_id.as_str(), started_at),
                 )
@@ -8338,6 +8500,10 @@ mod tests {
                 .contains("CREATE TRIGGER IF NOT EXISTS cluster_node_maintenance_heartbeat_guard")
                 && statement.contains("node maintenance requires current binary")
         }));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
+                && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
+        }));
         let ready = capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY);
         assert!(ready.contains(NODE_MAINTENANCE_CAPABILITY));
         assert!(ready.contains("capability.last_seen_at = active.last_seen_at"));
@@ -8369,6 +8535,89 @@ mod tests {
             .find("INSERT INTO cluster_node_maintenance")
             .expect("durable maintenance fence");
         assert!(handoff < commit);
+        assert!(source.contains("lease.operation != \"maintenance\""));
+        assert!(source.contains("Param::StmtOutputNamed(0, \"node_id\".into())"));
+        assert!(source.contains("DELETE FROM cluster_operation_leases"));
+    }
+
+    #[test]
+    fn restart_and_maintenance_race_for_one_replicated_outage_lease() {
+        let path = std::env::temp_dir().join(format!(
+            "plurx-cluster-operation-race-{}.sqlite",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = rusqlite::Connection::open(&path).expect("lease fixture");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, removed_at INTEGER); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', NULL), ('node-b', NULL); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removals (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_removal_attempts (node_id TEXT, attempt_id TEXT); \
+                 CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (\
+                   singleton INTEGER PRIMARY KEY CHECK (singleton = 1), \
+                   node_id TEXT NOT NULL, operation TEXT NOT NULL, \
+                   claim_id TEXT NOT NULL UNIQUE, expires_at INTEGER NOT NULL);",
+            )
+            .expect("lease schema");
+        drop(connection);
+
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(3));
+        let race = |node_id: &'static str, operation: &'static str| {
+            let path = path.clone();
+            let barrier = std::sync::Arc::clone(&barrier);
+            std::thread::spawn(move || {
+                let connection = rusqlite::Connection::open(path).expect("racing lease client");
+                connection
+                    .busy_timeout(Duration::from_secs(5))
+                    .expect("busy timeout");
+                barrier.wait();
+                connection
+                    .execute(
+                        ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                        rusqlite::params![
+                            node_id,
+                            operation,
+                            uuid::Uuid::new_v4().to_string(),
+                            1_000_i64,
+                            100_i64
+                        ],
+                    )
+                    .expect("serialized lease race")
+            })
+        };
+        let restart = race("node-a", "restart");
+        let maintenance = race("node-b", "maintenance");
+        barrier.wait();
+        let changed = restart.join().expect("restart claimant")
+            + maintenance.join().expect("maintenance claimant");
+        assert_eq!(changed, 1, "exactly one planned outage may commit");
+
+        let connection = rusqlite::Connection::open(&path).expect("read lease winner");
+        let winner_count: i64 = connection
+            .query_row("SELECT COUNT(*) FROM cluster_operation_leases", [], |row| {
+                row.get(0)
+            })
+            .expect("winner count");
+        assert_eq!(winner_count, 1);
+        connection
+            .execute("UPDATE cluster_operation_leases SET expires_at = 99", [])
+            .expect("expire first claimant");
+        assert_eq!(
+            connection
+                .execute(
+                    ACQUIRE_CLUSTER_OPERATION_LEASE_SQL,
+                    rusqlite::params!["node-b", "maintenance", "successor", 2_000_i64, 100_i64],
+                )
+                .expect("replace expired claimant"),
+            1
+        );
+        assert!(production_source()
+            .contains("DELETE FROM cluster_operation_leases WHERE expires_at <= $1"));
+        drop(connection);
+        std::fs::remove_file(path).expect("remove lease fixture");
     }
 
     #[test]
@@ -8440,9 +8689,11 @@ mod tests {
     }
 
     #[test]
-    fn every_membership_lifecycle_begin_excludes_maintenance() {
+    fn every_membership_lifecycle_begin_excludes_planned_outages() {
         assert!(begin_removal_attempt_sql(false)
             .contains("NOT EXISTS (SELECT 1 FROM cluster_node_maintenance)"));
+        assert!(begin_removal_attempt_sql(false)
+            .contains("NOT EXISTS (SELECT 1 FROM cluster_operation_leases)"));
         let source = production_source();
         let redeem = source
             .split_once("async fn redeem_for_role(")
@@ -8458,6 +8709,13 @@ mod tests {
                 >= 5,
             "every token reservation/proof branch must carry the atomic maintenance exclusion"
         );
+        assert!(
+            redeem
+                .matches("NOT EXISTS (SELECT 1 FROM cluster_operation_leases)")
+                .count()
+                >= 5,
+            "every token reservation/proof branch must carry the atomic outage-lease exclusion"
+        );
         let promotion = source
             .split_once("pub async fn promote_learner(")
             .expect("learner promotion")
@@ -8466,6 +8724,7 @@ mod tests {
             .expect("learner promotion end")
             .0;
         assert!(promotion.contains("NOT EXISTS (SELECT 1 FROM cluster_node_maintenance)"));
+        assert!(promotion.contains("NOT EXISTS (SELECT 1 FROM cluster_operation_leases)"));
         assert!(promotion.contains("MembershipError::MaintenanceConflict"));
     }
 
@@ -10161,6 +10420,7 @@ mod tests {
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (singleton INTEGER PRIMARY KEY); \
                  CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
                    lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
@@ -10274,6 +10534,7 @@ mod tests {
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_operation_leases (singleton INTEGER PRIMARY KEY); \
                  CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \
@@ -11060,6 +11321,10 @@ mod tests {
     fn stable_membership_refusal_codes_are_operator_visible() {
         assert_eq!(MembershipError::ExpiredToken.code(), "join_token_expired");
         assert_eq!(MembershipError::ReusedToken.code(), "join_token_reused");
+        assert_eq!(
+            MembershipError::ClusterOperationPending.code(),
+            "cluster_operation_pending"
+        );
         assert_eq!(
             MembershipError::QuorumLoss.code(),
             "removal_would_lose_quorum"

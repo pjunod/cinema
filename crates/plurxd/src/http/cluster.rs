@@ -182,12 +182,7 @@ pub async fn enter_maintenance(
         ));
     }
     if state.membership.local_maintenance_active() {
-        return state
-            .membership
-            .enter_maintenance(&node_id)
-            .await
-            .map(Json)
-            .map_err(api_error);
+        return state.membership.status().await.map(Json).map_err(api_error);
     }
     let preflight = collect_aggregate(&state).await?;
     let readiness = preflight
@@ -213,14 +208,26 @@ pub async fn enter_maintenance(
             format!("maintenance is not safe for this target: {reason}"),
         ));
     }
+    let lease = state
+        .membership
+        .acquire_maintenance_preparation(&node_id, MAINTENANCE_PREPARATION_DURATION)
+        .await
+        .map_err(api_error)?;
     state
         .serving
         .begin_restart_preparation(MAINTENANCE_PREPARATION_DURATION)
         .await;
     state.serving.wait_for_restart_admissions().await;
-    match state.membership.enter_maintenance(&node_id).await {
+    match state.membership.enter_maintenance(&node_id, &lease).await {
         Ok(status) => Ok(Json(status)),
         Err(error) => {
+            if let Err(release_error) = state
+                .membership
+                .release_cluster_operation_lease(&lease)
+                .await
+            {
+                tracing::warn!(%release_error, "failed to release maintenance preparation lease; expiry remains authoritative");
+            }
             let active_sessions = local_owned_media_sessions(&state).await;
             state
                 .serving
@@ -384,7 +391,7 @@ pub async fn finalize_learner_join(
         .map_err(api_error)
 }
 
-fn api_error(error: MembershipError) -> ApiError {
+pub(crate) fn api_error(error: MembershipError) -> ApiError {
     let status = match error {
         MembershipError::Unavailable => StatusCode::CONFLICT,
         MembershipError::InvalidToken
@@ -425,6 +432,7 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::LocalNodeNotActive
         | MembershipError::QuorumLoss
         | MembershipError::MaintenanceConflict(_)
+        | MembershipError::ClusterOperationPending
         | MembershipError::MaintenanceWouldLoseQuorum(_)
         | MembershipError::MaintenanceResumeUnsafe(_)
         | MembershipError::ElectionQuorumUnavailable
@@ -530,6 +538,9 @@ mod tests {
             .split_once("pub async fn exit_maintenance(")
             .expect("enter maintenance end")
             .0;
+        let claim = enter
+            .find("acquire_maintenance_preparation")
+            .expect("replicated planned-outage lease");
         let begin = enter
             .find("begin_restart_preparation")
             .expect("restart fence begins");
@@ -537,9 +548,10 @@ mod tests {
             .find("wait_for_restart_admissions")
             .expect("in-flight admissions settle");
         let commit = enter
-            .rfind(".enter_maintenance(&node_id)")
+            .rfind(".enter_maintenance(&node_id, &lease)")
             .expect("durable maintenance commit");
-        assert!(begin < wait && wait < commit);
+        assert!(claim < begin && begin < wait && wait < commit);
+        assert!(enter.contains("release_cluster_operation_lease(&lease)"));
         assert!(enter.contains("cancel_restart_preparation(active_sessions)"));
         assert!(enter.contains("node_id != state.node_id"));
         assert!(enter.contains(".maintenance"));

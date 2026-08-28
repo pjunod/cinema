@@ -669,7 +669,7 @@ test("a voter catching up is not rendered as a learner capacity role", () => {
 
 // ---- every refusal is a sentence with a next step -------------------------
 
-// All four exist in crates/plurx-core/src/cluster/membership.rs today.
+// These stable codes exist in crates/plurx-core/src/cluster/membership.rs.
 const REFUSAL_CODES = [
   "removal_would_lose_quorum",
   "node_owns_offline_work",
@@ -682,6 +682,7 @@ const REFUSAL_CODES = [
   "learner_not_ready",
   "voter_storage_preflight_failed",
   "maintenance_conflict",
+  "cluster_operation_pending",
   "maintenance_would_lose_quorum",
   "maintenance_resume_unsafe",
   "election_quorum_unavailable",

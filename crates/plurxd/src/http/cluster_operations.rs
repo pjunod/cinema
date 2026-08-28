@@ -26,6 +26,7 @@ use sha2::{Digest, Sha256};
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
+use super::cluster::api_error;
 use super::error::ApiError;
 use super::extract::AdminUser;
 use super::peer_transport::{
@@ -370,11 +371,23 @@ pub(crate) async fn prepare_restart(
         ));
     }
     let duration = Duration::from_secs(request.expires_in_seconds.unwrap_or(900).clamp(60, 3_600));
+    let lease = state
+        .membership
+        .acquire_restart_preparation(&node_id, duration)
+        .await
+        .map_err(api_error)?;
     state.serving.begin_restart_preparation(duration).await;
     state.serving.wait_for_restart_admissions().await;
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
     if !drain.new_admissions_blocked {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release expired restart preparation lease");
+        }
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "restart_preparation_expired",
@@ -400,6 +413,11 @@ pub(crate) async fn cancel_restart(
             "restart preparation cancellation must be sent directly to the node named in the route",
         ));
     }
+    state
+        .membership
+        .release_restart_preparation(&node_id)
+        .await
+        .map_err(api_error)?;
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state
         .serving
@@ -1367,6 +1385,29 @@ mod tests {
         assert!(!restart_preparation_response("node-a", 0, drained)
             .restart_commands
             .is_empty());
+    }
+
+    #[test]
+    fn restart_preparation_claims_and_releases_the_replicated_outage_slot() {
+        let source = include_str!("cluster_operations.rs")
+            .split_once("pub(crate) async fn prepare_restart(")
+            .expect("restart preparation")
+            .1
+            .split_once("fn restart_preparation_response(")
+            .expect("restart preparation handlers end")
+            .0;
+        let claim = source
+            .find("acquire_restart_preparation")
+            .expect("replicated lease acquisition");
+        let local_fence = source
+            .find("begin_restart_preparation")
+            .expect("local admission fence");
+        let commands = source
+            .find("restart_preparation_response")
+            .expect("reboot-ready response");
+        assert!(claim < local_fence && local_fence < commands);
+        assert!(source.contains("release_cluster_operation_lease(&lease)"));
+        assert!(source.contains("release_restart_preparation(&node_id)"));
     }
 
     #[test]

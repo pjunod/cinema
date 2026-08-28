@@ -11407,6 +11407,8 @@ function membershipRefusalText(code,message){
       "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
     maintenance_conflict:
       "Maintenance and membership changes are mutually exclusive. Let the active operation settle, refresh the roster, and retry this action.",
+    cluster_operation_pending:
+      "Another node already owns the cluster's planned-outage lease. Finish or cancel that restart preparation or maintenance operation, then refresh and retry.",
     maintenance_would_lose_quorum:
       "Restarting this voter would leave fewer reachable voters than quorum requires. Restore the missing voter or add capacity before retrying maintenance.",
     maintenance_resume_unsafe:

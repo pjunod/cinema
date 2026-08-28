@@ -335,10 +335,10 @@ expected_occurrences = 59
 [[module_structures]]
 id = "process-capable-launch-method"
 pattern = "\\.(?:spawn|output|status)\\s*\\("
-# Three new MembershipManager::status calls are direct replicated-state reads,
+# Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 162
+expected_occurrences = 163
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

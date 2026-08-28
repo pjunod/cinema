@@ -332,6 +332,13 @@ service-outage exception. Sending either action through another cluster node or
 a non-sticky load balancer is refused because only the target can linearize its
 own work admissions and inspect its local process registries.
 
+Before that local fence begins, the target atomically acquires the same
+replicated planned-outage lease used by ordinary restart preparation. Only one
+node can hold it. A maintenance claimant converts its exact lease into the
+durable maintenance row in one replicated transaction after any leader
+handoff; failure releases the claim, while heartbeat cleanup expires a claim
+left by a crashed caller.
+
 The workflow in **Maintenance & leadership** is the authoritative checklist;
 the full-width **Operations** card above it remains the stricter direct-peer
 restart verdict and WAL/snapshot evidence surface:
@@ -1685,6 +1692,14 @@ plurxd cluster status \
 The token file must be a small, owner-only regular file and must not be a
 symlink. There is no raw-token argument. Use `--json` when another tool needs
 the exact API document.
+
+Restart preparation acquires one replicated, expiring planned-outage lease
+before the target fences local admissions. Maintenance uses the same lease, so
+two safe observations on different nodes cannot turn into two simultaneous
+reboots. Cancellation releases the restart claim; a failed maintenance request
+releases its exact claim; normal heartbeats remove expired claims after a
+caller crash. Reboot commands are shown only while both the replicated claim
+and the target's local drain window are active.
 
 **How to read it:** every committed voter must have `PROCESS live`, a ready
 serving fence, one agreed leader and term, zero apply lag, a live owned WAL lock,
