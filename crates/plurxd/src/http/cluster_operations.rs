@@ -225,7 +225,9 @@ pub(crate) async fn aggregate(
     Ok((private_no_store_headers(), Json(aggregate)))
 }
 
-async fn collect_aggregate(state: &AppState) -> Result<ClusterOperationsAggregate, ApiError> {
+pub(crate) async fn collect_aggregate(
+    state: &AppState,
+) -> Result<ClusterOperationsAggregate, ApiError> {
     let membership = state.membership.status().await.map_err(|_| {
         ApiError::typed(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -478,7 +480,7 @@ async fn local_snapshot(state: &AppState) -> ClusterNodeOperationsStatus {
     }
 }
 
-async fn local_owned_media_sessions(state: &AppState) -> usize {
+pub(crate) async fn local_owned_media_sessions(state: &AppState) -> usize {
     let (hls, offline) = tokio::join!(
         state.transcode.active_sessions(),
         state.offline.active_preparations()

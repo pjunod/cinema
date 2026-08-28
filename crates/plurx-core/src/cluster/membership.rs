@@ -599,7 +599,7 @@ pub enum MembershipError {
     #[error("node maintenance operation for {0} conflicts with another cluster lifecycle change")]
     MaintenanceConflict(String),
     #[error(
-        "putting voter {0} into maintenance would leave a two-voter cluster without quorum during its restart"
+        "putting voter {0} into maintenance would leave fewer reachable voters than the cluster quorum during its restart"
     )]
     MaintenanceWouldLoseQuorum(String),
     #[error("node {0} must be reachable and caught up before maintenance can be cleared")]
@@ -1621,10 +1621,39 @@ fn begin_removal_attempt_sql(drain_media: bool) -> String {
     format!(
         "INSERT INTO cluster_node_removal_attempts (node_id, attempt_id) \
          SELECT $1, $2 WHERE {ready} \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
            AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions WHERE node_id = $1)\
            {active_media_guard}"
     )
 }
+
+fn maintenance_preserves_quorum(
+    is_voter: bool,
+    target_reachable: bool,
+    voting_nodes: usize,
+    reachable_voters: usize,
+    voting_quorum: usize,
+) -> bool {
+    !is_voter
+        || voting_nodes <= 1
+        || reachable_voters.saturating_sub(usize::from(target_reachable)) >= voting_quorum
+}
+
+const EXIT_MAINTENANCE_SQL: &str = "DELETE FROM cluster_node_maintenance WHERE node_id = $1 \
+       AND acknowledged_at IS NOT NULL \
+       AND EXISTS (SELECT 1 FROM cluster_nodes node \
+         JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+         WHERE node.node_id = $1 AND node.removed_at IS NULL \
+           AND node.last_seen_at >= $2 AND progress.observed_at >= $2 \
+           AND progress.apply_lag_entries = 0 \
+           AND EXISTS (SELECT 1 FROM cluster_node_capabilities capability \
+             WHERE capability.node_id = node.node_id \
+               AND capability.capability = $3 \
+               AND capability.last_seen_at = node.last_seen_at) \
+           AND NOT EXISTS (SELECT 1 FROM media_sessions session \
+             WHERE session.owner_node_id = node.node_id \
+               AND session.state = 'active' \
+               AND session.lease_expires_at_ms > $4))";
 
 /// Narrow `cluster_meta` onto exactly one protocol.
 ///
@@ -2541,6 +2570,11 @@ impl MembershipManager {
         if role != expected_role {
             return Err(MembershipError::InvalidToken);
         }
+        if self.maintenance_operation_pending().await? {
+            return Err(MembershipError::MaintenanceConflict(
+                request.node_id.clone(),
+            ));
+        }
         // The same rule the boot-time guard applies, from the coordinator's
         // side: the joiner has to implement every protocol this cluster is
         // actively using. Comparing against a constant instead would admit a
@@ -2631,10 +2665,11 @@ impl MembershipManager {
         if role.is_learner() && !resume_legacy_partial {
             statements.push((
                 "INSERT INTO cluster_learner_join_intents (token_hash) \
-                 SELECT token_hash FROM cluster_join_tokens \
-                 WHERE token_hash = $1 AND raft_id = $2 AND state = 'issued' \
-                   AND expires_at > $3 AND role = 'learner' \
-                 RETURNING token_hash"
+                     SELECT token_hash FROM cluster_join_tokens \
+                     WHERE token_hash = $1 AND raft_id = $2 AND state = 'issued' \
+                       AND expires_at > $3 AND role = 'learner' \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                     RETURNING token_hash"
                     .to_owned(),
                 params!(request.token_digest.as_str(), request.raft_id as i64, now),
             ));
@@ -2652,6 +2687,7 @@ impl MembershipManager {
                      AND NOT EXISTS (SELECT 1 FROM cluster_node_http_claims claim \
                        WHERE claim.node_id = $1 AND claim.public_http_url != $2) \
                      AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                     AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
                      AND NOT EXISTS (\
                        SELECT 1 FROM cluster_node_http owner_http \
                        JOIN cluster_nodes owner_node ON owner_node.node_id = owner_http.node_id \
@@ -2683,6 +2719,7 @@ impl MembershipManager {
                     "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
                      RETURNING node_id"
                         .to_owned(),
                     vec![
@@ -2701,6 +2738,7 @@ impl MembershipManager {
                      WHERE node_id = $1 AND token_hash = $2 AND raft_id = $3 \
                        AND state = 'redeeming' \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
                        AND {} \
                      RETURNING node_id",
                     unchanged_protocol_range_predicate(4, 5)
@@ -2721,6 +2759,7 @@ impl MembershipManager {
                     "UPDATE cluster_join_tokens SET state = 'redeeming', node_id = $1 \
                      WHERE token_hash = $2 AND state = 'issued' AND expires_at > $3 \
                        AND NOT EXISTS (SELECT 1 FROM cluster_nodes WHERE node_id = $1) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
                        AND {} \
                      RETURNING node_id",
                     unchanged_protocol_range_predicate(4, 5)
@@ -2813,6 +2852,11 @@ impl MembershipManager {
                 results.into_iter().collect::<Result<Vec<_>, _>>()?;
             }
             Err(error) if error.to_string().contains("StmtIndex(") => {
+                if self.maintenance_operation_pending().await? {
+                    return Err(MembershipError::MaintenanceConflict(
+                        request.node_id.clone(),
+                    ));
+                }
                 // The range predicate is one of the things that can have
                 // rolled this transaction back, and it is the one whose real
                 // answer would otherwise be reported as a bad token. Check it
@@ -3936,7 +3980,13 @@ impl MembershipManager {
         if target.removal_pending || self.lifecycle_operation_pending().await? {
             return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
         }
-        if target.is_voter && status.capacity.voting_nodes == 2 {
+        if !maintenance_preserves_quorum(
+            target.is_voter,
+            target.reachable,
+            status.capacity.voting_nodes,
+            status.recovery.reachable_voters,
+            status.capacity.voting_quorum,
+        ) {
             return Err(MembershipError::MaintenanceWouldLoseQuorum(
                 node_id.to_owned(),
             ));
@@ -3989,8 +4039,8 @@ impl MembershipManager {
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
         self.require_maintenance_capability().await?;
-        let status = self.status().await?;
-        let target = status
+        let mut status = self.status().await?;
+        let mut target = status
             .nodes
             .iter()
             .find(|node| node.node_id == node_id)
@@ -3999,20 +4049,26 @@ impl MembershipManager {
         if !target.maintenance {
             return Ok(status);
         }
-        if !target.reachable || target.apply_lag_entries != Some(0) {
+        if target.is_leader && status.capacity.voting_nodes > 1 {
+            self.handoff_leadership(target.raft_id, &status).await?;
+            status = self.status().await?;
+            target = status
+                .nodes
+                .iter()
+                .find(|node| node.node_id == node_id)
+                .cloned()
+                .ok_or(MembershipError::NodeNotFound)?;
+        }
+        if !target.maintenance_ready {
             return Err(MembershipError::MaintenanceResumeUnsafe(node_id.to_owned()));
         }
-        let cutoff = reachable_after(unix_ms()?);
+        let now = unix_ms()?;
+        let cutoff = reachable_after(now);
         let changed = inner
             .client
             .execute(
-                "DELETE FROM cluster_node_maintenance WHERE node_id = $1 \
-                   AND EXISTS (SELECT 1 FROM cluster_nodes node \
-                     JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
-                     WHERE node.node_id = $1 AND node.removed_at IS NULL \
-                       AND node.last_seen_at >= $2 AND progress.observed_at >= $2 \
-                       AND progress.apply_lag_entries = 0)",
-                params!(node_id, cutoff),
+                EXIT_MAINTENANCE_SQL,
+                params!(node_id, cutoff, NODE_MAINTENANCE_CAPABILITY, now),
             )
             .await?;
         if changed != 1 {
@@ -4110,6 +4166,18 @@ impl MembershipManager {
                 "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
                    + (SELECT COUNT(*) FROM cluster_node_promotions) \
                    + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    async fn maintenance_operation_pending(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_node_maintenance",
                 params!(),
             )
             .await?;
@@ -5189,6 +5257,9 @@ impl MembershipManager {
     ) -> Result<MembershipStatus, MembershipError> {
         let inner = self.replicated_inner()?;
         self.require_learner_lifecycle_capability().await?;
+        if self.maintenance_operation_pending().await? {
+            return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+        }
         let initial_metrics = inner.client.metrics_db().await?;
         let target = self.promotion_target(node_id).await?;
         let target_raft_id = u64::try_from(target.raft_id)
@@ -5269,11 +5340,15 @@ impl MembershipManager {
                  (node_id, attempt_id, barrier_index, started_at) \
                  SELECT $1, $2, NULL, $3 \
                  WHERE NOT EXISTS (SELECT 1 FROM cluster_node_removals WHERE node_id = $1) \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
                  ON CONFLICT(node_id) DO NOTHING",
                     params!(node_id, attempt_id.as_str(), started_at),
                 )
                 .await?;
             if inserted != 1 {
+                if self.maintenance_operation_pending().await? {
+                    return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+                }
                 return Err(MembershipError::LearnerLifecyclePending(node_id.to_owned()));
             }
             (attempt_id, true)
@@ -6110,6 +6185,9 @@ impl MembershipManager {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
         if results.get(1).copied() != Some(1) {
+            if self.maintenance_operation_pending().await? {
+                return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+            }
             let promotions = inner
                 .client
                 .query_consistent_map::<CountRow, _>(
@@ -8266,6 +8344,114 @@ mod tests {
     }
 
     #[test]
+    fn maintenance_preserves_the_live_voter_quorum() {
+        assert!(maintenance_preserves_quorum(true, true, 3, 3, 2));
+        assert!(!maintenance_preserves_quorum(true, true, 3, 2, 2));
+        assert!(maintenance_preserves_quorum(true, true, 4, 4, 3));
+        assert!(!maintenance_preserves_quorum(true, true, 4, 3, 3));
+        assert!(maintenance_preserves_quorum(true, true, 1, 1, 1));
+        assert!(maintenance_preserves_quorum(false, true, 3, 1, 2));
+    }
+
+    #[test]
+    fn maintenance_exit_is_one_atomic_current_process_and_drain_proof() {
+        let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, acknowledged_at INTEGER); \
+                 CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL, removed_at INTEGER); \
+                 CREATE TABLE cluster_node_progress (node_id TEXT PRIMARY KEY, observed_at INTEGER NOT NULL, apply_lag_entries INTEGER); \
+                 CREATE TABLE cluster_node_capabilities (node_id TEXT, capability TEXT, last_seen_at INTEGER, PRIMARY KEY(node_id, capability)); \
+                 CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, lease_expires_at_ms INTEGER); \
+                 INSERT INTO cluster_node_maintenance VALUES ('node-a', 90, NULL); \
+                 INSERT INTO cluster_nodes VALUES ('node-a', 100, NULL); \
+                 INSERT INTO cluster_node_progress VALUES ('node-a', 100, 0); \
+                 INSERT INTO cluster_node_capabilities VALUES ('node-a', 'node_maintenance_v1', 100);",
+            )
+            .expect("maintenance exit fixture");
+        let clear = |connection: &rusqlite::Connection| {
+            connection
+                .execute(
+                    EXIT_MAINTENANCE_SQL,
+                    rusqlite::params!["node-a", 95, NODE_MAINTENANCE_CAPABILITY, 100],
+                )
+                .expect("maintenance exit")
+        };
+
+        assert_eq!(clear(&connection), 0, "acknowledgement is mandatory");
+        connection
+            .execute(
+                "UPDATE cluster_node_maintenance SET acknowledged_at = 100",
+                [],
+            )
+            .expect("acknowledge");
+        connection
+            .execute("UPDATE cluster_nodes SET last_seen_at = 90", [])
+            .expect("make heartbeat stale");
+        assert_eq!(
+            clear(&connection),
+            0,
+            "a stopped or stale process is refused"
+        );
+        connection
+            .execute("UPDATE cluster_nodes SET last_seen_at = 100", [])
+            .expect("restore heartbeat");
+        connection
+            .execute(
+                "INSERT INTO media_sessions VALUES ('node-a', 'active', 101)",
+                [],
+            )
+            .expect("active media");
+        assert_eq!(clear(&connection), 0, "active replicated media is refused");
+        connection
+            .execute("UPDATE media_sessions SET state = 'ended'", [])
+            .expect("drain media");
+
+        let transaction = connection.transaction().expect("exit transaction");
+        assert_eq!(clear(&transaction), 1, "all current proofs permit exit");
+        transaction.rollback().expect("simulate failed commit");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cluster_node_maintenance", [], |row| {
+                    row.get::<_, i64>(0)
+                },)
+                .expect("maintenance row"),
+            1,
+            "a failed transaction leaves the durable fence intact"
+        );
+    }
+
+    #[test]
+    fn every_membership_lifecycle_begin_excludes_maintenance() {
+        assert!(begin_removal_attempt_sql(false)
+            .contains("NOT EXISTS (SELECT 1 FROM cluster_node_maintenance)"));
+        let source = production_source();
+        let redeem = source
+            .split_once("async fn redeem_for_role(")
+            .expect("join redemption")
+            .1
+            .split_once("async fn upsert_hostname(")
+            .expect("join redemption end")
+            .0;
+        assert!(
+            redeem
+                .matches("NOT EXISTS (SELECT 1 FROM cluster_node_maintenance)")
+                .count()
+                >= 5,
+            "every token reservation/proof branch must carry the atomic maintenance exclusion"
+        );
+        let promotion = source
+            .split_once("pub async fn promote_learner(")
+            .expect("learner promotion")
+            .1
+            .split_once("async fn promotion_target(")
+            .expect("learner promotion end")
+            .0;
+        assert!(promotion.contains("NOT EXISTS (SELECT 1 FROM cluster_node_maintenance)"));
+        assert!(promotion.contains("MembershipError::MaintenanceConflict"));
+    }
+
+    #[test]
     fn maintenance_rejects_a_heartbeat_without_the_current_binary_intent() {
         let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
         connection
@@ -9956,6 +10142,7 @@ mod tests {
                    PRIMARY KEY(node_id, capability)); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE media_sessions (owner_node_id TEXT, state TEXT, \
                    lease_expires_at_ms INTEGER); \
                  INSERT INTO cluster_nodes VALUES ('node-a', 10, NULL); \
@@ -9989,6 +10176,24 @@ mod tests {
                 .expect("admit removal after media drains"),
             1
         );
+        connection
+            .execute("DELETE FROM cluster_node_removal_attempts", [])
+            .expect("reset removal attempt");
+        connection
+            .execute("INSERT INTO cluster_node_maintenance VALUES ('node-b')", [])
+            .expect("begin maintenance");
+        assert_eq!(
+            connection
+                .execute(
+                    &begin_removal_attempt_sql(true),
+                    rusqlite::params!["node-a", "maintenance-blocked"],
+                )
+                .expect("maintenance blocks removal"),
+            0
+        );
+        connection
+            .execute("DELETE FROM cluster_node_maintenance", [])
+            .expect("finish maintenance");
         connection
             .execute("DELETE FROM cluster_node_removal_attempts", [])
             .expect("reset removal attempt");
@@ -10050,6 +10255,7 @@ mod tests {
                    node_id TEXT PRIMARY KEY, last_seen_at INTEGER); \
                  CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_node_promotions (node_id TEXT PRIMARY KEY); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY); \
                  CREATE TABLE cluster_join_tokens (node_id TEXT, state TEXT); \
                  CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT, updated_at INTEGER); \
                  CREATE TABLE job_leases (owner_node_id TEXT, expires_at_ms INTEGER, \

@@ -49,6 +49,9 @@ const BORROWED = [
   "clusterQuorum",
   "clusterStateView",
   "membershipRefusalText",
+  "clusterDirectMaintenanceStatus",
+  "clusterMaintenanceReady",
+  "clusterMaintenanceResumeReady",
   "clusterNodeRow",
   "clusterOperationAge",
   "clusterOperationReason",
@@ -58,6 +61,7 @@ const BORROWED = [
   "clusterOperationsCard",
   "clusterRecoveryState",
   "clusterRecoveryPanel",
+  "clusterMaintenanceProgress",
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
@@ -176,6 +180,26 @@ function status(availability, nodes) {
   };
 }
 
+function maintenanceOps(nodeId, { drained = true, admissions = 0 } = {}) {
+  return {
+    nodes: [
+      {
+        observation: "answered",
+        membership: { node_id: nodeId },
+        status: {
+          process: { live: true },
+          serving: { ready: false, reason: "maintenance" },
+          media: {
+            local_active_sessions: drained ? 0 : 1,
+            drained,
+            admissions_in_flight: admissions,
+          },
+        },
+      },
+    ],
+  };
+}
+
 function operationStatus(membership, { safe = true, unreachable = false } = {}) {
   const observations = membership.nodes.map((entry, index) => ({
     membership: entry,
@@ -287,7 +311,10 @@ test("the two-voter state reaches the rendered panel as those words", () => {
   assert.match(html, /survives no failure/);
   assert.equal(html.includes("clstate warn"), true);
   assertNoRedundancyClaim(html.replace(/<[^>]*>/g, " "), "the two-voter panel");
-  assert.match(html, /disabled title="A two-voter cluster cannot keep quorum/);
+  assert.match(
+    html,
+    /disabled title="Operations has not selected this node as the safe restart candidate/,
+  );
 });
 
 test("three voters may say redundant, and count the loss they survive", () => {
@@ -855,18 +882,102 @@ test("maintenance renders the acknowledged handoff, catch-up, and drain workflow
     }),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  const html = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b", { drained: false }));
   assert.match(html, /Maintenance in progress/);
   assert.match(html, /Target acknowledged the replicated work fence/);
-  assert.match(html, /Existing media sessions drained \(2 active\)/);
+  assert.match(html, /Direct process work drained \(1 local operation\)/);
   assert.match(html, /maintenance fence survives a process restart/i);
   assert.match(html, /<button class="sm" disabled[^>]*>Resume service/);
 
   cluster.nodes[1].active_media_sessions = 0;
   cluster.nodes[1].maintenance_ready = true;
-  const ready = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  assert.match(ready, /Ready to update or reboot/);
+  cluster.local_node_id = "node-b";
+  const ready = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b"));
+  assert.match(ready, /Ready to update, reboot, or resume/);
   assert.doesNotMatch(ready, /<button class="sm" disabled[^>]*>Resume service/);
+});
+
+test("maintenance resume requires direct local process evidence", () => {
+  const ui = sandbox();
+  const maintained = node("node-b", 2, "voter", {
+    maintenance: true,
+    maintenance_acknowledged: true,
+    maintenance_ready: true,
+  });
+  const remote = ui.clusterNodeRow(maintained, "node-a", false, {
+    operations: maintenanceOps("node-b"),
+    lifecycleLocked: true,
+  });
+  assert.match(remote, /Open this node directly to resume it/);
+  assert.match(remote, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const local = ui.clusterNodeRow(maintained, "node-b", false, {
+    operations: maintenanceOps("node-b"),
+    lifecycleLocked: true,
+  });
+  assert.doesNotMatch(local, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const admission = ui.clusterNodeRow(maintained, "node-b", false, {
+    operations: maintenanceOps("node-b", { admissions: 1 }),
+    lifecycleLocked: true,
+  });
+  assert.match(admission, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const recoveredLeader = { ...maintained, is_leader: true, maintenance_ready: false };
+  const handoff = ui.clusterOperationsPanel(
+    status("high_availability", [
+      recoveredLeader,
+      node("node-a", 1, "voter"),
+      node("node-c", 3, "voter"),
+    ]),
+    maintenanceOps("node-b"),
+  );
+  assert.match(handoff, /Ready to hand off leadership and resume/);
+  assert.doesNotMatch(handoff, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    maintained,
+    node("node-c", 3, "voter"),
+  ]);
+  const panel = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Create a join token/);
+  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
+  assert.match(panel, /disabled[^>]*>Remove permanently/);
+});
+
+test("recovery keeps an active maintenance target visible and blocks elections", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", {
+      reachable: false,
+      maintenance: true,
+      maintenance_acknowledged: true,
+    }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  cluster.recovery = {
+    required: true,
+    quorum_available: false,
+    reachable_voters: 1,
+    required_voters: 2,
+    leader_elected: false,
+    permanent_majority_loss_supported: false,
+  };
+  const html = ui.clusterOperationsPanel(cluster, null);
+  assert.match(html, /Restore the maintenance target first: node-b/);
+  assert.match(html, /durable work fence is still active/i);
+  assert.match(html, /Force election unavailable without quorum/);
+
+  cluster.nodes[2].reachable = true;
+  cluster.recovery = {
+    ...cluster.recovery,
+    quorum_available: true,
+    reachable_voters: 2,
+  };
+  const leaderless = ui.clusterOperationsPanel(cluster, null);
+  assert.match(leaderless, /<button class="ghost sm" disabled[^>]*>Force election/);
 });
 
 test("lost quorum offers restoration and preservation, never force reconfiguration", () => {

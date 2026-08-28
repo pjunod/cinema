@@ -314,10 +314,19 @@ maintenance is a reversible replicated fence.
 
 The server accepts maintenance only when every active member proves it runs a
 binary that understands the fence, no join, promotion, removal, or other
-maintenance is pending, and a quorum is available. A two-voter cluster refuses
-voter maintenance because restarting either voter leaves no write quorum. A
-one-voter cluster may enter maintenance with an expected service outage; three
-or more voters keep their majority while one voter restarts.
+maintenance is pending, and taking the target offline still leaves the current
+reachable voter quorum. This is based on live reachability, not only the
+configured voter count: a three-voter cluster with one voter already down also
+refuses maintenance on either survivor. A one-voter cluster may enter
+maintenance with an expected service outage.
+
+Open the exact target backend before choosing **Enter maintenance**. In a
+multi-voter cluster, the server accepts the request only when the full-width
+**Operations** verdict names that local process as the safe restart candidate.
+A directly observed one-voter server is the explicit service-outage exception.
+Sending either action through another cluster node or a non-sticky load
+balancer is refused because only the target can linearize its own work
+admissions and inspect its local process registries.
 
 The workflow in **Maintenance & leadership** is the authoritative checklist;
 the full-width **Operations** card above it remains the stricter direct-peer
@@ -328,14 +337,24 @@ restart verdict and WAL/snapshot evidence surface:
 2. The target reads the replicated row from its local applied state, fences
    new HTTP work and cluster-wide singleton jobs, refuses media placement, and
    acknowledges that fence in its next heartbeat.
-3. Existing HLS, publication, and offline media capabilities may finish. The
-   card counts active replicated media-session leases; maintenance never kills
-   them implicitly.
+3. Existing HLS, direct streams, publication, and offline preparation may
+   finish. Before the replicated fence commits, the target blocks new local
+   admissions and waits for any admission already in flight to publish or
+   fail. The checklist uses direct process evidence for all of these owners in
+   addition to replicated media-session leases; maintenance never kills them
+   implicitly.
 4. **Ready to update or reboot** means the target acknowledged the fence, is
-   not leader, is reachable with zero apply lag, and owns no active media
-   sessions. You may then update or reboot it.
+   not leader, is reachable with zero apply lag, and the directly observed
+   process owns no local work or admission in flight. You may then update or
+   reboot it.
 5. After restart, wait for a fresh heartbeat and zero apply lag, then choose
-   **Resume service**. The server refuses an early resume.
+   **Resume service on that exact backend**. The target must directly prove its
+   current maintenance acknowledgement and empty local workload; another node
+   cannot clear the fence while the target is powered off. The delete itself
+   atomically rechecks acknowledgement, heartbeat and progress freshness,
+   current-binary capability, zero lag, and zero live replicated sessions.
+   If recovery made the target leader, the same operation first hands
+   leadership to a reachable caught-up voter and waits for the successor.
 
 The maintenance row is replicated and survives the target process restarting.
 `GET /readyz` answers `503 maintenance`, new application work answers the typed
@@ -348,17 +367,18 @@ rollback fails closed instead of serving through maintenance.
 The admin API is the same operation:
 
 ```bash
-# Fence one node. Poll GET /cluster/nodes until maintenance_ready is true.
+# Use the target's direct origin, not a load-balanced cluster origin.
+# Poll both /cluster/nodes and /cluster/status until the maintenance checklist is ready.
 curl -fsS -X POST \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{}' \
-  "http://plurx.example/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+  "$PLURX_TARGET/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
 
-# Resume only after the node is reachable and apply_lag_entries is zero.
+# Resume from the same running target after direct local drain proof is empty.
 curl -fsS -X DELETE \
   -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
-  "http://plurx.example/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+  "$PLURX_TARGET/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
 ```
 
 ### Force election — a campaign request, never a quorum override
@@ -403,6 +423,12 @@ identity. Do not initialize a replacement cluster over those files, delete
 membership records, copy one voter's Raft directory onto another identity, or
 repeatedly press force election: none of those actions can create the missing
 majority.
+
+If the recovery began during planned maintenance, the Recovery workspace keeps
+that maintenance target and its checklist visible. Restore that original
+fenced voter first. Force election, join, promotion, and removal remain disabled
+until the running target has recovered and maintenance is safely cleared from
+the target itself.
 
 **Permanent majority loss is not recoverable by this release.** There is no
 force-reconfigure or "form new cluster" button. Stop writes, copy every
