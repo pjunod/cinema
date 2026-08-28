@@ -6689,6 +6689,21 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
                           'transcode_cache_location_identity_au')",
             2,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
+        ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
@@ -6831,6 +6846,21 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                           'analysis_requests_supersede_source', \
                           'analysis_requests_bound_terminal_history')",
             3,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
         ),
     ] {
         let rows: Vec<I64Value> = client
@@ -7076,6 +7106,21 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                           'analysis_requests_supersede_source', \
                           'analysis_requests_bound_terminal_history')",
             4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
         ),
     ] {
         let rows: Vec<I64Value> = client
