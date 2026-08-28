@@ -681,10 +681,15 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
     target_node_id:"",pipeline_version:"0123456789ab",source_size:123,
     request_error_code:"",job_error_code:"",action:"rebuild",
   }));
-  const summary={available:true,enabled:true,total:26,active:0,attention:0,expected:0,ready:26};
+  const summary={available:true,enabled:true,scope:"active_and_recent_terminal",terminal_window:8192,total:26,active:0,attention:0,expected:0,ready:26};
   harness.paint({enabled:true,now_ms:200,filtered_total:26,next_cursor:"5|76|job:job-24",rows,summary});
   assert.match(harness.html(),/Showing 1–25 of 26/);
   assert.match(harness.html(),/Page 1 of 2/);
+  assert.match(harness.html(),/Summary window/);
+  assert.match(harness.html(),/All <b>26<\/b>/);
+  assert.doesNotMatch(harness.html(),/Attention <b>/,
+    "sampled summary values are never presented as exact full-history filter counts");
+  assert.doesNotMatch(SHIPPED_UI,/Analysis is caught up/);
   harness.page(2,{enabled:true,now_ms:200,filtered_total:26,next_cursor:null,rows:[rows[0]],summary});
   assert.match(harness.html(),/Showing 26–26 of 26/);
   assert.match(harness.html(),/Page 2 of 2/);
@@ -724,6 +729,10 @@ test("Analysis refresh preserves stale data, focus, and accessible state", () =>
   assert.match(paint,/setSelectionRange/);
   assert.match(paint,/aria-pressed=/);
   assert.match(paint,/role="status" aria-live="polite"/);
+  const view=shippedSource("viewAnalysis");
+  assert.match(view,/setPageTimer\(\(\)=>\{ if\(ANALYSIS_VIEW\.auto\) renderAnalysisSummary\(generation\)/,
+    "the workspace polls only the compact summary, never the full history query");
+  assert.doesNotMatch(view,/setPageTimer\([^\n]*renderAnalysis\(generation\)/);
 });
 
 test("Analysis refresh queues changed views and never paints an obsolete response", async () => {
@@ -739,7 +748,7 @@ test("Analysis refresh queues changed views and never paints an obsolete respons
   };
   const harness=new Function(
     "api","document","location",
-    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=false;
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=null;
      let ANALYSIS_SNAPSHOT=null,ANALYSIS_SUMMARY=null;
      let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
      const painted=[];
@@ -768,6 +777,44 @@ test("Analysis refresh queues changed views and never paints an obsolete respons
   await Promise.resolve();
   await Promise.resolve();
   assert.deepEqual(harness.painted,["current"]);
+});
+
+test("Analysis re-entry aborts an older generation and immediately loads the current one", async () => {
+  const reads=[];
+  const api=(url,{signal}={})=>new Promise((resolve,reject)=>{
+    const read={url,resolve,reject,signal}; reads.push(read);
+    if(signal) signal.addEventListener("abort",()=>{
+      const error=new Error("aborted"); error.name="AbortError"; reject(error);
+    },{once:true});
+  });
+  const document={visibilityState:"visible",getElementById:()=>null};
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=null;
+     let ANALYSIS_SNAPSHOT=null,ANALYSIS_SUMMARY=null;
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     const paintAnalysis=()=>{},setPageFailure=()=>{},setPagePhase=()=>{},esc=String;
+     ${shippedSource("analysisPageUrl")}
+     ${shippedSource("renderAnalysis")}
+     return {
+       start:()=>renderAnalysis(1),
+       reenter:()=>{PAGE_RENDER_GENERATION=2;return renderAnalysis(2);},
+     };`,
+  )(api,document,{hash:"#/analysis"});
+
+  const old=harness.start();
+  assert.equal(reads.length,2,"history and compact summary start together");
+  await harness.reenter();
+  await old;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(reads[0].signal.aborted,true);
+  assert.equal(reads[1].signal.aborted,true);
+  assert.equal(reads.length,4,"the current generation starts without waiting for a timer");
+  reads[2].resolve({rows:[],filtered_total:0,next_cursor:null});
+  reads[3].resolve({available:true,enabled:true});
+  await Promise.resolve();
+  await Promise.resolve();
 });
 
 test("Analysis repaint restores row-link and disclosure focus with stable keys", () => {
