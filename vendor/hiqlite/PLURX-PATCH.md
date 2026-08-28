@@ -65,7 +65,10 @@ Apache-2.0. Plurx carries ten compatibility patches for clustered deployments:
   an accepted write or allowing raw client calls to hang. Management clients
   never follow redirects, so their custom API-secret header cannot leave the
   configured roster. Proxy-mode clients reconnect through the next configured
-  proxy instead of escaping that trust boundary.
+  proxy instead of escaping that trust boundary. Replicated backups derive the
+  upload owner from the committed log entry's leader rather than a client-side
+  cached leader sample, so a handoff cannot acknowledge a backup that no node
+  uploads.
 
 Remove this vendor when an upstream Hiqlite release contains all ten patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in
