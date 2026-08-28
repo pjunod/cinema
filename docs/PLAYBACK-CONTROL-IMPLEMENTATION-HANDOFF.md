@@ -6,35 +6,31 @@
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Last formally reviewed head:** `e40c56d400a820bdd609dc7b1eff5446c25e92a1`
-(rejected: one transcode approval; actor and HTTP change requests; next repair
-head pending)
-**Runtime implementation head:** `0e80c6ba` (`feat(playback): own transcode
-prepublication recovery`; formal exact-head review pending)
-**Runtime review state:** exact head `e40c56d4` repaired the earlier
-confirmed-reap, owner-ledger, false-`404`, ETag, shared-wait-budget, and
-bounded-settlement findings. Its formal review approved process/resource
-ownership but rejected the combined candidate: EOF projection could be lost
-after actor commit; first-media settlement remained unbounded; cached cleanup
-was cancellable; master/VTT/segment/retirement outcomes still collapsed into
-`404`; and subtitle preparation plus VOD resurrection escaped their deadlines.
-Those findings are repaired in the working tree. A follow-up moving-tree
-integration audit then found a handle-only first-media retirement fence, stale
-attempt-status admission after terminal failure, bodyless `416` using media
-admission, unbounded initial VOD probes/preparation, remote handoff becoming
-`404`, and ownerless VOD misses. Those second-pass findings are repaired in the
-working tree; the repaired branch head must now be frozen and reviewed.
+**Last formally reviewed head:**
+`1bee10d9f6f6d427151dbc3587089b367806c30a` (frozen and rejected; combined
+verdict **REQUEST CHANGES**)
+**Current runtime repair:**
+`8cc28bc8134412149829a37a0cfe8ba83f5da795` (`fix(playback): fence delivery
+handoffs end to end`). The documentation reconciliation that names this hash
+is the only remaining uncommitted tracked change; neither `0e80c6ba` nor
+`e40c56d4` is the current candidate.
+**Runtime review state:** actor review of exact `1bee10d9` found no runtime
+P1/P2/P3. HTTP and transcode review found five P1, five P2, and one P3 runtime
+defect; actor review also found the stale continuation/status record as P3.
+The exact finding ledger is below. A pre-freeze review of the repair found and
+closed three additional retirement/failure races, and root review corrected
+the relay clock-skew ceiling before the runtime commit. The combined runtime
+and documentation head must still be independently reviewed before any unit
+test runs.
 **Current implementation:** actor, HTTP response admission, transcode executor,
 frozen rolling presentation, cancellation settlement, synchronous first-media
-handoff, status projection, and checked owner inventory are committed at
-`0e80c6ba`. This is the first
-production-authoritative cut: initial transcode startup uses one actor
-deadline, one validated prepublication retry, exact response publication
+handoff, status projection, and checked owner inventory are assembled in the
+frozen `1bee10d9` candidate plus runtime repair `8cc28bc8`. This is the first
+production-authoritative cut: initial transcode startup is intended to use one
+actor deadline, one validated prepublication retry, exact response publication
 admission, and one cancellation-safe executor. Published-lifetime and copy
-compatibility owners remain later cuts. Runtime `0e80c6ba` and repair head
-`e40c56d4` are committed; the latter's newly reported lifecycle and
-classification findings are the active working-tree repair. No build or test
-has run.
+compatibility owners remain later cuts. No build or test has run on the active
+branch.
 **Test state:** no tests have run on the active branch by design. The user
 requires adversarial implementation review before unit tests and exactly one
 full unit-suite run on the final reviewed merge candidate. If that run fails,
@@ -109,8 +105,8 @@ the corrected delta is approved. No active-branch unit test has run yet.
 ### Active prepublication review ledger
 
 The pre-commit review used three independent scopes and did not build or run
-tests. The repaired working tree now has targeted approval with no remaining
-P1/P2/P3 finding:
+tests. At that stage, the repaired working tree received targeted approval
+with no remaining P1/P2/P3 finding:
 
 - actor review repaired executor-loss cutoff visibility, exact-deadline
   first-media ownership, synchronous publication projection, cancellation-safe
@@ -166,8 +162,72 @@ retired-but-registered outcomes could still become false `404`; and subtitle
 preparation plus VOD resurrection escaped their advertised deadlines. Those
 findings are repaired. Follow-up integration review found the remaining
 retirement-import, stale-status, bodyless-admission, request-deadline,
-remote-handoff, and VOD-negative-owner defects. The repair is complete and
-must receive immutable exact-head approval before the test gate opens.
+remote-handoff, and VOD-negative-owner defects. Those repairs were frozen and
+committed as `1bee10d9f6f6d427151dbc3587089b367806c30a`.
+
+Formal review of exact `1bee10d9` ran read-only, without builds or tests, and
+returned **REQUEST CHANGES**. Actor review found no runtime P1/P2/P3. The
+combined rejection ledger is:
+
+- P1: ownerless VOD `Pending`, `Busy`, `ProducerFailed`, `Io`, and `Gone`
+  outcomes could publish stale status after another session reattached with
+  the same ID;
+- P1: `OwnerGone` mapped directly to `404`, erasing both an active remote
+  handoff and a durable terminal result;
+- P1: relay ingress, transport, and owner handling each minted a new deadline,
+  so the owner could publish after the ingress request had been abandoned;
+- P1: default copy and rolling-cache delivery bypassed actor publication
+  admission;
+- P1: VOD resurrection could be cancelled after predecessor detach but before
+  successor attachment and registry insertion, leaving neither generation
+  durably reachable;
+- P2: transformed init bytes retained the original object's strong ETag;
+- P2: VOD exact-EOF, touch, and frontier commit could partially mutate before
+  cancellation interrupted the rest of the ownership transfer;
+- P2: first-media handoff cleared prepublication projection before lifetime
+  and cleanup ownership had transferred;
+- P2: the global sessions lock remained held across slow VOD supersession;
+- P2: the same global lock remained held across an unbounded actor `End`;
+- P3: HTTP conditional handling did not implement weak ETag comparison; and
+- P3 documentation: the status and handoff still named `0e80c6ba` or
+  `e40c56d4` as current instead of recording the frozen `1bee10d9` rejection.
+
+Runtime repair `8cc28bc8134412149829a37a0cfe8ba83f5da795` closes that ledger:
+
+- every VOD success, miss, error, and tombstone retains exact attachment
+  authority through bodyless status admission;
+- durable route resolution distinguishes absent, terminal, active-local, and
+  active-remote state, and `OwnerGone` performs one bounded authoritative
+  reclassification;
+- one authenticated absolute resource deadline crosses ingress, relay
+  transport, owner routing, and local handling, with per-resource ceilings and
+  conservative clock-skew handling;
+- VOD resurrection, supersession, and EOF/frontier mutation are
+  cancellation-safe ownership transactions;
+- copy and rolling-cache publication enter the actor with an immutable
+  response contract and a shared monotone failure fence;
+- first-media projection cannot clear confirmed-reap ownership before the
+  retained lifetime owner is visible;
+- VOD transformed-init validators name the transformed representation, and
+  conditional GET uses weak comparison; and
+- global rolling-session locks no longer span VOD supersession or actor End.
+
+The pre-freeze repair review then found three more races: Terminal could be
+queued before a deadline yet retire the predecessor after the caller reported
+failure; durable-ID adoption before retirement's first registry check could
+hide the exact predecessor; and the copy watchdog published its actor-visible
+failure only after waiting for process reap. The same runtime commit bounds
+only Terminal admission before treating End as irreversible, resolves and
+removes retirement targets by exact `Arc` across ID adoption, and publishes
+the copy failure fence before kill/reap. Focused regressions were added for all
+three. Root review also rejected executable clock-skew slack; owner execution
+now subtracts the full declared allowance, so skew cannot become work after
+ingress abandonment.
+
+Formatting, `git diff --check`, and the read-only mechanical ownership recount
+are clean at `8cc28bc8`. No build or test has run. Freeze the documentation
+reconciliation, obtain independent exact-head approval, and do not open the
+unit-test gate before that approval.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -494,14 +554,17 @@ topology, and daemon-integration contracts.
 
 PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
-runtime `0e80c6ba`, and rejected documentation/review head `ab3808b1` are
-committed. First repair head `e40c56d4` is also committed and formally rejected;
-its findings are being repaired in the worktree. The preserved untracked vendor
-build artifacts remain outside every commit.
+runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
+repair head `e40c56d4` are historical commits. Exact candidate `1bee10d9` is
+the last formally reviewed head and is rejected. Runtime repair `8cc28bc8` is
+committed; only the documentation reconciliation that names it remains to be
+frozen. The preserved untracked vendor build artifacts remain outside every
+commit.
+
 Continue in this order:
 
-1. Repair every `e40c56d4` actor/HTTP finding, update the semantic owner
-   inventory and status docs, and commit without either vendor target tree.
+1. Commit the documentation reconciliation without either vendor target tree,
+   then record the resulting exact branch head for review.
 2. Obtain independent adversarial approval of the resulting exact branch head
    without running unit tests.
 3. If review changes behavior, re-review only the changed behavioral delta and

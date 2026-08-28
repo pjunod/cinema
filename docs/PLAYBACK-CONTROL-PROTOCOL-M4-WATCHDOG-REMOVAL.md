@@ -371,7 +371,7 @@ that expose no resolved producer object do not claim media publication: a
 generation-fenced `503` may report starting or retry-pending state, a
 decision-fenced `502` may report final producer failure, and a no-actor `404`
 reports that the capability is gone. The prepared media response carries one
-of three bounded bindings. Classification follows the body's actual data
+of four bounded bindings. Classification follows the body's actual data
 dependencies, not its route name:
 
 - `generation_metadata` contains only immutable delivery-generation facts and
@@ -382,7 +382,7 @@ dependencies, not its route name:
   identity. The actor rejects a stale, terminal, prepublication-failed,
   already-decided, or retrying attempt, atomically sets
   `producer_media_published=true` before replying yes, and records the admitted
-  object frontier when applicable; and
+  object frontier when applicable;
 - `attempt_status` carries an exact-attempt classification but no media body.
   The actor rejects stale or terminal state without closing retry, claiming
   first-media ownership, renewing the lease, or advancing a frontier; and
