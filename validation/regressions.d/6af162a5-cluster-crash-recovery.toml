@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6af162a5"]
+points = ["cluster.auth", "operations.packaging", "persistence.upgrades"]
+checks = ["cluster-auth", "container-runtime", "operations-contract", "rust-gate"]
+reason = "The retained Hiqlite unit test proves AppendEntries receives the full OpenRaft hard deadline while votes and snapshots keep the soft deadline, and the production timing contract admits measured 600–700 ms recovery responses while preserving clean rolling compatibility with the previous 1500 ms election floor. The post-start initialization-failure regression proves shutdown removes the crash sentinel and state-machine lock instead of creating a destructive restart loop. The three-voter Store suite exercises the replicated recovery surface, while the Compose contract and rendered configuration pin a 65-minute stop grace that exceeds the maximum configured snapshot admission, catch-up, and database shutdown window."
