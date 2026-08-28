@@ -98,7 +98,10 @@ const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 = 800;
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 = 2_400;
 #[cfg(feature = "hiqlite-store")]
-const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_800;
+const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_000;
+/// Accepted end-to-end window for an exact-state write to survive leader loss.
+#[cfg(all(feature = "hiqlite-store", test))]
+pub(crate) const REPLICATED_LEADER_RECOVERY_BUDGET: Duration = Duration::from_secs(16);
 /// Hiqlite Raft WAL segment size used by every plurx voter.
 ///
 /// Hiqlite 0.14 accepts one serialized Raft entry up to `wal_size - 34` bytes:
@@ -3385,7 +3388,7 @@ mod tests {
         assert_eq!(defaults.wal_size, HIQLITE_WAL_SIZE_BYTES);
         assert_eq!(defaults.raft_config.heartbeat_interval, 800);
         assert_eq!(defaults.raft_config.election_timeout_min, 2_400);
-        assert_eq!(defaults.raft_config.election_timeout_max, 4_800);
+        assert_eq!(defaults.raft_config.election_timeout_max, 4_000);
         assert!(
             defaults.raft_config.election_timeout_min
                 >= defaults.raft_config.heartbeat_interval * 3
@@ -3393,6 +3396,27 @@ mod tests {
         assert!(
             defaults.raft_config.heartbeat_interval * 3 / 2 < 1_500,
             "a new leader must beat the previous release's election floor"
+        );
+        let vote_soft_ttl = defaults.raft_config.election_timeout_min * 3 / 4;
+        assert!(
+            u128::from(defaults.raft_config.election_timeout_max + vote_soft_ttl)
+                < hiqlite::LEADER_DISCOVERY_TIMEOUT.as_millis(),
+            "detached leader discovery must outlive the longest election and vote round"
+        );
+        assert_eq!(
+            hiqlite::LEADER_DISCOVERY_TIMEOUT + hiqlite::LEADER_STREAM_HANDOFF_TIMEOUT,
+            hiqlite::LEADER_RETRY_RECOVERY_TIMEOUT,
+            "the recovery bound must include discovery and an acknowledged replacement stream"
+        );
+        assert!(
+            hiqlite::LEADER_STREAM_CONNECT_TIMEOUT < hiqlite::LEADER_STREAM_HANDOFF_TIMEOUT,
+            "the end-to-end handoff must leave time around one connection attempt"
+        );
+        assert!(
+            hiqlite::LEADER_RETRY_RECOVERY_TIMEOUT
+                + Duration::from_millis(defaults.raft_config.heartbeat_interval)
+                < REPLICATED_LEADER_RECOVERY_BUDGET,
+            "leader discovery, stream reconnect, and one AppendEntries round must fit the recovery budget"
         );
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);

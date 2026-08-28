@@ -1,6 +1,6 @@
 use crate::app_state::RaftType;
 use crate::network::handshake::HandshakeSecret;
-use crate::{Error, NodeId, tls};
+use crate::{Error, LEADER_STREAM_CONNECT_TIMEOUT, NodeId, tls};
 use axum::http::Request;
 use axum::http::header::{CONNECTION, UPGRADE};
 use bytes::Bytes;
@@ -9,7 +9,6 @@ use http_body_util::Empty;
 use hyper::upgrade::Upgraded;
 use hyper_util::rt::TokioIo;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpStream;
 use tracing::{debug, error, info};
 
@@ -33,12 +32,15 @@ pub async fn try_connect(
     secret: &[u8],
 ) -> Result<WebSocket<TokioIo<Upgraded>>, Error> {
     tokio::time::timeout(
-        Duration::from_secs(5),
+        LEADER_STREAM_CONNECT_TIMEOUT,
         try_connect_stream(node_id, addr, raft_type, tls_config, secret),
     )
     .await
     .map_err(|_| {
-        Error::Connect("Could not open WebSocket stream after timeout of 5 seconds".to_string())
+        Error::Connect(format!(
+            "Could not open WebSocket stream after timeout of {} seconds",
+            LEADER_STREAM_CONNECT_TIMEOUT.as_secs()
+        ))
     })?
 }
 
