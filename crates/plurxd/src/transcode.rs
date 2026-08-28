@@ -1976,6 +1976,10 @@ impl Drop for PrepublicationStartSettlement {
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
 impl PrepublicationTranscodeRetry {
+    // Keep the frozen source, retry policy, and detached admission ownership as
+    // separate arguments; bundling them would obscure which snapshot each
+    // retry phase is allowed to retain.
+    #[allow(clippy::too_many_arguments)]
     fn build(
         file: &plurx_core::domain::MediaFile,
         opts: &TranscodeOptions,
@@ -2411,6 +2415,7 @@ fn spawn_prepublication_cleanup_owner(
 /// boundary. After Terminal applies, this task is the sole owner of registry
 /// removal, confirmed child reap, and admission release;
 /// caller cancellation and later deadlines cannot revoke that ownership.
+#[allow(clippy::too_many_arguments)]
 async fn own_rolling_retirement(
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
     active_session_count: Arc<AtomicUsize>,
@@ -2666,6 +2671,7 @@ fn spawn_context_retirement_owner(
 /// first VOD tombstone or rolling actor Terminal admission. Once either
 /// mutation wins, every snapshotted rolling victim is started without a
 /// caller deadline and all settlement futures remain owned here.
+#[allow(clippy::too_many_arguments)]
 async fn own_supersession_convergence(
     vod: Arc<crate::vodserve::VodServe>,
     sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
@@ -2683,9 +2689,7 @@ async fn own_supersession_convergence(
     let mut committed = vod_ended > 0;
     let mut pending = Vec::new();
     let mut removed = Vec::new();
-    let mut victims = doomed.into_iter();
-
-    while let Some((session_id, session)) = victims.next() {
+    for (session_id, session) in doomed {
         let retirement_deadline = if committed { None } else { deadline };
         let (mut commit, ticket) = spawn_rolling_retirement_owner(
             Arc::clone(&sessions),
@@ -4474,6 +4478,7 @@ impl Session {
     /// Fence every later renewal in the control actor before publishing the
     /// process-local serving verdict. Actor ordering replaces the old
     /// check-plus-two-lock activity-clock protocol.
+    #[cfg(test)]
     async fn end_activity(&self) {
         let _ = self.end_activity_until(None).await;
     }
@@ -4527,11 +4532,6 @@ impl Session {
             }
             Err(_) => self.control.fence_unavailable(),
         }
-    }
-
-    async fn fence_authority(&self) {
-        self.project_authority_fence();
-        self.settle_authority_fence().await;
     }
 
     /// Renew the actor-owned playback lease only if no serving fence
@@ -5009,46 +5009,11 @@ impl Session {
         }
     }
 
-    /// Remove this session's scratch — unless it is a cache entry, which this
-    /// session did not produce and the next viewer still wants.
-    ///
-    /// The guard is the whole reason this is a method. Every other place a
-    /// session ends removes its directory, correctly, and a cached session
-    /// reaching one of those paths without this check would delete the cache
-    /// one playback at a time — each hit destroying the entry that made it.
-    async fn discard_dir(&self) {
-        if self.cached || self.prepublication_cleanup_active.load(Acquire) {
-            return;
-        }
-        let _ = tokio::fs::remove_dir_all(&self.dir).await;
-    }
-
-    /// Hand the hardware slot back now rather than whenever the last reference
-    /// to this session happens to go. Idempotent, because the reaper and an
-    /// explicit stop can both reach a session and neither should have to know
-    /// whether the other got there first.
-    fn release_hardware(&self) {
-        if self.prepublication_cleanup_active.load(Acquire) {
-            return;
-        }
-        self.release_hardware_after_confirmed_reap();
-    }
-
     /// Bypass the prepublication-reap retention fence only when the caller has
     /// either confirmed physical reap or is intentionally transferring a live
     /// hardware producer to its admitted software successor.
     fn release_hardware_after_confirmed_reap(&self) {
         let _ = self.hw_slot.lock().expect("hw slot mutex").take();
-    }
-
-    /// Hand the software pool its threads back now — the watchdog task holds
-    /// an `Arc` to this session for its whole grace window, and a viewer who
-    /// closed the tab should not keep cores reserved for it.
-    fn release_software(&self) {
-        if self.prepublication_cleanup_active.load(Acquire) {
-            return;
-        }
-        self.release_software_after_confirmed_reap();
     }
 
     fn release_software_after_confirmed_reap(&self) {
@@ -5584,6 +5549,10 @@ pub(crate) enum MediaResponsePublicationRejection {
 /// terminal producer verdict. HTTP must publish the latter two as typed
 /// responses rather than passing through the live-only facade and inventing a
 /// fatal 404.
+// The Ready payload is intentionally returned by value to preserve the
+// existing cross-module response contract; boxing it would force every HTTP
+// caller to unwrap an owned presentation before publication admission.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum HlsPresentationResolution {
     Ready(
         HlsContext,
@@ -12650,11 +12619,6 @@ impl TranscodeManager {
             })
     }
 
-    /// The file a live VOD session serves, for response-time source facts.
-    pub async fn vod_session_file_id(&self, session_id: &str) -> Option<i64> {
-        self.vod.session_file_id(session_id).await
-    }
-
     /// True for an attached VOD capability or one still in the slow
     /// resurrection preparation window. Lease loss uses this classification
     /// to close the stable release generation before a late attachment.
@@ -12766,8 +12730,10 @@ impl TranscodeManager {
                         supersession_user: &supersession_user,
                     },
                     session_id.to_owned(),
-                    Arc::clone(&release_gate.transition),
-                    &release_gate.released,
+                    crate::vodserve::VodReleaseFence::new(
+                        Arc::clone(&release_gate.transition),
+                        &release_gate.released,
+                    ),
                 )
                 .await
             {
@@ -15207,6 +15173,7 @@ impl TranscodeManager {
 
     /// Publish a provisional successor under the incarnation's stable bearer
     /// capability after the replicated owner CAS succeeds.
+    #[cfg(test)]
     pub(crate) async fn adopt_session_id(
         &self,
         provisional_id: &str,
@@ -15219,6 +15186,7 @@ impl TranscodeManager {
             .await
     }
 
+    #[cfg(test)]
     pub(crate) async fn adopt_session_id_with_token(
         &self,
         provisional_id: &str,
@@ -15513,6 +15481,7 @@ impl TranscodeManager {
     /// Status for either HLS presentation. A VOD lookup goes first because a
     /// session id belongs to exactly one registry and its diagnostics have no
     /// honest live-transcode equivalent.
+    #[cfg(test)]
     pub async fn hls_session_status(&self, session_id: &str) -> Option<HlsSessionInfo> {
         self.hls_session_status_publication(session_id)
             .await
@@ -15860,12 +15829,14 @@ impl TranscodeManager {
     /// wins still fixes the exact child: a late replacement sees `retired`,
     /// while late retirement owns the installed successor until terminal
     /// proof.
+    #[cfg(test)]
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
         self.retire_session_until(session_id, session, None)
             .await
             .expect("unbounded session retirement cannot expire")
     }
 
+    #[cfg(test)]
     async fn retire_session_until(
         &self,
         session_id: &str,
@@ -16282,6 +16253,7 @@ impl TranscodeManager {
     /// fenced, while confirmed process reap continues under the universal
     /// detached retirement owner and cannot delay submission of the durable
     /// Store mutation.
+    #[cfg(test)]
     pub(crate) async fn begin_session_release(self: &Arc<Self>, session_id: &str) {
         self.begin_session_terminal(
             session_id,
@@ -16577,21 +16549,6 @@ impl TranscodeManager {
             .is_ok_and(|outcome| outcome.removed)
     }
 
-    pub(crate) async fn fence_session_for_request(
-        &self,
-        request_id: &str,
-        session_id: &str,
-    ) -> bool {
-        let Some(session) = self
-            .rolling_session_for_request(request_id, session_id)
-            .await
-        else {
-            return false;
-        };
-        session.project_authority_fence();
-        true
-    }
-
     pub async fn stop_session_for_request(
         &self,
         request_id: &str,
@@ -16687,6 +16644,7 @@ impl TranscodeManager {
     /// renew only after they have a concrete response to serve. Keeping those
     /// operations separate prevents repeated misses from becoming synthetic
     /// playback activity.
+    #[cfg(test)]
     async fn live_session(&self, session_id: &str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
         (!session.control.is_retired()).then_some(session)
@@ -17261,6 +17219,7 @@ impl TranscodeManager {
     /// The rolling actor or immutable registry must still own the capability
     /// when response completion linearizes. Partial objects may renew demand,
     /// but only a complete object moves the consumed frontier.
+    #[cfg(test)]
     pub(crate) async fn commit_resolved_media(
         self: &Arc<Self>,
         session_id: &str,
@@ -17667,6 +17626,7 @@ impl TranscodeManager {
     /// supplied them. Composite resources such as native subtitle playlists
     /// must carry this owner through their own response commit rather than
     /// reconstructing ownership from a reusable session id afterward.
+    #[cfg(test)]
     pub(crate) async fn playlist_with_owner(
         self: &Arc<Self>,
         session_id: &str,
@@ -17860,23 +17820,21 @@ impl TranscodeManager {
                     else {
                         continue;
                     };
-                    if !playlist_published {
-                        if !transcode_first_playlist_ready(&bytes) {
-                            if self.playlist_producer_failed(&session, session_id).await {
-                                return Err(PlaylistPublicationError::for_session(
-                                    session.failure_reason(),
-                                    &session,
-                                ));
-                            }
-                            if tokio::time::Instant::now().into_std() >= deadline {
-                                return Err(PlaylistPublicationError::for_session(
-                                    PlaylistError::StartupTimedOut(budget),
-                                    &session,
-                                ));
-                            }
-                            wait_for_playlist_poll_before(deadline).await;
-                            continue;
+                    if !playlist_published && !transcode_first_playlist_ready(&bytes) {
+                        if self.playlist_producer_failed(&session, session_id).await {
+                            return Err(PlaylistPublicationError::for_session(
+                                session.failure_reason(),
+                                &session,
+                            ));
                         }
+                        if tokio::time::Instant::now().into_std() >= deadline {
+                            return Err(PlaylistPublicationError::for_session(
+                                PlaylistError::StartupTimedOut(budget),
+                                &session,
+                            ));
+                        }
+                        wait_for_playlist_poll_before(deadline).await;
+                        continue;
                     }
                     // Actor readiness must come from the exact bytes this
                     // response owns. A best-effort second filesystem read in
@@ -18101,6 +18059,7 @@ impl TranscodeManager {
     /// pruned prefix. The index keeps those duration-only entries even after
     /// their files are gone, so callers never reconstruct time from a segment
     /// number or the shortened playlist.
+    #[cfg(test)]
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         if let Some(window) = self.vod.segment_window(session_id, segment_index).await {
             return Some(window);
@@ -18977,26 +18936,6 @@ impl TranscodeManager {
             }
             session.flow_worker_started.store(false, Release);
         });
-    }
-
-    /// Queue policy re-evaluation after a completed rolling media object.
-    /// VOD has no producer to pace, and partial objects do not advance the
-    /// client's download frontier.
-    pub(crate) fn request_response_flow(
-        self: &Arc<Self>,
-        session_id: &str,
-        owner: &MediaResponseOwner,
-        object_name: Option<&str>,
-        complete_object: bool,
-    ) {
-        let MediaResponseOwnerKind::Rolling { session, .. } = &owner.0 else {
-            return;
-        };
-        if !complete_object || object_name.and_then(segment_index).is_none() {
-            return;
-        }
-        self.ensure_flow_worker(session_id, Arc::clone(session));
-        session.control.request_flow();
     }
 
     /// Re-evaluate one session after a client request refreshes the published

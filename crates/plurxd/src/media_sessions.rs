@@ -678,7 +678,7 @@ impl<W: TakeoverWorkerLifecycle> Drop for TakeoverCreationOwner<W> {
 
 #[derive(Debug, PartialEq, Eq)]
 enum TakeoverClaimVerdict {
-    Won(MediaSessionRoute),
+    Won(Box<MediaSessionRoute>),
     Pending,
     Lost,
 }
@@ -810,6 +810,7 @@ pub(crate) struct ReleaseIntent {
 }
 
 impl ReleaseIntent {
+    #[cfg(test)]
     pub(crate) const CLIENT: Self = Self {
         terminal: crate::vodserve::Terminal::Deleted,
         reason: "released by client",
@@ -1329,7 +1330,7 @@ pub(crate) struct MediaSessionCoordinator {
     release_fence_count: Arc<std::sync::atomic::AtomicUsize>,
     route_queries: Arc<Vec<tokio::sync::Mutex<()>>>,
     route_generations: Arc<Vec<std::sync::atomic::AtomicU64>>,
-    lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, (String, i64, i64, bool)>>>,
+    lease_seeds: Arc<tokio::sync::Mutex<HashMap<String, LeaseSeed>>>,
     control_admission: Arc<StdMutex<ControlAdmission>>,
     #[cfg(test)]
     route_store_queries: Arc<std::sync::atomic::AtomicUsize>,
@@ -1476,6 +1477,7 @@ impl MediaSessionCoordinator {
     /// consensus reads even when an unauthenticated caller sprays random UUIDs.
     /// Activation overwrites a prior miss immediately, and no cache entry can
     /// extend the exact durable lease boundary.
+    #[cfg(test)]
     pub(crate) async fn route(
         &self,
         session_id: &str,
@@ -1503,7 +1505,10 @@ impl MediaSessionCoordinator {
         }
         let deadline = now + remaining.min(ROUTE_QUERY_DEADLINE);
         let route = self.raw_route_before(session_id, deadline).await?;
-        Ok(classify_durable_route(route, local_node_id, unix_ms()))
+        validate_route_resolution(
+            session_id,
+            classify_durable_route(route, local_node_id, unix_ms()),
+        )
     }
 
     /// Cache-bypassing durable resolution for a final HTTP status verdict.
@@ -1536,7 +1541,10 @@ impl MediaSessionCoordinator {
                 StoreError::Database("media-session route reclassification timed out".to_owned())
             })??;
         self.reject_pending_release(session_id).await?;
-        Ok(classify_durable_route(route, local_node_id, unix_ms()))
+        validate_route_resolution(
+            session_id,
+            classify_durable_route(route, local_node_id, unix_ms()),
+        )
     }
 
     async fn raw_route_before(
@@ -1621,6 +1629,7 @@ impl MediaSessionCoordinator {
     /// release mutation, or join the exact settlement already elected for
     /// this capability. A duplicate DELETE never consumes another worker
     /// permit and observes the elected transaction's eventual HTTP result.
+    #[cfg(test)]
     pub(crate) async fn begin_release_reconciliation(&self, session_id: &str) -> ReleaseAdmission {
         self.begin_release_reconciliation_with_intent(session_id, ReleaseIntent::CLIENT)
             .await
@@ -2037,7 +2046,7 @@ impl MediaSessionCoordinator {
         );
     }
 
-    async fn take_lease_seeds(&self) -> HashMap<String, (String, i64, i64, bool)> {
+    async fn take_lease_seeds(&self) -> HashMap<String, LeaseSeed> {
         std::mem::take(&mut *self.lease_seeds.lock().await)
     }
 
@@ -2293,6 +2302,7 @@ fn route_hash(session_id: &str) -> usize {
     hasher.finish() as usize
 }
 
+#[cfg(test)]
 fn authorizing_route(route: &MediaSessionRoute) -> bool {
     let now_ms = unix_ms();
     route.state == "active"
@@ -2324,6 +2334,27 @@ fn classify_durable_route(
         }
         Some(route) => DurableRouteResolution::ActiveRemote(route),
     }
+}
+
+type LeaseSeed = (String, i64, i64, bool);
+
+fn validate_route_resolution(
+    session_id: &str,
+    resolution: DurableRouteResolution,
+) -> Result<DurableRouteResolution, StoreError> {
+    let route = match &resolution {
+        DurableRouteResolution::Absent => None,
+        DurableRouteResolution::ActiveLocal(route)
+        | DurableRouteResolution::ActiveRemote(route)
+        | DurableRouteResolution::OwnerTransition(route)
+        | DurableRouteResolution::Terminal(route) => Some(route),
+    };
+    if route.is_some_and(|route| route.session_id.as_str() != session_id) {
+        return Err(StoreError::Database(
+            "media-session route identity mismatch".to_owned(),
+        ));
+    }
+    Ok(resolution)
 }
 
 fn relay_response(response: reqwest::Response) -> Result<Response<Body>, PeerTransportError> {
@@ -2521,10 +2552,9 @@ fn relay_response_with_limits_observed(
                     ));
                 }
                 () = terminal.signal.cancelled() => {
-                    let error = terminal.take_error().unwrap_or_else(|| io::Error::new(
-                        io::ErrorKind::Other,
-                        "relayed media response producer failed",
-                    ));
+                    let error = terminal
+                        .take_error()
+                        .unwrap_or_else(|| io::Error::other("relayed media response producer failed"));
                     return Some((Err(error), (receiver, terminal, body_deadline, true)));
                 }
                 item = receiver.recv() => item,
@@ -3773,7 +3803,7 @@ fn takeover_claim_verdict(
         && current.discontinuity_sequence >= original.discontinuity_sequence.saturating_add(1);
     if exact_winner {
         return if current.lease_expires_at_ms > now_ms {
-            TakeoverClaimVerdict::Won(current)
+            TakeoverClaimVerdict::Won(Box::new(current))
         } else {
             TakeoverClaimVerdict::Lost
         };
@@ -3915,7 +3945,7 @@ where
                 Some(candidate),
                 unix_ms(),
             ) {
-                TakeoverClaimVerdict::Won(route) => break (route, cache_generation),
+                TakeoverClaimVerdict::Won(route) => break (*route, cache_generation),
                 TakeoverClaimVerdict::Lost => {
                     stop_pending_takeover(pending, "media-session takeover lost", TAKEOVER_LOST)
                         .await;
@@ -3990,7 +4020,7 @@ where
                 }
             };
         match takeover_claim_verdict(&pending.original, &pending.claim, current, unix_ms()) {
-            TakeoverClaimVerdict::Won(route) => break (route, read_cache_generation),
+            TakeoverClaimVerdict::Won(route) => break (*route, read_cache_generation),
             TakeoverClaimVerdict::Lost => {
                 stop_pending_takeover(pending, "media-session takeover lost", TAKEOVER_LOST).await;
                 return Ok(());
@@ -4715,7 +4745,7 @@ mod tests {
                 i64::try_from(
                     (RELAY_SHORT_MAX_LIFETIME + RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE).as_millis(),
                 )
-                .unwrap(),
+                .expect("relay lifetime fits in i64"),
             ),
         );
         assert!(valid.is_valid());
@@ -5368,7 +5398,7 @@ mod tests {
         winner.updated_at_ms = claim.now_ms;
         assert!(matches!(
             takeover_claim_verdict(&original, &claim, Some(winner.clone()), now_ms),
-            TakeoverClaimVerdict::Won(route) if route == winner
+            TakeoverClaimVerdict::Won(route) if *route == winner
         ));
 
         let mut renewed_winner = winner.clone();
@@ -5382,7 +5412,7 @@ mod tests {
                     Some(renewed_winner.clone()),
                     now_ms,
                 ),
-                TakeoverClaimVerdict::Won(route) if route == renewed_winner
+                TakeoverClaimVerdict::Won(route) if *route == renewed_winner
             ),
             "the exact target epoch remains ours after a legitimate renewal"
         );

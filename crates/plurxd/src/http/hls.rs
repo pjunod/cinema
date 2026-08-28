@@ -1225,7 +1225,7 @@ async fn settle_activation_predecessor(
     // that lands arbitrarily late can never inherit an expired timestamp.
     let fast_deadline = tokio::time::Instant::now() + PREDECESSOR_PROJECTION_FAST_WINDOW;
     let successor = match arm_activation_handoff_until(state, &successor, fast_deadline).await {
-        ActivationHandoffArmVerdict::Armed(route) => route,
+        ActivationHandoffArmVerdict::Armed(route) => *route,
         ActivationHandoffArmVerdict::Ready => {
             guard.disarm();
             return Ok(());
@@ -1244,7 +1244,7 @@ async fn settle_activation_predecessor(
                         settle_armed_activation_handoff(
                             &projection_state,
                             predecessor_incarnation,
-                            successor,
+                            *successor,
                         )
                         .await;
                         guard.disarm();
@@ -1305,7 +1305,7 @@ async fn settle_activation_predecessor(
 }
 
 enum ActivationHandoffArmVerdict {
-    Armed(MediaSessionRoute),
+    Armed(Box<MediaSessionRoute>),
     Ready,
     SuccessorGone,
     Pending,
@@ -1320,7 +1320,7 @@ async fn arm_activation_handoff_until(
         return ActivationHandoffArmVerdict::Ready;
     }
     if successor.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED {
-        return ActivationHandoffArmVerdict::Armed(successor.clone());
+        return ActivationHandoffArmVerdict::Armed(Box::new(successor.clone()));
     }
     loop {
         let now = tokio::time::Instant::now();
@@ -1350,7 +1350,7 @@ async fn arm_activation_handoff_until(
             }
             Ok(Ok(Some(route))) => {
                 state.media_sessions.cache_route(route.clone()).await;
-                return ActivationHandoffArmVerdict::Armed(route);
+                return ActivationHandoffArmVerdict::Armed(Box::new(route));
             }
             Ok(Ok(None)) => {
                 if let Ok(Ok(Some(route))) = tokio::time::timeout_at(
@@ -3845,10 +3845,9 @@ fn driven_local_body(
                     ));
                 }
                 () = terminal.signal.cancelled() => {
-                    let error = terminal.take_error().unwrap_or_else(|| std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        "media response producer failed",
-                    ));
+                    let error = terminal
+                        .take_error()
+                        .unwrap_or_else(|| std::io::Error::other("media response producer failed"));
                     return Some((Err(error), (receiver, terminal, body_deadline, true)));
                 }
                 chunk = receiver.recv() => chunk,
@@ -4055,15 +4054,6 @@ pub async fn playlist(
     playlist_local_before(&state, &session, query, playlist_deadline, request_deadline).await
 }
 
-async fn playlist_local(
-    state: &AppState,
-    session: &str,
-    query: PlaylistQuery,
-) -> Result<Response, ApiError> {
-    let (playlist_deadline, request_deadline) = playlist_request_deadlines(state);
-    playlist_local_before(state, session, query, playlist_deadline, request_deadline).await
-}
-
 async fn playlist_local_before(
     state: &AppState,
     session: &str,
@@ -4181,22 +4171,6 @@ pub async fn master_playlist_response(
     master_playlist_response_local_before(
         &state,
         &session,
-        query,
-        playlist_deadline,
-        request_deadline,
-    )
-    .await
-}
-
-async fn master_playlist_response_local(
-    state: &AppState,
-    session: &str,
-    query: PlaylistQuery,
-) -> Result<Response, ApiError> {
-    let (playlist_deadline, request_deadline) = playlist_request_deadlines(state);
-    master_playlist_response_local_before(
-        state,
-        session,
         query,
         playlist_deadline,
         request_deadline,
@@ -4345,22 +4319,6 @@ pub async fn video_playlist(
         &state,
         &session,
         "video.m3u8",
-        playlist_deadline,
-        request_deadline,
-    )
-    .await
-}
-
-async fn video_playlist_local(
-    state: &AppState,
-    session: &str,
-    object_name: &'static str,
-) -> Result<Response, ApiError> {
-    let (playlist_deadline, request_deadline) = playlist_request_deadlines(state);
-    video_playlist_local_before(
-        state,
-        session,
-        object_name,
         playlist_deadline,
         request_deadline,
     )
@@ -4529,6 +4487,7 @@ pub async fn subtitle_playlist(
         .await
 }
 
+#[cfg(test)]
 async fn subtitle_playlist_local(
     state: &AppState,
     session: &str,
@@ -4760,22 +4719,6 @@ pub async fn subtitle_vtt(
         return Ok(response);
     }
     subtitle_vtt_local_before(&state, &session, index, &segment, request_deadline).await
-}
-
-async fn subtitle_vtt_local(
-    state: &AppState,
-    session: &str,
-    index: i64,
-    segment: &str,
-) -> Result<Response, ApiError> {
-    subtitle_vtt_local_before(
-        state,
-        session,
-        index,
-        segment,
-        response_publication_deadline(),
-    )
-    .await
 }
 
 async fn subtitle_vtt_local_before(
@@ -6601,16 +6544,6 @@ async fn vod_segment_response_before(
     Ok(response)
 }
 
-async fn segment_local(
-    state: &AppState,
-    session: &str,
-    seg: &str,
-    headers: &RelayHeaders,
-) -> Result<Response, ApiError> {
-    let request_deadline = segment_request_deadline();
-    segment_local_before(state, session, seg, headers, request_deadline).await
-}
-
 async fn segment_local_before(
     state: &AppState,
     session: &str,
@@ -7325,8 +7258,7 @@ mod tests {
         let deadline = tokio::time::Instant::now().into_std() + Duration::from_millis(1);
         let error = reserve_response_completion_from(slots, deadline)
             .await
-            .err()
-            .expect("a second streamed response must not exceed settlement capacity");
+            .expect_err("a second streamed response must not exceed settlement capacity");
         assert!(matches!(
             error,
             ApiError::Typed {

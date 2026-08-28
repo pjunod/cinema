@@ -256,17 +256,10 @@ pub struct VodPublication<T> {
     pub(crate) owner: ResponseOwner,
 }
 
+#[cfg(test)]
 impl<T> VodPublication<T> {
-    pub fn is_ok(&self) -> bool {
+    fn is_ok(&self) -> bool {
         self.result.is_ok()
-    }
-
-    pub fn is_err(&self) -> bool {
-        self.result.is_err()
-    }
-
-    pub(crate) fn expect(self, message: &str) -> (T, ResponseOwner) {
-        (self.result.expect(message), self.owner)
     }
 }
 
@@ -330,6 +323,22 @@ pub struct VodAttribution<'a> {
     pub user_name: &'a str,
     pub item_title: &'a str,
     pub supersession_user: &'a str,
+}
+
+/// The exact public-release generation that must remain closed across a slow
+/// VOD resurrection's final registry attachment.
+pub(crate) struct VodReleaseFence<'a> {
+    transition: Arc<tokio::sync::Mutex<()>>,
+    released: &'a AtomicBool,
+}
+
+impl<'a> VodReleaseFence<'a> {
+    pub(crate) fn new(transition: Arc<tokio::sync::Mutex<()>>, released: &'a AtomicBool) -> Self {
+        Self {
+            transition,
+            released,
+        }
+    }
 }
 
 /// Playlist / segment answers. `None` from any method = "not a VOD session,
@@ -466,6 +475,7 @@ impl Rendition {
             .remove(&index);
     }
 
+    #[cfg(test)]
     async fn attach_reader(&self, session_id: &str, frontier: u32) {
         self.readers.lock().await.insert(
             session_id.to_string(),
@@ -1255,8 +1265,7 @@ impl VodServe {
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
-        release_transition: Arc<tokio::sync::Mutex<()>>,
-        released: &AtomicBool,
+        release_fence: VodReleaseFence<'_>,
     ) -> Result<VodStart, String> {
         let _preparing = self.begin_preparing_session(&session_id);
         self.try_create_with_release_fence(
@@ -1265,7 +1274,7 @@ impl VodServe {
             settings,
             attribution,
             session_id,
-            Some((release_transition, released)),
+            Some(release_fence),
         )
         .await
     }
@@ -1327,7 +1336,7 @@ impl VodServe {
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
-        release_fence: Option<(Arc<tokio::sync::Mutex<()>>, &AtomicBool)>,
+        release_fence: Option<VodReleaseFence<'_>>,
     ) -> Result<VodStart, String> {
         let SessionKind::Copy {
             aac,
@@ -1451,9 +1460,9 @@ impl VodServe {
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let _release_transition = if let Some((transition, released)) = release_fence {
-            let guard = transition.lock_owned().await;
-            if released.load(Acquire) {
+        let _release_transition = if let Some(release_fence) = release_fence {
+            let guard = release_fence.transition.lock_owned().await;
+            if release_fence.released.load(Acquire) {
                 return Err(crate::transcode::vod_refusal_error(
                     "vod_session_released",
                     "the VOD session was released before attachment",
@@ -1877,9 +1886,7 @@ impl VodServe {
     async fn begin_end(&self, session_id: &str, cause: Terminal) -> Option<Arc<TerminalCleanup>> {
         let (lifecycle, incarnation) = {
             let sessions = self.shared.sessions.lock().await;
-            let Some(session) = sessions.get(session_id) else {
-                return None;
-            };
+            let session = sessions.get(session_id)?;
             (
                 Arc::clone(&session.lifecycle),
                 Arc::clone(&session.incarnation),
@@ -1888,9 +1895,7 @@ impl VodServe {
         let _lifecycle = lifecycle.lock().await;
         let (cleanup, work) = {
             let mut sessions = self.shared.sessions.lock().await;
-            let Some(session) = sessions.get_mut(session_id) else {
-                return None;
-            };
+            let session = sessions.get_mut(session_id)?;
             if !Arc::ptr_eq(&session.lifecycle, &lifecycle)
                 || !Arc::ptr_eq(&session.incarnation, &incarnation)
             {
@@ -1966,7 +1971,8 @@ impl VodServe {
     /// a viewer switching presentations is still one player replacing its own
     /// stream. Scoped by the same user string the legacy sweep uses, so a
     /// colliding `playback_id` from another account ends nothing.
-    pub async fn supersede(&self, supersession_user: &str, playback_id: &str, keep: &str) -> usize {
+    #[cfg(test)]
+    async fn supersede(&self, supersession_user: &str, playback_id: &str, keep: &str) -> usize {
         self.supersede_before(supersession_user, playback_id, keep, None)
             .await
             .expect("an unbounded VOD supersession cannot reach a deadline")
@@ -3037,18 +3043,6 @@ impl VodServe {
             .source
             .as_ref()
             .is_some_and(|source| !source.unchanged())
-    }
-
-    /// Serving updates the session's reader window and kicks the driver.
-    async fn note_served(&self, rendition: &Arc<Rendition>, session_id: &str, index: u32) {
-        {
-            let mut readers = rendition.readers.lock().await;
-            if let Some(reader) = readers.get_mut(session_id) {
-                reader.last_served = Some(index);
-                reader.frontier = reader.frontier.max(index);
-            }
-        }
-        rendition.kick();
     }
 }
 
@@ -5482,10 +5476,13 @@ mod tests {
         );
 
         pending.abort();
-        assert!(matches!(
-            pending.await,
-            Err(error) if error.is_cancelled()
-        ), "attach is cancelled after publication");
+        assert!(
+            matches!(
+                pending.await,
+                Err(error) if error.is_cancelled()
+            ),
+            "attach is cancelled after publication"
+        );
         install_pause.wait().await;
         *serve
             .shared
