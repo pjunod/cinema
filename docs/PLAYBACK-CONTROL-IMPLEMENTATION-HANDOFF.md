@@ -7,20 +7,20 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`9809d553ee94ae1f7ba6caa3147294a27d8582c5` (frozen and rejected; combined
-verdict **REQUEST CHANGES**; earlier rejected heads `bb69eb7e`, `31e7d5e2`,
-and `763c230c`)
-**Implementation freeze:** `6f458ea0132aae790bf2cc167e3fffe01898d753`
+`9121db03ebcb74e17ffb0004897a101f04abfe43` (frozen and rejected; combined
+verdict **REQUEST CHANGES**; earlier rejected heads `9809d553`, `bb69eb7e`,
+`31e7d5e2`, and `763c230c`)
+**Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
-**Validation-evidence freeze:** `5bea1ec7730eef47f343527db10e7ff378161b49`
+**Validation-evidence freeze:** `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`
 on branch `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact head `9809d553` was reviewed read-only by three
-parallel reviewers and rejected. The repair through `6f458ea0` closes its
-import-continuity, compile, remote-start ownership, activation-contract, and
-status-identity findings. The combined docs-bearing branch tip has not yet
-received immutable-head adversarial approval.
+**Runtime review state:** exact head `9121db03` was reviewed read-only and
+rejected. The repair through `f02bf5b5` closes its premature replacement-gate
+release, unbounded local pin, invalid Hiqlite fixture, and stale-roadmap
+findings. The combined docs-bearing branch tip has not yet received
+immutable-head adversarial approval.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -432,8 +432,16 @@ rebase and for this repair after GitHub's automatic static preflight stopped at
 that missing evidence. That automatic run executed no unit, focused, cluster,
 build, or compile lane. No dynamic test has run locally or remotely.
 
-The immutable PR #636 tip containing this handoff must receive the required
-exact-head adversarial approval before the unit-test gate opens.
+Review of `9121db03` then found that the cleanup task did not own the remaining
+replacement guard, the public local cache pin still lacked its placement
+deadline, and the forced three-voter stale-replay fixture used a blocked
+publication sentinel despite having no predecessor. Commit `f02bf5b5` moves the
+replacement guard into the detached cleanup payload through exact worker and
+request settlement, bounds the local pin with a retryable timeout, adds a
+guard-level hold/release ordering regression, and corrects the fixture to
+publication fence `0`. `95cd9a2e` maps that evidence. The immutable PR #636 tip
+containing this handoff must receive exact-head approval before the unit-test
+gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -762,10 +770,10 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`9809d553ee94ae1f7ba6caa3147294a27d8582c5` is the last formally reviewed head
+`9121db03ebcb74e17ffb0004897a101f04abfe43` is the last formally reviewed head
 and is rejected. Runtime, Store, tests, and owner inventory are frozen in
-`6f458ea0132aae790bf2cc167e3fffe01898d753`; regression-history evidence is
-frozen in `5bea1ec7730eef47f343527db10e7ff378161b49`. This status/handoff update
+`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
+frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`. This status/handoff update
 is the only remaining tracked change. The preserved untracked vendor build
 artifacts remain outside every commit.
 
@@ -1114,7 +1122,7 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Freeze and unanimously review the post-`9809d553` repair candidate, run its
+1. Unanimously review the frozen post-`9121db03` repair candidate, run its
    one full unit suite, satisfy cluster/hosted gates, and merge the production
    decision, prepublication retry, response-admission, relay/VOD ownership,
    and confirmed-reap cut.

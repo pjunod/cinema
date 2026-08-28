@@ -6,11 +6,11 @@
 [#636](https://github.com/pjunod/plurx/pull/636) on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
 `/private/tmp/plurx-playback-control-clone`. Exact reviewed head
-`9809d553ee94ae1f7ba6caa3147294a27d8582c5` was rejected after the earlier
-`bb69eb7ef43909965ea81f8081ea8a77b46504c2`, `31e7d5e2`, and `763c230c`
-rejections. Runtime, Store, tests, and the owner ledger are now frozen in
-`6f458ea0132aae790bf2cc167e3fffe01898d753`; rebased regression-history
-evidence is frozen in `5bea1ec7730eef47f343527db10e7ff378161b49`.
+`9121db03ebcb74e17ffb0004897a101f04abfe43` was rejected after the earlier
+`9809d553`, `bb69eb7e`, `31e7d5e2`, and `763c230c` rejections. Runtime, Store,
+tests, and the owner ledger are now frozen in
+`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
+frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`.
 The current review candidate is the PR tip containing this status file; the PR
 body pins its exact full object ID, avoiding an impossible self-reference from
 a commit to its own hash.
@@ -35,7 +35,7 @@ The post-rejection work is assembled in three tracks:
   immediate heavyweight terminal-graph compaction, and bounded compact `410`
   replay followed by fail-closed durable eviction.
 
-The implementation frozen through `6f458ea0` joins those tracks at their
+The implementation frozen through `f02bf5b5` joins those tracks at their
 shared publication boundary:
 
 - replacement is make-before-break: the provisional successor activates by
@@ -76,9 +76,9 @@ This is still a repair candidate, not immutable-head approved or dynamically
 validated implementation.
 Only `cargo fmt`, static diff inspection, and static ownership recounts have
 run. GitHub's automatic scope lane ran no tests or builds: its static
-`history-check` stopped on hashes rewritten by the rebase, and `5bea1ec7` adds
-their append-only evidence mappings. No compile, build, focused test, or unit
-test has run. One full unit-suite
+`history-check` stopped on hashes rewritten by the rebase, and `5bea1ec7` plus
+`95cd9a2e` add their append-only evidence mappings. No compile, build, focused
+test, or unit test has run. One full unit-suite
 run remains locked until every required adversarial reviewer approves the
 same immutable exact head. A failure permits only failed or directly affected
 tests to rerun after repair and behavioral review. PR #626's runtime commits
@@ -138,7 +138,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the post-review candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Freeze and unanimously review one immutable docs-bearing head, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the frozen candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Unanimously approve the immutable docs-bearing head, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -205,8 +205,8 @@ Review and test state for M4:
 | Static owner inventory | **Reconciled for source freeze.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. A direct read-only recount matches all 36 source-symbol rows, 132 module-symbol rows, and 22 structural rows. The ownership test itself has not run. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Implementation frozen in `6f458ea0`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Exact head `9809d553` rejected; `6f458ea0` closes all five code/contract findings.** Three parallel read-only reviewers found the SQLite v33/v34 import thresholds one version early, a terminal-retry Arc/guard name collision that could not compile, remote worker cleanup ownership beginning after an unbounded cache-pin await, stale ordinary-start CAS documentation, and status text that blurred a runtime freeze with the exact PR tip. The repair reads seeded rows from real v33/v34/v35 migration shapes, restores the distinct Arc and mutex guard, arms exact cleanup before a deadline-bounded pin and transfers it to confirmation, states the always-CAS contract, and identifies the current candidate without a self-hash. `5bea1ec7` maps the rebased corrective history after the automatic static preflight identified the rewritten hashes. The new immutable PR tip must receive unanimous review before tests. |
+| Operational projection | **Implementation frozen in `f02bf5b5`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
+| Adversarial implementation review | **Exact head `9121db03` rejected; `f02bf5b5` closes its two P1s and one stale-roadmap finding.** Independent review found that `StartedSessionGuard::Drop` moved async cleanup but released its remaining replacement guard synchronously, so another same-player worker could overlap before physical cleanup; the public local cache-pin await was still unbounded; and the forced three-voter replay fixture combined no predecessor with a blocked publication sentinel, causing validation to fail before the intended race. The repair moves replacement serialization into the detached cleanup owner through worker/request settlement, bounds local pinning to the placement deadline with retryable timeout, proves gate hold/release order, and gives the no-predecessor fixture publication fence `0`. The roadmap now treats freezing as complete and exact-head approval as the next gate. The new immutable PR tip must receive unanimous review before tests. |
 | Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts are the only candidate validation so far. No compile or build command has run. |
 | Unit/focused tests | **Gate closed; none run on the repair candidate.** Per user direction there will be one full unit-suite run, on the unanimously reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
 | Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
@@ -296,9 +296,8 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Freeze the complete post-`9809d553` repair and reconciled owner ledger as
-   one immutable docs-bearing head, and obtain unanimous adversarial
-   approval before tests. Then run the full local unit suite once, make
+1. Obtain unanimous adversarial approval of the frozen post-`9121db03`
+   immutable docs-bearing head before tests. Then run the full local unit suite once, make
    cluster/hosted gates green, merge the active prepublication cut, migrate
    published-lifetime and copy recovery, and prove the old server watchdog/
    replacement symbols are gone.
