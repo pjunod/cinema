@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6a5414db"]
+points = ["cluster.auth"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained repair-handoff regressions require a mature successor to reprove the same leader term, fresh quorum watermark, complete monotonic lease, and unchanged durable fence/index after any read-only reroute; the generation CAS remains single-dispatch. The idempotent-write regression permits a fourth exact-state attempt only inside the positive remainder of a 9.8-second total window, while the separate-process failure drill keeps all 64 writes error-free and still rejects leader recovery beyond the declared 10-second budget."
