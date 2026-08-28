@@ -2782,7 +2782,7 @@ async fn title_of(state: &AppState, item_id: i64, seen: &mut HashMap<i64, String
 /// authenticated user may look (it's their household server); the stop action
 /// below is admin-only.
 pub async fn activity_detail(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // `sessions` is untouched — native clients parse it — and `deliveries` is
@@ -2853,6 +2853,13 @@ pub async fn activity_detail(
     if clustered {
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
+    }
+    // Analysis is an operator concern: keep it out of ordinary household
+    // responses, but make it a first-class part of the admin Activity page.
+    // This is folded into the existing page read rather than making the web
+    // client add a second polling loop beside /activity/detail.
+    if user.0.is_admin {
+        response["analysis"] = super::analysis::activity_summary(&state).await?;
     }
     Ok(Json(response))
 }

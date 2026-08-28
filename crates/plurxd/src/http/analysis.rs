@@ -1,5 +1,7 @@
 //! Admin control and diagnostics for the durable content-analysis queue.
 
+use std::collections::{HashMap, HashSet};
+
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::Json;
@@ -8,6 +10,97 @@ use serde::{Deserialize, Serialize};
 use super::error::ApiError;
 use super::extract::AdminUser;
 use crate::state::AppState;
+
+fn summary_value(
+    requests: &[plurx_core::store::AnalysisRequest],
+    jobs: &[plurx_core::store::ClusterFragmentIndexJob],
+    enabled: bool,
+    now_ms: i64,
+) -> serde_json::Value {
+    let by_key: HashMap<&str, &plurx_core::store::ClusterFragmentIndexJob> = jobs
+        .iter()
+        .map(|job| (job.cache_key.as_str(), job))
+        .collect();
+    let mut represented = HashSet::new();
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut latest_error: Option<(String, i64, i64)> = None;
+    let mut observe = |state: &str, file_id: i64, error: &str, updated_at_ms: i64| {
+        *counts.entry(state.to_owned()).or_default() += 1;
+        if !error.is_empty()
+            && latest_error
+                .as_ref()
+                .is_none_or(|(_, _, previous)| updated_at_ms > *previous)
+        {
+            latest_error = Some((error.to_owned(), file_id, updated_at_ms));
+        }
+    };
+    for request in requests {
+        let job = (!request.result_cache_key.is_empty())
+            .then(|| by_key.get(request.result_cache_key.as_str()).copied())
+            .flatten();
+        if let Some(job) = job {
+            represented.insert(job.cache_key.as_str());
+            observe(
+                &job.state,
+                job.file_id,
+                &job.last_error_code,
+                job.updated_at_ms,
+            );
+        } else {
+            observe(
+                &request.state,
+                request.file_id,
+                &request.last_error_code,
+                request.updated_at_ms,
+            );
+        }
+    }
+    for job in jobs {
+        if !represented.contains(job.cache_key.as_str()) {
+            observe(
+                &job.state,
+                job.file_id,
+                &job.last_error_code,
+                job.updated_at_ms,
+            );
+        }
+    }
+    let count = |state: &str| counts.get(state).copied().unwrap_or_default();
+    serde_json::json!({
+        "enabled": enabled,
+        "total": counts.values().sum::<u64>(),
+        "active": count("queued") + count("running") + count("submitted"),
+        "queued": count("queued"),
+        "running": count("running"),
+        "submitted": count("submitted"),
+        "failed": count("failed"),
+        "cancelled": count("cancelled"),
+        "ready": count("ready"),
+        "now_ms": now_ms,
+        "latest_error": latest_error.map(|(code, file_id, updated_at_ms)| serde_json::json!({
+            "code": code,
+            "file_id": file_id.to_string(),
+            "updated_at_ms": updated_at_ms,
+        })),
+    })
+}
+
+/// Compact projection for Activity. It deliberately uses the same merge rule
+/// as the full status response so a submitted request and its worker do not
+/// appear as two pieces of work on one page and one piece on another.
+pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Value, ApiError> {
+    let now_ms = crate::state::clock_ms();
+    let (requests, jobs) = tokio::try_join!(
+        state.store.analysis_requests(500),
+        state.store.cluster_fragment_index_jobs(500),
+    )?;
+    Ok(summary_value(
+        &requests,
+        &jobs,
+        state.jobs.analysis_queue_enabled().await,
+        now_ms,
+    ))
+}
 
 #[derive(Default, Deserialize)]
 pub struct AnalysisRequestBody {
@@ -46,7 +139,7 @@ pub async fn request(
     }
     if !state.jobs.analysis_queue_enabled().await {
         return Err(ApiError::Conflict(
-            "analysis queue is paused; enable Cluster index cache in Playback settings".to_owned(),
+            "analysis queue is paused; enable it in Analysis settings".to_owned(),
         ));
     }
     if state.store.get_file(file_id).await?.is_none() {
@@ -97,10 +190,14 @@ pub async fn jobs(
         state.store.cluster_fragment_index_jobs(500),
         state.store.analysis_file_labels(500),
     )?;
+    let enabled = state.jobs.analysis_queue_enabled().await;
+    let summary = summary_value(&requests, &jobs, enabled, now_ms);
     Ok(Json(serde_json::json!({
-        "enabled": state.jobs.analysis_queue_enabled().await,
+        "enabled": enabled,
         "node_id": state.node_id,
         "now_ms": now_ms,
+        "history_limit": 500,
+        "summary": summary,
         "requests": requests.into_iter().map(|request| serde_json::json!({
             "request_id": request.request_id,
             "file_id": request.file_id.to_string(),

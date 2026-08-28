@@ -3654,6 +3654,7 @@ mod tests {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
             [
+                "analysis",
                 "deliveries",
                 "offline",
                 "producing",
@@ -3664,11 +3665,38 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            "SQLite gains no clustered-only field"
+            "SQLite gains analysis health but no clustered-only field"
         );
+        assert_eq!(detail["analysis"]["enabled"], false);
+        assert_eq!(detail["analysis"]["total"], 0);
         assert!(
             detail["sessions"].as_array().is_some_and(Vec::is_empty),
             "native sessions retains its existing array shape"
+        );
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token");
+        let (_, viewer_detail) = call(&app, get("/api/v1/activity/detail", Some(viewer))).await;
+        assert!(
+            viewer_detail.get("analysis").is_none(),
+            "operator queue health stays out of ordinary household responses"
         );
     }
 
@@ -7943,6 +7971,16 @@ mod tests {
         );
         assert_eq!(analysis["files"][0]["item_id"], s.ep.to_string());
         assert!(analysis["jobs"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(analysis["history_limit"], 500);
+        assert_eq!(analysis["summary"]["enabled"], true);
+        assert_eq!(analysis["summary"]["queued"], 1);
+        assert_eq!(analysis["summary"]["active"], 1);
+        assert_eq!(analysis["summary"]["total"], 1);
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(activity["analysis"]["enabled"], true);
+        assert_eq!(activity["analysis"]["queued"], 1);
+        assert_eq!(activity["analysis"]["active"], 1);
+        assert_eq!(activity["analysis"]["total"], 1);
         drop(_waiting_viewer);
 
         // Progress on a missing item → 404.
