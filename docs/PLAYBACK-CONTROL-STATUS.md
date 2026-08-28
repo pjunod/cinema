@@ -5,9 +5,11 @@
 **Current work:** first actor-owned prepublication recovery cut on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
 `/private/tmp/plurx-playback-control-clone`. Exact reviewed head
-`763c230cc5de98adc7b07f4635016e5d9db06f2a` was rejected. The current repair
-implementation is frozen in `031065ab3c28195505fa0249700fe964d9ec5c45`;
-this status update will become the final immutable review head.
+`31e7d5e2a0ca3c8db4b8de677d40e6c699c36242` was rejected after the earlier
+`763c230cc5de98adc7b07f4635016e5d9db06f2a` rejection. The current runtime,
+Store, tests, and owner ledger are frozen in
+`52678b96115369650556440ed5b15efdfa5b3896`; this status update will become
+the next immutable review head.
 
 The post-rejection work is assembled in three tracks:
 
@@ -29,7 +31,7 @@ The post-rejection work is assembled in three tracks:
   immediate heavyweight terminal-graph compaction, and bounded compact `410`
   replay followed by fail-closed durable eviction.
 
-The implementation frozen in `031065ab` joins those tracks at their
+The implementation frozen through `52678b96` joins those tracks at their
 shared publication boundary:
 
 - replacement is make-before-break: the provisional successor activates by
@@ -129,7 +131,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the post-`763c230c` candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, and VOD ownership | Freeze and unanimously review one immutable repair head, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the post-review candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Freeze and unanimously review one immutable docs-bearing head, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -193,11 +195,11 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Reconciled for source freeze.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. A direct read-only recount matches all 36 source-symbol rows, 119 module-symbol rows, and 22 structural rows. The ownership test itself has not run. |
+| Static owner inventory | **Reconciled for source freeze.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. A direct read-only recount matches all 36 source-symbol rows, 132 module-symbol rows, and 22 structural rows. The ownership test itself has not run. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Implementation frozen in `031065ab`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Exact head `763c230c` rejected; repaired moving tree approved.** Independent moving-tree reviews closed HTTP/routing/relay, rolling-settlement, VOD, Store binding, durable release/projection, and regression-test findings. They are diagnostic evidence, not approval of the final docs-bearing hash. Commit this update and obtain unanimous review of that exact immutable head before tests. |
+| Operational projection | **Implementation frozen in `52678b96`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, exact takeover activation/replay/bootstrap renewal, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
+| Adversarial implementation review | **Exact heads `763c230c` and `31e7d5e2` rejected; `52678b96` moving tree approved.** The second formal review found activation replay regression, an unreachable Live takeover contract, underbounded first renewal, detachable creation cleanup, expired-route stale End, and missing lifecycle coverage. The repair uses read-only activation replay, separate VOD-ingress/Live-takeover validators, abort/join-before-stop creation ownership, exact lease-boundary End CAS, and a confirmed bootstrap renewal before seed/publish. Three focused moving-tree reviews approve those repairs. They are diagnostic evidence, not approval of the final docs-bearing hash. Commit this update and obtain unanimous review of that exact immutable head before tests. |
 | Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts are the only candidate validation so far. No compile or build command has run. |
 | Unit/focused tests | **Gate closed; none run on the repair candidate.** Per user direction there will be one full unit-suite run, on the unanimously reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
 | Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
@@ -277,10 +279,17 @@ The 60-second terminal-ack retention window introduced by M3c3 is likewise an
 idempotency bound: it retains one immutable accepted reply and triggers no
 playback, replacement, restart, or failure decision. It is not a watchdog.
 
+Cluster takeover adds one 24-second, one-shot ownership lease. The survivor
+must complete an exact bootstrap renewal after adoption and before
+seed/publication; ordinary renewals then return to the 12-second cluster owner
+lease. This fixed lease and its four-second Store deadline can fence serving
+authority, but they never infer a playback stall, select quality, or restart a
+producer. They are cluster split-brain bounds, not playback watchdogs.
+
 ## Remaining delivery order
 
-1. Freeze the complete post-`763c230c` repair and reconciled owner ledger as
-   one immutable head, and obtain unanimous adversarial
+1. Freeze the complete post-`31e7d5e2` repair and reconciled owner ledger as
+   one immutable docs-bearing head, and obtain unanimous adversarial
    approval before tests. Then run the full local unit suite once, make
    cluster/hosted gates green, merge the active prepublication cut, migrate
    published-lifetime and copy recovery, and prove the old server watchdog/
