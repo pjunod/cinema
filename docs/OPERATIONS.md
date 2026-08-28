@@ -337,10 +337,12 @@ replicated planned-outage lease used by ordinary restart preparation. Only one
 node can hold it. A maintenance claimant converts its exact lease into the
 durable maintenance row in one replicated transaction after any leader
 handoff; failure releases the claim, while heartbeat cleanup expires a claim
-left by a crashed caller. Replicated schema guards also reject lifecycle-begin
-writes from a previous-release join, promotion, or removal coordinator while
-the lease exists, so the exclusion remains effective throughout a rolling
-upgrade or rollback.
+left by a crashed caller. That cleanup is a replicated schema trigger, so even
+a previous-release heartbeat ages out an expired claim after a full rollback.
+Replicated schema guards also reject lifecycle-begin writes from a
+previous-release join, promotion, or removal coordinator while the lease
+exists, so the exclusion remains effective throughout a rolling upgrade or
+rollback without permanently blocking later recovery.
 
 The workflow in **Maintenance & leadership** is the authoritative checklist;
 the full-width **Operations** card above it remains the stricter direct-peer

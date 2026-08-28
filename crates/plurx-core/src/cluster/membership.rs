@@ -280,6 +280,14 @@ const PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL: &str =
      BEFORE INSERT ON cluster_node_join_staging \
      WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
      BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks node join'); END";
+const EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_heartbeat_expiry \
+     BEFORE UPDATE OF last_seen_at ON cluster_nodes \
+     WHEN EXISTS (SELECT 1 FROM cluster_operation_leases \
+       WHERE expires_at <= NEW.last_seen_at) \
+     BEGIN \
+       DELETE FROM cluster_operation_leases WHERE expires_at <= NEW.last_seen_at; \
+     END";
 
 /// One additive column, named as well as spelled.
 ///
@@ -445,6 +453,9 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          generation INTEGER NOT NULL) STRICT",
     // Replicated schema guards make the outage lease authoritative even while
     // a previous-release coordinator is still active during upgrade/rollback.
+    // Its ordinary heartbeat shape also clears an expired lease, so a full
+    // rollback cannot leave membership operations permanently blocked.
+    EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL,
     PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL,
     PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL,
     PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL,
@@ -8563,6 +8574,7 @@ mod tests {
                 && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
         }));
         for trigger in [
+            "cluster_operation_lease_heartbeat_expiry",
             "cluster_operation_lease_removal_guard",
             "cluster_operation_lease_promotion_guard",
             "cluster_operation_lease_join_reservation_guard",
@@ -8696,6 +8708,8 @@ mod tests {
                 "CREATE TABLE cluster_operation_leases (\
                    singleton INTEGER PRIMARY KEY, node_id TEXT NOT NULL, \
                    operation TEXT NOT NULL, claim_id TEXT NOT NULL, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_nodes (\
+                   node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL); \
                  CREATE TABLE cluster_node_removal_attempts (\
                    node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
                    PRIMARY KEY(node_id, attempt_id)); \
@@ -8708,6 +8722,7 @@ mod tests {
             )
             .expect("previous-release lifecycle fixture");
         for trigger in [
+            EXPIRE_OPERATION_LEASE_FROM_HEARTBEAT_SQL,
             PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL,
             PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL,
             PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL,
@@ -8720,6 +8735,7 @@ mod tests {
         connection
             .execute_batch(
                 "INSERT INTO cluster_join_tokens VALUES ('old-join', 'issued'); \
+                 INSERT INTO cluster_nodes VALUES ('old-voter', 100); \
                  INSERT INTO cluster_operation_leases VALUES \
                    (1, 'node-a', 'restart', 'claim-a', 1000);",
             )
@@ -8753,9 +8769,23 @@ mod tests {
             )
             .is_err());
 
+        // The preceding release knows nothing about the lease table, but its
+        // ordinary heartbeat update fires the schema-owned expiry cleanup.
         connection
-            .execute("DELETE FROM cluster_operation_leases", [])
-            .expect("release outage lease");
+            .execute(
+                "UPDATE cluster_nodes SET last_seen_at = 1001 \
+                 WHERE node_id = 'old-voter'",
+                [],
+            )
+            .expect("previous-release heartbeat clears expired lease");
+        assert_eq!(
+            connection
+                .query_row("SELECT COUNT(*) FROM cluster_operation_leases", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .expect("expired lease count"),
+            0
+        );
         assert_eq!(
             connection
                 .execute(
