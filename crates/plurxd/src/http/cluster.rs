@@ -213,11 +213,47 @@ pub async fn enter_maintenance(
         .acquire_maintenance_preparation(&node_id, MAINTENANCE_PREPARATION_DURATION)
         .await
         .map_err(api_error)?;
-    state
-        .serving
-        .begin_restart_preparation(MAINTENANCE_PREPARATION_DURATION)
-        .await;
+    let local_expiry = lease.preparation_expiry_unix_ms(MAINTENANCE_PREPARATION_DURATION);
+    if local_expiry.is_none()
+        || !state
+            .serving
+            .begin_restart_preparation_until(local_expiry.unwrap_or_default())
+            .await
+    {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release exhausted maintenance preparation lease");
+        }
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "maintenance_preparation_expired",
+            "maintenance preparation expired while the replicated lease was being committed; run preflight again",
+        ));
+    }
     state.serving.wait_for_restart_admissions().await;
+    let active_sessions = local_owned_media_sessions(&state).await;
+    let drain = state.serving.restart_drain_status(active_sessions).await;
+    if !drain.new_admissions_blocked {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release expired maintenance preparation lease");
+        }
+        state
+            .serving
+            .cancel_restart_preparation(active_sessions)
+            .await;
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "maintenance_preparation_expired",
+            "maintenance preparation expired before pre-existing admissions settled; run preflight again",
+        ));
+    }
     match state.membership.enter_maintenance(&node_id, &lease).await {
         Ok(status) => Ok(Json(status)),
         Err(error) => {
@@ -541,6 +577,9 @@ mod tests {
         let claim = enter
             .find("acquire_maintenance_preparation")
             .expect("replicated planned-outage lease");
+        let bound = enter
+            .find("preparation_expiry_unix_ms")
+            .expect("committed lease bounds local fence");
         let begin = enter
             .find("begin_restart_preparation")
             .expect("restart fence begins");
@@ -550,7 +589,8 @@ mod tests {
         let commit = enter
             .rfind(".enter_maintenance(&node_id, &lease)")
             .expect("durable maintenance commit");
-        assert!(claim < begin && begin < wait && wait < commit);
+        assert!(claim < bound && bound < begin && begin < wait && wait < commit);
+        assert!(enter.contains("if !drain.new_admissions_blocked"));
         assert!(enter.contains("release_cluster_operation_lease(&lease)"));
         assert!(enter.contains("cancel_restart_preparation(active_sessions)"));
         assert!(enter.contains("node_id != state.node_id"));

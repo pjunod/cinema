@@ -167,12 +167,26 @@ impl ServingFence {
         })
     }
 
-    pub(crate) async fn begin_restart_preparation(&self, duration: Duration) {
+    /// Fence new local work only until the already-committed replicated lease
+    /// expires. Returning `false` means consensus consumed the whole lease and
+    /// no local admission was fenced.
+    pub(crate) async fn begin_restart_preparation_until(&self, expires_at_unix_ms: u64) -> bool {
         let mut state = self.restart_drain.state.lock().await;
+        let now_unix_ms = unix_ms();
+        let Some(remaining_ms) = expires_at_unix_ms.checked_sub(now_unix_ms) else {
+            state.expires_at = None;
+            state.expires_at_unix_ms = None;
+            return false;
+        };
+        if remaining_ms == 0 {
+            state.expires_at = None;
+            state.expires_at_unix_ms = None;
+            return false;
+        }
         let now = tokio::time::Instant::now();
-        state.expires_at = Some(now + duration);
-        state.expires_at_unix_ms =
-            Some(unix_ms().saturating_add(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)));
+        state.expires_at = Some(now + Duration::from_millis(remaining_ms));
+        state.expires_at_unix_ms = Some(expires_at_unix_ms);
+        true
     }
 
     /// Wait until every admission that won before the drain flag has either
@@ -295,10 +309,12 @@ impl ServingFence {
 }
 
 fn expire_restart_drain(state: &mut RestartDrainState) {
-    if state
-        .expires_at
-        .is_some_and(|expires_at| expires_at <= tokio::time::Instant::now())
-    {
+    if state.expires_at.is_some_and(|expires_at| {
+        expires_at <= tokio::time::Instant::now()
+            || state
+                .expires_at_unix_ms
+                .is_some_and(|expires_at_unix_ms| expires_at_unix_ms <= unix_ms())
+    }) {
         state.expires_at = None;
         state.expires_at_unix_ms = None;
     }
@@ -370,9 +386,11 @@ mod tests {
             .try_restart_admission()
             .await
             .expect("admit before preparation");
-        fence
-            .begin_restart_preparation(Duration::from_secs(60))
-            .await;
+        assert!(
+            fence
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
         let preparing = fence.restart_drain_status(0).await;
         assert!(preparing.new_admissions_blocked);
         assert_eq!(preparing.admissions_in_flight, 1);
@@ -395,12 +413,28 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn restart_drain_expires_and_accepts_new_work_again() {
         let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        fence
-            .begin_restart_preparation(Duration::from_secs(60))
-            .await;
+        assert!(
+            fence
+                .begin_restart_preparation_until(unix_ms().saturating_add(60_000))
+                .await
+        );
         assert!(fence.try_restart_admission().await.is_none());
         tokio::time::advance(Duration::from_secs(61)).await;
         assert!(fence.try_restart_admission().await.is_some());
         assert!(!fence.restart_drain_status(0).await.new_admissions_blocked);
+    }
+
+    #[tokio::test]
+    async fn restart_drain_advertises_exactly_the_replicated_bound() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let replicated_expiry = unix_ms().saturating_add(60_000);
+        assert!(
+            fence
+                .begin_restart_preparation_until(replicated_expiry)
+                .await
+        );
+        let status = fence.restart_drain_status(0).await;
+        assert_eq!(status.expires_at_unix_ms, Some(replicated_expiry));
+        assert!(!fence.begin_restart_preparation_until(unix_ms()).await);
     }
 }

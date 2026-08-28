@@ -337,7 +337,10 @@ replicated planned-outage lease used by ordinary restart preparation. Only one
 node can hold it. A maintenance claimant converts its exact lease into the
 durable maintenance row in one replicated transaction after any leader
 handoff; failure releases the claim, while heartbeat cleanup expires a claim
-left by a crashed caller.
+left by a crashed caller. Replicated schema guards also reject lifecycle-begin
+writes from a previous-release join, promotion, or removal coordinator while
+the lease exists, so the exclusion remains effective throughout a rolling
+upgrade or rollback.
 
 The workflow in **Maintenance & leadership** is the authoritative checklist;
 the full-width **Operations** card above it remains the stricter direct-peer
@@ -355,11 +358,11 @@ restart verdict and WAL/snapshot evidence surface:
 4. The checklist uses direct process evidence for every local owner in addition
    to replicated media-session leases. It becomes update/reboot ready only after
    the existing work from step 1 has drained.
-4. **Ready to update or reboot** means the target acknowledged the fence, is
+5. **Ready to update or reboot** means the target acknowledged the fence, is
    not leader, is reachable with zero apply lag, and the directly observed
    process owns no local work or admission in flight. You may then update or
    reboot it.
-5. After restart, wait for a fresh heartbeat and zero apply lag, then choose
+6. After restart, wait for a fresh heartbeat and zero apply lag, then choose
    **Resume service on that exact backend**. The target must directly prove its
    current maintenance acknowledgement and empty local workload; another node
    cannot clear the fence while the target is powered off. The delete itself
@@ -1699,7 +1702,10 @@ two safe observations on different nodes cannot turn into two simultaneous
 reboots. Cancellation releases the restart claim; a failed maintenance request
 releases its exact claim; normal heartbeats remove expired claims after a
 caller crash. Reboot commands are shown only while both the replicated claim
-and the target's local drain window are active.
+and the target's local drain window are active. Time spent committing the
+replicated claim consumes the requested preparation window: the local fence
+and its advertised deadline are capped at the committed lease expiry and the
+request is refused if no safe time remains.
 
 **How to read it:** every committed voter must have `PROCESS live`, a ready
 serving fence, one agreed leader and term, zero apply lag, a live owned WAL lock,

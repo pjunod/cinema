@@ -376,7 +376,26 @@ pub(crate) async fn prepare_restart(
         .acquire_restart_preparation(&node_id, duration)
         .await
         .map_err(api_error)?;
-    state.serving.begin_restart_preparation(duration).await;
+    let local_expiry = lease.preparation_expiry_unix_ms(duration);
+    if local_expiry.is_none()
+        || !state
+            .serving
+            .begin_restart_preparation_until(local_expiry.unwrap_or_default())
+            .await
+    {
+        if let Err(error) = state
+            .membership
+            .release_cluster_operation_lease(&lease)
+            .await
+        {
+            tracing::warn!(%error, "failed to release exhausted restart preparation lease");
+        }
+        return Err(ApiError::typed(
+            StatusCode::CONFLICT,
+            "restart_preparation_expired",
+            "restart preparation expired while the replicated lease was being committed; run preflight again",
+        ));
+    }
     state.serving.wait_for_restart_admissions().await;
     let active_sessions = local_owned_media_sessions(&state).await;
     let drain = state.serving.restart_drain_status(active_sessions).await;
@@ -1399,13 +1418,16 @@ mod tests {
         let claim = source
             .find("acquire_restart_preparation")
             .expect("replicated lease acquisition");
+        let bound = source
+            .find("preparation_expiry_unix_ms")
+            .expect("committed lease bounds local fence");
         let local_fence = source
             .find("begin_restart_preparation")
             .expect("local admission fence");
         let commands = source
             .find("restart_preparation_response")
             .expect("reboot-ready response");
-        assert!(claim < local_fence && local_fence < commands);
+        assert!(claim < bound && bound < local_fence && local_fence < commands);
         assert!(source.contains("release_cluster_operation_lease(&lease)"));
         assert!(source.contains("release_restart_preparation(&node_id)"));
     }

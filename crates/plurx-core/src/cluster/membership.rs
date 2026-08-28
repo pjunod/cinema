@@ -255,6 +255,32 @@ const REQUIRE_LEARNER_JOIN_INTENT_SQL: &str =
          WHERE intent.token_hash = OLD.token_hash) \
      BEGIN SELECT RAISE(ABORT, 'learner token requires v2 admission'); END";
 
+// These schema guards are deliberately independent of the current
+// coordinator SQL. A previous-release binary does not know to predicate its
+// lifecycle writes on `cluster_operation_leases`, but every version still
+// submits them through this replicated SQLite state machine.
+const PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_removal_guard \
+     BEFORE INSERT ON cluster_node_removal_attempts \
+     WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks membership removal'); END";
+const PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_promotion_guard \
+     BEFORE INSERT ON cluster_node_promotions \
+     WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks learner promotion'); END";
+const PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_join_reservation_guard \
+     BEFORE UPDATE OF state ON cluster_join_tokens \
+     WHEN NEW.state = 'redeeming' AND OLD.state = 'issued' \
+       AND EXISTS (SELECT 1 FROM cluster_operation_leases) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks node join'); END";
+const PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL: &str =
+    "CREATE TRIGGER IF NOT EXISTS cluster_operation_lease_join_staging_guard \
+     BEFORE INSERT ON cluster_node_join_staging \
+     WHEN EXISTS (SELECT 1 FROM cluster_operation_leases) \
+     BEGIN SELECT RAISE(ABORT, 'planned outage lease blocks node join'); END";
+
 /// One additive column, named as well as spelled.
 ///
 /// The table and column are carried beside the statement because both the
@@ -417,6 +443,12 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          owner_node_id TEXT NOT NULL, \
          leader_term INTEGER NOT NULL, \
          generation INTEGER NOT NULL) STRICT",
+    // Replicated schema guards make the outage lease authoritative even while
+    // a previous-release coordinator is still active during upgrade/rollback.
+    PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL,
+    PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL,
+    PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL,
+    PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL,
     // These triggers make the removed-owner fence authoritative for every
     // client version. A still-running older binary uses lease SQL that does
     // not know about the settings marker, but SQLite evaluates these guards
@@ -1794,6 +1826,31 @@ pub struct ClusterOperationLease {
     node_id: String,
     operation: &'static str,
     claim_id: String,
+    expires_at_unix_ms: i64,
+}
+
+impl ClusterOperationLease {
+    /// Bound a process-local admission fence by both the requested operator
+    /// window and the already-committed replicated expiry. Time spent waiting
+    /// for consensus consumes the lease instead of moving this deadline.
+    #[must_use]
+    pub fn preparation_expiry_unix_ms(&self, requested: Duration) -> Option<u64> {
+        bounded_local_operation_expiry(unix_ms().ok()?, requested, self.expires_at_unix_ms)
+    }
+}
+
+fn bounded_local_operation_expiry(
+    now_unix_ms: i64,
+    requested: Duration,
+    replicated_expiry_unix_ms: i64,
+) -> Option<u64> {
+    let requested_ms = i64::try_from(requested.as_millis()).unwrap_or(i64::MAX);
+    let local_expiry = now_unix_ms
+        .saturating_add(requested_ms)
+        .min(replicated_expiry_unix_ms);
+    (local_expiry > now_unix_ms)
+        .then(|| u64::try_from(local_expiry).ok())
+        .flatten()
 }
 
 /// Fencing proof for one leader-arbitrated source repair.
@@ -4060,6 +4117,7 @@ impl MembershipManager {
             node_id: node_id.to_owned(),
             operation,
             claim_id,
+            expires_at_unix_ms: expires_at,
         })
     }
 
@@ -8504,6 +8562,16 @@ mod tests {
             statement.contains("CREATE TABLE IF NOT EXISTS cluster_operation_leases")
                 && statement.contains("CHECK (operation IN ('restart', 'maintenance'))")
         }));
+        for trigger in [
+            "cluster_operation_lease_removal_guard",
+            "cluster_operation_lease_promotion_guard",
+            "cluster_operation_lease_join_reservation_guard",
+            "cluster_operation_lease_join_staging_guard",
+        ] {
+            assert!(MEMBERSHIP_SCHEMA
+                .iter()
+                .any(|statement| statement.contains(trigger)));
+        }
         let ready = capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY);
         assert!(ready.contains(NODE_MAINTENANCE_CAPABILITY));
         assert!(ready.contains("capability.last_seen_at = active.last_seen_at"));
@@ -8618,6 +8686,113 @@ mod tests {
             .contains("DELETE FROM cluster_operation_leases WHERE expires_at <= $1"));
         drop(connection);
         std::fs::remove_file(path).expect("remove lease fixture");
+    }
+
+    #[test]
+    fn previous_release_lifecycle_writes_cannot_cross_an_outage_lease() {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_operation_leases (\
+                   singleton INTEGER PRIMARY KEY, node_id TEXT NOT NULL, \
+                   operation TEXT NOT NULL, claim_id TEXT NOT NULL, expires_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE cluster_node_promotions (\
+                   node_id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, \
+                   barrier_index INTEGER, started_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_join_tokens (\
+                   token_hash TEXT PRIMARY KEY, state TEXT NOT NULL); \
+                 CREATE TABLE cluster_node_join_staging (node_id TEXT PRIMARY KEY);",
+            )
+            .expect("previous-release lifecycle fixture");
+        for trigger in [
+            PROTECT_OPERATION_LEASE_FROM_REMOVAL_SQL,
+            PROTECT_OPERATION_LEASE_FROM_PROMOTION_SQL,
+            PROTECT_OPERATION_LEASE_FROM_JOIN_RESERVATION_SQL,
+            PROTECT_OPERATION_LEASE_FROM_JOIN_STAGING_SQL,
+        ] {
+            connection
+                .execute_batch(trigger)
+                .expect("install lease guard");
+        }
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_join_tokens VALUES ('old-join', 'issued'); \
+                 INSERT INTO cluster_operation_leases VALUES \
+                   (1, 'node-a', 'restart', 'claim-a', 1000);",
+            )
+            .expect("active outage lease");
+
+        // These are the lifecycle-begin write shapes used by the preceding
+        // release, which has no lease predicate of its own.
+        assert!(connection
+            .execute(
+                "INSERT INTO cluster_node_removal_attempts VALUES ($1, $2)",
+                rusqlite::params!["node-c", "old-removal"],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO cluster_node_promotions VALUES ($1, $2, NULL, $3)",
+                rusqlite::params!["node-c", "old-promotion", 1_i64],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "UPDATE cluster_join_tokens SET state = 'redeeming' \
+                 WHERE token_hash = 'old-join' AND state = 'issued'",
+                [],
+            )
+            .is_err());
+        assert!(connection
+            .execute(
+                "INSERT INTO cluster_node_join_staging VALUES ('old-join')",
+                [],
+            )
+            .is_err());
+
+        connection
+            .execute("DELETE FROM cluster_operation_leases", [])
+            .expect("release outage lease");
+        assert_eq!(
+            connection
+                .execute(
+                    "INSERT INTO cluster_node_removal_attempts VALUES ($1, $2)",
+                    rusqlite::params!["node-c", "old-removal"],
+                )
+                .expect("removal resumes after release"),
+            1
+        );
+        assert_eq!(
+            connection
+                .execute(
+                    "UPDATE cluster_join_tokens SET state = 'redeeming' \
+                     WHERE token_hash = 'old-join' AND state = 'issued'",
+                    [],
+                )
+                .expect("join resumes after release"),
+            1
+        );
+    }
+
+    #[test]
+    fn delayed_acquisition_cannot_extend_the_local_fence_past_the_lease() {
+        let requested = Duration::from_secs(60);
+        let replicated_expiry = 65_000_i64;
+        let after_slow_consensus = 5_800_i64;
+        let local_expiry =
+            bounded_local_operation_expiry(after_slow_consensus, requested, replicated_expiry)
+                .expect("remaining lease time");
+        assert_eq!(
+            local_expiry,
+            u64::try_from(replicated_expiry).expect("positive fixture expiry")
+        );
+        assert!(
+            bounded_local_operation_expiry(replicated_expiry, requested, replicated_expiry)
+                .is_none()
+        );
     }
 
     #[test]
