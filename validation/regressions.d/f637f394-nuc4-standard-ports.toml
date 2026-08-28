@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f637f394"]
+points = ["operations.packaging"]
+checks = ["operations-contract"]
+reason = "The retained deploy-wrapper contract rejects the obsolete nuc4 Plex port exception, so future rollouts cannot silently bless a host-specific published port after the fleet inventory has returned to the shared Plurx defaults."
