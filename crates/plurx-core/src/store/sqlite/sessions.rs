@@ -1588,11 +1588,11 @@ impl MediaSessionStore for SqliteStore {
                     route_from_row,
                 )
                 .optional()?;
-            let Some(route) = route.as_mut() else {
+            let Some(current_route) = route.as_mut() else {
                 tx.commit()?;
                 return Ok(None);
             };
-            if route.state != "ended" {
+            if current_route.state != "ended" {
                 let changed = tx.execute(
                     "UPDATE media_sessions SET state = 'ended', terminal_reason = ?2, lease_expires_at_ms = ?1,
                             publication_ready_at_ms = ?7, updated_at_ms = ?1
@@ -1614,11 +1614,11 @@ impl MediaSessionStore for SqliteStore {
                     tx.commit()?;
                     return Ok(None);
                 }
-                route.state = "ended".to_owned();
-                route.terminal_reason = Some(end.terminal_reason.clone());
-                route.lease_expires_at_ms = end.now_ms;
-                route.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
-                route.updated_at_ms = end.now_ms;
+                current_route.state = "ended".to_owned();
+                current_route.terminal_reason = Some(end.terminal_reason.clone());
+                current_route.lease_expires_at_ms = end.now_ms;
+                current_route.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
+                current_route.updated_at_ms = end.now_ms;
             }
             let lease_resource = format!("session:{}", end.incarnation_id);
             tx.execute(
@@ -1638,7 +1638,11 @@ impl MediaSessionStore for SqliteStore {
             tx.execute(
                 "DELETE FROM media_playback_pointers
                   WHERE user_id = ?1 AND playback_id = ?2 AND current_incarnation_id = ?3",
-                params![route.user_id, route.playback_id, end.incarnation_id],
+                params![
+                    current_route.user_id,
+                    current_route.playback_id,
+                    end.incarnation_id
+                ],
             )?;
             tx.execute(
                 "DELETE FROM cache_consumer_pins

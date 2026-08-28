@@ -1144,7 +1144,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 )
                 .await?;
         }
-        Ok(route_by_incarnation(self, incarnation_id)
+        Ok(route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {
                 route.owner_node_id == owner_node_id
@@ -1190,7 +1190,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             )
             .await?;
-        Ok(route_by_incarnation(self, incarnation_id)
+        Ok(route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {
                 route.owner_node_id == owner_node_id
@@ -1235,7 +1235,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             )
             .await?;
-        Ok(route_by_incarnation(self, incarnation_id)
+        Ok(route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {
                 route.owner_node_id == owner_node_id
@@ -1310,7 +1310,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 )
                 .await?;
         }
-        Ok(route_by_incarnation(self, incarnation_id)
+        Ok(route_by(self, "incarnation_id", incarnation_id)
             .await?
             .filter(|route| {
                 route.owner_node_id == owner_node_id
@@ -2237,6 +2237,11 @@ impl MediaSessionStore for HiqliteAuthStore {
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        MEDIA_SESSIONS_SCHEMA, MEDIA_SESSIONS_V10_SCHEMA,
+        MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION, MEDIA_SESSION_TERMINAL_REASON_MIGRATION,
+    };
+
     const SOURCE: &str = include_str!("hiqlite_sessions.rs");
 
     fn method_source(method: &str) -> &'static str {
