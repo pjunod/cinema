@@ -3569,7 +3569,6 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                 if observation_confirmed_at.elapsed() < repair_lease {
                     bail!("artwork repair successor did not wait one complete monotonic lease");
                 }
-                break observed;
             }
             Response::Metrics { .. } => {
                 // A new term invalidates the receiver-local observation. The
@@ -3578,31 +3577,54 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
             response => bail!("unexpected post-wait successor metrics response: {response:?}"),
         }
+
+        let Some((before_repeat_fence, before_repeat_index)) =
+            try_read_artwork_repair_observation(&mut cluster, observed.0, repair_item).await?
+        else {
+            continue;
+        };
+        let repeat = cluster
+            .request(
+                observed.0,
+                Request::ObserveArtworkRepair {
+                    item_id: repair_item,
+                    inject_leader_change: false,
+                },
+            )
+            .await?;
+        if !repeatable_artwork_observation_succeeded(repeat)? {
+            // A loaded runner can spend the one-second quorum-freshness
+            // window in the read-only evidence requests above. Re-enter the
+            // bounded successor proof and require another complete local
+            // lease; never advance to the generation CAS on this stale view.
+            continue;
+        }
+        let Some((after_repeat_fence, after_repeat_index)) =
+            try_read_artwork_repair_observation(&mut cluster, observed.0, repair_item).await?
+        else {
+            continue;
+        };
+        if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
+            bail!(
+                "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
+                 {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
+                 {after_repeat_index:?}"
+            );
+        }
+        match cluster.request(observed.0, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == observed.0 && current_term == observed.1 => break observed,
+            Response::Metrics { .. } => {
+                // The repeat was read-only, so retrying the stable-term proof
+                // cannot duplicate a mutation or weaken the lease boundary.
+            }
+            response => bail!("unexpected repeat-observation metrics response: {response:?}"),
+        }
     };
-    let (before_repeat_fence, before_repeat_index) =
-        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
-    match cluster
-        .request(
-            handoff,
-            Request::ObserveArtworkRepair {
-                item_id: repair_item,
-                inject_leader_change: false,
-            },
-        )
-        .await?
-    {
-        Response::Flag { value: true } => {}
-        response => bail!("mature repair observation was not repeatable: {response:?}"),
-    }
-    let (after_repeat_fence, after_repeat_index) =
-        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
-    if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
-        bail!(
-            "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
-             {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
-             {after_repeat_index:?}"
-        );
-    }
     let mut handoff_winners = Vec::new();
     let mut new_fence = None;
     for node_id in 1..=3 {
@@ -4535,18 +4557,42 @@ async fn read_artwork_repair_observation(
     node_id: u64,
     item_id: i64,
 ) -> Result<(Option<ArtworkRepairFence>, Option<u64>)> {
+    try_read_artwork_repair_observation(cluster, node_id, item_id)
+        .await?
+        .context("repair observation changed leader during a required evidence read")
+}
+
+/// Read both pieces of durable repeat evidence, preserving a typed routing
+/// transition so the caller may retry only this non-mutating operation.
+async fn try_read_artwork_repair_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<Option<(Option<ArtworkRepairFence>, Option<u64>)>> {
     let fence = match cluster
         .request(node_id, Request::ReadArtworkRepairFence { item_id })
         .await?
     {
         Response::ArtworkRepairFence { fence } => fence,
+        Response::MembershipLeaderChange { .. } => return Ok(None),
         response => bail!("unexpected repair fence read response: {response:?}"),
     };
     let applied_index = match cluster.request(node_id, Request::Metrics).await? {
         Response::Metrics { applied_index, .. } => applied_index,
         response => bail!("unexpected repair observation metrics: {response:?}"),
     };
-    Ok((fence, applied_index))
+    Ok(Some((fence, applied_index)))
+}
+
+/// Classify the read-only repeat probe. A stale quorum view or typed routing
+/// transition is safe to retry because this request cannot reach the repair
+/// generation CAS; every other response is a semantic harness failure.
+fn repeatable_artwork_observation_succeeded(response: Response) -> Result<bool> {
+    match response {
+        Response::Flag { value: true } => Ok(true),
+        Response::Flag { value: false } | Response::MembershipLeaderChange { .. } => Ok(false),
+        response => bail!("mature repair observation was not repeatable: {response:?}"),
+    }
 }
 
 /// A potentially mutating repair claim is sent exactly once. In particular,
@@ -6315,6 +6361,9 @@ async fn run_failure_case(
     let survivor = (1..=3)
         .find(|node_id| *node_id != target_id)
         .context("choose survivor")?;
+    println!(
+        "CLUSTER_FAILURE_START target={failure_name} initial_leader={leader} failed_node={target_id} request_target={survivor}"
+    );
     let mut loss_started = None;
     let mut recovery_millis = None;
     let mut request_errors = 0_u64;
@@ -6354,8 +6403,9 @@ async fn run_failure_case(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     if request_errors != 0 {
+        let recovered_leader = cluster.leader().await?;
         bail!(
-            "{failure_name} loss produced {request_errors} failed requests in the fixed 64-write workload"
+            "{failure_name} loss produced {request_errors} failed requests in the fixed 64-write workload; initial leader {leader}, failed node {target_id}, request target {survivor}, recovered leader {recovered_leader}"
         );
     }
     let recovery_millis = recovery_millis.context("post-loss workload never recovered")?;
@@ -9122,13 +9172,22 @@ async fn handle_request(
             }
         }
         Request::ReadArtworkRepairFence { item_id } => {
-            let mut rows = client
+            let rows = client
                 .query_consistent_map::<HarnessArtworkRepairRow, _>(
                     "SELECT owner_node_id, leader_term, generation \
                      FROM cluster_artwork_repairs WHERE item_id = $1",
                     params!(item_id),
                 )
-                .await?;
+                .await;
+            let mut rows = match rows {
+                Ok(rows) => rows,
+                Err(error) if error.is_forward_to_leader().is_some() => {
+                    return Ok(Response::MembershipLeaderChange {
+                        message: error.to_string(),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
             if rows.len() > 1 {
                 bail!("artwork repair primary key returned multiple rows");
             }
@@ -12104,6 +12163,43 @@ mod tests {
             )),
             Response::MembershipError { code, .. } if code == "membership_internal"
         ));
+    }
+
+    #[test]
+    fn read_only_repair_repeat_retries_only_stale_or_rerouted_observations() {
+        assert!(
+            repeatable_artwork_observation_succeeded(Response::Flag { value: true })
+                .expect("a successful read-only repeat is classified")
+        );
+        assert!(
+            !repeatable_artwork_observation_succeeded(Response::Flag { value: false })
+                .expect("a stale read-only repeat is classified")
+        );
+        assert!(
+            !repeatable_artwork_observation_succeeded(Response::MembershipLeaderChange {
+                message: "election".to_owned(),
+            })
+            .expect("a rerouted read-only repeat is classified")
+        );
+        assert!(repeatable_artwork_observation_succeeded(Response::Ok).is_err());
+    }
+
+    #[test]
+    fn read_only_repair_evidence_preserves_forward_to_leader_as_typed() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .rsplit_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        let handler = production
+            .rsplit_once("Request::ReadArtworkRepairFence { item_id } => {")
+            .expect("repair evidence request handler")
+            .1
+            .split_once("Request::ClaimArtworkRepair")
+            .expect("next request handler")
+            .0;
+        assert!(handler.contains("error.is_forward_to_leader().is_some()"));
+        assert!(handler.contains("Response::MembershipLeaderChange"));
     }
 
     #[test]

@@ -1323,6 +1323,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # cycle happened to be showing.
         page.wait_for_timeout(settle_ms)
         if route.get("player"):
+            # The request inventory has already observed one complete activity
+            # period above. Player startup includes a real media request and
+            # decoder initialization, whose duration varies with runner load;
+            # leaving the global interval live here makes that unrelated work
+            # decide whether the golden records two or three activity reads.
+            # Stop it at the named boundary and wait out any in-flight tick
+            # before opening the player.
+            pause_activity_polling(page, name, args.timeout)
             open_player(page, args.timeout)
 
         if args.self_test_fail and name == args.self_test_route:

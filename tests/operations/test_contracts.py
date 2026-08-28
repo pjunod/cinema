@@ -52,6 +52,13 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('if name == "analysis":', script)
         self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
         self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
+        player_open = script.index(
+            'if route.get("player"):', script.index("def capture_route")
+        )
+        self.assertLess(
+            script.index("pause_activity_polling(page, name, args.timeout)", player_open),
+            script.index("open_player(page, args.timeout)", player_open),
+        )
         self.assertLess(
             script.index('[data-phase="settled"]'),
             script.index("resume_activity_polling(page)", script.index("def capture_route")),
