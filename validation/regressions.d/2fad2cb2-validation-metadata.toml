@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["2fad2cb2"]
+reason = "This commit only records the retained cluster handoff and bounded retry evidence in regressions.d; it does not change runtime or validation behavior."
+ignore = true
