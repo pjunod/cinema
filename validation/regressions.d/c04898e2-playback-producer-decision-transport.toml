@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["c04898e2"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The rolling actor now retains one immutable typed producer-decision slot and exposes non-consuming sequenced polling to one capacity-one, move-only passive executor inbox registered before producer attempt admission. Notify provides the retained decision wake, actor-side channel closure provides lifecycle wakeup, and the executor holds only weak command-transport ownership, so neither actor nor executor can keep the other's mailbox or session alive. Terminal transition settles the slot; status distinguishes passive observation from a future DecisionApplied acknowledgement. Production emits no decision or recovery action, and every legacy recovery owner remains active in this behavior-neutral transport slice."

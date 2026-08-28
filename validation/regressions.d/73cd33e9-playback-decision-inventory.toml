@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["73cd33e9", "f447aa1d"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "Focused validation repairs update whole-module normalized counts for the reviewed spawn, timeout, barrier-wait, and method-shape delta introduced by the passive executor tests. Exhaustive future decision reasons remain intentionally allowed before production emission constructs every variant. Commit 9d100a04 separately removes a misplaced entrypoint row from the transcode-only entrypoint table."
