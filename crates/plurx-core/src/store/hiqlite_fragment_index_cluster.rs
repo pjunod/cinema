@@ -4,11 +4,14 @@ use async_trait::async_trait;
 use hiqlite::macros::params;
 use hiqlite::Row;
 
+use super::fragment_index_cluster::ANALYSIS_CANONICAL_CTE;
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::{
-    cluster_fragment_index_key, AnalysisFileLabel, AnalysisRequest, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
-    FragmentIndexSourceObservation, NewAnalysisRequest, NewClusterFragmentIndexJob,
+    cluster_fragment_index_key, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob,
 };
 use crate::error::StoreError;
 
@@ -259,6 +262,93 @@ impl From<&mut Row<'_>> for LabelRow {
             item_id: row.get("item_id"),
             title: row.get("title"),
         })
+    }
+}
+
+const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
+    component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
+    owner_node_id, lease_expires_ms, attempts, not_before_ms, request_error_code,
+    job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
+
+struct HistoryRow(AnalysisHistoryRow, AnalysisHistoryCursor, i64);
+
+impl From<&mut Row<'_>> for HistoryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let history = AnalysisHistoryRow {
+            row_key: row.get("row_key"),
+            request_id: row.get("request_id"),
+            job_id: row.get("job_id"),
+            file_id: row.get("file_id"),
+            item_id: row.get("item_id"),
+            title: row.get("title"),
+            component: row.get("component"),
+            force_rebuild: row.get::<i64>("force_rebuild") != 0,
+            target_node_id: row.get("target_node_id"),
+            request_state: row.get("request_state"),
+            job_state: row.get("job_state"),
+            state: row.get("state"),
+            disposition: row.get("disposition"),
+            owner_node_id: row.get("owner_node_id"),
+            lease_expires_ms: row.get("lease_expires_ms"),
+            attempts: row.get("attempts"),
+            not_before_ms: row.get("not_before_ms"),
+            request_error_code: row.get("request_error_code"),
+            job_error_code: row.get("job_error_code"),
+            created_at_ms: row.get("created_at_ms"),
+            updated_at_ms: row.get("updated_at_ms"),
+            pipeline_version: row.get("pipeline_version"),
+            source_size: row.get("source_size"),
+        };
+        let cursor = AnalysisHistoryCursor {
+            sort_rank: row.get("sort_rank"),
+            updated_at_ms: history.updated_at_ms,
+            row_key: history.row_key.clone(),
+        };
+        Self(history, cursor, row.get("filtered_total"))
+    }
+}
+
+struct StatusSummaryRow(AnalysisStatusSummary);
+
+impl From<&mut Row<'_>> for StatusSummaryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(AnalysisStatusSummary {
+            total: row.get("total"),
+            working: row.get("working"),
+            queued: row.get("queued"),
+            running: row.get("running"),
+            submitted: row.get("submitted"),
+            attention: row.get("attention"),
+            expected: row.get("expected"),
+            ready: row.get("ready"),
+            latest_error_code: row.get("latest_error_code"),
+            latest_error_file_id: row.get("latest_error_file_id"),
+            latest_error_updated_at_ms: row.get("latest_error_updated_at_ms"),
+        })
+    }
+}
+
+fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
+    match filter {
+        AnalysisHistoryFilter::All => 0,
+        AnalysisHistoryFilter::Working => 1,
+        AnalysisHistoryFilter::Attention => 2,
+        AnalysisHistoryFilter::Ready => 3,
+        AnalysisHistoryFilter::Expected => 4,
+    }
+}
+
+fn analysis_search_pattern(search: &str) -> String {
+    let escaped = search
+        .trim()
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    if escaped.is_empty() {
+        String::new()
+    } else {
+        format!("%{escaped}%")
     }
 }
 
@@ -786,6 +876,100 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .into_iter()
             .map(|row| row.0)
             .collect())
+    }
+
+    async fn analysis_history(
+        &self,
+        query: &AnalysisHistoryQuery,
+    ) -> Result<AnalysisHistoryPage, StoreError> {
+        let limit = query.limit.clamp(10, 100);
+        let filter = analysis_filter_code(query.filter);
+        let search = analysis_search_pattern(&query.search);
+        let cursor = query.cursor.clone().unwrap_or(AnalysisHistoryCursor {
+            sort_rank: -1,
+            updated_at_ms: 0,
+            row_key: String::new(),
+        });
+        let sql = format!(
+            "{ANALYSIS_CANONICAL_CTE}, matching AS (
+               SELECT * FROM classified
+                WHERE ($1 = 0
+                  OR ($1 = 1 AND disposition IN ('working', 'automatic'))
+                  OR ($1 = 2 AND disposition = 'attention')
+                  OR ($1 = 3 AND disposition = 'ready')
+                  OR ($1 = 4 AND disposition IN ('expected', 'unsupported')))
+                  AND ($2 = '' OR LOWER(title) LIKE $2 ESCAPE '\\'
+                    OR CAST(file_id AS TEXT) LIKE $2 ESCAPE '\\'
+                    OR LOWER(row_key) LIKE $2 ESCAPE '\\'
+                    OR LOWER(owner_node_id) LIKE $2 ESCAPE '\\'
+                    OR LOWER(target_node_id) LIKE $2 ESCAPE '\\'
+                    OR LOWER(request_error_code) LIKE $2 ESCAPE '\\'
+                    OR LOWER(job_error_code) LIKE $2 ESCAPE '\\'
+                    OR LOWER(state) LIKE $2 ESCAPE '\\')
+             )
+             SELECT {HISTORY_COLS}, sort_rank,
+                    (SELECT COUNT(*) FROM matching) AS filtered_total
+               FROM matching
+              WHERE $3 < 0 OR sort_rank > $3
+                 OR (sort_rank = $3 AND updated_at_ms < $4)
+                 OR (sort_rank = $3 AND updated_at_ms = $4 AND row_key > $5)
+              ORDER BY sort_rank, updated_at_ms DESC, row_key
+              LIMIT $6"
+        );
+        let mut rows = self
+            .client()
+            .query_consistent_map::<HistoryRow, _>(
+                sql,
+                params!(
+                    filter,
+                    search,
+                    cursor.sort_rank,
+                    cursor.updated_at_ms,
+                    cursor.row_key,
+                    limit + 1
+                ),
+            )
+            .await?;
+        let filtered_total = rows.first().map_or(0, |row| row.2);
+        let has_more = rows.len() > limit as usize;
+        if has_more {
+            rows.pop();
+        }
+        let next_cursor = has_more.then(|| rows.last().expect("non-empty history page").1.clone());
+        Ok(AnalysisHistoryPage {
+            rows: rows.into_iter().map(|row| row.0).collect(),
+            filtered_total,
+            next_cursor,
+        })
+    }
+
+    async fn analysis_status_summary(&self) -> Result<AnalysisStatusSummary, StoreError> {
+        let sql = format!(
+            "{ANALYSIS_CANONICAL_CTE}
+             SELECT COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN disposition IN ('working', 'automatic') THEN 1 ELSE 0 END), 0) AS working,
+                    COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
+                    COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0) AS running,
+                    COALESCE(SUM(CASE WHEN state = 'submitted' THEN 1 ELSE 0 END), 0) AS submitted,
+                    COALESCE(SUM(CASE WHEN disposition = 'attention' THEN 1 ELSE 0 END), 0) AS attention,
+                    COALESCE(SUM(CASE WHEN disposition IN ('expected', 'unsupported') THEN 1 ELSE 0 END), 0) AS expected,
+                    COALESCE(SUM(CASE WHEN disposition = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
+                    COALESCE((SELECT COALESCE(NULLIF(job_error_code, ''), request_error_code)
+                      FROM classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), '') AS latest_error_code,
+                    COALESCE((SELECT file_id FROM classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_file_id,
+                    COALESCE((SELECT updated_at_ms FROM classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_updated_at_ms
+               FROM classified"
+        );
+        self.client()
+            .query_consistent_map::<StatusSummaryRow, _>(sql, params!())
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0)
+            .ok_or_else(|| StoreError::Task("analysis summary returned no row".to_owned()))
     }
 
     async fn analysis_file_labels(&self, limit: i64) -> Result<Vec<AnalysisFileLabel>, StoreError> {

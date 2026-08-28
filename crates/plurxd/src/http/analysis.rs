@@ -1,8 +1,6 @@
 //! Admin control and diagnostics for the durable content-analysis queue.
 
-use std::collections::{HashMap, HashSet};
-
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use serde::{Deserialize, Serialize};
@@ -12,75 +10,28 @@ use super::extract::AdminUser;
 use crate::state::AppState;
 
 fn summary_value(
-    requests: &[plurx_core::store::AnalysisRequest],
-    jobs: &[plurx_core::store::ClusterFragmentIndexJob],
+    summary: plurx_core::store::AnalysisStatusSummary,
     enabled: bool,
     now_ms: i64,
 ) -> serde_json::Value {
-    let by_key: HashMap<&str, &plurx_core::store::ClusterFragmentIndexJob> = jobs
-        .iter()
-        .map(|job| (job.cache_key.as_str(), job))
-        .collect();
-    let mut represented = HashSet::new();
-    let mut counts: HashMap<String, u64> = HashMap::new();
-    let mut latest_error: Option<(String, i64, i64)> = None;
-    let mut observe = |state: &str, file_id: i64, error: &str, updated_at_ms: i64| {
-        *counts.entry(state.to_owned()).or_default() += 1;
-        if !error.is_empty()
-            && latest_error
-                .as_ref()
-                .is_none_or(|(_, _, previous)| updated_at_ms > *previous)
-        {
-            latest_error = Some((error.to_owned(), file_id, updated_at_ms));
-        }
-    };
-    for request in requests {
-        let job = (!request.result_cache_key.is_empty())
-            .then(|| by_key.get(request.result_cache_key.as_str()).copied())
-            .flatten();
-        if let Some(job) = job {
-            represented.insert(job.cache_key.as_str());
-            observe(
-                &job.state,
-                job.file_id,
-                &job.last_error_code,
-                job.updated_at_ms,
-            );
-        } else {
-            observe(
-                &request.state,
-                request.file_id,
-                &request.last_error_code,
-                request.updated_at_ms,
-            );
-        }
-    }
-    for job in jobs {
-        if !represented.contains(job.cache_key.as_str()) {
-            observe(
-                &job.state,
-                job.file_id,
-                &job.last_error_code,
-                job.updated_at_ms,
-            );
-        }
-    }
-    let count = |state: &str| counts.get(state).copied().unwrap_or_default();
     serde_json::json!({
+        "available": true,
         "enabled": enabled,
-        "total": counts.values().sum::<u64>(),
-        "active": count("queued") + count("running") + count("submitted"),
-        "queued": count("queued"),
-        "running": count("running"),
-        "submitted": count("submitted"),
-        "failed": count("failed"),
-        "cancelled": count("cancelled"),
-        "ready": count("ready"),
+        "total": summary.total,
+        "active": summary.working,
+        "working": summary.working,
+        "queued": summary.queued,
+        "running": summary.running,
+        "submitted": summary.submitted,
+        "attention": summary.attention,
+        "failed": summary.attention,
+        "expected": summary.expected,
+        "ready": summary.ready,
         "now_ms": now_ms,
-        "latest_error": latest_error.map(|(code, file_id, updated_at_ms)| serde_json::json!({
-            "code": code,
-            "file_id": file_id.to_string(),
-            "updated_at_ms": updated_at_ms,
+        "latest_error": (!summary.latest_error_code.is_empty()).then(|| serde_json::json!({
+            "code": summary.latest_error_code,
+            "file_id": summary.latest_error_file_id.to_string(),
+            "updated_at_ms": summary.latest_error_updated_at_ms,
         })),
     })
 }
@@ -90,13 +41,9 @@ fn summary_value(
 /// appear as two pieces of work on one page and one piece on another.
 pub(crate) async fn activity_summary(state: &AppState) -> Result<serde_json::Value, ApiError> {
     let now_ms = crate::state::clock_ms();
-    let (requests, jobs) = tokio::try_join!(
-        state.store.analysis_requests(500),
-        state.store.cluster_fragment_index_jobs(500),
-    )?;
+    let summary = state.store.analysis_status_summary().await?;
     Ok(summary_value(
-        &requests,
-        &jobs,
+        summary,
         state.jobs.analysis_queue_enabled().await,
         now_ms,
     ))
@@ -179,60 +126,123 @@ pub async fn request(
     ))
 }
 
-/// GET /api/v1/analysis/jobs — one bounded, admin-only status snapshot.
-pub async fn jobs(
+#[derive(Default, Deserialize)]
+pub struct AnalysisHistoryParams {
+    limit: Option<i64>,
+    cursor: Option<String>,
+    filter: Option<String>,
+    q: Option<String>,
+}
+
+fn decode_cursor(value: &str) -> Result<plurx_core::store::AnalysisHistoryCursor, ApiError> {
+    let mut parts = value.splitn(3, '|');
+    let sort_rank = parts
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        .filter(|rank| (0..=6).contains(rank));
+    let updated_at_ms = parts
+        .next()
+        .and_then(|part| part.parse::<i64>().ok())
+        .filter(|value| *value >= 0);
+    let row_key = parts
+        .next()
+        .filter(|key| key.len() <= 160 && (key.starts_with("request:") || key.starts_with("job:")));
+    match (sort_rank, updated_at_ms, row_key) {
+        (Some(sort_rank), Some(updated_at_ms), Some(row_key)) => {
+            Ok(plurx_core::store::AnalysisHistoryCursor {
+                sort_rank,
+                updated_at_ms,
+                row_key: row_key.to_owned(),
+            })
+        }
+        _ => Err(ApiError::BadRequest("invalid analysis cursor".to_owned())),
+    }
+}
+
+fn encode_cursor(cursor: plurx_core::store::AnalysisHistoryCursor) -> String {
+    format!(
+        "{}|{}|{}",
+        cursor.sort_rank, cursor.updated_at_ms, cursor.row_key
+    )
+}
+
+fn history_filter(
+    value: Option<&str>,
+) -> Result<plurx_core::store::AnalysisHistoryFilter, ApiError> {
+    match value.unwrap_or("all") {
+        "all" => Ok(plurx_core::store::AnalysisHistoryFilter::All),
+        "working" => Ok(plurx_core::store::AnalysisHistoryFilter::Working),
+        "attention" => Ok(plurx_core::store::AnalysisHistoryFilter::Attention),
+        "ready" => Ok(plurx_core::store::AnalysisHistoryFilter::Ready),
+        "expected" => Ok(plurx_core::store::AnalysisHistoryFilter::Expected),
+        _ => Err(ApiError::BadRequest("invalid analysis filter".to_owned())),
+    }
+}
+
+fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::Value {
+    serde_json::json!({
+        "row_key": row.row_key,
+        "request_id": row.request_id,
+        "job_id": row.job_id,
+        "file_id": row.file_id.to_string(),
+        "item_id": (row.item_id > 0).then(|| row.item_id.to_string()),
+        "title": row.title,
+        "component": row.component,
+        "force_rebuild": row.force_rebuild,
+        "target_node_id": row.target_node_id,
+        "request_state": row.request_state,
+        "job_state": row.job_state,
+        "state": row.state,
+        "disposition": row.disposition,
+        "owner_node_id": row.owner_node_id,
+        "lease_expires_ms": row.lease_expires_ms,
+        "attempts": row.attempts,
+        "not_before_ms": row.not_before_ms,
+        "request_error_code": row.request_error_code,
+        "job_error_code": row.job_error_code,
+        "created_at_ms": row.created_at_ms,
+        "updated_at_ms": row.updated_at_ms,
+        "pipeline_version": row.pipeline_version,
+        "source_size": row.source_size,
+    })
+}
+
+/// GET /api/v1/analysis/summary — compact, admin-only polling projection.
+pub async fn summary(
     _admin: AdminUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    Ok(Json(activity_summary(&state).await?))
+}
+
+/// GET /api/v1/analysis/jobs — stable, server-filtered keyset history page.
+pub async fn jobs(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Query(params): Query<AnalysisHistoryParams>,
+) -> Result<Json<serde_json::Value>, ApiError> {
     let now_ms = crate::state::clock_ms();
-    let (requests, jobs, files) = tokio::try_join!(
-        state.store.analysis_requests(500),
-        state.store.cluster_fragment_index_jobs(500),
-        state.store.analysis_file_labels(500),
-    )?;
+    let search = params.q.unwrap_or_default();
+    if search.chars().count() > 120 {
+        return Err(ApiError::BadRequest(
+            "analysis search is limited to 120 characters".to_owned(),
+        ));
+    }
+    let query = plurx_core::store::AnalysisHistoryQuery {
+        limit: params.limit.unwrap_or(25),
+        cursor: params.cursor.as_deref().map(decode_cursor).transpose()?,
+        filter: history_filter(params.filter.as_deref())?,
+        search,
+    };
+    let page = state.store.analysis_history(&query).await?;
     let enabled = state.jobs.analysis_queue_enabled().await;
-    let summary = summary_value(&requests, &jobs, enabled, now_ms);
     Ok(Json(serde_json::json!({
         "enabled": enabled,
         "node_id": state.node_id,
         "now_ms": now_ms,
-        "history_limit": 500,
-        "summary": summary,
-        "requests": requests.into_iter().map(|request| serde_json::json!({
-            "request_id": request.request_id,
-            "file_id": request.file_id.to_string(),
-            "component": request.component,
-            "force_rebuild": request.force_rebuild,
-            "target_node_id": request.target_node_id,
-            "state": request.state,
-            "owner_node_id": request.owner_node_id,
-            "lease_expires_ms": request.lease_expires_ms,
-            "attempts": request.attempts,
-            "not_before_ms": request.not_before_ms,
-            "result_cache_key": request.result_cache_key,
-            "last_error_code": request.last_error_code,
-            "created_at_ms": request.created_at_ms,
-            "updated_at_ms": request.updated_at_ms,
-        })).collect::<Vec<_>>(),
-        "files": files.into_iter().map(|file| serde_json::json!({
-            "file_id": file.file_id.to_string(),
-            "item_id": file.item_id.to_string(),
-            "title": file.title,
-        })).collect::<Vec<_>>(),
-        "jobs": jobs.into_iter().map(|job| serde_json::json!({
-            "job_id": job.cache_key,
-            "file_id": job.file_id.to_string(),
-            "component": "fragment_index",
-            "state": job.state,
-            "owner_node_id": job.owner_node_id,
-            "lease_expires_ms": job.lease_expires_ms,
-            "attempts": job.attempts,
-            "not_before_ms": job.not_before_ms,
-            "created_at_ms": job.created_at_ms,
-            "updated_at_ms": job.updated_at_ms,
-            "last_error_code": job.last_error_code,
-            "pipeline_version": job.pipeline_sha256.get(..12).unwrap_or(&job.pipeline_sha256),
-            "source_size": job.source_size,
-        })).collect::<Vec<_>>(),
+        "page_size": query.limit.clamp(10, 100),
+        "filtered_total": page.filtered_total,
+        "next_cursor": page.next_cursor.map(encode_cursor),
+        "rows": page.rows.into_iter().map(history_row_value).collect::<Vec<_>>(),
     })))
 }

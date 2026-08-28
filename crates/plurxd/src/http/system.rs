@@ -2859,7 +2859,16 @@ pub async fn activity_detail(
     // This is folded into the existing page read rather than making the web
     // client add a second polling loop beside /activity/detail.
     if user.0.is_admin {
-        response["analysis"] = super::analysis::activity_summary(&state).await?;
+        response["analysis"] = match super::analysis::activity_summary(&state).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                tracing::warn!(?error, "analysis summary unavailable for activity");
+                serde_json::json!({
+                    "available": false,
+                    "enabled": state.jobs.analysis_queue_enabled().await,
+                })
+            }
+        };
     }
     Ok(Json(response))
 }

@@ -3,10 +3,13 @@ use rusqlite::{params, OptionalExtension, Row};
 
 use super::SqliteStore;
 use crate::error::StoreError;
+use crate::store::fragment_index_cluster::ANALYSIS_CANONICAL_CTE;
 use crate::store::{
-    cluster_fragment_index_key, AnalysisFileLabel, AnalysisRequest, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
-    FragmentIndexSourceObservation, NewAnalysisRequest, NewClusterFragmentIndexJob,
+    cluster_fragment_index_key, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob,
 };
 
 const MAX_ATTEMPTS: i64 = 5;
@@ -49,6 +52,11 @@ const REQUEST_COLS: &str = "request_id, file_id, source_size, source_mtime, comp
     COALESCE(result_cache_key, ''), COALESCE(last_error_code, ''),
     created_at_ms, updated_at_ms";
 
+const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
+    component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
+    owner_node_id, lease_expires_ms, attempts, not_before_ms, request_error_code,
+    job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
+
 fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
     Ok(AnalysisRequest {
         request_id: row.get(0)?,
@@ -69,6 +77,66 @@ fn request_from_row(row: &Row<'_>) -> rusqlite::Result<AnalysisRequest> {
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
     })
+}
+
+fn history_from_row(
+    row: &Row<'_>,
+) -> rusqlite::Result<(AnalysisHistoryRow, AnalysisHistoryCursor, i64)> {
+    let history = AnalysisHistoryRow {
+        row_key: row.get(0)?,
+        request_id: row.get(1)?,
+        job_id: row.get(2)?,
+        file_id: row.get(3)?,
+        item_id: row.get(4)?,
+        title: row.get(5)?,
+        component: row.get(6)?,
+        force_rebuild: row.get::<_, i64>(7)? != 0,
+        target_node_id: row.get(8)?,
+        request_state: row.get(9)?,
+        job_state: row.get(10)?,
+        state: row.get(11)?,
+        disposition: row.get(12)?,
+        owner_node_id: row.get(13)?,
+        lease_expires_ms: row.get(14)?,
+        attempts: row.get(15)?,
+        not_before_ms: row.get(16)?,
+        request_error_code: row.get(17)?,
+        job_error_code: row.get(18)?,
+        created_at_ms: row.get(19)?,
+        updated_at_ms: row.get(20)?,
+        pipeline_version: row.get(21)?,
+        source_size: row.get(22)?,
+    };
+    let cursor = AnalysisHistoryCursor {
+        sort_rank: row.get(23)?,
+        updated_at_ms: history.updated_at_ms,
+        row_key: history.row_key.clone(),
+    };
+    Ok((history, cursor, row.get(24)?))
+}
+
+fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
+    match filter {
+        AnalysisHistoryFilter::All => 0,
+        AnalysisHistoryFilter::Working => 1,
+        AnalysisHistoryFilter::Attention => 2,
+        AnalysisHistoryFilter::Ready => 3,
+        AnalysisHistoryFilter::Expected => 4,
+    }
+}
+
+fn analysis_search_pattern(search: &str) -> String {
+    let escaped = search
+        .trim()
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    if escaped.is_empty() {
+        String::new()
+    } else {
+        format!("%{escaped}%")
+    }
 }
 
 fn artifact_from_row(row: &Row<'_>) -> rusqlite::Result<ClusterFragmentIndexArtifact> {
@@ -541,6 +609,115 @@ impl ClusterFragmentIndexStore for SqliteStore {
             ))?;
             let rows = statement.query_map(params![limit], request_from_row)?;
             rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn analysis_history(
+        &self,
+        query: &AnalysisHistoryQuery,
+    ) -> Result<AnalysisHistoryPage, StoreError> {
+        let limit = query.limit.clamp(10, 100);
+        let filter = analysis_filter_code(query.filter);
+        let search = analysis_search_pattern(&query.search);
+        let cursor = query.cursor.clone().unwrap_or(AnalysisHistoryCursor {
+            sort_rank: -1,
+            updated_at_ms: 0,
+            row_key: String::new(),
+        });
+        self.with_read(move |conn| {
+            let sql = format!(
+                "{ANALYSIS_CANONICAL_CTE}, matching AS (
+                   SELECT * FROM classified
+                    WHERE (?1 = 0
+                      OR (?1 = 1 AND disposition IN ('working', 'automatic'))
+                      OR (?1 = 2 AND disposition = 'attention')
+                      OR (?1 = 3 AND disposition = 'ready')
+                      OR (?1 = 4 AND disposition IN ('expected', 'unsupported')))
+                      AND (?2 = '' OR LOWER(title) LIKE ?2 ESCAPE '\\'
+                        OR CAST(file_id AS TEXT) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(row_key) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(owner_node_id) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(target_node_id) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(request_error_code) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(job_error_code) LIKE ?2 ESCAPE '\\'
+                        OR LOWER(state) LIKE ?2 ESCAPE '\\')
+                 )
+                 SELECT {HISTORY_COLS}, sort_rank,
+                        (SELECT COUNT(*) FROM matching) AS filtered_total
+                   FROM matching
+                  WHERE ?3 < 0 OR sort_rank > ?3
+                     OR (sort_rank = ?3 AND updated_at_ms < ?4)
+                     OR (sort_rank = ?3 AND updated_at_ms = ?4 AND row_key > ?5)
+                  ORDER BY sort_rank, updated_at_ms DESC, row_key
+                  LIMIT ?6"
+            );
+            let mut statement = conn.prepare(&sql)?;
+            let rows = statement.query_map(
+                params![
+                    filter,
+                    search,
+                    cursor.sort_rank,
+                    cursor.updated_at_ms,
+                    cursor.row_key,
+                    limit + 1
+                ],
+                history_from_row,
+            )?;
+            let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
+            let filtered_total = rows.first().map_or(0, |(_, _, total)| *total);
+            let has_more = rows.len() > limit as usize;
+            if has_more {
+                rows.pop();
+            }
+            let next_cursor =
+                has_more.then(|| rows.last().expect("non-empty history page").1.clone());
+            Ok(AnalysisHistoryPage {
+                rows: rows.into_iter().map(|(row, _, _)| row).collect(),
+                filtered_total,
+                next_cursor,
+            })
+        })
+        .await
+    }
+
+    async fn analysis_status_summary(&self) -> Result<AnalysisStatusSummary, StoreError> {
+        self.with_read(|conn| {
+            let sql = format!(
+                "{ANALYSIS_CANONICAL_CTE}
+                 SELECT COUNT(*) AS total,
+                        COALESCE(SUM(CASE WHEN disposition IN ('working', 'automatic') THEN 1 ELSE 0 END), 0) AS working,
+                        COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
+                        COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0) AS running,
+                        COALESCE(SUM(CASE WHEN state = 'submitted' THEN 1 ELSE 0 END), 0) AS submitted,
+                        COALESCE(SUM(CASE WHEN disposition = 'attention' THEN 1 ELSE 0 END), 0) AS attention,
+                        COALESCE(SUM(CASE WHEN disposition IN ('expected', 'unsupported') THEN 1 ELSE 0 END), 0) AS expected,
+                        COALESCE(SUM(CASE WHEN disposition = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
+                        COALESCE((SELECT COALESCE(NULLIF(job_error_code, ''), request_error_code)
+                          FROM classified WHERE disposition = 'attention'
+                          ORDER BY updated_at_ms DESC, row_key LIMIT 1), '') AS latest_error_code,
+                        COALESCE((SELECT file_id FROM classified WHERE disposition = 'attention'
+                          ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_file_id,
+                        COALESCE((SELECT updated_at_ms FROM classified WHERE disposition = 'attention'
+                          ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_updated_at_ms
+                   FROM classified"
+            );
+            conn.query_row(&sql, [], |row| {
+                Ok(AnalysisStatusSummary {
+                    total: row.get(0)?,
+                    working: row.get(1)?,
+                    queued: row.get(2)?,
+                    running: row.get(3)?,
+                    submitted: row.get(4)?,
+                    attention: row.get(5)?,
+                    expected: row.get(6)?,
+                    ready: row.get(7)?,
+                    latest_error_code: row.get(8)?,
+                    latest_error_file_id: row.get(9)?,
+                    latest_error_updated_at_ms: row.get(10)?,
+                })
+            })
+            .map_err(Into::into)
         })
         .await
     }
@@ -1280,6 +1457,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     async fn seed_files(store: &SqliteStore) {
@@ -1333,6 +1512,123 @@ mod tests {
             not_before_ms: created_at_ms,
             created_at_ms,
         }
+    }
+
+    #[tokio::test]
+    async fn analysis_history_is_canonical_paginated_and_classified() {
+        let store = SqliteStore::open_in_memory().expect("store");
+        seed_files(&store).await;
+        let cache_key =
+            cluster_fragment_index_key(&"a".repeat(64), &"b".repeat(64)).expect("valid cache key");
+        let seeded_key = cache_key.clone();
+        store
+            .with_conn(move |conn| {
+                conn.execute(
+                    "INSERT INTO cluster_fragment_index_jobs
+                      (cache_key, file_id, source_size, source_mtime, source_sha256,
+                       pipeline_sha256, state, fence, attempts, not_before_ms,
+                       last_error_code, created_at_ms, updated_at_ms)
+                     VALUES (?1, 1, 100, 10, ?2, ?3, 'failed', 1, 1, 0,
+                             'source_unavailable', 10, 20)",
+                    params![seeded_key, "a".repeat(64), "b".repeat(64)],
+                )?;
+                conn.execute(
+                    "INSERT INTO analysis_requests
+                      (request_id, file_id, source_size, source_mtime, component,
+                       force_rebuild, target_node_id, state, fence, attempts,
+                       not_before_ms, result_cache_key, created_at_ms, updated_at_ms)
+                     VALUES ('old-generation', 1, 100, 10, 'fragment_index', 0,
+                             'node-a', 'ready', 1, 1, 0, ?1, 1, 10),
+                            ('new-generation', 1, 100, 10, 'fragment_index', 1,
+                             'node-a', 'submitted', 1, 1, 0, ?1, 2, 20),
+                            ('unsupported', 1, 100, 10, 'fragment_index', 0,
+                             'node-a', 'failed', 1, 1, 0, NULL, 3, 30),
+                            ('deleted', 1, 100, 10, 'fragment_index', 0,
+                             'node-a', 'cancelled', 1, 1, 0, NULL, 4, 40)",
+                    params![seeded_key],
+                )?;
+                conn.execute(
+                    "UPDATE analysis_requests SET last_error_code = 'unsupported'
+                      WHERE request_id = 'unsupported'",
+                    [],
+                )?;
+                conn.execute(
+                    "UPDATE analysis_requests SET last_error_code = 'source_deleted'
+                      WHERE request_id = 'deleted'",
+                    [],
+                )?;
+                for index in 0..25_i64 {
+                    conn.execute(
+                        "INSERT INTO analysis_requests
+                          (request_id, file_id, source_size, source_mtime, component,
+                           force_rebuild, target_node_id, state, fence, attempts,
+                           not_before_ms, created_at_ms, updated_at_ms)
+                         VALUES (?1, 1, 100, 10, 'fragment_index', 0, 'node-a',
+                                 'ready', 1, 1, 0, ?2, ?2)",
+                        params![format!("ready-{index:02}"), 100 + index],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .expect("seed analysis history");
+
+        let mut cursor = None;
+        let mut rows = Vec::new();
+        loop {
+            let page = store
+                .analysis_history(&AnalysisHistoryQuery {
+                    limit: 10,
+                    cursor,
+                    filter: AnalysisHistoryFilter::All,
+                    search: String::new(),
+                })
+                .await
+                .expect("history page");
+            assert_eq!(page.filtered_total, 29);
+            rows.extend(page.rows);
+            cursor = page.next_cursor;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(rows.len(), 29);
+        let keys = rows.iter().map(|row| &row.row_key).collect::<HashSet<_>>();
+        assert_eq!(keys.len(), rows.len(), "keyset pages must not overlap");
+        let old = rows
+            .iter()
+            .find(|row| row.request_id == "old-generation")
+            .expect("old generation");
+        let new = rows
+            .iter()
+            .find(|row| row.request_id == "new-generation")
+            .expect("new generation");
+        assert!(old.job_id.is_empty(), "mutable job leaked into old history");
+        assert_eq!(old.state, "ready");
+        assert_eq!(new.job_id, cache_key);
+        assert_eq!(new.state, "failed");
+
+        let expected = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: None,
+                filter: AnalysisHistoryFilter::Expected,
+                search: String::new(),
+            })
+            .await
+            .expect("expected outcomes");
+        assert_eq!(expected.filtered_total, 2);
+        assert!(expected
+            .rows
+            .iter()
+            .all(|row| matches!(row.disposition.as_str(), "expected" | "unsupported")));
+
+        let summary = store.analysis_status_summary().await.expect("summary");
+        assert_eq!(summary.total, 29);
+        assert_eq!(summary.attention, 1);
+        assert_eq!(summary.expected, 2);
+        assert_eq!(summary.ready, 26);
+        assert_eq!(summary.latest_error_code, "source_unavailable");
     }
 
     #[tokio::test]
