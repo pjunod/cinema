@@ -51,16 +51,17 @@ use plurx_core::segplan::{
     SEGPLAN_VERSION,
 };
 use plurx_core::store::{
-    cluster_fragment_index_key, ArtworkRepairFence, ClusterFragmentIndexStore, LibraryStore,
+    cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
+    ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore,
     MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
     ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
 use plurx_core::store::{
-    ApiKeyStore, CoordinationStore, FencedPublicationStore, HiqliteAuthStore, MediaSessionStore,
-    OfflinePackageStore, PlaybackTelemetryStore, PretranscodeJobStore, ReadingStore, SettingsStore,
-    TraktStore, TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE,
-    AUTH_SCHEMA_VERSION,
+    ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, FencedPublicationStore,
+    HiqliteAuthStore, MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore,
+    PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore, TranscodeCacheStore, UserStore,
+    WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -6178,6 +6179,12 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             3,
         ),
         (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('analysis_requests_result_history', \
+                          'cluster_fragment_index_jobs_status_history')",
+            2,
+        ),
+        (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
              AND name IN ('analysis_requests_cancel_source', \
                           'analysis_requests_supersede_source', \
@@ -9092,6 +9099,170 @@ async fn rendition_plan_contract_runs_through_dyn_store() {
             alive.is_empty(),
             "backend {backend}: no rows in `files`, so nothing survives, got {alive:?}"
         );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_history_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-history").await;
+        let source_sha256 = "a".repeat(64);
+        let pipeline_sha256 = "b".repeat(64);
+        let cache_key = cluster_fragment_index_key(&source_sha256, &pipeline_sha256)
+            .expect("analysis history cache key");
+        let request = NewAnalysisRequest {
+            request_id: "analysis-history-old".to_owned(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "fragment_index".to_owned(),
+            force_rebuild: false,
+            target_node_id: "analysis-node".to_owned(),
+            not_before_ms: 10,
+            created_at_ms: 10,
+        };
+        store
+            .enqueue_analysis_request(&request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue old generation: {error}"));
+        let claimed = store
+            .claim_analysis_request("analysis-node", 10, 1_010)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim old generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: old generation claim"));
+        let job = NewClusterFragmentIndexJob {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256: source_sha256.clone(),
+            pipeline_sha256: pipeline_sha256.clone(),
+            not_before_ms: 11,
+            created_at_ms: 11,
+        };
+        assert!(
+            store
+                .submit_fragment_index_analysis(&claimed, &job, 11)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit old generation: {error}")),
+            "backend {backend}"
+        );
+        let worker = store
+            .claim_cluster_fragment_index("analysis-node", &[], 11, 1_011)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim worker: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: worker claim"));
+        let artifact = ClusterFragmentIndexArtifact {
+            cache_key: cache_key.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            source_sha256,
+            pipeline_sha256,
+            blob_sha256: "c".repeat(64),
+            bytes: 128,
+            built_by_node_id: "analysis-node".to_owned(),
+            built_at_ms: 12,
+        };
+        let location = ClusterFragmentIndexLocation {
+            cache_key: cache_key.clone(),
+            node_id: "analysis-node".to_owned(),
+            bytes: 128,
+            verified_at_ms: 12,
+            last_seen_at_ms: 12,
+        };
+        assert!(
+            store
+                .complete_cluster_fragment_index(&worker, &artifact, &location, 12)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: complete worker: {error}")),
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .settle_analysis_requests(13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: settle old generation: {error}")),
+            1,
+            "backend {backend}"
+        );
+
+        let mut replacement = request.clone();
+        replacement.request_id = "analysis-history-new".to_owned();
+        replacement.force_rebuild = true;
+        replacement.not_before_ms = 20;
+        replacement.created_at_ms = 20;
+        store
+            .enqueue_analysis_request(&replacement)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue new generation: {error}"));
+        let replacement_claim = store
+            .claim_analysis_request("analysis-node", 20, 1_020)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim new generation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: new generation claim"));
+        let mut reopened = job.clone();
+        reopened.not_before_ms = 21;
+        reopened.created_at_ms = 21;
+        assert!(
+            store
+                .submit_fragment_index_analysis(&replacement_claim, &reopened, 21)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: submit new generation: {error}")),
+            "backend {backend}"
+        );
+
+        let history = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: None,
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read canonical history: {error}"));
+        assert_eq!(history.filtered_total, 2, "backend {backend}");
+        let old = history
+            .rows
+            .iter()
+            .find(|row| row.request_id == "analysis-history-old")
+            .unwrap_or_else(|| panic!("{backend}: retained old generation"));
+        let new = history
+            .rows
+            .iter()
+            .find(|row| row.request_id == "analysis-history-new")
+            .unwrap_or_else(|| panic!("{backend}: retained new generation"));
+        assert!(old.job_id.is_empty(), "backend {backend}: old mutable job");
+        assert_eq!(old.state, "ready", "backend {backend}");
+        assert_eq!(old.action, "rebuild", "backend {backend}");
+        assert_eq!(new.job_id, cache_key, "backend {backend}");
+        assert_eq!(new.state, "queued", "backend {backend}");
+        assert_eq!(new.action, "none", "backend {backend}");
+
+        let past_end = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: Some(AnalysisHistoryCursor {
+                    sort_rank: 6,
+                    updated_at_ms: 0,
+                    row_key: "past-the-retained-tail".to_owned(),
+                }),
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read valid empty tail page: {error}"));
+        assert!(past_end.rows.is_empty(), "backend {backend}");
+        assert_eq!(past_end.filtered_total, 2, "backend {backend}");
+
+        let summary = store
+            .analysis_status_summary()
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: compact summary: {error}"));
+        assert_eq!(summary.total, 2, "backend {backend}");
+        assert_eq!(summary.working, 1, "backend {backend}");
+        assert_eq!(summary.ready, 1, "backend {backend}");
     })
     .await;
 }

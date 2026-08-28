@@ -124,10 +124,18 @@ test("Activity renders explicit lease and demand-window instrumentation", () => 
   );
 });
 
-test("playback info names the active VOD or live-recovery presentation", () => {
+test("playback info explicitly separates playback mode from delivery method", () => {
+  const modes = new Function(
+    `${shippedSource("playbackModeName")}\n${shippedSource("playbackModeDetail")}\nreturn {playbackModeName,playbackModeDetail};`,
+  )();
+  assert.equal(modes.playbackModeName({ vod: true }), "VOD HLS");
+  assert.equal(modes.playbackModeName({ sessionId: "live-1" }), "Live HLS");
+  assert.equal(modes.playbackModeName({}), "Progressive file");
+  assert.match(modes.playbackModeDetail({ vod: true }), /fixed, seekable timeline/);
+  assert.match(modes.playbackModeDetail({ sessionId: "live-1" }), /growing recovery timeline/);
   const stats = shippedSource("updateStats");
-  assert.match(stats, /PLAYER\.vod\?"VOD":PLAYER\.sessionId\?"Live recovery"/);
-  assert.match(stats, /cardRow\("Presentation"/);
+  assert.match(stats, /cardRow\("Playback mode"/);
+  assert.match(stats, /Delivery method/);
 });
 
 asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
@@ -232,34 +240,41 @@ test("VOD diagnostics describe materialization instead of claiming a cache hit",
     "health",
     `${shippedSource("vodServerState")}\nreturn vodServerState(health);`,
   );
-  assert.equal(status(null), "VOD · Waiting for demand");
-  assert.equal(status({ producer_state: "running" }), "VOD · Materializing");
+  assert.equal(status(null), "VOD HLS · Waiting for demand");
+  assert.equal(status({ producer_state: "running" }), "VOD HLS · Materializing");
   assert.equal(
     status({ producer_state: "held", producer_hold: "working_set" }),
-    "VOD · Holding working set",
+    "VOD HLS · Holding working set",
   );
   assert.equal(
     status({ producer_state: "held", producer_hold: "ahead" }),
-    "VOD · Holding ahead window",
+    "VOD HLS · Holding ahead window",
   );
-  assert.equal(status({ producer_state: "complete" }), "VOD · Complete");
+  assert.equal(status({ producer_state: "complete" }), "VOD HLS · Complete");
   assert.doesNotMatch(status({ producer_state: "complete" }), /cache/i);
 });
 
-test("an operator can control VOD indexing and live recovery independently", () => {
+test("analysis controls are first-class settings separate from playback mode controls", () => {
   const panel = shippedSource("playbackPanel");
   const save = shippedSource("savePlayback");
+  const analysisPanel = shippedSource("analysisSettingsPanel");
+  const saveAnalysis = shippedSource("saveAnalysisSettings");
   assert.match(panel, /id="pvod"/);
   assert.match(panel, /id="pvlr"/);
-  assert.match(panel, /id="pvi"/);
+  assert.doesNotMatch(panel, /id="pvi"/);
+  assert.match(analysisPanel, /id="an-every"/);
+  assert.match(analysisPanel, /id="an-enabled"/);
   assert.match(panel, /id="pvws"/);
   assert.match(panel, /id="pvmb"/);
   assert.match(save, /vod_presentation:/);
   assert.match(save, /vod_live_recovery:/);
-  assert.match(save, /vod_index_mins:/);
+  assert.doesNotMatch(save, /vod_index_mins:/);
+  assert.match(saveAnalysis, /vod_index_mins:/);
+  assert.match(saveAnalysis, /vod_index_cluster_cache:/);
   assert.match(save, /vod_materialize_budget_secs:/);
   assert.match(save, /vod_block_budget_secs:"8"/);
-  assert.match(panel, /fallback is temporary protection/);
+  assert.match(panel, /VOD HLS/);
+  assert.match(panel, /Live HLS/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
@@ -1927,7 +1942,7 @@ function shippedBinding(keyword, name) {
 
 // The detail screen with no browser: format helpers that are not under test are
 // stubbed, everything that decides what a viewer READS is shipped code.
-function detailHarness({ decisions = {} } = {}) {
+function detailHarness({ decisions = {}, admin = false } = {}) {
   const requested = [];
   const build = new Function(
     "document",
@@ -1967,7 +1982,7 @@ function detailHarness({ decisions = {} } = {}) {
       shippedSource("prePlayBurnNeeded"),
       shippedSource("prePlayApplication"),
       shippedSource("prePlayPreview"),
-      "return {specBlock, prePlayPickers, setPrePlay, clearPrePlay," +
+      "return {specBlock, analysisFileControl, prePlayPickers, setPrePlay, clearPrePlay," +
         " prePlaySelection, decisionUrl, prePlayApplication, prePlayBurnNeeded," +
         " preferredLanguageNote};",
     ].join("\n"),
@@ -1988,7 +2003,7 @@ function detailHarness({ decisions = {} } = {}) {
     () => "3.4 GB",
     () => "1h 52m",
     () => "8.1 Mb/s",
-    { is_admin: false },
+    { is_admin: admin },
     (file) => String(file.id),
   );
   return { ...shipped, requested };
@@ -2082,12 +2097,22 @@ test("the detail screen names every subtitle track, its format and its markers",
   );
 });
 
-test("the detail screen shows VOD index readiness before playback", () => {
+test("the detail screen names the supported HLS mode before playback", () => {
   const indexed = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "indexed" });
-  assert.match(indexed, /<dt>VOD index<\/dt><dd><span[^>]*>Indexed<\/span>/);
+  assert.match(indexed, /<dt>HLS capability<\/dt><dd><span class="mode-chip vod">VOD HLS<\/span>/);
+  assert.match(indexed, /Fixed, seekable timeline/);
   const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
-  assert.match(pending, /Index pending/);
-  assert.match(pending, /live recovery will be used/);
+  assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
+  assert.match(pending, /while VOD analysis is pending/);
+  assert.match(pending, /when live recovery is enabled in Playback settings/);
+  const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
+  assert.match(unsupported, /cannot use the VOD indexer/);
+  assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
+  const adminControl=detailHarness({admin:true}).analysisFileControl({
+    ...MOVIE_FILE,available:true,vod_index_status:"unsupported",
+  });
+  assert.match(adminControl,/VOD analysis unsupported/);
+  assert.doesNotMatch(adminControl,/Analyze now/);
 });
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {

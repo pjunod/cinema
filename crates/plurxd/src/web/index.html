@@ -703,6 +703,78 @@
     padding:9px 15px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:-1px;border-radius:8px 8px 0 0}
   .settab:hover{color:var(--text);background:linear-gradient(180deg,transparent,color-mix(in srgb,var(--accent) 18%,transparent))}
   .settab.active{color:var(--text);border-bottom-color:var(--accent)}
+  /* Content analysis is an operator workspace, not a link dropped between
+     unrelated sections. These primitives are shared by its compact Activity
+     and Settings summaries and by the full queue/history page. */
+  .analysis-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:2px 0 20px}
+  .analysis-head h1{margin:0;font-size:28px;line-height:1.12}
+  .analysis-head p{margin:6px 0 0;color:var(--muted);max-width:68ch;line-height:1.5}
+  .analysis-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+  .analysis-live{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}
+  .analysis-live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 16%,transparent)}
+  .analysis-live.paused::before{background:var(--muted);box-shadow:none}
+  .analysis-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:14px 0 18px}
+  .analysis-metric{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+  .analysis-metric .n{display:block;font:700 24px/1.05 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text)}
+  .analysis-metric .k{display:block;margin-top:5px;color:var(--muted);font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.055em}
+  .analysis-metric.good{border-color:color-mix(in srgb,var(--good) 46%,var(--line))}
+  .analysis-metric.warn{border-color:color-mix(in srgb,var(--warn) 52%,var(--line))}
+  .analysis-metric.bad{border-color:color-mix(in srgb,var(--bad) 58%,var(--line))}
+  .analysis-metric.bad .n{color:var(--bad)}
+  .analysis-brief{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 8%,var(--panel)),var(--panel));border:1px solid var(--line);border-radius:var(--radius);padding:17px 18px}
+  .analysis-brief-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .analysis-brief-head h2{margin:0 0 5px;font-size:17px}
+  .analysis-brief-head p{margin:0;color:var(--muted);font-size:13px;line-height:1.5;max-width:66ch}
+  .analysis-brief-status{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:13px}
+  .analysis-state{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:11.5px;font-weight:650;line-height:1.2;background:var(--panel2);white-space:nowrap}
+  .analysis-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted)}
+  .analysis-state.running::before{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .analysis-state.queued::before,.analysis-state.submitted::before{background:var(--warn)}
+  .analysis-state.ready::before{background:var(--good)}
+  .analysis-state.failed::before,.analysis-state.cancelled::before{background:var(--bad)}
+  .analysis-controls{display:grid;grid-template-columns:minmax(220px,1fr) auto auto;gap:10px;align-items:center;margin:16px 0 10px}
+  .analysis-search{position:relative;min-width:0}
+  .analysis-search input{width:100%;padding-left:34px}
+  .analysis-search::before{content:"⌕";position:absolute;left:12px;top:50%;transform:translateY(-52%);color:var(--muted);font-size:18px;pointer-events:none}
+  .analysis-filters{display:flex;gap:4px;flex-wrap:wrap}
+  .analysis-filters button{background:transparent;color:var(--muted);border:1px solid var(--line);padding:7px 10px;font-size:12px}
+  .analysis-filters button.on{background:color-mix(in srgb,var(--accent) 15%,var(--panel));border-color:var(--accent);color:var(--text)}
+  .analysis-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+  table.analysis-table{margin:0;min-width:790px}
+  .analysis-table th{padding-top:11px;padding-bottom:11px;background:color-mix(in srgb,var(--panel2) 74%,transparent)}
+  .analysis-table td{vertical-align:top;padding-top:13px;padding-bottom:13px}
+  .analysis-file{display:block;font-weight:700;line-height:1.3}
+  .analysis-sub{margin-top:4px;color:var(--muted);font-size:11.5px;line-height:1.4;overflow-wrap:anywhere}
+  .analysis-phase{margin-top:5px;color:var(--muted);font-size:12px;line-height:1.4}
+  .analysis-error{margin-top:8px;border:1px solid color-mix(in srgb,var(--bad) 46%,var(--line));border-left:3px solid var(--bad);border-radius:8px;background:color-mix(in srgb,var(--bad) 7%,var(--panel2));padding:9px 10px;max-width:580px}
+  .analysis-error b{display:block;color:var(--bad);font-size:12.5px;line-height:1.35}
+  .analysis-error.warn{border-color:color-mix(in srgb,var(--warn) 46%,var(--line));border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,var(--panel2))}
+  .analysis-error.warn b{color:var(--warn)}
+  .analysis-error p{margin:4px 0 0;color:var(--prose);font-size:12px;line-height:1.48}
+  .analysis-error code{display:inline-block;margin-top:6px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
+  .analysis-diag{margin-top:8px;color:var(--muted);font-size:11.5px}
+  .analysis-diag summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:600}
+  .analysis-diag summary::-webkit-details-marker{display:none}
+  .analysis-diag summary::after{content:" ›"}
+  .analysis-diag[open] summary::after{content:" ⌄"}
+  .analysis-diag-grid{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 10px;margin-top:7px;padding:8px 10px;background:var(--panel2);border-radius:7px;line-height:1.45}
+  .analysis-diag-grid b{font-weight:600;color:var(--muted)}
+  .analysis-diag-grid span{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+  .analysis-pages{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:11px 2px 0;color:var(--muted);font-size:12px}
+  .analysis-pages .row{gap:6px}
+  .analysis-pages select{width:auto;padding:5px 26px 5px 8px;font-size:12px}
+  .analysis-stale{margin:0 0 12px;border-left:3px solid var(--warn);padding:9px 11px;background:color-mix(in srgb,var(--warn) 8%,var(--panel));color:var(--prose);font-size:12px;border-radius:7px}
+  .mode-chip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:11.5px;font-weight:750;letter-spacing:.01em;white-space:nowrap}
+  .mode-chip.vod{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line));background:color-mix(in srgb,var(--good) 8%,transparent)}
+  .mode-chip.live{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line));background:color-mix(in srgb,var(--warn) 8%,transparent)}
+  .mode-detail{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}
+  @media(max-width:760px){
+    .analysis-head,.analysis-brief-head{display:grid}
+    .analysis-actions{justify-content:flex-start}
+    .analysis-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .analysis-controls{grid-template-columns:minmax(0,1fr)}
+    .analysis-pages{align-items:flex-start;flex-direction:column}
+  }
   /* Library paths shown as distinct chips instead of a comma-run. */
   .paths{display:flex;flex-wrap:wrap;gap:5px}
   .pathchip{display:inline-block;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
@@ -2862,12 +2934,12 @@ async function startNativeReader(token,itemId,fileId){
 window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
-async function api(path, {method="GET", body=null, raw=false}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
   const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
-  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null});
+  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
   if(authGeneration!==AUTH_GENERATION){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
@@ -4763,35 +4835,43 @@ function specBlock(f){
     : trackFactRow("Subtitles", subs, sd&&sd.selected_index!=null?sd.selected_index:-1,
         (s,on)=>trackChip(subFactLabel(s),on),
         subs.length?preferredLanguageNote("subtitles",sd):"", true);
-  const vodRow=f.vod_index_status==="indexed"
-    ? `<dt>VOD index</dt><dd><span class="stat-good">Indexed</span></dd>`
+  // Lead with what a viewer will actually get. "VOD index" is an internal
+  // prerequisite; VOD HLS versus Live HLS is the playback capability someone
+  // is deciding whether to use.
+  const hlsRow=f.vod_index_status==="indexed"
+    ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Fixed, seekable timeline · analysis is ready for this file</span></dd>`
     : f.vod_index_status==="pending"
-      ? `<dt>VOD index</dt><dd><span class="stat-warn">Index pending</span> · live recovery will be used for segmented playback</dd>`
+      ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
       : f.vod_index_status==="unsupported"
-        ? `<dt>VOD index</dt><dd><span class="muted">Unsupported for this video codec</span></dd>`:"";
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
     ${audRow}
     ${subRow}
-    ${vodRow}
+    ${hlsRow}
     <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
 }
 function analysisFileControl(f){
   if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
   const rebuild=f.vod_index_status==="indexed";
+  const unsupported=f.vod_index_status==="unsupported";
   const fileId=exactWireId(f);
-  return `<div class="row px-admin th-admin" style="margin-top:10px;gap:8px">
-    <button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>
-    <a class="ghost sm" href="#/analysis">Analysis status</a></div>`;
+  const state=rebuild?"VOD HLS ready":f.vod_index_status==="unsupported"?"VOD analysis unsupported":"VOD analysis pending";
+  return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
+    <div class="analysis-brief-head"><div><h2>Content analysis</h2>
+      <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>
+      <div class="analysis-actions">${unsupported?"":`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>`}
+      <a class="ghost sm" href="#/analysis">View queue</a></div></div></div>`;
 }
-async function requestAnalysis(fileId,force,btn){
+async function requestAnalysis(fileId,force,btn,stay=false){
   const label=btn&&btn.textContent;
   if(btn){ btn.disabled=true; btn.textContent=force?"Queueing rebuild…":"Queueing…"; }
   try{
     const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index"]}});
     toast(response.joined?"Analysis is already queued":"Analysis queued");
-    location.hash="#/analysis";
+    if(stay&&location.hash==="#/analysis") await renderAnalysis(PAGE_RENDER_GENERATION,true);
+    else location.hash="#/analysis";
   }catch(error){ toast(error.message||"Couldn’t queue analysis"); }
   finally{ if(btn&&document.body.contains(btn)){ btn.disabled=false; btn.textContent=label; } }
 }
@@ -9176,19 +9256,19 @@ function statsRateTone(rate,ahead,suspended,final){
   return "good";
 }
 function vodServerState(health){
-  if(!health) return "VOD · Waiting for demand";
+  if(!health) return "VOD HLS · Waiting for demand";
   switch(health.producer_state){
-    case "running": return "VOD · Materializing";
+    case "running": return "VOD HLS · Materializing";
     case "held":
       switch(health.producer_hold){
-        case "ahead": return "VOD · Holding ahead window";
-        case "working_set": return "VOD · Holding working set";
-        case "no_room": return "VOD · Holding · no room";
-        default: return "VOD · Holding";
+        case "ahead": return "VOD HLS · Holding ahead window";
+        case "working_set": return "VOD HLS · Holding working set";
+        case "no_room": return "VOD HLS · Holding · no room";
+        default: return "VOD HLS · Holding";
       }
-    case "complete": return "VOD · Complete";
-    case "failed": return "VOD · Producer failed";
-    default: return "VOD · Waiting for demand";
+    case "complete": return "VOD HLS · Complete";
+    case "failed": return "VOD HLS · Producer failed";
+    default: return "VOD HLS · Waiting for demand";
   }
 }
 function vodHealthWord(health){
@@ -9201,6 +9281,16 @@ function vodHealthWord(health){
     default: return "VOD";
   }
 }
+function playbackModeName(player){
+  if(player&&player.vod) return "VOD HLS";
+  if(player&&player.sessionId) return "Live HLS";
+  return "Progressive file";
+}
+function playbackModeDetail(player){
+  if(player&&player.vod) return "VOD HLS · fixed, seekable timeline";
+  if(player&&player.sessionId) return "Live HLS · growing recovery timeline";
+  return "Progressive file · byte-range delivery";
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
@@ -9209,8 +9299,8 @@ function updateStats(){
   const baseMethod = PLAYER.method==='direct_play'?'Direct play'
     : PLAYER.method==='transcode'?('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))
     : 'Remux';
-  const presentation=PLAYER.vod?"VOD":PLAYER.sessionId?"Live recovery":null;
-  const method=presentation?`${baseMethod} · ${presentation}`:baseMethod;
+  const playbackMode=playbackModeName(PLAYER);
+  const playbackModeLong=playbackModeDetail(PLAYER);
   // source (from the server probe — the browser never sees these numbers)
   const srcVideo=[ (s.video_codec||'').toUpperCase(), s.bit_depth?`${s.bit_depth}-bit`:null, (s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)) ].filter(Boolean).join(" · ")||'—';
   const srcRes = s.width&&s.height? `${s.width}×${s.height}`:'—';
@@ -9561,7 +9651,8 @@ function updateStats(){
     // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
     // That is what makes one line able to answer for both.
     {l:"Build",c:"stat-muted",v:`${esc(buildLabel())}`},
-    {l:"Method",v:`${esc(method)}`},
+    {l:"Playback mode",c:PLAYER.vod?"stat-good":PLAYER.sessionId?"stat-warn":"stat-muted",v:`${esc(playbackModeLong)}`},
+    {l:"Delivery method",v:`${esc(baseMethod)}`},
     // Said outright, because the two transports are different code paths in
     // the browser and "which one ran" was previously only inferable from
     // which other rows happened to be missing. The wire container is named
@@ -9726,7 +9817,7 @@ function updateStats(){
     :health?(health.suspended?"Held":"Active"):"Direct";
   const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
   const miniHtml=`<div class="statsmini">`
-    +`<div class="smethod">${esc(method)}</div>`+miniDiv
+    +`<div class="smethod">${esc(playbackMode)} · ${esc(baseMethod)}</div>`+miniDiv
     +`<div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div>`+miniDiv
     +`<div class="sval ${statsToneClass(frameTone)}" title="${esc(rangeBadge?rangeBadge.full||rangeText:rangeText)}">${esc(tgtRes)} · ${esc(rangeShort)}</div>`+miniDiv
     +`<div class="sval sfix ${statsToneClass(runwayTone)}">${esc(buf)}</div>`+miniDiv
@@ -9757,7 +9848,7 @@ function updateStats(){
       cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
       cardRow("Subtitles",esc(selectedSub))]},
     {t:"Server",rows:[
-      presentation?cardRow("Presentation",esc(presentation),PLAYER.vod?"good":"warn"):null,
+      cardRow("Playback mode",esc(playbackModeLong),PLAYER.vod?"good":PLAYER.sessionId?"warn":"muted"),
       cardRow("Status",esc(serverState),serverTone),
       controlStatus?cardRow("Control",controlStatus.accepted_sequence
         ?`${standardLeasePresentation.ownership} · accepted #${controlStatus.accepted_sequence}`
@@ -9902,6 +9993,7 @@ const ITEM_FOR_FILE={};
 async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   layoutChrome("activity", `<h2 class="section" style="margin-top:6px">Now playing</h2>
     <div class="empty" aria-busy="true">Checking current activity…</div>
+    ${typeof ME!=="undefined"&&ME&&ME.is_admin?'<h2 class="section">Content analysis</h2>':""}
     <h2 class="section">Pre-transcoding</h2><h2 class="section">Offline downloads</h2>
     <h2 class="section">Library</h2><h2 class="section">Trakt</h2>`);
   setPagePhase("#/activity",generation,"shell");
@@ -9915,96 +10007,304 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 }
 
 // ---- analysis status -----------------------------------------------------
-// A dedicated operator surface backed by the replicated request and index-job
-// rows. Completed and failed work remains useful after it stops being activity.
-let ANALYSIS_BUSY=0, ANALYSIS_SNAPSHOT=null;
+// A dedicated operator workspace backed by the replicated request and index-
+// job rows. It keeps live work, failures and recent history in one model, then
+// provides smaller projections to Activity and Settings.
+let ANALYSIS_BUSY=null, ANALYSIS_PENDING=null, ANALYSIS_SUMMARY_BUSY=null, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
+let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
 async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
-  layoutChrome("activity",`<div class="row" style="justify-content:space-between;align-items:center">
-      <h1 style="margin:0">Analysis status</h1><a class="ghost sm" href="#/activity">Activity</a></div>
+  if(!ME||!ME.is_admin){ location.hash="#/activity"; return; }
+  layoutChrome("activity",`<div class="analysis-head"><div><h1>Content analysis</h1>
+      <p>VOD HLS readiness, active index work, and recent results across the cluster.</p></div></div>
     <div class="empty" aria-busy="true">Loading the analysis queue…</div>`);
   setPagePhase("#/analysis",generation,"shell");
   if(ANALYSIS_SNAPSHOT){ paintAnalysis(ANALYSIS_SNAPSHOT); setPagePhase("#/analysis",generation,"content"); }
   await renderAnalysis(generation);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
-  setPageTimer(()=>renderAnalysis(generation),2000,generation);
+  setPageTimer(()=>{ if(ANALYSIS_VIEW.auto) renderAnalysisSummary(generation); },3000,generation);
 }
-async function renderAnalysis(generation=PAGE_RENDER_GENERATION){
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden"||ANALYSIS_BUSY===generation) return;
-  ANALYSIS_BUSY=generation;
+function analysisPageUrl(){
+  const params=new URLSearchParams({limit:String(ANALYSIS_VIEW.pageSize),filter:ANALYSIS_VIEW.filter});
+  if(ANALYSIS_VIEW.query.trim()) params.set("q",ANALYSIS_VIEW.query.trim());
+  const cursor=ANALYSIS_VIEW.cursors[ANALYSIS_VIEW.page-1]; if(cursor) params.set("cursor",cursor);
+  return `/analysis/jobs?${params}`;
+}
+async function renderAnalysis(generation=PAGE_RENDER_GENERATION,force=false){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden") return;
+  const requestKey=analysisPageUrl();
+  if(ANALYSIS_BUSY){
+    ANALYSIS_PENDING={generation,requestKey};
+    if(force||ANALYSIS_BUSY.generation!==generation||ANALYSIS_BUSY.requestKey!==requestKey) ANALYSIS_BUSY.controller.abort();
+    return;
+  }
+  const run={generation,requestKey,controller:new AbortController()}; ANALYSIS_BUSY=run; ANALYSIS_PENDING=null;
   try{
-    const snapshot=await api("/analysis/jobs");
+    const [snapshot,summary]=await Promise.all([
+      api(requestKey,{signal:run.controller.signal}),
+      api("/analysis/summary",{signal:run.controller.signal}).catch(error=>{
+        if(error&&error.name==="AbortError") throw error;
+        return {available:false,enabled:false};
+      }),
+    ]);
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
-    ANALYSIS_SNAPSHOT=snapshot; paintAnalysis(snapshot);
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return; }
+    if(!snapshot.rows.length&&snapshot.filtered_total>0&&ANALYSIS_VIEW.page>1){
+      ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return;
+    }
+    ANALYSIS_VIEW.cursors[ANALYSIS_VIEW.page]=snapshot.next_cursor||null;
+    ANALYSIS_VIEW.cursors.length=ANALYSIS_VIEW.page+1;
+    snapshot.summary=summary; ANALYSIS_SUMMARY=summary; ANALYSIS_SNAPSHOT=snapshot; paintAnalysis(snapshot);
     setPageFailure("#/analysis",generation,null); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
   }catch(error){
     if(error&&error.status===401) return;
+    if(error&&error.name==="AbortError") return;
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return; }
     const main=document.getElementById("main");
-    if(main) main.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="renderAnalysis()">Retry</button></div></div>`;
+    if(main&&ANALYSIS_SNAPSHOT){
+      let stale=document.getElementById("analysis-stale");
+      if(!stale){ stale=document.createElement("div"); stale.id="analysis-stale"; stale.className="analysis-stale"; stale.setAttribute("role","status"); stale.setAttribute("aria-live","polite"); main.prepend(stale); }
+      stale.textContent=`Showing the last update — refresh failed: ${error.message}`;
+    }else if(main) main.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="renderAnalysis()">Retry</button></div></div>`;
     setPageFailure("#/analysis",generation,"render_error"); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
-  }finally{ if(ANALYSIS_BUSY===generation) ANALYSIS_BUSY=0; }
+  }finally{
+    if(ANALYSIS_BUSY===run) ANALYSIS_BUSY=null;
+    const pending=ANALYSIS_PENDING;
+    if(pending&&pending.generation===PAGE_RENDER_GENERATION&&location.hash==="#/analysis"&&document.visibilityState!=="hidden"){
+      ANALYSIS_PENDING=null; Promise.resolve().then(()=>renderAnalysis(pending.generation,true));
+    }
+  }
+}
+async function renderAnalysisSummary(generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden"||!ANALYSIS_SNAPSHOT) return;
+  if(ANALYSIS_SUMMARY_BUSY){ if(ANALYSIS_SUMMARY_BUSY.generation!==generation) ANALYSIS_SUMMARY_BUSY.controller.abort(); return; }
+  const run={generation,controller:new AbortController()}; ANALYSIS_SUMMARY_BUSY=run;
+  try{
+    const summary=await api("/analysis/summary",{signal:run.controller.signal});
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    ANALYSIS_SUMMARY=summary;
+    ANALYSIS_SNAPSHOT={...ANALYSIS_SNAPSHOT,summary,enabled:summary.enabled,now_ms:summary.now_ms};
+    paintAnalysis(ANALYSIS_SNAPSHOT);
+  }catch(error){
+    if(error&&(error.status===401||error.name==="AbortError")) return;
+    if(generation===PAGE_RENDER_GENERATION&&location.hash==="#/analysis"){
+      ANALYSIS_SNAPSHOT.summary={...(ANALYSIS_SNAPSHOT.summary||{}),available:false}; paintAnalysis(ANALYSIS_SNAPSHOT);
+    }
+  }finally{ if(ANALYSIS_SUMMARY_BUSY===run) ANALYSIS_SUMMARY_BUSY=null; }
 }
 function analysisStateLabel(state){
-  return ({queued:"Waiting",running:"Running",submitted:"Submitted",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
+  return ({queued:"Queued",running:"Running",submitted:"Publishing",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
 }
-function analysisPhase(request,job){
-  if(request&&request.state==="running") return "Hashing and fencing source";
-  if(job&&job.state==="running") return "Building fragment index";
-  if(job&&job.state==="queued") return "Waiting for media worker";
-  if(request&&request.state==="queued"&&request.last_error_code) return "Retry scheduled";
-  if(request&&request.state==="queued") return "Waiting to inspect source";
-  if((job&&job.state)==="failed"||(request&&request.state)==="failed") return "Stopped with an error";
-  if((job&&job.state)==="ready"||(request&&request.state)==="ready") return "Published and available";
+function analysisPhase(row){
+  if(row.request_state==="running") return "Hashing and verifying the source file";
+  if(row.job_state==="running") return "Building the fragment index";
+  if(row.job_state==="queued") return "Waiting for an idle media worker";
+  if(row.disposition==="automatic") return "Retry scheduled automatically";
+  if(row.request_state==="queued") return "Waiting to inspect the source";
+  if(row.request_state==="submitted"&&!row.job_id) return "Handed to the index worker";
+  if(row.state==="failed") return "Stopped with an error";
+  if(row.state==="ready") return "Published and available";
+  if(row.state==="cancelled") return "Canceled before completion";
   return "Resolving analysis request";
 }
+function analysisErrorInfo(code){
+  const known={
+    foreground_preempted:["Paused for playback","A playback or offline job needed the shared media worker.","No action is needed; analysis retries automatically when the worker is idle.","warn"],
+    source_unavailable:["Source file is unavailable","The node could not open the media file at its catalogued location.","Check that the library mount is online and the file is readable, then retry.","bad"],
+    source_catalog_read_failed:["Catalog read failed","The server could not load the file or probe facts needed to plan analysis.","Check storage health and server logs, then retry.","bad"],
+    source_attestation_failed:["Source verification failed","The file could not be read consistently enough to prove its content identity.","Check the mount and whether another process is replacing the file, then retry.","bad"],
+    source_attestation_timeout:["Source verification timed out","Reading and hashing the source exceeded the analysis deadline.","Check source-storage latency and retry when the node is less busy.","bad"],
+    source_record_failed:["Source identity could not be saved","The source was verified, but its identity could not be committed to the store.","Check database or cluster health, then retry.","bad"],
+    source_superseded:["Source changed after this request","The catalog now points at a newer version of the file.","Queue a fresh analysis for the current file.","warn"],
+    source_changed:["Source changed during analysis","The file changed while the index was being built, so the result was discarded.","Wait for the file copy or replacement to finish, then retry.","warn"],
+    source_deleted:["Source was removed","The catalog file was deleted while analysis was pending.","No action is needed unless the deletion was unexpected.","warn"],
+    pipeline_superseded:["Analysis pipeline changed","The server’s index pipeline changed while this job was running.","Retry to build with the current pipeline.","warn"],
+    invalid_cache_identity:["Invalid cache identity","The server could not derive a safe content-addressed key for this source.","Inspect server logs; retry after correcting the source metadata.","bad"],
+    queue_write_failed:["Queue update failed","The analysis request could not be handed to the shared index queue.","Check database or cluster health; the request will retry automatically.","bad"],
+    queue_full_or_busy:["Analysis queue is busy","The shared index queue could not accept another handoff yet.","No action is needed; this request retries automatically.","warn"],
+    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Resolve the underlying error shown in earlier attempts, then retry manually.","bad"],
+    unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used only when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
+    truncated:["Index output was incomplete","Analysis ended before it could describe the complete file timeline.","Check the source for damage or truncation, then retry after replacing it.","bad"],
+    encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
+    local_publish_failed:["Index could not be published","The completed artifact could not be written to this node’s index cache.","Check free space and permissions on the cache directory, then retry.","bad"],
+  };
+  const parts=known[code]||[String(code||"Analysis failed").replace(/_/g," "),"The analysis pipeline reported an unrecognized error code.","Copy the diagnostics and inspect the server logs before retrying.","bad"];
+  return {title:parts[0],detail:parts[1],next:parts[2],tone:parts[3]};
+}
+function analysisErrorHtml(code,stage){
+  if(!code) return "";
+  const info=analysisErrorInfo(code);
+  return `<div class="analysis-error ${info.tone}"><b>${esc(info.title)}</b><p>${esc(info.detail)} ${esc(info.next)}</p><code>${stage?esc(stage)+" · ":""}${esc(code)}</code></div>`;
+}
 function analysisRows(snapshot){
-  const jobs=snapshot.jobs||[], byKey=new Map(jobs.map(job=>[job.job_id,job]));
-  const files=new Map((snapshot.files||[]).map(file=>[String(file.file_id),file]));
-  const represented=new Set(), rows=[];
-  for(const request of (snapshot.requests||[])){
-    const job=request.result_cache_key?byKey.get(request.result_cache_key):null;
-    if(job) represented.add(job.job_id);
-    rows.push({request,job,file:files.get(String(request.file_id)),file_id:request.file_id,state:job?job.state:request.state,
-      trigger:request.force_rebuild?"Operator rebuild":"Operator",updated:(job&&job.updated_at_ms)||request.updated_at_ms});
+  return (snapshot&&snapshot.rows)||[];
+}
+function analysisCounts(value){
+  const summary=value&&value.summary?value.summary:(value||{});
+  return {...summary,active:summary.active??summary.working??0,attention:summary.attention??summary.failed??0,expected:summary.expected??0};
+}
+function analysisSummaryCard(value,context="activity"){
+  const s=analysisCounts(value), attention=s.attention||0, active=s.active||0, expected=s.expected||0;
+  const headline=s.available===false?"Analysis status is unavailable"
+    :!s.enabled?"Analysis is paused"
+    :attention?`${attention} recent result${attention===1?' needs':'s need'} attention`
+    :active?`${active} analysis job${active===1?'':'s'} in progress`
+    :s.ready?"Recent analysis results look healthy":"No recent analysis results";
+  const detail=s.available===false?"Activity is still available. Refresh or open the workspace to retry analysis health separately."
+    :!s.enabled?"Existing indexes still serve, but new VOD HLS indexes will not be built."
+    :attention?"Open the workspace for this recent failure and the exact full-history Attention filter."
+    :active?"Source verification and index builds yield to foreground playback automatically."
+    :s.ready?`${s.ready} recent file${s.ready===1?' is':'s are'} ready for VOD HLS. The workspace retains the full searchable history.`
+    :"This compact summary covers active work and recent terminal results; open the workspace for exact retained history.";
+  const latest=s.latest_error&&s.latest_error.code?analysisErrorInfo(s.latest_error.code):null;
+  return `<div class="analysis-brief"><div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
+      <div class="analysis-actions"><a class="ghost sm" href="#/analysis">Open workspace</a>${context==="activity"?`<button class="ghost sm" onclick="openAnalysisSettings()">Settings</button>`:""}</div></div>
+    <div class="analysis-brief-status">
+      <span class="analysis-state running">${active} working</span>
+      <span class="analysis-state failed">${attention} recent attention</span>
+      <span class="analysis-state cancelled">${expected} recent expected</span>
+      <span class="analysis-state ready">${s.ready||0} recent ready</span>
+      <span class="analysis-state ${s.enabled?'ready':'cancelled'}">Queue ${s.enabled?'enabled':'paused'}</span>
+    </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
+}
+function analysisRowKey(row){
+  return row.row_key;
+}
+function analysisDisposition(row){
+  if(row.disposition) return row.disposition;
+  const code=row.job_error_code||row.request_error_code||"";
+  if(["queued","running","submitted"].includes(row.state)) return code?"automatic":"working";
+  if(row.state==="ready") return "ready";
+  if(code==="unsupported") return "unsupported";
+  if(["source_deleted","source_superseded"].includes(code)) return "expected";
+  return "attention";
+}
+function analysisErrors(row){ return [row.request_error_code?{stage:"Request",code:row.request_error_code}:null,row.job_error_code?{stage:"Index build",code:row.job_error_code}:null].filter(Boolean); }
+function analysisAction(row){
+  if(row.action) return row.action;
+  const code=row.job_error_code||row.request_error_code||"";
+  if(code==="source_superseded") return "analyze_current";
+  if(row.state==="ready") return "rebuild";
+  return analysisDisposition(row)==="attention"?"retry":"none";
+}
+function analysisCanRetry(row){ return ["retry","analyze_current"].includes(analysisAction(row)); }
+function resetAnalysisPage(){ ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; }
+function setAnalysisFilter(filter){ ANALYSIS_VIEW.filter=filter; resetAnalysisPage(); renderAnalysis(PAGE_RENDER_GENERATION,true); }
+function setAnalysisQuery(query){
+  ANALYSIS_VIEW.query=query; resetAnalysisPage(); clearTimeout(ANALYSIS_SEARCH_TIMER);
+  ANALYSIS_SEARCH_TIMER=setTimeout(()=>renderAnalysis(PAGE_RENDER_GENERATION,true),250);
+}
+function setAnalysisPage(page){
+  page=Math.max(1,Number(page)||1); if(page>1&&!ANALYSIS_VIEW.cursors[page-1]) return;
+  ANALYSIS_VIEW.page=page; renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+function setAnalysisPageSize(size){ ANALYSIS_VIEW.pageSize=Math.max(10,Math.min(100,Number(size)||25)); resetAnalysisPage(); renderAnalysis(PAGE_RENDER_GENERATION,true); }
+function toggleAnalysisAuto(){ ANALYSIS_VIEW.auto=!ANALYSIS_VIEW.auto; if(ANALYSIS_SNAPSHOT) paintAnalysis(ANALYSIS_SNAPSHOT); }
+async function refreshAnalysisNow(btn){
+  const label=btn&&btn.textContent; if(btn){btn.disabled=true;btn.textContent="Refreshing…";}
+  try{ await renderAnalysis(PAGE_RENDER_GENERATION,true); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
+function openAnalysisSettings(){
+  try{ localStorage.setItem("plurx_settings_tab","analysis"); }catch(error){}
+  if(location.hash==="#/settings"||location.hash==="#/admin") viewSettings(++PAGE_RENDER_GENERATION,false);
+  else location.hash="#/settings";
+}
+function analysisDiagnosticText(row){
+  const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
+  return [
+    `Title: ${row.title||`File ${row.file_id}`}`,
+    `File: ${row.file_id}`,
+    `State: ${analysisStateLabel(row.state)}`,
+    `Disposition: ${analysisDisposition(row)}`,
+    `Phase: ${analysisPhase(row)}`,
+    `Trigger: ${trigger}`,
+    row.request_id?`Request: ${row.request_id}`:null,
+    row.job_id?`Job: ${row.job_id}`:null,
+    row.owner_node_id?`Owner: ${row.owner_node_id}`:null,
+    row.target_node_id?`Target: ${row.target_node_id}`:null,
+    row.pipeline_version?`Pipeline: ${row.pipeline_version}`:null,
+    `Attempts: ${row.attempts||0}`,
+    ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
+  ].filter(Boolean).join("\n");
+}
+async function copyAnalysisDetails(key,btn){
+  const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
+  try{
+    await navigator.clipboard.writeText(analysisDiagnosticText(row));
+    const label=btn.textContent; btn.textContent="Copied"; setTimeout(()=>{if(document.body.contains(btn))btn.textContent=label;},1200);
+  }catch(error){ toast("Couldn’t copy diagnostics"); }
+}
+async function retryFailedAnalysis(){
+  const rows=analysisRows(ANALYSIS_SNAPSHOT||{}).filter(analysisCanRetry);
+  if(!rows.length||!confirm(`Retry ${rows.length} analysis ${rows.length===1?'item':'items'} needing attention on this page?`)) return;
+  let queued=0;
+  for(const row of rows){
+    try{ await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:["fragment_index"]}}); queued++; }
+    catch(error){}
   }
-  for(const job of jobs){
-    if(!represented.has(job.job_id)) rows.push({request:null,job,file:files.get(String(job.file_id)),file_id:job.file_id,state:job.state,
-      trigger:"Background",updated:job.updated_at_ms});
-  }
-  const rank={running:0,queued:1,submitted:2,failed:3,cancelled:4,ready:5};
-  rows.sort((a,b)=>(rank[a.state]??9)-(rank[b.state]??9)||(b.updated||0)-(a.updated||0));
-  return rows;
+  toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
+  await renderAnalysis(PAGE_RENDER_GENERATION,true);
 }
 function paintAnalysis(snapshot){
-  const all=analysisRows(snapshot), counts={};
-  for(const row of all) counts[row.state]=(counts[row.state]||0)+1;
-  const summary=["running","queued","submitted","failed","ready"].filter(s=>counts[s]).map(s=>`<span><b>${counts[s]}</b> ${esc(analysisStateLabel(s).toLowerCase())}</span>`).join("");
-  const rows=all.map(row=>{
-    const request=row.request, job=row.job;
-    const owner=(job&&job.owner_node_id)||(request&&request.owner_node_id)||(request&&request.target_node_id)||"—";
-    const attempt=(job&&job.attempts)||(request&&request.attempts)||0;
-    const lease=(job&&job.lease_expires_ms)||(request&&request.lease_expires_ms)||0;
-    const retryAt=(job&&job.not_before_ms)||(request&&request.not_before_ms)||0;
-    const error=(job&&job.last_error_code)||(request&&request.last_error_code)||"";
-    const pipeline=job&&job.pipeline_version?` · pipeline ${esc(job.pipeline_version)}`:"";
-    const canRebuild=row.state==="ready"||row.state==="failed"||row.state==="cancelled";
-    const title=row.file&&row.file.item_id?`<a href="#/item/${row.file.item_id}">${esc(row.file.title||`File ${row.file_id}`)}</a>`:`File ${row.file_id}`;
-    return `<tr>
-      <td><b>${title}</b><div class="muted" style="font-size:12px">File ${row.file_id} · ${esc(row.trigger)}${pipeline}</div></td>
-      <td><b>${esc(analysisStateLabel(row.state))}</b><div class="muted" style="font-size:12px">${esc(analysisPhase(request,job))}</div></td>
-      <td><span class="clid">${esc(owner)}</span>${lease?`<div class="muted" style="font-size:12px">lease ${lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"}</div>`:""}</td>
-      <td>${attempt||"—"}</td><td class="muted">${row.updated?fmtAgo(Math.floor(row.updated/1000)):"—"}${error?`<div style="color:var(--bad)">${esc(error.replace(/_/g," "))}</div>`:""}${row.state==="queued"&&retryAt>snapshot.now_ms?`<div>retry in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s</div>`:""}</td>
-      <td style="text-align:right">${canRebuild?`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this)'>Rebuild</button>`:""}</td></tr>`;
-  }).join("");
   const main=document.getElementById("main"); if(!main) return;
-  main.innerHTML=`<div class="row" style="justify-content:space-between;align-items:center;gap:12px">
-      <div><h1 style="margin:0">Analysis status</h1><div class="muted">Durable work across the content-analysis pipeline</div></div>
-      <a class="ghost sm" href="#/activity">Activity</a></div>
-    ${!snapshot.enabled?`<div class="clrefusal" style="margin-top:16px"><b>Analysis is paused.</b> Enable Cluster index cache in <a href="#/settings">Playback settings</a>. Existing indexes continue serving.</div>`:""}
-    <div class="chips" style="margin-top:16px">${summary||"<span>No jobs yet</span>"}</div>
-    <h2 class="section">Queue and recent work</h2>
-    ${rows?`<table><thead><tr><th>File</th><th>Status</th><th>Owner</th><th>Attempt</th><th>Updated</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
-      :`<div class="empty">Nothing has been queued yet. Use Analyze now on a video’s detail page.</div>`}`;
+  const active=document.activeElement;
+  const focusKey=active&&(active.dataset.analysisFocus||(active.id==="analysis-search"?"search":""));
+  const selection=focusKey==="search"?[active.selectionStart,active.selectionEnd]:null;
+  const open=new Set([...main.querySelectorAll("details[data-analysis-key][open]")].map(detail=>detail.dataset.analysisKey));
+  const pageRows=analysisRows(snapshot), counts=analysisCounts(snapshot);
+  const filteredTotal=Number(snapshot.filtered_total)||0;
+  const pages=Math.max(1,Math.ceil(filteredTotal/ANALYSIS_VIEW.pageSize));
+  ANALYSIS_VIEW.page=Math.min(ANALYSIS_VIEW.page,pages);
+  ANALYSIS_ROW_LOOKUP=new Map(pageRows.map(row=>[analysisRowKey(row),row]));
+  const rows=pageRows.map(row=>{
+    const owner=row.owner_node_id||row.target_node_id||"—";
+    const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
+    const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
+    const key=analysisRowKey(row), action=analysisAction(row);
+    const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
+    const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
+    const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
+    const details=[
+      ["Request",row.request_id],["Worker job",row.job_id],
+      ["Target node",row.target_node_id],["Owner",owner!=="—"?owner:null],
+      ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
+      ["Retry",row.state==="queued"&&retryAt>snapshot.now_ms?`in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s`:null],
+      ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
+      ["Pipeline",row.pipeline_version],
+    ].filter(([,value])=>value!=null&&value!=="");
+    const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
+    return `<tr>
+      <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · ${esc(trigger)}${pipeline}</div></td>
+      <td><span class="analysis-state ${esc(row.state)}">${esc(analysisStateLabel(row.state))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+        <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
+          ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
+          <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
+        </div></details></td>
+      <td><span class="clid">${esc(owner)}</span><div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
+      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
+  }).join("");
+  const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
+  const filterButton=(id,label)=>`<button class="${ANALYSIS_VIEW.filter===id?'on':''}" data-analysis-focus="filter:${id}" aria-pressed="${ANALYSIS_VIEW.filter===id}" onclick="setAnalysisFilter('${id}')">${label}${ANALYSIS_VIEW.filter===id?` <b>${filteredTotal}</b>`:""}</button>`;
+  const shownFrom=filteredTotal?(ANALYSIS_VIEW.page-1)*ANALYSIS_VIEW.pageSize+1:0;
+  const shownTo=pageRows.length?Math.min(shownFrom+pageRows.length-1,filteredTotal):0;
+  const summaryWarning=counts.available===false?`<div class="analysis-stale" role="status" aria-live="polite">The recent summary is temporarily unavailable. The history and selected-filter total below are still current.</div>`:"";
+  main.innerHTML=`<div class="analysis-head"><div><h1>Content analysis</h1><p>Everything that determines whether a file can use fixed-timeline VOD HLS: source verification, index builds, failures, and recent published results.</p></div>
+      <div class="analysis-actions"><span class="analysis-live ${ANALYSIS_VIEW.auto?'':'paused'}" role="status" aria-live="polite">${ANALYSIS_VIEW.auto?'Summary auto-refreshing':'Summary auto-refresh paused'}</span><button class="ghost sm" data-analysis-focus="auto" aria-pressed="${ANALYSIS_VIEW.auto}" onclick="toggleAnalysisAuto()">${ANALYSIS_VIEW.auto?'Pause':'Resume'}</button><button class="ghost sm" data-analysis-focus="refresh" onclick="refreshAnalysisNow(this)">Refresh history</button><button class="ghost sm" data-analysis-focus="settings" onclick="openAnalysisSettings()">Settings</button></div></div>
+    ${summaryWarning}
+    ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
+    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working now</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>
+    <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
+    <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
+      <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
+      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>
+    ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
+    <div class="analysis-pages"><span>Showing ${shownFrom}–${shownTo} of ${filteredTotal}</span><div class="row"><label>Rows <select data-analysis-focus="page-size" onchange="setAnalysisPageSize(this.value)">${[10,25,50,100].map(size=>`<option value="${size}"${ANALYSIS_VIEW.pageSize===size?' selected':''}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-analysis-focus="previous" ${ANALYSIS_VIEW.page<=1?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page-1})">Previous</button><span>Page ${ANALYSIS_VIEW.page} of ${pages}</span><button class="ghost sm" data-analysis-focus="next" ${!snapshot.next_cursor?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page+1})">Next</button></div></div>`;
+  if(focusKey){
+    const target=[...main.querySelectorAll("[data-analysis-focus]")].find(element=>element.dataset.analysisFocus===focusKey);
+    if(target){ target.focus(); if(selection){try{target.setSelectionRange(selection[0],selection[1]);}catch(error){}} }
+  }
 }
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 function activityNodeFailures(d){
@@ -10117,12 +10417,12 @@ function paintActivityBody(d){
     const flow=!se?'':se.suspended
       ?` · ${se.control_demand?`${esc(se.control_demand)} · `:''}held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
       :se.suspend_count?` · ${se.suspend_count} suspend${se.suspend_count===1?'':'s'} · running`:'';
-    const presentation=de.presentation==="vod"?"VOD":de.presentation==="live-recovery"?"Live recovery":"";
+    const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
       ${attributed?`<td><span class="clid">${esc(de.node_id||"Unknown")}</span></td>`:""}
-      <td>${presentation?`<b>${esc(presentation)}</b> · `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
+      <td>${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span> `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
       <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
@@ -10169,9 +10469,9 @@ function paintActivityBody(d){
     ${dels.length
       ? `<table><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
+    ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
-    ${ME&&ME.is_admin?`<div style="margin:10px 0 18px"><a class="ghost sm" href="#/analysis">Open analysis status</a></div>`:""}
     <h2 class="section">Offline downloads</h2>
     ${offline.length
       ? `<table><thead><tr><th>Title</th><th>Profile</th><th>Work</th><th>Progress</th><th>Requested</th><th></th></tr></thead><tbody>${offlineRows}</tbody></table>`
@@ -10266,6 +10566,7 @@ let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
   cluster:()=>api("/cluster/nodes").catch(error=>{
     if(error&&error.status===401) throw error;
@@ -10276,6 +10577,7 @@ const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
   metadata:{required:["settings","trakt"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
+  analysis:{required:["settings","analysis"],secondary:[]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
   cluster:{required:["cluster"],secondary:[]},
@@ -10386,7 +10688,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
-const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["system","System"],["cluster","Cluster"]];
+const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["analysis","Analysis"],["users","Users"],["system","System"],["cluster","Cluster"]];
 function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
 // Leaving the tab drops any minted join token: it is bearer material, and the
 // operator who switched away is done with it whether or not they said so.
@@ -10417,6 +10719,7 @@ function renderSettings(){
 function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
   if(tab==="playback") return playbackPanel(d.settings);
+  if(tab==="analysis") return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="users")    return usersPanel(d.users);
   if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")  return clusterPanel(d);
@@ -10658,6 +10961,21 @@ function presetOpts(pairs, cur, label){
   if(cur!=="" && !opts.some(([v])=>v===cur)) opts.unshift([cur, label?label(cur):cur]);
   return opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join("");
 }
+function analysisSettingsPanel(settings,snapshot){
+  return `<div id="analysis-settings-summary">${analysisSummaryCard(snapshot||{enabled:false},"settings")}</div>
+    <div class="card"><h2 class="section" style="margin-top:0">Index analysis</h2>
+      <p class="muted" style="margin-top:0;max-width:72ch">Content analysis verifies each source and builds the fragment index used by <b>VOD HLS</b>. It runs only while the media worker is idle, so foreground playback always wins.</p>
+      <label class="row" style="margin:0 0 16px;font-size:14px;color:var(--text)"><input type="checkbox" id="an-enabled" ${settings.vod_index_cluster_cache?'checked':''} style="width:auto;margin-right:9px"> Enable the durable analysis queue and shared index cache</label>
+      <div class="row" style="align-items:end">
+        <div><label>Background analysis</label><select id="an-every" style="width:auto;min-width:220px">${presetOpts([["0","Paused"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+      </div>
+      <div class="hint">Manual Analyze and Retry actions use the durable queue. Background analysis discovers eligible files on this cadence. Pausing either does not remove completed indexes; titles without one use Live HLS when live recovery is enabled in Playback.</div>
+      <div class="err" id="an-error"></div><div class="analysis-actions" style="justify-content:flex-start;margin-top:10px"><button onclick="saveAnalysisSettings()">Save analysis settings</button><a class="ghost sm" href="#/analysis">Open analysis workspace</a></div>
+    </div>
+    <div class="card"><h2 class="section" style="margin-top:0">How a file becomes VOD HLS ready</h2>
+      <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
+    </div>`;
+}
 function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
@@ -10675,18 +10993,16 @@ function playbackPanel(settings){
       <h2 class="section">Automatic quality</h2>
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
-      <h2 class="section">Film-addressed VOD</h2>
-      <p class="muted" style="margin-top:0">Immutable VOD is preferred for every HLS session. While live recovery is enabled, an unindexed or not-yet-supported VOD request uses the growing-HLS compatibility engine instead of failing playback.</p>
+      <h2 class="section">HLS playback modes</h2>
+      <p class="muted" style="margin-top:0"><b>VOD HLS</b> is the preferred fixed, seekable timeline. <b>Live HLS</b> is the growing recovery stream used when a file’s VOD analysis is unavailable.</p>
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvlr" ${settings.vod_live_recovery?'checked':''} style="width:auto;margin-right:9px"> Use live HLS when a VOD prerequisite is unavailable</label>
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pcpv1" ${settings.playback_control_protocol_v1?'checked':''} style="width:auto;margin-right:9px"> Advertise playback control protocol v1 <span class="muted" style="font-size:12px;margin-left:6px">· passive preview; no automatic actions yet</span></label>
       <div class="row" style="align-items:end">
-        <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
-        <div><label>Cluster index cache</label><input id="pvcc" type="checkbox" ${settings.vod_index_cluster_cache?'checked':''}><span class="hint">Share content-addressed indexes and divide background builds across voters</span></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
-      <div class="hint">Indexing reads each eligible file once per node; 15 minutes is the default. The item page shows whether this node's current file identity is indexed, and Activity/Playback Stats show VOD versus Live recovery. The fallback is temporary protection for the backfill and can be disabled independently.</div>
+      <div class="hint">The item page and Playback info name the active mode explicitly. Index schedules, queue health, failures, and retries now live in <button class="ghost sm" onclick="openAnalysisSettings()">Analysis settings</button>.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets
@@ -11340,6 +11656,13 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       if(!settingsCurrent(generation,tab)) return;
       if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ cacheTrakt(t); paintTrakt(); }
     }
+    if(tab==="analysis"){
+      const snapshot=await api("/analysis/summary");
+      if(!settingsCurrent(generation,tab)) return;
+      SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
+      const mount=document.getElementById("analysis-settings-summary");
+      if(mount) mount.innerHTML=analysisSummaryCard(snapshot,"settings");
+    }
     await Promise.all(secondary);
   }catch(e){ if(e&&e.status===401) return; }
   finally{ if(SETTINGS_TICKING===owner) SETTINGS_TICKING=null; }
@@ -11438,6 +11761,19 @@ const LANG_CHOICES=[["eng","English"],["jpn","Japanese"],["spa","Spanish"],["fre
   ["tha","Thai"],["vie","Vietnamese"],["ukr","Ukrainian"],["ces","Czech"],["ell","Greek"],
   ["heb","Hebrew"],["hun","Hungarian"],["ron","Romanian"]];
 function langOpts(cur){ return LANG_CHOICES.map(([v,l])=>`<option value="${v}" ${cur===v?'selected':''}>${l}</option>`).join(""); }
+async function saveAnalysisSettings(){
+  const err=document.getElementById("an-error"); if(err) err.textContent="";
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_mins:Number(document.getElementById("an-every").value),
+      vod_index_cluster_cache:document.getElementById("an-enabled").checked,
+    }}));
+    const snapshot=await api("/analysis/summary");
+    SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
+    if(settingsCurrent(PAGE_RENDER_GENERATION,"analysis")) renderSettings();
+    toast("Analysis settings saved");
+  }catch(error){ if(err) err.textContent=error.message; }
+}
 async function savePlayback(){
   const err=document.getElementById("perr"); err.textContent="";
   try{
@@ -11454,8 +11790,6 @@ async function savePlayback(){
       vod_presentation:document.getElementById("pvod").checked,
       vod_live_recovery:document.getElementById("pvlr").checked,
       playback_control_protocol_v1:document.getElementById("pcpv1").checked,
-      vod_index_mins:Number(document.getElementById("pvi").value),
-      vod_index_cluster_cache:document.getElementById("pvcc").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value}}));

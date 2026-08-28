@@ -843,6 +843,9 @@ const MIGRATIONS: &[&str] = &[
     ) STRICT;
     CREATE INDEX media_session_terminal_acks_expiry
         ON media_session_terminal_acks(expires_at_ms, session_id);",
+    // v33: query indexes for the server-paginated analysis history and the
+    // bounded summary projection polled by Activity and Settings.
+    crate::store::fragment_index_cluster::ANALYSIS_HISTORY_INDEX_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1773,7 +1776,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 32,
+            version, 33,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2891,5 +2894,91 @@ mod tests {
                 "missing v32 schema object {object}"
             );
         }
+    }
+
+    #[test]
+    fn v33_adds_analysis_history_indexes_without_losing_v32_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(32) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 32)
+                .expect("v32 marker");
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES ('migration.proof', 'survives-v32')",
+                [],
+            )
+            .expect("seed v32 state");
+        }
+
+        SqliteStore::open(&db).expect("migrate v32 to v33");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT value FROM settings WHERE key = 'migration.proof'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("migration proof"),
+            "survives-v32"
+        );
+        for object in [
+            "analysis_requests_result_history",
+            "cluster_fragment_index_jobs_status_history",
+        ] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                    [object],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("schema object"),
+                1,
+                "missing v33 schema object {object}"
+            );
+        }
+        let mut plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT cache_key FROM (
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'ready'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   UNION ALL
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'failed'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   UNION ALL
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'cancelled'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)",
+            )
+            .expect("prepare summary terminal-window plan");
+        let details = plan
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query summary terminal-window plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("summary terminal-window plan rows");
+        assert_eq!(
+            details
+                .iter()
+                .filter(|detail| { detail.contains("cluster_fragment_index_jobs_status_history") })
+                .count(),
+            3,
+            "each terminal state must have its own bounded newest-first index walk: {details:?}"
+        );
     }
 }

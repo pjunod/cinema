@@ -196,6 +196,7 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
         .route("/files/{id}/analysis", post(analysis::request))
+        .route("/analysis/summary", get(analysis::summary))
         .route("/analysis/jobs", get(analysis::jobs))
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
@@ -3654,6 +3655,7 @@ mod tests {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
             [
+                "analysis",
                 "deliveries",
                 "offline",
                 "producing",
@@ -3664,11 +3666,38 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            "SQLite gains no clustered-only field"
+            "SQLite gains analysis health but no clustered-only field"
         );
+        assert_eq!(detail["analysis"]["enabled"], false);
+        assert_eq!(detail["analysis"]["total"], 0);
         assert!(
             detail["sessions"].as_array().is_some_and(Vec::is_empty),
             "native sessions retains its existing array shape"
+        );
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token");
+        let (_, viewer_detail) = call(&app, get("/api/v1/activity/detail", Some(viewer))).await;
+        assert!(
+            viewer_detail.get("analysis").is_none(),
+            "operator queue health stays out of ordinary household responses"
         );
     }
 
@@ -7937,12 +7966,45 @@ mod tests {
         tokio::task::yield_now().await;
         let (status, analysis) = call(&app, get("/api/v1/analysis/jobs", Some(&admin))).await;
         assert_eq!(status, StatusCode::OK, "{analysis}");
+        assert_eq!(analysis["rows"][0]["request_id"], requested["request_id"]);
+        assert_eq!(analysis["rows"][0]["item_id"], s.ep.to_string());
+        assert_eq!(analysis["rows"][0]["job_id"], "");
+        assert_eq!(analysis["rows"][0]["disposition"], "working");
+        assert_eq!(analysis["rows"][0]["action"], "none");
+        assert_eq!(analysis["filtered_total"], 1);
+        assert_eq!(analysis["page_size"], 25);
+        assert!(analysis["next_cursor"].is_null());
+        let (status, summary) = call(&app, get("/api/v1/analysis/summary", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{summary}");
+        assert_eq!(summary["enabled"], true);
+        assert_eq!(summary["queued"], 1);
+        assert_eq!(summary["active"], 1);
+        assert_eq!(summary["total"], 1);
+        assert_eq!(summary["scope"], "active_and_recent_terminal");
+        assert_eq!(summary["terminal_window"], 8192);
         assert_eq!(
-            analysis["requests"][0]["request_id"],
-            requested["request_id"]
+            call(
+                &app,
+                get("/api/v1/analysis/jobs?filter=unknown", Some(&admin))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
         );
-        assert_eq!(analysis["files"][0]["item_id"], s.ep.to_string());
-        assert!(analysis["jobs"].as_array().is_some_and(Vec::is_empty));
+        assert_eq!(
+            call(
+                &app,
+                get("/api/v1/analysis/jobs?cursor=not-a-cursor", Some(&admin))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(activity["analysis"]["enabled"], true);
+        assert_eq!(activity["analysis"]["queued"], 1);
+        assert_eq!(activity["analysis"]["active"], 1);
+        assert_eq!(activity["analysis"]["total"], 1);
         drop(_waiting_viewer);
 
         // Progress on a missing item → 404.

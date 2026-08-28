@@ -145,7 +145,183 @@ BEGIN
 END;
 "#;
 
+/// v33/v15 query indexes for the paginated operator history and its compact
+/// polling projection. This is a separate migration from the v31/v13 table so
+/// deployed databases receive it instead of only fresh installations.
+pub const ANALYSIS_HISTORY_INDEX_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS analysis_requests_result_history
+    ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+    WHERE result_cache_key IS NOT NULL AND result_cache_key <> '';
+CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
+    ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
+
+/// Portable SQLite/Postgres projection used by both store backends. Retained
+/// request generations are authoritative history. A mutable worker job is
+/// attached only to the newest request that references its cache key; jobs
+/// created solely by background analysis remain standalone rows.
+pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
+  SELECT request.*, ROW_NUMBER() OVER (
+    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id)
+    ORDER BY updated_at_ms DESC, request_id DESC) AS cache_rank
+    FROM analysis_requests request
+), canonical AS (
+  SELECT 'request:' || request.request_id AS row_key,
+         request.request_id AS request_id,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.cache_key, '') ELSE '' END AS job_id,
+         request.file_id AS file_id,
+         CASE WHEN files.id IS NULL THEN 0 ELSE 1 END AS file_available,
+         COALESCE(files.item_id, 0) AS item_id,
+         COALESCE(items.title, '') AS title,
+         request.component AS component,
+         request.force_rebuild AS force_rebuild,
+         request.target_node_id AS target_node_id,
+         request.state AS request_state,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, '') ELSE '' END AS job_state,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state) ELSE request.state END AS state,
+         CASE WHEN request.cache_rank = 1 AND COALESCE(job.owner_node_id, '') <> ''
+              THEN job.owner_node_id ELSE COALESCE(request.owner_node_id, '') END AS owner_node_id,
+         CASE WHEN request.cache_rank = 1 AND COALESCE(job.lease_expires_ms, 0) > 0
+              THEN job.lease_expires_ms ELSE COALESCE(request.lease_expires_ms, 0) END AS lease_expires_ms,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.attempts ELSE request.attempts END AS attempts,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.not_before_ms ELSE request.not_before_ms END AS not_before_ms,
+         COALESCE(request.last_error_code, '') AS request_error_code,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
+         request.created_at_ms AS created_at_ms,
+         CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
+              THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms,
+         CASE WHEN request.cache_rank = 1 THEN SUBSTR(COALESCE(job.pipeline_sha256, ''), 1, 12) ELSE '' END AS pipeline_version,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.source_size ELSE request.source_size END AS source_size
+    FROM request_ranked request
+    LEFT JOIN cluster_fragment_index_jobs job
+      ON request.cache_rank = 1 AND job.cache_key = request.result_cache_key
+    LEFT JOIN files ON files.id = request.file_id
+    LEFT JOIN items ON items.id = files.item_id
+  UNION ALL
+  SELECT 'job:' || job.cache_key AS row_key,
+         '' AS request_id, job.cache_key AS job_id, job.file_id AS file_id,
+         CASE WHEN files.id IS NULL THEN 0 ELSE 1 END AS file_available,
+         COALESCE(files.item_id, 0) AS item_id,
+         COALESCE(items.title, '') AS title,
+         'fragment_index' AS component, 0 AS force_rebuild,
+         '' AS target_node_id, '' AS request_state, job.state AS job_state,
+         job.state AS state, COALESCE(job.owner_node_id, '') AS owner_node_id,
+         COALESCE(job.lease_expires_ms, 0) AS lease_expires_ms,
+         job.attempts AS attempts, job.not_before_ms AS not_before_ms,
+         '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
+         job.created_at_ms AS created_at_ms, job.updated_at_ms AS updated_at_ms,
+         SUBSTR(job.pipeline_sha256, 1, 12) AS pipeline_version,
+         job.source_size AS source_size
+    FROM cluster_fragment_index_jobs job
+    LEFT JOIN files ON files.id = job.file_id
+    LEFT JOIN items ON items.id = files.item_id
+   WHERE NOT EXISTS (
+     SELECT 1 FROM analysis_requests request
+      WHERE request.result_cache_key = job.cache_key)
+), classified_base AS (
+  SELECT canonical.*,
+         CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1
+           WHEN 'submitted' THEN 2 WHEN 'failed' THEN 3
+           WHEN 'cancelled' THEN 4 WHEN 'ready' THEN 5 ELSE 6 END AS sort_rank,
+         CASE
+           WHEN state IN ('queued', 'running', 'submitted')
+             AND COALESCE(NULLIF(job_error_code, ''), request_error_code) <> '' THEN 'automatic'
+           WHEN state IN ('queued', 'running', 'submitted') THEN 'working'
+           WHEN state = 'ready' THEN 'ready'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'unsupported' THEN 'unsupported'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code)
+             IN ('source_deleted', 'source_superseded') THEN 'expected'
+           ELSE 'attention'
+         END AS disposition
+    FROM canonical
+), classified AS (
+  SELECT classified_base.*,
+         CASE
+           WHEN file_available = 0 THEN 'none'
+           WHEN state = 'ready' THEN 'rebuild'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'source_superseded'
+             THEN 'analyze_current'
+           WHEN disposition = 'attention' THEN 'retry'
+           ELSE 'none'
+         END AS action
+    FROM classified_base
+)"#;
+
+/// Bounded, join-free projection for the frequently polled status cards.
+/// Operator requests already have a hard retained-history cap. Standalone
+/// terminal worker rows are restricted to the newest retained window while
+/// active and request-referenced jobs are always included.
+pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
+  SELECT request.*, ROW_NUMBER() OVER (
+    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id)
+    ORDER BY updated_at_ms DESC, request_id DESC) AS cache_rank
+    FROM analysis_requests request
+), summary_job_keys AS (
+  SELECT result_cache_key AS cache_key FROM analysis_requests
+   WHERE result_cache_key IS NOT NULL AND result_cache_key <> ''
+  UNION
+  SELECT cache_key FROM cluster_fragment_index_jobs
+   WHERE state IN ('queued', 'running')
+  UNION
+  SELECT cache_key FROM (
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'ready'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    UNION ALL
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'failed'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    UNION ALL
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'cancelled'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+), summary_jobs AS (
+  SELECT job.* FROM cluster_fragment_index_jobs job
+  JOIN summary_job_keys keys ON keys.cache_key = job.cache_key
+), summary_canonical AS (
+  SELECT 'request:' || request.request_id AS row_key,
+         request.file_id AS file_id,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state)
+              ELSE request.state END AS state,
+         COALESCE(request.last_error_code, '') AS request_error_code,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
+         CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
+              THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms
+    FROM request_ranked request
+    LEFT JOIN summary_jobs job
+      ON request.cache_rank = 1 AND job.cache_key = request.result_cache_key
+  UNION ALL
+  SELECT 'job:' || job.cache_key AS row_key, job.file_id AS file_id,
+         job.state AS state, '' AS request_error_code,
+         COALESCE(job.last_error_code, '') AS job_error_code,
+         job.updated_at_ms AS updated_at_ms
+    FROM summary_jobs job
+   WHERE NOT EXISTS (
+     SELECT 1 FROM analysis_requests request
+      WHERE request.result_cache_key = job.cache_key)
+), summary_classified AS (
+  SELECT summary_canonical.*,
+         CASE
+           WHEN state IN ('queued', 'running', 'submitted')
+             AND COALESCE(NULLIF(job_error_code, ''), request_error_code) <> '' THEN 'automatic'
+           WHEN state IN ('queued', 'running', 'submitted') THEN 'working'
+           WHEN state = 'ready' THEN 'ready'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'unsupported' THEN 'unsupported'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code)
+             IN ('source_deleted', 'source_superseded') THEN 'expected'
+           ELSE 'attention'
+         END AS disposition
+    FROM summary_canonical
+)"#;
 const BLOB_MAGIC: &[u8; 8] = b"PLRXIDX2";
 const BLOB_FORMAT_VERSION: u16 = 2;
 const ROW_BYTES: usize = 24;
@@ -231,6 +407,81 @@ pub struct AnalysisFileLabel {
     pub file_id: i64,
     pub item_id: i64,
     pub title: String,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnalysisHistoryFilter {
+    #[default]
+    All,
+    Working,
+    Attention,
+    Ready,
+    Expected,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisHistoryCursor {
+    pub sort_rank: i64,
+    pub updated_at_ms: i64,
+    pub row_key: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisHistoryQuery {
+    pub limit: i64,
+    pub cursor: Option<AnalysisHistoryCursor>,
+    pub filter: AnalysisHistoryFilter,
+    pub search: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisHistoryRow {
+    pub row_key: String,
+    pub request_id: String,
+    pub job_id: String,
+    pub file_id: i64,
+    pub item_id: i64,
+    pub title: String,
+    pub component: String,
+    pub force_rebuild: bool,
+    pub target_node_id: String,
+    pub request_state: String,
+    pub job_state: String,
+    pub state: String,
+    pub disposition: String,
+    pub action: String,
+    pub owner_node_id: String,
+    pub lease_expires_ms: i64,
+    pub attempts: i64,
+    pub not_before_ms: i64,
+    pub request_error_code: String,
+    pub job_error_code: String,
+    pub created_at_ms: i64,
+    pub updated_at_ms: i64,
+    pub pipeline_version: String,
+    pub source_size: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnalysisHistoryPage {
+    pub rows: Vec<AnalysisHistoryRow>,
+    pub filtered_total: i64,
+    pub next_cursor: Option<AnalysisHistoryCursor>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AnalysisStatusSummary {
+    pub total: i64,
+    pub working: i64,
+    pub queued: i64,
+    pub running: i64,
+    pub submitted: i64,
+    pub attention: i64,
+    pub expected: i64,
+    pub ready: i64,
+    pub latest_error_code: String,
+    pub latest_error_file_id: i64,
+    pub latest_error_updated_at_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -320,6 +571,17 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    /// Stable keyset page over operator requests plus background-only jobs.
+    /// A worker job is attached only to the newest request that references its
+    /// cache key, so retained request generations remain distinct history.
+    async fn analysis_history(
+        &self,
+        query: &AnalysisHistoryQuery,
+    ) -> Result<AnalysisHistoryPage, StoreError>;
+
+    /// Compact aggregate used by frequently-polled operator surfaces.
+    async fn analysis_status_summary(&self) -> Result<AnalysisStatusSummary, StoreError>;
 
     async fn analysis_file_labels(&self, limit: i64) -> Result<Vec<AnalysisFileLabel>, StoreError>;
 

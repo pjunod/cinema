@@ -56,7 +56,8 @@ catalog|activity@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* 
 catalog|activity@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|activity@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|activity@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|activity@1280x860|dom|div > a.ghost.sm[text]|1
+catalog|activity@1280x860|dom|div > h2[text]|1
+catalog|activity@1280x860|dom|div > p[text]|1
 catalog|activity@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|activity@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|activity@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
@@ -65,6 +66,16 @@ catalog|activity@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|activity@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|activity@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|activity@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|activity@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|activity@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+catalog|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-head|1
+catalog|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-status|1
+catalog|activity@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|activity@1280x860|dom|div.analysis-brief-head > div|1
+catalog|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+catalog|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+catalog|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+catalog|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 catalog|activity@1280x860|dom|div.card > p.muted[text]|1
 catalog|activity@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|activity@1280x860|dom|div.px-ctl > div.px-pop|3
@@ -82,10 +93,10 @@ catalog|activity@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|activity@1280x860|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|activity@1280x860|dom|div.px-pop > div#thememenu.amenu|1
 catalog|activity@1280x860|dom|div.px-user > div.px-pop|1
+catalog|activity@1280x860|dom|main#main > div.analysis-brief|1
 catalog|activity@1280x860|dom|main#main > div.card|1
 catalog|activity@1280x860|dom|main#main > div.empty[text]|4
-catalog|activity@1280x860|dom|main#main > div|1
-catalog|activity@1280x860|dom|main#main > h2.section[text]|5
+catalog|activity@1280x860|dom|main#main > h2.section[text]|6
 catalog|activity@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|activity@1280x860|dom|nav.px-nav[aria-label=*] > a|2
 catalog|activity@1280x860|dom|nav.px-tabs[aria-label=*] > a.on.px-tab[aria-current=page]|1
@@ -106,9 +117,10 @@ catalog|activity@1280x860|focus|005|button.ghost.sm "Theme and layout"
 catalog|activity@1280x860|focus|006|button.ghost.sm "Light or dark"
 catalog|activity@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 catalog|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
-catalog|activity@1280x860|focus|009|a.ghost.sm "Open analysis status"
-catalog|activity@1280x860|focus|010|a "Settings"
-catalog|activity@1280x860|focus|011|<wrap>
+catalog|activity@1280x860|focus|009|a.ghost.sm "Open workspace"
+catalog|activity@1280x860|focus|010|button.ghost.sm "Settings"
+catalog|activity@1280x860|focus|011|a "Settings"
+catalog|activity@1280x860|focus|012|<wrap>
 catalog|activity@1280x860|req|GET /api/v1/activity/detail|2
 catalog|activity@1280x860|req|GET /api/v1/me|1
 catalog|activity@1280x860|req|GET /api/v1/server|1
@@ -134,7 +146,8 @@ catalog|activity@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* t
 catalog|activity@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|activity@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|activity@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|activity@390x780|dom|div > a.ghost.sm[text]|1
+catalog|activity@390x780|dom|div > h2[text]|1
+catalog|activity@390x780|dom|div > p[text]|1
 catalog|activity@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|activity@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|activity@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
@@ -143,6 +156,16 @@ catalog|activity@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|activity@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|activity@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|activity@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
+catalog|activity@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|activity@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+catalog|activity@390x780|dom|div.analysis-brief > div.analysis-brief-head|1
+catalog|activity@390x780|dom|div.analysis-brief > div.analysis-brief-status|1
+catalog|activity@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|activity@390x780|dom|div.analysis-brief-head > div|1
+catalog|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+catalog|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+catalog|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+catalog|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 catalog|activity@390x780|dom|div.card > p.muted[text]|1
 catalog|activity@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|activity@390x780|dom|div.px-ctl > div.px-pop|3
@@ -160,10 +183,10 @@ catalog|activity@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|activity@390x780|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|activity@390x780|dom|div.px-pop > div#thememenu.amenu|1
 catalog|activity@390x780|dom|div.px-user > div.px-pop|1
+catalog|activity@390x780|dom|main#main > div.analysis-brief|1
 catalog|activity@390x780|dom|main#main > div.card|1
 catalog|activity@390x780|dom|main#main > div.empty[text]|4
-catalog|activity@390x780|dom|main#main > div|1
-catalog|activity@390x780|dom|main#main > h2.section[text]|5
+catalog|activity@390x780|dom|main#main > h2.section[text]|6
 catalog|activity@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|activity@390x780|dom|nav.px-nav[aria-label=*] > a|2
 catalog|activity@390x780|dom|nav.px-tabs[aria-label=*] > a.on.px-tab[aria-current=page]|1
@@ -181,13 +204,14 @@ catalog|activity@390x780|focus|002|button.ghost.sm "Theme and layout"
 catalog|activity@390x780|focus|003|button.ghost.sm "Light or dark"
 catalog|activity@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 catalog|activity@390x780|focus|005|button.ghost.sm.profile "Account"
-catalog|activity@390x780|focus|006|a.ghost.sm "Open analysis status"
-catalog|activity@390x780|focus|007|a "Settings"
-catalog|activity@390x780|focus|008|a.px-tab "Home"
-catalog|activity@390x780|focus|009|button.px-tab "Libraries"
-catalog|activity@390x780|focus|010|button.px-tab "Search"
-catalog|activity@390x780|focus|011|a.px-tab.on "Activity"
-catalog|activity@390x780|focus|012|<wrap>
+catalog|activity@390x780|focus|006|a.ghost.sm "Open workspace"
+catalog|activity@390x780|focus|007|button.ghost.sm "Settings"
+catalog|activity@390x780|focus|008|a "Settings"
+catalog|activity@390x780|focus|009|a.px-tab "Home"
+catalog|activity@390x780|focus|010|button.px-tab "Libraries"
+catalog|activity@390x780|focus|011|button.px-tab "Search"
+catalog|activity@390x780|focus|012|a.px-tab.on "Activity"
+catalog|activity@390x780|focus|013|<wrap>
 catalog|activity@390x780|req|GET /api/v1/activity/detail|2
 catalog|activity@390x780|req|GET /api/v1/me|1
 catalog|activity@390x780|req|GET /api/v1/server|1
@@ -209,12 +233,13 @@ catalog|analysis@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 catalog|analysis@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 catalog|analysis@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 catalog|analysis@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
+catalog|analysis@1280x860|dom|button.on[aria-pressed=true text] > b[text]|1
 catalog|analysis@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
 catalog|analysis@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|analysis@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|analysis@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|analysis@1280x860|dom|div > div.muted[text]|1
 catalog|analysis@1280x860|dom|div > h1[text]|1
+catalog|analysis@1280x860|dom|div > p[text]|1
 catalog|analysis@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|analysis@1280x860|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|analysis@1280x860|dom|div#pxnav.px-scroll > div#pxlibs|1
@@ -223,9 +248,27 @@ catalog|analysis@1280x860|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|analysis@1280x860|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|analysis@1280x860|dom|div#pxshell.px-shell > main#main|1
 catalog|analysis@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|analysis@1280x860|dom|div.chips > span[text]|1
-catalog|analysis@1280x860|dom|div.clrefusal[text] > a[text]|1
+catalog|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+catalog|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|2
+catalog|analysis@1280x860|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+catalog|analysis@1280x860|dom|div.analysis-controls > div.analysis-filters|1
+catalog|analysis@1280x860|dom|div.analysis-controls > div.analysis-search|1
+catalog|analysis@1280x860|dom|div.analysis-controls > span|1
+catalog|analysis@1280x860|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+catalog|analysis@1280x860|dom|div.analysis-filters > button[aria-pressed=false text]|4
+catalog|analysis@1280x860|dom|div.analysis-head > div.analysis-actions|1
+catalog|analysis@1280x860|dom|div.analysis-head > div|1
+catalog|analysis@1280x860|dom|div.analysis-metric > span.k[text]|4
+catalog|analysis@1280x860|dom|div.analysis-metric > span.n[text]|4
+catalog|analysis@1280x860|dom|div.analysis-metric.good > span.k[text]|1
+catalog|analysis@1280x860|dom|div.analysis-metric.good > span.n[text]|1
+catalog|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric.good|1
+catalog|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric|4
+catalog|analysis@1280x860|dom|div.analysis-pages > div.row|1
+catalog|analysis@1280x860|dom|div.analysis-pages > span[text]|1
+catalog|analysis@1280x860|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 catalog|analysis@1280x860|dom|div.clrefusal[text] > b[text]|1
+catalog|analysis@1280x860|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 catalog|analysis@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|analysis@1280x860|dom|div.px-ctl > div.px-pop|3
 catalog|analysis@1280x860|dom|div.px-foot > div.px-ctl|1
@@ -242,19 +285,24 @@ catalog|analysis@1280x860|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|analysis@1280x860|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|analysis@1280x860|dom|div.px-pop > div#thememenu.amenu|1
 catalog|analysis@1280x860|dom|div.px-user > div.px-pop|1
-catalog|analysis@1280x860|dom|div.row > a.ghost.sm[text]|1
-catalog|analysis@1280x860|dom|div.row > div|1
-catalog|analysis@1280x860|dom|main#main > div.chips|1
+catalog|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
+catalog|analysis@1280x860|dom|div.row > label[text]|1
+catalog|analysis@1280x860|dom|div.row > span[text]|1
+catalog|analysis@1280x860|dom|label[text] > select|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-controls|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-head|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-metrics|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-pages|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 catalog|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 catalog|analysis@1280x860|dom|main#main > div.empty[text]|1
-catalog|analysis@1280x860|dom|main#main > div.row|1
-catalog|analysis@1280x860|dom|main#main > h2.section[text]|1
 catalog|analysis@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|analysis@1280x860|dom|nav.px-nav[aria-label=*] > a|2
 catalog|analysis@1280x860|dom|nav.px-tabs[aria-label=*] > a.on.px-tab[aria-current=page]|1
 catalog|analysis@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|1
 catalog|analysis@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|analysis@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|analysis@1280x860|dom|select > option[text]|4
 catalog|analysis@1280x860|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|analysis@1280x860|dom|svg.px-ico[aria-hidden=true] > path|6
 catalog|analysis@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|4
@@ -268,11 +316,21 @@ catalog|analysis@1280x860|focus|005|button.ghost.sm "Theme and layout"
 catalog|analysis@1280x860|focus|006|button.ghost.sm "Light or dark"
 catalog|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 catalog|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
-catalog|analysis@1280x860|focus|009|a.ghost.sm "Activity"
-catalog|analysis@1280x860|focus|010|a "Playback settings"
-catalog|analysis@1280x860|focus|011|<wrap>
+catalog|analysis@1280x860|focus|009|button.ghost.sm "Pause"
+catalog|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
+catalog|analysis@1280x860|focus|011|button.ghost.sm "Settings"
+catalog|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
+catalog|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
+catalog|analysis@1280x860|focus|014|button.on "All 0"
+catalog|analysis@1280x860|focus|015|button "Working"
+catalog|analysis@1280x860|focus|016|button "Attention"
+catalog|analysis@1280x860|focus|017|button "Expected"
+catalog|analysis@1280x860|focus|018|button "Ready"
+catalog|analysis@1280x860|focus|019|select "10 25 50 100"
+catalog|analysis@1280x860|focus|020|<wrap>
 catalog|analysis@1280x860|req|GET /api/v1/activity|2
 catalog|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
+catalog|analysis@1280x860|req|GET /api/v1/analysis/summary|1
 catalog|analysis@1280x860|req|GET /api/v1/me|1
 catalog|analysis@1280x860|req|GET /api/v1/server|1
 catalog|analysis@390x780|dom|^ > div#app|1
@@ -293,12 +351,13 @@ catalog|analysis@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 catalog|analysis@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 catalog|analysis@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 catalog|analysis@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
+catalog|analysis@390x780|dom|button.on[aria-pressed=true text] > b[text]|1
 catalog|analysis@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > span[text]|1
 catalog|analysis@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|analysis@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|analysis@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|analysis@390x780|dom|div > div.muted[text]|1
 catalog|analysis@390x780|dom|div > h1[text]|1
+catalog|analysis@390x780|dom|div > p[text]|1
 catalog|analysis@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|analysis@390x780|dom|div#pxnav.px-scroll > button.ghost.px-sheetx.sm[aria-label=* type=button text]|1
 catalog|analysis@390x780|dom|div#pxnav.px-scroll > div#pxlibs|1
@@ -307,9 +366,27 @@ catalog|analysis@390x780|dom|div#pxnav.px-scroll > nav.px-nav[aria-label=*]|2
 catalog|analysis@390x780|dom|div#pxshell.px-shell > aside.px-side|1
 catalog|analysis@390x780|dom|div#pxshell.px-shell > main#main|1
 catalog|analysis@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
-catalog|analysis@390x780|dom|div.chips > span[text]|1
-catalog|analysis@390x780|dom|div.clrefusal[text] > a[text]|1
+catalog|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+catalog|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[text]|2
+catalog|analysis@390x780|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+catalog|analysis@390x780|dom|div.analysis-controls > div.analysis-filters|1
+catalog|analysis@390x780|dom|div.analysis-controls > div.analysis-search|1
+catalog|analysis@390x780|dom|div.analysis-controls > span|1
+catalog|analysis@390x780|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+catalog|analysis@390x780|dom|div.analysis-filters > button[aria-pressed=false text]|4
+catalog|analysis@390x780|dom|div.analysis-head > div.analysis-actions|1
+catalog|analysis@390x780|dom|div.analysis-head > div|1
+catalog|analysis@390x780|dom|div.analysis-metric > span.k[text]|4
+catalog|analysis@390x780|dom|div.analysis-metric > span.n[text]|4
+catalog|analysis@390x780|dom|div.analysis-metric.good > span.k[text]|1
+catalog|analysis@390x780|dom|div.analysis-metric.good > span.n[text]|1
+catalog|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric.good|1
+catalog|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric|4
+catalog|analysis@390x780|dom|div.analysis-pages > div.row|1
+catalog|analysis@390x780|dom|div.analysis-pages > span[text]|1
+catalog|analysis@390x780|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 catalog|analysis@390x780|dom|div.clrefusal[text] > b[text]|1
+catalog|analysis@390x780|dom|div.clrefusal[text] > button.ghost.sm[text]|1
 catalog|analysis@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|analysis@390x780|dom|div.px-ctl > div.px-pop|3
 catalog|analysis@390x780|dom|div.px-foot > div.px-ctl|1
@@ -326,19 +403,24 @@ catalog|analysis@390x780|dom|div.px-pop > div#profilemenu.amenu|1
 catalog|analysis@390x780|dom|div.px-pop > div#sizemenu.amenu|1
 catalog|analysis@390x780|dom|div.px-pop > div#thememenu.amenu|1
 catalog|analysis@390x780|dom|div.px-user > div.px-pop|1
-catalog|analysis@390x780|dom|div.row > a.ghost.sm[text]|1
-catalog|analysis@390x780|dom|div.row > div|1
-catalog|analysis@390x780|dom|main#main > div.chips|1
+catalog|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
+catalog|analysis@390x780|dom|div.row > label[text]|1
+catalog|analysis@390x780|dom|div.row > span[text]|1
+catalog|analysis@390x780|dom|label[text] > select|1
+catalog|analysis@390x780|dom|main#main > div.analysis-controls|1
+catalog|analysis@390x780|dom|main#main > div.analysis-head|1
+catalog|analysis@390x780|dom|main#main > div.analysis-metrics|1
+catalog|analysis@390x780|dom|main#main > div.analysis-pages|1
+catalog|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 catalog|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 catalog|analysis@390x780|dom|main#main > div.empty[text]|1
-catalog|analysis@390x780|dom|main#main > div.row|1
-catalog|analysis@390x780|dom|main#main > h2.section[text]|1
 catalog|analysis@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
 catalog|analysis@390x780|dom|nav.px-nav[aria-label=*] > a|2
 catalog|analysis@390x780|dom|nav.px-tabs[aria-label=*] > a.on.px-tab[aria-current=page]|1
 catalog|analysis@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|1
 catalog|analysis@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|analysis@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|analysis@390x780|dom|select > option[text]|4
 catalog|analysis@390x780|dom|svg.px-ico[aria-hidden=true] > circle|2
 catalog|analysis@390x780|dom|svg.px-ico[aria-hidden=true] > path|6
 catalog|analysis@390x780|dom|svg.px-ico[aria-hidden=true] > rect|4
@@ -349,15 +431,25 @@ catalog|analysis@390x780|focus|002|button.ghost.sm "Theme and layout"
 catalog|analysis@390x780|focus|003|button.ghost.sm "Light or dark"
 catalog|analysis@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 catalog|analysis@390x780|focus|005|button.ghost.sm.profile "Account"
-catalog|analysis@390x780|focus|006|a.ghost.sm "Activity"
-catalog|analysis@390x780|focus|007|a "Playback settings"
-catalog|analysis@390x780|focus|008|a.px-tab "Home"
-catalog|analysis@390x780|focus|009|button.px-tab "Libraries"
-catalog|analysis@390x780|focus|010|button.px-tab "Search"
-catalog|analysis@390x780|focus|011|a.px-tab.on "Activity"
-catalog|analysis@390x780|focus|012|<wrap>
+catalog|analysis@390x780|focus|006|button.ghost.sm "Pause"
+catalog|analysis@390x780|focus|007|button.ghost.sm "Refresh history"
+catalog|analysis@390x780|focus|008|button.ghost.sm "Settings"
+catalog|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
+catalog|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
+catalog|analysis@390x780|focus|011|button.on "All 0"
+catalog|analysis@390x780|focus|012|button "Working"
+catalog|analysis@390x780|focus|013|button "Attention"
+catalog|analysis@390x780|focus|014|button "Expected"
+catalog|analysis@390x780|focus|015|button "Ready"
+catalog|analysis@390x780|focus|016|select "10 25 50 100"
+catalog|analysis@390x780|focus|017|a.px-tab "Home"
+catalog|analysis@390x780|focus|018|button.px-tab "Libraries"
+catalog|analysis@390x780|focus|019|button.px-tab "Search"
+catalog|analysis@390x780|focus|020|a.px-tab.on "Activity"
+catalog|analysis@390x780|focus|021|<wrap>
 catalog|analysis@390x780|req|GET /api/v1/activity|2
 catalog|analysis@390x780|req|GET /api/v1/analysis/jobs|1
+catalog|analysis@390x780|req|GET /api/v1/analysis/summary|1
 catalog|analysis@390x780|req|GET /api/v1/me|1
 catalog|analysis@390x780|req|GET /api/v1/server|1
 catalog|auth@1280x860|dom|^ > div#app|1
@@ -950,7 +1042,10 @@ catalog|item@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=tr
 catalog|item@1280x860|dom|dd > div.langnote[text]|1
 catalog|item@1280x860|dom|dd > div.trks[text]|1
 catalog|item@1280x860|dom|dd > div.trks|1
-catalog|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
+catalog|item@1280x860|dom|dd > span.live.mode-chip[text]|1
+catalog|item@1280x860|dom|dd > span.mode-detail[text]|1
+catalog|item@1280x860|dom|div > h2[text]|1
+catalog|item@1280x860|dom|div > p[text]|1
 catalog|item@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|item@1280x860|dom|div#pxlibs > div.px-sec[text]|1
 catalog|item@1280x860|dom|div#pxlibs > nav.px-nav|1
@@ -964,6 +1059,11 @@ catalog|item@1280x860|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|item@1280x860|dom|div.actions > button.btnplay[text]|1
 catalog|item@1280x860|dom|div.actions > button.ghost.sm[text]|1
 catalog|item@1280x860|dom|div.actions > button.ghost[text]|1
+catalog|item@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|item@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+catalog|item@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|item@1280x860|dom|div.analysis-brief-head > div|1
+catalog|item@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 catalog|item@1280x860|dom|div.chips > span[text]|2
 catalog|item@1280x860|dom|div.crumbs > a[text]|1
 catalog|item@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -983,8 +1083,6 @@ catalog|item@1280x860|dom|div.pagehead > div.phnav|1
 catalog|item@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 catalog|item@1280x860|dom|div.phnav > div.crumbs|1
 catalog|item@1280x860|dom|div.poster > div.art.ph[text]|1
-catalog|item@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-catalog|item@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 catalog|item@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|item@1280x860|dom|div.px-ctl > div.px-pop|3
 catalog|item@1280x860|dom|div.px-detail > div.version|1
@@ -1005,11 +1103,11 @@ catalog|item@1280x860|dom|div.px-user > div.px-pop|1
 catalog|item@1280x860|dom|div.trks > span.on.trk[text]|1
 catalog|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-catalog|item@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+catalog|item@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 catalog|item@1280x860|dom|div.version > dl.specs|1
 catalog|item@1280x860|dom|dl.specs > dd.fn[text]|1
-catalog|item@1280x860|dom|dl.specs > dd[text]|2
-catalog|item@1280x860|dom|dl.specs > dd|2
+catalog|item@1280x860|dom|dl.specs > dd[text]|1
+catalog|item@1280x860|dom|dl.specs > dd|3
 catalog|item@1280x860|dom|dl.specs > dt[text]|5
 catalog|item@1280x860|dom|h1[text] > button.ghost.px-admin.sm[aria-label=* text]|1
 catalog|item@1280x860|dom|main#main > div.hero.px-hero.px-noart|1
@@ -1019,6 +1117,7 @@ catalog|item@1280x860|dom|nav.px-nav[aria-label=*] > a|3
 catalog|item@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|item@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|item@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|item@1280x860|dom|p[text] > b[text]|1
 catalog|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|item@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
 catalog|item@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -1046,7 +1145,7 @@ catalog|item@1280x860|focus|015|button.btnplay "▶ Resume · 7s"
 catalog|item@1280x860|focus|016|button.ghost "Start over"
 catalog|item@1280x860|focus|017|button.ghost.sm "Mark watched"
 catalog|item@1280x860|focus|018|button.ghost.sm "Analyze now"
-catalog|item@1280x860|focus|019|a.ghost.sm "Analysis status"
+catalog|item@1280x860|focus|019|a.ghost.sm "View queue"
 catalog|item@1280x860|focus|020|<wrap>
 catalog|item@1280x860|req|GET /api/v1/activity|2
 catalog|item@1280x860|req|GET /api/v1/items/<id>|1
@@ -1074,7 +1173,10 @@ catalog|item@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=tru
 catalog|item@390x780|dom|dd > div.langnote[text]|1
 catalog|item@390x780|dom|dd > div.trks[text]|1
 catalog|item@390x780|dom|dd > div.trks|1
-catalog|item@390x780|dom|dd[text] > span.stat-warn[text]|1
+catalog|item@390x780|dom|dd > span.live.mode-chip[text]|1
+catalog|item@390x780|dom|dd > span.mode-detail[text]|1
+catalog|item@390x780|dom|div > h2[text]|1
+catalog|item@390x780|dom|div > p[text]|1
 catalog|item@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|item@390x780|dom|div#pxlibs > div.px-sec[text]|1
 catalog|item@390x780|dom|div#pxlibs > nav.px-nav|1
@@ -1088,6 +1190,11 @@ catalog|item@390x780|dom|div#pxshell.px-shell > nav.px-tabs[aria-label=*]|1
 catalog|item@390x780|dom|div.actions > button.btnplay[text]|1
 catalog|item@390x780|dom|div.actions > button.ghost.sm[text]|1
 catalog|item@390x780|dom|div.actions > button.ghost[text]|1
+catalog|item@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|item@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+catalog|item@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|item@390x780|dom|div.analysis-brief-head > div|1
+catalog|item@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 catalog|item@390x780|dom|div.chips > span[text]|2
 catalog|item@390x780|dom|div.crumbs > a[text]|1
 catalog|item@390x780|dom|div.crumbs > span.cur[text]|1
@@ -1107,8 +1214,6 @@ catalog|item@390x780|dom|div.pagehead > div.phnav|1
 catalog|item@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 catalog|item@390x780|dom|div.phnav > div.crumbs|1
 catalog|item@390x780|dom|div.poster > div.art.ph[text]|1
-catalog|item@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-catalog|item@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 catalog|item@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|item@390x780|dom|div.px-ctl > div.px-pop|3
 catalog|item@390x780|dom|div.px-detail > div.version|1
@@ -1129,11 +1234,11 @@ catalog|item@390x780|dom|div.px-user > div.px-pop|1
 catalog|item@390x780|dom|div.trks > span.on.trk[text]|1
 catalog|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-catalog|item@390x780|dom|div.version > div.px-admin.row.th-admin|1
+catalog|item@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 catalog|item@390x780|dom|div.version > dl.specs|1
 catalog|item@390x780|dom|dl.specs > dd.fn[text]|1
-catalog|item@390x780|dom|dl.specs > dd[text]|2
-catalog|item@390x780|dom|dl.specs > dd|2
+catalog|item@390x780|dom|dl.specs > dd[text]|1
+catalog|item@390x780|dom|dl.specs > dd|3
 catalog|item@390x780|dom|dl.specs > dt[text]|5
 catalog|item@390x780|dom|h1[text] > button.ghost.px-admin.sm[aria-label=* text]|1
 catalog|item@390x780|dom|main#main > div.hero.px-hero.px-noart|1
@@ -1143,6 +1248,7 @@ catalog|item@390x780|dom|nav.px-nav[aria-label=*] > a|3
 catalog|item@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|item@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|item@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|item@390x780|dom|p[text] > b[text]|1
 catalog|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|item@390x780|dom|span.on.trk[text] > span.tdef[text]|1
 catalog|item@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -1164,7 +1270,7 @@ catalog|item@390x780|focus|009|button.btnplay "▶ Resume · 7s"
 catalog|item@390x780|focus|010|button.ghost "Start over"
 catalog|item@390x780|focus|011|button.ghost.sm "Mark watched"
 catalog|item@390x780|focus|012|button.ghost.sm "Analyze now"
-catalog|item@390x780|focus|013|a.ghost.sm "Analysis status"
+catalog|item@390x780|focus|013|a.ghost.sm "View queue"
 catalog|item@390x780|focus|014|a.px-tab "Home"
 catalog|item@390x780|focus|015|button.px-tab "Libraries"
 catalog|item@390x780|focus|016|button.px-tab "Search"
@@ -1457,7 +1563,10 @@ catalog|player@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=
 catalog|player@1280x860|dom|dd > div.langnote[text]|1
 catalog|player@1280x860|dom|dd > div.trks[text]|1
 catalog|player@1280x860|dom|dd > div.trks|1
-catalog|player@1280x860|dom|dd > span.muted[text]|1
+catalog|player@1280x860|dom|dd > span.live.mode-chip[text]|1
+catalog|player@1280x860|dom|dd > span.mode-detail[text]|1
+catalog|player@1280x860|dom|div > h2[text]|1
+catalog|player@1280x860|dom|div > p[text]|1
 catalog|player@1280x860|dom|div#app > div#pxshell.px-shell|1
 catalog|player@1280x860|dom|div#modal.modal.open > div#player.player|1
 catalog|player@1280x860|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
@@ -1503,6 +1612,10 @@ catalog|player@1280x860|dom|div#statsov.statsov > div#statsbody.statsbody|1
 catalog|player@1280x860|dom|div#statsov.statsov > div.statshd|1
 catalog|player@1280x860|dom|div.actions > button.btnplay[text]|1
 catalog|player@1280x860|dom|div.actions > button.ghost.sm[text]|1
+catalog|player@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|player@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|player@1280x860|dom|div.analysis-brief-head > div|1
+catalog|player@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 catalog|player@1280x860|dom|div.chips > span[text]|2
 catalog|player@1280x860|dom|div.crumbs > a[text]|1
 catalog|player@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -1524,8 +1637,6 @@ catalog|player@1280x860|dom|div.phnav > div.crumbs|1
 catalog|player@1280x860|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 catalog|player@1280x860|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 catalog|player@1280x860|dom|div.poster > div.art.ph[text]|1
-catalog|player@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-catalog|player@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 catalog|player@1280x860|dom|div.px-brand > a.logo[text]|1
 catalog|player@1280x860|dom|div.px-ctl > div.px-pop|3
 catalog|player@1280x860|dom|div.px-detail > div.version|1
@@ -1559,7 +1670,7 @@ catalog|player@1280x860|dom|div.statsmodes[role=radiogroup aria-label=*] > butto
 catalog|player@1280x860|dom|div.trks > span.on.trk[text]|1
 catalog|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|player@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-catalog|player@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+catalog|player@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 catalog|player@1280x860|dom|div.version > dl.specs|1
 catalog|player@1280x860|dom|dl.specs > dd.fn[text]|1
 catalog|player@1280x860|dom|dl.specs > dd[text]|1
@@ -1573,6 +1684,7 @@ catalog|player@1280x860|dom|nav.px-nav[aria-label=*] > a|3
 catalog|player@1280x860|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|player@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|player@1280x860|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|player@1280x860|dom|p[text] > b[text]|1
 catalog|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|player@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|player@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
@@ -1583,22 +1695,21 @@ catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > path|9
 catalog|player@1280x860|dom|svg.px-ico[aria-hidden=true] > rect|7
 catalog|player@1280x860|dom|svg[aria-hidden=true] > rect|4
 catalog|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-catalog|player@1280x860|focus|001|button.ghost.sm "Analyze now"
-catalog|player@1280x860|focus|002|a.ghost.sm "Analysis status"
-catalog|player@1280x860|focus|003|button#qualbtn.pbtn "Playback quality"
-catalog|player@1280x860|focus|004|button#syncbtn.pbtn "Audio sync adjustment"
-catalog|player@1280x860|focus|005|button#statsbtn.pbtn "Playback info (i)"
-catalog|player@1280x860|focus|006|button#skipbtn.pbtn "Auto-skip intro & credits"
-catalog|player@1280x860|focus|007|button#autonextbtn.pbtn.on "Auto-play the next episode when
-catalog|player@1280x860|focus|008|button.pbtn "Close (Esc)"
-catalog|player@1280x860|focus|009|button#pbplay.picon "Play"
-catalog|player@1280x860|focus|010|button.picon.nudge "Back 10 seconds"
-catalog|player@1280x860|focus|011|button.picon.nudge "Forward 10 seconds"
-catalog|player@1280x860|focus|012|div#pseek.pseek "Seek"
-catalog|player@1280x860|focus|013|button#pbinfo.picon.on "Title info"
-catalog|player@1280x860|focus|014|button#pbpip.picon "Picture in picture"
-catalog|player@1280x860|focus|015|button#pbfs.picon "Fullscreen"
-catalog|player@1280x860|focus|016|<wrap>
+catalog|player@1280x860|focus|001|a.ghost.sm "View queue"
+catalog|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
+catalog|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
+catalog|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
+catalog|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
+catalog|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
+catalog|player@1280x860|focus|007|button.pbtn "Close (Esc)"
+catalog|player@1280x860|focus|008|button#pbplay.picon "Play"
+catalog|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
+catalog|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
+catalog|player@1280x860|focus|011|div#pseek.pseek "Seek"
+catalog|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
+catalog|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
+catalog|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
+catalog|player@1280x860|focus|015|<wrap>
 catalog|player@1280x860|req|GET /api/v1/activity|2
 catalog|player@1280x860|req|GET /api/v1/files/<id>/decision|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -1629,7 +1740,10 @@ catalog|player@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=t
 catalog|player@390x780|dom|dd > div.langnote[text]|1
 catalog|player@390x780|dom|dd > div.trks[text]|1
 catalog|player@390x780|dom|dd > div.trks|1
-catalog|player@390x780|dom|dd > span.muted[text]|1
+catalog|player@390x780|dom|dd > span.live.mode-chip[text]|1
+catalog|player@390x780|dom|dd > span.mode-detail[text]|1
+catalog|player@390x780|dom|div > h2[text]|1
+catalog|player@390x780|dom|div > p[text]|1
 catalog|player@390x780|dom|div#app > div#pxshell.px-shell|1
 catalog|player@390x780|dom|div#modal.modal.open > div#player.player|1
 catalog|player@390x780|dom|div#pbar.pbar > div#playTitle.ptitle[text]|1
@@ -1675,6 +1789,10 @@ catalog|player@390x780|dom|div#statsov.statsov > div#statsbody.statsbody|1
 catalog|player@390x780|dom|div#statsov.statsov > div.statshd|1
 catalog|player@390x780|dom|div.actions > button.btnplay[text]|1
 catalog|player@390x780|dom|div.actions > button.ghost.sm[text]|1
+catalog|player@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+catalog|player@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+catalog|player@390x780|dom|div.analysis-brief-head > div|1
+catalog|player@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 catalog|player@390x780|dom|div.chips > span[text]|2
 catalog|player@390x780|dom|div.crumbs > a[text]|1
 catalog|player@390x780|dom|div.crumbs > span.cur[text]|1
@@ -1696,8 +1814,6 @@ catalog|player@390x780|dom|div.phnav > div.crumbs|1
 catalog|player@390x780|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 catalog|player@390x780|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 catalog|player@390x780|dom|div.poster > div.art.ph[text]|1
-catalog|player@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-catalog|player@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 catalog|player@390x780|dom|div.px-brand > a.logo[text]|1
 catalog|player@390x780|dom|div.px-ctl > div.px-pop|3
 catalog|player@390x780|dom|div.px-detail > div.version|1
@@ -1731,7 +1847,7 @@ catalog|player@390x780|dom|div.statsmodes[role=radiogroup aria-label=*] > button
 catalog|player@390x780|dom|div.trks > span.on.trk[text]|1
 catalog|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 catalog|player@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-catalog|player@390x780|dom|div.version > div.px-admin.row.th-admin|1
+catalog|player@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 catalog|player@390x780|dom|div.version > dl.specs|1
 catalog|player@390x780|dom|dl.specs > dd.fn[text]|1
 catalog|player@390x780|dom|dl.specs > dd[text]|1
@@ -1745,6 +1861,7 @@ catalog|player@390x780|dom|nav.px-nav[aria-label=*] > a|3
 catalog|player@390x780|dom|nav.px-tabs[aria-label=*] > a.px-tab|2
 catalog|player@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[aria-expanded=false aria-controls=* type=button]|1
 catalog|player@390x780|dom|nav.px-tabs[aria-label=*] > button.px-tab[type=button]|1
+catalog|player@390x780|dom|p[text] > b[text]|1
 catalog|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|player@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 catalog|player@390x780|dom|span.on.trk[text] > span.tdef[text]|1
@@ -1755,24 +1872,23 @@ catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > path|9
 catalog|player@390x780|dom|svg.px-ico[aria-hidden=true] > rect|7
 catalog|player@390x780|dom|svg[aria-hidden=true] > rect|4
 catalog|player@390x780|focus|000|button.ghost.sm "Mark watched"
-catalog|player@390x780|focus|001|button.ghost.sm "Analyze now"
-catalog|player@390x780|focus|002|a.ghost.sm "Analysis status"
-catalog|player@390x780|focus|003|a.px-tab "Home"
-catalog|player@390x780|focus|004|button.px-tab "Libraries"
-catalog|player@390x780|focus|005|button.px-tab "Search"
-catalog|player@390x780|focus|006|a.px-tab "Activity"
-catalog|player@390x780|focus|007|button#qualbtn.pbtn "Playback quality"
-catalog|player@390x780|focus|008|button#syncbtn.pbtn "Audio sync adjustment"
-catalog|player@390x780|focus|009|button#statsbtn.pbtn "Playback info (i)"
-catalog|player@390x780|focus|010|button#skipbtn.pbtn "Auto-skip intro & credits"
-catalog|player@390x780|focus|011|button#autonextbtn.pbtn.on "Auto-play the next episode when
-catalog|player@390x780|focus|012|button.pbtn "Close (Esc)"
-catalog|player@390x780|focus|013|button#pbplay.picon "Play"
-catalog|player@390x780|focus|014|div#pseek.pseek "Seek"
-catalog|player@390x780|focus|015|button#pbinfo.picon.on "Title info"
-catalog|player@390x780|focus|016|button#pbpip.picon "Picture in picture"
-catalog|player@390x780|focus|017|button#pbfs.picon "Fullscreen"
-catalog|player@390x780|focus|018|<wrap>
+catalog|player@390x780|focus|001|a.ghost.sm "View queue"
+catalog|player@390x780|focus|002|a.px-tab "Home"
+catalog|player@390x780|focus|003|button.px-tab "Libraries"
+catalog|player@390x780|focus|004|button.px-tab "Search"
+catalog|player@390x780|focus|005|a.px-tab "Activity"
+catalog|player@390x780|focus|006|button#qualbtn.pbtn "Playback quality"
+catalog|player@390x780|focus|007|button#syncbtn.pbtn "Audio sync adjustment"
+catalog|player@390x780|focus|008|button#statsbtn.pbtn "Playback info (i)"
+catalog|player@390x780|focus|009|button#skipbtn.pbtn "Auto-skip intro & credits"
+catalog|player@390x780|focus|010|button#autonextbtn.pbtn.on "Auto-play the next episode when
+catalog|player@390x780|focus|011|button.pbtn "Close (Esc)"
+catalog|player@390x780|focus|012|button#pbplay.picon "Play"
+catalog|player@390x780|focus|013|div#pseek.pseek "Seek"
+catalog|player@390x780|focus|014|button#pbinfo.picon.on "Title info"
+catalog|player@390x780|focus|015|button#pbpip.picon "Picture in picture"
+catalog|player@390x780|focus|016|button#pbfs.picon "Fullscreen"
+catalog|player@390x780|focus|017|<wrap>
 catalog|player@390x780|req|GET /api/v1/activity|2
 catalog|player@390x780|req|GET /api/v1/files/<id>/decision|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -2024,7 +2140,7 @@ catalog|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
 catalog|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
 catalog|settings@1280x860|dom|div.sched > span.schedpair[text]|9
 catalog|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
-catalog|settings@1280x860|dom|div.settabs > button.settab[text]|5
+catalog|settings@1280x860|dom|div.settabs > button.settab[text]|6
 catalog|settings@1280x860|dom|div.setwarn[text] > a[text]|1
 catalog|settings@1280x860|dom|div.setwarn[text] > b[text]|2
 catalog|settings@1280x860|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
@@ -2108,47 +2224,48 @@ catalog|settings@1280x860|focus|008|button.ghost.sm.profile "Account"
 catalog|settings@1280x860|focus|009|button.settab.active "Libraries"
 catalog|settings@1280x860|focus|010|button.settab "Metadata"
 catalog|settings@1280x860|focus|011|button.settab "Playback"
-catalog|settings@1280x860|focus|012|button.settab "Users"
-catalog|settings@1280x860|focus|013|button.settab "System"
-catalog|settings@1280x860|focus|014|button.settab "Cluster"
-catalog|settings@1280x860|focus|015|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@1280x860|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@1280x860|focus|017|select#sched-scan-2 "How often to look for new & changed fil
-catalog|settings@1280x860|focus|018|select#sched-ref-2 "How often to re-fetch metadata for every
-catalog|settings@1280x860|focus|019|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|020|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|022|button.ghost.sm "Edit"
-catalog|settings@1280x860|focus|023|button.ghost.sm "Delete"
-catalog|settings@1280x860|focus|024|select#sched-scan-1 "How often to look for new & changed fil
-catalog|settings@1280x860|focus|025|select#sched-ref-1 "How often to re-fetch metadata for every
-catalog|settings@1280x860|focus|026|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|027|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|029|button.ghost.sm "Edit"
-catalog|settings@1280x860|focus|030|button.ghost.sm "Delete"
-catalog|settings@1280x860|focus|031|select#sched-scan-3 "How often to look for new & changed fil
-catalog|settings@1280x860|focus|032|select#sched-ref-3 "How often to re-fetch metadata for every
-catalog|settings@1280x860|focus|033|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|034|button.ghost.sm "Scan"
-catalog|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@1280x860|focus|036|button.ghost.sm "Edit"
-catalog|settings@1280x860|focus|037|button.ghost.sm "Delete"
-catalog|settings@1280x860|focus|038|input#ln "Library name"
-catalog|settings@1280x860|focus|039|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-catalog|settings@1280x860|focus|040|input#lp "Media paths"
-catalog|settings@1280x860|focus|041|button "Add & scan"
-catalog|settings@1280x860|focus|042|select#job-probe "Re-run ffprobe on files whose media detail
-catalog|settings@1280x860|focus|043|select#job-art "Re-fetch posters for items a provider matche
-catalog|settings@1280x860|focus|044|select#job-clean "Delete leftover transcode working director
-catalog|settings@1280x860|focus|045|input#job-boot
-catalog|settings@1280x860|focus|046|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|047|select#telemetry-retain "How long node-local playback measur
-catalog|settings@1280x860|focus|048|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|049|select#cache-produce "How often to check what's worth encodi
-catalog|settings@1280x860|focus|050|select#cache-gb "How much disk finished pre-transcodes may o
-catalog|settings@1280x860|focus|051|button.ghost.sm "Save"
-catalog|settings@1280x860|focus|052|<wrap>
+catalog|settings@1280x860|focus|012|button.settab "Analysis"
+catalog|settings@1280x860|focus|013|button.settab "Users"
+catalog|settings@1280x860|focus|014|button.settab "System"
+catalog|settings@1280x860|focus|015|button.settab "Cluster"
+catalog|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@1280x860|focus|018|select#sched-scan-2 "How often to look for new & changed fil
+catalog|settings@1280x860|focus|019|select#sched-ref-2 "How often to re-fetch metadata for every
+catalog|settings@1280x860|focus|020|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|021|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|023|button.ghost.sm "Edit"
+catalog|settings@1280x860|focus|024|button.ghost.sm "Delete"
+catalog|settings@1280x860|focus|025|select#sched-scan-1 "How often to look for new & changed fil
+catalog|settings@1280x860|focus|026|select#sched-ref-1 "How often to re-fetch metadata for every
+catalog|settings@1280x860|focus|027|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|028|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|030|button.ghost.sm "Edit"
+catalog|settings@1280x860|focus|031|button.ghost.sm "Delete"
+catalog|settings@1280x860|focus|032|select#sched-scan-3 "How often to look for new & changed fil
+catalog|settings@1280x860|focus|033|select#sched-ref-3 "How often to re-fetch metadata for every
+catalog|settings@1280x860|focus|034|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|035|button.ghost.sm "Scan"
+catalog|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@1280x860|focus|037|button.ghost.sm "Edit"
+catalog|settings@1280x860|focus|038|button.ghost.sm "Delete"
+catalog|settings@1280x860|focus|039|input#ln "Library name"
+catalog|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+catalog|settings@1280x860|focus|041|input#lp "Media paths"
+catalog|settings@1280x860|focus|042|button "Add & scan"
+catalog|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+catalog|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
+catalog|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
+catalog|settings@1280x860|focus|046|input#job-boot
+catalog|settings@1280x860|focus|047|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
+catalog|settings@1280x860|focus|049|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
+catalog|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@1280x860|focus|052|button.ghost.sm "Save"
+catalog|settings@1280x860|focus|053|<wrap>
 catalog|settings@1280x860|req|GET /api/v1/activity|2
 catalog|settings@1280x860|req|GET /api/v1/libraries|1
 catalog|settings@1280x860|req|GET /api/v1/me|1
@@ -2221,7 +2338,7 @@ catalog|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
 catalog|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
 catalog|settings@390x780|dom|div.sched > span.schedpair[text]|9
 catalog|settings@390x780|dom|div.settabs > button.active.settab[text]|1
-catalog|settings@390x780|dom|div.settabs > button.settab[text]|5
+catalog|settings@390x780|dom|div.settabs > button.settab[text]|6
 catalog|settings@390x780|dom|div.setwarn[text] > a[text]|1
 catalog|settings@390x780|dom|div.setwarn[text] > b[text]|2
 catalog|settings@390x780|dom|label.schedpair[text] > input#job-boot[type=checkbox]|1
@@ -2302,51 +2419,52 @@ catalog|settings@390x780|focus|005|button.ghost.sm.profile "Account"
 catalog|settings@390x780|focus|006|button.settab.active "Libraries"
 catalog|settings@390x780|focus|007|button.settab "Metadata"
 catalog|settings@390x780|focus|008|button.settab "Playback"
-catalog|settings@390x780|focus|009|button.settab "Users"
-catalog|settings@390x780|focus|010|button.settab "System"
-catalog|settings@390x780|focus|011|button.settab "Cluster"
-catalog|settings@390x780|focus|012|button.ghost.sm "Scan every library for new & changed files"
-catalog|settings@390x780|focus|013|button.ghost.sm "Re-fetch metadata & artwork for every libra
-catalog|settings@390x780|focus|014|select#sched-scan-2 "How often to look for new & changed fil
-catalog|settings@390x780|focus|015|select#sched-ref-2 "How often to re-fetch metadata for every
-catalog|settings@390x780|focus|016|button.ghost.sm "Save"
-catalog|settings@390x780|focus|017|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|018|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|019|button.ghost.sm "Edit"
-catalog|settings@390x780|focus|020|button.ghost.sm "Delete"
-catalog|settings@390x780|focus|021|select#sched-scan-1 "How often to look for new & changed fil
-catalog|settings@390x780|focus|022|select#sched-ref-1 "How often to re-fetch metadata for every
-catalog|settings@390x780|focus|023|button.ghost.sm "Save"
-catalog|settings@390x780|focus|024|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|026|button.ghost.sm "Edit"
-catalog|settings@390x780|focus|027|button.ghost.sm "Delete"
-catalog|settings@390x780|focus|028|select#sched-scan-3 "How often to look for new & changed fil
-catalog|settings@390x780|focus|029|select#sched-ref-3 "How often to re-fetch metadata for every
-catalog|settings@390x780|focus|030|button.ghost.sm "Save"
-catalog|settings@390x780|focus|031|button.ghost.sm "Scan"
-catalog|settings@390x780|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-catalog|settings@390x780|focus|033|button.ghost.sm "Edit"
-catalog|settings@390x780|focus|034|button.ghost.sm "Delete"
-catalog|settings@390x780|focus|035|input#ln "Library name"
-catalog|settings@390x780|focus|036|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-catalog|settings@390x780|focus|037|input#lp "Media paths"
-catalog|settings@390x780|focus|038|button "Add & scan"
-catalog|settings@390x780|focus|039|select#job-probe "Re-run ffprobe on files whose media detail
-catalog|settings@390x780|focus|040|select#job-art "Re-fetch posters for items a provider matche
-catalog|settings@390x780|focus|041|select#job-clean "Delete leftover transcode working director
-catalog|settings@390x780|focus|042|input#job-boot
-catalog|settings@390x780|focus|043|button.ghost.sm "Save"
-catalog|settings@390x780|focus|044|select#telemetry-retain "How long node-local playback measur
-catalog|settings@390x780|focus|045|button.ghost.sm "Save"
-catalog|settings@390x780|focus|046|select#cache-produce "How often to check what's worth encodi
-catalog|settings@390x780|focus|047|select#cache-gb "How much disk finished pre-transcodes may o
-catalog|settings@390x780|focus|048|button.ghost.sm "Save"
-catalog|settings@390x780|focus|049|a.px-tab "Home"
-catalog|settings@390x780|focus|050|button.px-tab "Libraries"
-catalog|settings@390x780|focus|051|button.px-tab "Search"
-catalog|settings@390x780|focus|052|a.px-tab "Activity"
-catalog|settings@390x780|focus|053|<wrap>
+catalog|settings@390x780|focus|009|button.settab "Analysis"
+catalog|settings@390x780|focus|010|button.settab "Users"
+catalog|settings@390x780|focus|011|button.settab "System"
+catalog|settings@390x780|focus|012|button.settab "Cluster"
+catalog|settings@390x780|focus|013|button.ghost.sm "Scan every library for new & changed files"
+catalog|settings@390x780|focus|014|button.ghost.sm "Re-fetch metadata & artwork for every libra
+catalog|settings@390x780|focus|015|select#sched-scan-2 "How often to look for new & changed fil
+catalog|settings@390x780|focus|016|select#sched-ref-2 "How often to re-fetch metadata for every
+catalog|settings@390x780|focus|017|button.ghost.sm "Save"
+catalog|settings@390x780|focus|018|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|020|button.ghost.sm "Edit"
+catalog|settings@390x780|focus|021|button.ghost.sm "Delete"
+catalog|settings@390x780|focus|022|select#sched-scan-1 "How often to look for new & changed fil
+catalog|settings@390x780|focus|023|select#sched-ref-1 "How often to re-fetch metadata for every
+catalog|settings@390x780|focus|024|button.ghost.sm "Save"
+catalog|settings@390x780|focus|025|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|027|button.ghost.sm "Edit"
+catalog|settings@390x780|focus|028|button.ghost.sm "Delete"
+catalog|settings@390x780|focus|029|select#sched-scan-3 "How often to look for new & changed fil
+catalog|settings@390x780|focus|030|select#sched-ref-3 "How often to re-fetch metadata for every
+catalog|settings@390x780|focus|031|button.ghost.sm "Save"
+catalog|settings@390x780|focus|032|button.ghost.sm "Scan"
+catalog|settings@390x780|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+catalog|settings@390x780|focus|034|button.ghost.sm "Edit"
+catalog|settings@390x780|focus|035|button.ghost.sm "Delete"
+catalog|settings@390x780|focus|036|input#ln "Library name"
+catalog|settings@390x780|focus|037|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+catalog|settings@390x780|focus|038|input#lp "Media paths"
+catalog|settings@390x780|focus|039|button "Add & scan"
+catalog|settings@390x780|focus|040|select#job-probe "Re-run ffprobe on files whose media detail
+catalog|settings@390x780|focus|041|select#job-art "Re-fetch posters for items a provider matche
+catalog|settings@390x780|focus|042|select#job-clean "Delete leftover transcode working director
+catalog|settings@390x780|focus|043|input#job-boot
+catalog|settings@390x780|focus|044|button.ghost.sm "Save"
+catalog|settings@390x780|focus|045|select#telemetry-retain "How long node-local playback measur
+catalog|settings@390x780|focus|046|button.ghost.sm "Save"
+catalog|settings@390x780|focus|047|select#cache-produce "How often to check what's worth encodi
+catalog|settings@390x780|focus|048|select#cache-gb "How much disk finished pre-transcodes may o
+catalog|settings@390x780|focus|049|button.ghost.sm "Save"
+catalog|settings@390x780|focus|050|a.px-tab "Home"
+catalog|settings@390x780|focus|051|button.px-tab "Libraries"
+catalog|settings@390x780|focus|052|button.px-tab "Search"
+catalog|settings@390x780|focus|053|a.px-tab "Activity"
+catalog|settings@390x780|focus|054|<wrap>
 catalog|settings@390x780|req|GET /api/v1/activity|2
 catalog|settings@390x780|req|GET /api/v1/libraries|1
 catalog|settings@390x780|req|GET /api/v1/me|1
@@ -2360,7 +2478,6 @@ classic|activity@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 classic|activity@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|activity@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|activity@1280x860|dom|button.ghost.sm > span.tsw|1
-classic|activity@1280x860|dom|div > a.ghost.sm[text]|1
 classic|activity@1280x860|dom|div > button.ghost.profile.sm|1
 classic|activity@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|activity@1280x860|dom|div > button.ghost.sm[text]|1
@@ -2369,8 +2486,20 @@ classic|activity@1280x860|dom|div > div#appmenu.amenu|1
 classic|activity@1280x860|dom|div > div#profilemenu.amenu|1
 classic|activity@1280x860|dom|div > div#sizemenu.amenu|1
 classic|activity@1280x860|dom|div > div#thememenu.amenu|1
+classic|activity@1280x860|dom|div > h2[text]|1
+classic|activity@1280x860|dom|div > p[text]|1
 classic|activity@1280x860|dom|div#app > header.top|1
 classic|activity@1280x860|dom|div#app > main#main|1
+classic|activity@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|activity@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+classic|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-head|1
+classic|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-status|1
+classic|activity@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|activity@1280x860|dom|div.analysis-brief-head > div|1
+classic|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+classic|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+classic|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+classic|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 classic|activity@1280x860|dom|div.card > p.muted[text]|1
 classic|activity@1280x860|dom|div.topctl > div|4
 classic|activity@1280x860|dom|header.top > a.logo[text]|1
@@ -2379,10 +2508,10 @@ classic|activity@1280x860|dom|header.top > input#q.search[aria-label=*]|1
 classic|activity@1280x860|dom|header.top > nav|1
 classic|activity@1280x860|dom|header.top > span#activity.activity|1
 classic|activity@1280x860|dom|header.top > span.spacer|1
+classic|activity@1280x860|dom|main#main > div.analysis-brief|1
 classic|activity@1280x860|dom|main#main > div.card|1
 classic|activity@1280x860|dom|main#main > div.empty[text]|4
-classic|activity@1280x860|dom|main#main > div|1
-classic|activity@1280x860|dom|main#main > h2.section[text]|5
+classic|activity@1280x860|dom|main#main > h2.section[text]|6
 classic|activity@1280x860|dom|nav > a.active[text]|1
 classic|activity@1280x860|dom|nav > a[text]|2
 classic|activity@1280x860|dom|p.muted[text] > a[text]|1
@@ -2396,9 +2525,10 @@ classic|activity@1280x860|focus|005|button.ghost.sm "Theme"
 classic|activity@1280x860|focus|006|button.ghost.sm "Light / dark"
 classic|activity@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
-classic|activity@1280x860|focus|009|a.ghost.sm "Open analysis status"
-classic|activity@1280x860|focus|010|a "Settings"
-classic|activity@1280x860|focus|011|<wrap>
+classic|activity@1280x860|focus|009|a.ghost.sm "Open workspace"
+classic|activity@1280x860|focus|010|button.ghost.sm "Settings"
+classic|activity@1280x860|focus|011|a "Settings"
+classic|activity@1280x860|focus|012|<wrap>
 classic|activity@1280x860|req|GET /api/v1/activity/detail|2
 classic|activity@1280x860|req|GET /api/v1/me|1
 classic|activity@1280x860|req|GET /api/v1/server|1
@@ -2409,7 +2539,6 @@ classic|activity@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 classic|activity@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|activity@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|activity@390x780|dom|button.ghost.sm > span.tsw|1
-classic|activity@390x780|dom|div > a.ghost.sm[text]|1
 classic|activity@390x780|dom|div > button.ghost.profile.sm|1
 classic|activity@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|activity@390x780|dom|div > button.ghost.sm[text]|1
@@ -2418,8 +2547,20 @@ classic|activity@390x780|dom|div > div#appmenu.amenu|1
 classic|activity@390x780|dom|div > div#profilemenu.amenu|1
 classic|activity@390x780|dom|div > div#sizemenu.amenu|1
 classic|activity@390x780|dom|div > div#thememenu.amenu|1
+classic|activity@390x780|dom|div > h2[text]|1
+classic|activity@390x780|dom|div > p[text]|1
 classic|activity@390x780|dom|div#app > header.top|1
 classic|activity@390x780|dom|div#app > main#main|1
+classic|activity@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|activity@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+classic|activity@390x780|dom|div.analysis-brief > div.analysis-brief-head|1
+classic|activity@390x780|dom|div.analysis-brief > div.analysis-brief-status|1
+classic|activity@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|activity@390x780|dom|div.analysis-brief-head > div|1
+classic|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+classic|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+classic|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+classic|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 classic|activity@390x780|dom|div.card > p.muted[text]|1
 classic|activity@390x780|dom|div.topctl > div|4
 classic|activity@390x780|dom|header.top > a.logo[text]|1
@@ -2428,10 +2569,10 @@ classic|activity@390x780|dom|header.top > input#q.search[aria-label=*]|1
 classic|activity@390x780|dom|header.top > nav|1
 classic|activity@390x780|dom|header.top > span#activity.activity|1
 classic|activity@390x780|dom|header.top > span.spacer|1
+classic|activity@390x780|dom|main#main > div.analysis-brief|1
 classic|activity@390x780|dom|main#main > div.card|1
 classic|activity@390x780|dom|main#main > div.empty[text]|4
-classic|activity@390x780|dom|main#main > div|1
-classic|activity@390x780|dom|main#main > h2.section[text]|5
+classic|activity@390x780|dom|main#main > h2.section[text]|6
 classic|activity@390x780|dom|nav > a.active[text]|1
 classic|activity@390x780|dom|nav > a[text]|2
 classic|activity@390x780|dom|p.muted[text] > a[text]|1
@@ -2445,9 +2586,10 @@ classic|activity@390x780|focus|005|button.ghost.sm "Theme"
 classic|activity@390x780|focus|006|button.ghost.sm "Light / dark"
 classic|activity@390x780|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|activity@390x780|focus|008|button.ghost.sm.profile "Account"
-classic|activity@390x780|focus|009|a.ghost.sm "Open analysis status"
-classic|activity@390x780|focus|010|a "Settings"
-classic|activity@390x780|focus|011|<wrap>
+classic|activity@390x780|focus|009|a.ghost.sm "Open workspace"
+classic|activity@390x780|focus|010|button.ghost.sm "Settings"
+classic|activity@390x780|focus|011|a "Settings"
+classic|activity@390x780|focus|012|<wrap>
 classic|activity@390x780|req|GET /api/v1/activity/detail|2
 classic|activity@390x780|req|GET /api/v1/me|1
 classic|activity@390x780|req|GET /api/v1/server|1
@@ -2458,6 +2600,7 @@ classic|analysis@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 classic|analysis@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|analysis@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|analysis@1280x860|dom|button.ghost.sm > span.tsw|1
+classic|analysis@1280x860|dom|button.on[aria-pressed=true text] > b[text]|1
 classic|analysis@1280x860|dom|div > button.ghost.profile.sm|1
 classic|analysis@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|analysis@1280x860|dom|div > button.ghost.sm[text]|1
@@ -2466,15 +2609,34 @@ classic|analysis@1280x860|dom|div > div#appmenu.amenu|1
 classic|analysis@1280x860|dom|div > div#profilemenu.amenu|1
 classic|analysis@1280x860|dom|div > div#sizemenu.amenu|1
 classic|analysis@1280x860|dom|div > div#thememenu.amenu|1
-classic|analysis@1280x860|dom|div > div.muted[text]|1
 classic|analysis@1280x860|dom|div > h1[text]|1
+classic|analysis@1280x860|dom|div > p[text]|1
 classic|analysis@1280x860|dom|div#app > header.top|1
 classic|analysis@1280x860|dom|div#app > main#main|1
-classic|analysis@1280x860|dom|div.chips > span[text]|1
-classic|analysis@1280x860|dom|div.clrefusal[text] > a[text]|1
+classic|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+classic|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|2
+classic|analysis@1280x860|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+classic|analysis@1280x860|dom|div.analysis-controls > div.analysis-filters|1
+classic|analysis@1280x860|dom|div.analysis-controls > div.analysis-search|1
+classic|analysis@1280x860|dom|div.analysis-controls > span|1
+classic|analysis@1280x860|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+classic|analysis@1280x860|dom|div.analysis-filters > button[aria-pressed=false text]|4
+classic|analysis@1280x860|dom|div.analysis-head > div.analysis-actions|1
+classic|analysis@1280x860|dom|div.analysis-head > div|1
+classic|analysis@1280x860|dom|div.analysis-metric > span.k[text]|4
+classic|analysis@1280x860|dom|div.analysis-metric > span.n[text]|4
+classic|analysis@1280x860|dom|div.analysis-metric.good > span.k[text]|1
+classic|analysis@1280x860|dom|div.analysis-metric.good > span.n[text]|1
+classic|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric.good|1
+classic|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric|4
+classic|analysis@1280x860|dom|div.analysis-pages > div.row|1
+classic|analysis@1280x860|dom|div.analysis-pages > span[text]|1
+classic|analysis@1280x860|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 classic|analysis@1280x860|dom|div.clrefusal[text] > b[text]|1
-classic|analysis@1280x860|dom|div.row > a.ghost.sm[text]|1
-classic|analysis@1280x860|dom|div.row > div|1
+classic|analysis@1280x860|dom|div.clrefusal[text] > button.ghost.sm[text]|1
+classic|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
+classic|analysis@1280x860|dom|div.row > label[text]|1
+classic|analysis@1280x860|dom|div.row > span[text]|1
 classic|analysis@1280x860|dom|div.topctl > div|4
 classic|analysis@1280x860|dom|header.top > a.logo[text]|1
 classic|analysis@1280x860|dom|header.top > div.topctl|1
@@ -2482,13 +2644,17 @@ classic|analysis@1280x860|dom|header.top > input#q.search[aria-label=*]|1
 classic|analysis@1280x860|dom|header.top > nav|1
 classic|analysis@1280x860|dom|header.top > span#activity.activity|1
 classic|analysis@1280x860|dom|header.top > span.spacer|1
-classic|analysis@1280x860|dom|main#main > div.chips|1
+classic|analysis@1280x860|dom|label[text] > select|1
+classic|analysis@1280x860|dom|main#main > div.analysis-controls|1
+classic|analysis@1280x860|dom|main#main > div.analysis-head|1
+classic|analysis@1280x860|dom|main#main > div.analysis-metrics|1
+classic|analysis@1280x860|dom|main#main > div.analysis-pages|1
+classic|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 classic|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 classic|analysis@1280x860|dom|main#main > div.empty[text]|1
-classic|analysis@1280x860|dom|main#main > div.row|1
-classic|analysis@1280x860|dom|main#main > h2.section[text]|1
 classic|analysis@1280x860|dom|nav > a.active[text]|1
 classic|analysis@1280x860|dom|nav > a[text]|2
+classic|analysis@1280x860|dom|select > option[text]|4
 classic|analysis@1280x860|dom|svg[aria-hidden=true] > rect|4
 classic|analysis@1280x860|focus|000|a.logo "cinema"
 classic|analysis@1280x860|focus|001|a "home"
@@ -2499,11 +2665,21 @@ classic|analysis@1280x860|focus|005|button.ghost.sm "Theme"
 classic|analysis@1280x860|focus|006|button.ghost.sm "Light / dark"
 classic|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
-classic|analysis@1280x860|focus|009|a.ghost.sm "Activity"
-classic|analysis@1280x860|focus|010|a "Playback settings"
-classic|analysis@1280x860|focus|011|<wrap>
+classic|analysis@1280x860|focus|009|button.ghost.sm "Pause"
+classic|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
+classic|analysis@1280x860|focus|011|button.ghost.sm "Settings"
+classic|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
+classic|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
+classic|analysis@1280x860|focus|014|button.on "All 0"
+classic|analysis@1280x860|focus|015|button "Working"
+classic|analysis@1280x860|focus|016|button "Attention"
+classic|analysis@1280x860|focus|017|button "Expected"
+classic|analysis@1280x860|focus|018|button "Ready"
+classic|analysis@1280x860|focus|019|select "10 25 50 100"
+classic|analysis@1280x860|focus|020|<wrap>
 classic|analysis@1280x860|req|GET /api/v1/activity|2
 classic|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
+classic|analysis@1280x860|req|GET /api/v1/analysis/summary|1
 classic|analysis@1280x860|req|GET /api/v1/me|1
 classic|analysis@1280x860|req|GET /api/v1/server|1
 classic|analysis@390x780|dom|^ > div#app|1
@@ -2513,6 +2689,7 @@ classic|analysis@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 classic|analysis@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|analysis@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|analysis@390x780|dom|button.ghost.sm > span.tsw|1
+classic|analysis@390x780|dom|button.on[aria-pressed=true text] > b[text]|1
 classic|analysis@390x780|dom|div > button.ghost.profile.sm|1
 classic|analysis@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|analysis@390x780|dom|div > button.ghost.sm[text]|1
@@ -2521,15 +2698,34 @@ classic|analysis@390x780|dom|div > div#appmenu.amenu|1
 classic|analysis@390x780|dom|div > div#profilemenu.amenu|1
 classic|analysis@390x780|dom|div > div#sizemenu.amenu|1
 classic|analysis@390x780|dom|div > div#thememenu.amenu|1
-classic|analysis@390x780|dom|div > div.muted[text]|1
 classic|analysis@390x780|dom|div > h1[text]|1
+classic|analysis@390x780|dom|div > p[text]|1
 classic|analysis@390x780|dom|div#app > header.top|1
 classic|analysis@390x780|dom|div#app > main#main|1
-classic|analysis@390x780|dom|div.chips > span[text]|1
-classic|analysis@390x780|dom|div.clrefusal[text] > a[text]|1
+classic|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+classic|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[text]|2
+classic|analysis@390x780|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+classic|analysis@390x780|dom|div.analysis-controls > div.analysis-filters|1
+classic|analysis@390x780|dom|div.analysis-controls > div.analysis-search|1
+classic|analysis@390x780|dom|div.analysis-controls > span|1
+classic|analysis@390x780|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+classic|analysis@390x780|dom|div.analysis-filters > button[aria-pressed=false text]|4
+classic|analysis@390x780|dom|div.analysis-head > div.analysis-actions|1
+classic|analysis@390x780|dom|div.analysis-head > div|1
+classic|analysis@390x780|dom|div.analysis-metric > span.k[text]|4
+classic|analysis@390x780|dom|div.analysis-metric > span.n[text]|4
+classic|analysis@390x780|dom|div.analysis-metric.good > span.k[text]|1
+classic|analysis@390x780|dom|div.analysis-metric.good > span.n[text]|1
+classic|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric.good|1
+classic|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric|4
+classic|analysis@390x780|dom|div.analysis-pages > div.row|1
+classic|analysis@390x780|dom|div.analysis-pages > span[text]|1
+classic|analysis@390x780|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 classic|analysis@390x780|dom|div.clrefusal[text] > b[text]|1
-classic|analysis@390x780|dom|div.row > a.ghost.sm[text]|1
-classic|analysis@390x780|dom|div.row > div|1
+classic|analysis@390x780|dom|div.clrefusal[text] > button.ghost.sm[text]|1
+classic|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
+classic|analysis@390x780|dom|div.row > label[text]|1
+classic|analysis@390x780|dom|div.row > span[text]|1
 classic|analysis@390x780|dom|div.topctl > div|4
 classic|analysis@390x780|dom|header.top > a.logo[text]|1
 classic|analysis@390x780|dom|header.top > div.topctl|1
@@ -2537,13 +2733,17 @@ classic|analysis@390x780|dom|header.top > input#q.search[aria-label=*]|1
 classic|analysis@390x780|dom|header.top > nav|1
 classic|analysis@390x780|dom|header.top > span#activity.activity|1
 classic|analysis@390x780|dom|header.top > span.spacer|1
-classic|analysis@390x780|dom|main#main > div.chips|1
+classic|analysis@390x780|dom|label[text] > select|1
+classic|analysis@390x780|dom|main#main > div.analysis-controls|1
+classic|analysis@390x780|dom|main#main > div.analysis-head|1
+classic|analysis@390x780|dom|main#main > div.analysis-metrics|1
+classic|analysis@390x780|dom|main#main > div.analysis-pages|1
+classic|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 classic|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 classic|analysis@390x780|dom|main#main > div.empty[text]|1
-classic|analysis@390x780|dom|main#main > div.row|1
-classic|analysis@390x780|dom|main#main > h2.section[text]|1
 classic|analysis@390x780|dom|nav > a.active[text]|1
 classic|analysis@390x780|dom|nav > a[text]|2
+classic|analysis@390x780|dom|select > option[text]|4
 classic|analysis@390x780|dom|svg[aria-hidden=true] > rect|4
 classic|analysis@390x780|focus|000|a.logo "cinema"
 classic|analysis@390x780|focus|001|a "home"
@@ -2554,11 +2754,21 @@ classic|analysis@390x780|focus|005|button.ghost.sm "Theme"
 classic|analysis@390x780|focus|006|button.ghost.sm "Light / dark"
 classic|analysis@390x780|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|analysis@390x780|focus|008|button.ghost.sm.profile "Account"
-classic|analysis@390x780|focus|009|a.ghost.sm "Activity"
-classic|analysis@390x780|focus|010|a "Playback settings"
-classic|analysis@390x780|focus|011|<wrap>
+classic|analysis@390x780|focus|009|button.ghost.sm "Pause"
+classic|analysis@390x780|focus|010|button.ghost.sm "Refresh history"
+classic|analysis@390x780|focus|011|button.ghost.sm "Settings"
+classic|analysis@390x780|focus|012|button.ghost.sm "Analysis settings"
+classic|analysis@390x780|focus|013|input#analysis-search "Search analysis work"
+classic|analysis@390x780|focus|014|button.on "All 0"
+classic|analysis@390x780|focus|015|button "Working"
+classic|analysis@390x780|focus|016|button "Attention"
+classic|analysis@390x780|focus|017|button "Expected"
+classic|analysis@390x780|focus|018|button "Ready"
+classic|analysis@390x780|focus|019|select "10 25 50 100"
+classic|analysis@390x780|focus|020|<wrap>
 classic|analysis@390x780|req|GET /api/v1/activity|2
 classic|analysis@390x780|req|GET /api/v1/analysis/jobs|1
+classic|analysis@390x780|req|GET /api/v1/analysis/summary|1
 classic|analysis@390x780|req|GET /api/v1/me|1
 classic|analysis@390x780|req|GET /api/v1/server|1
 classic|auth@1280x860|dom|^ > div#app|1
@@ -2964,7 +3174,8 @@ classic|item@1280x860|dom|button.ghost.sm > span.tsw|1
 classic|item@1280x860|dom|dd > div.langnote[text]|1
 classic|item@1280x860|dom|dd > div.trks[text]|1
 classic|item@1280x860|dom|dd > div.trks|1
-classic|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
+classic|item@1280x860|dom|dd > span.live.mode-chip[text]|1
+classic|item@1280x860|dom|dd > span.mode-detail[text]|1
 classic|item@1280x860|dom|div > button.ghost.profile.sm|1
 classic|item@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|item@1280x860|dom|div > button.ghost.sm[text]|1
@@ -2973,11 +3184,18 @@ classic|item@1280x860|dom|div > div#appmenu.amenu|1
 classic|item@1280x860|dom|div > div#profilemenu.amenu|1
 classic|item@1280x860|dom|div > div#sizemenu.amenu|1
 classic|item@1280x860|dom|div > div#thememenu.amenu|1
+classic|item@1280x860|dom|div > h2[text]|1
+classic|item@1280x860|dom|div > p[text]|1
 classic|item@1280x860|dom|div#app > header.top|1
 classic|item@1280x860|dom|div#app > main#main|1
 classic|item@1280x860|dom|div.actions > button.btnplay[text]|1
 classic|item@1280x860|dom|div.actions > button.ghost.sm[text]|1
 classic|item@1280x860|dom|div.actions > button.ghost[text]|1
+classic|item@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|item@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+classic|item@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|item@1280x860|dom|div.analysis-brief-head > div|1
+classic|item@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 classic|item@1280x860|dom|div.chips > span[text]|3
 classic|item@1280x860|dom|div.crumbs > a[text]|1
 classic|item@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -2996,17 +3214,15 @@ classic|item@1280x860|dom|div.pagehead > div.phnav|1
 classic|item@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 classic|item@1280x860|dom|div.phnav > div.crumbs|1
 classic|item@1280x860|dom|div.poster > div.art.ph[text]|1
-classic|item@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-classic|item@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 classic|item@1280x860|dom|div.topctl > div|4
 classic|item@1280x860|dom|div.trks > span.on.trk[text]|1
 classic|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-classic|item@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+classic|item@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 classic|item@1280x860|dom|div.version > dl.specs|1
 classic|item@1280x860|dom|dl.specs > dd.fn[text]|1
-classic|item@1280x860|dom|dl.specs > dd[text]|2
-classic|item@1280x860|dom|dl.specs > dd|2
+classic|item@1280x860|dom|dl.specs > dd[text]|1
+classic|item@1280x860|dom|dl.specs > dd|3
 classic|item@1280x860|dom|dl.specs > dt[text]|5
 classic|item@1280x860|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@1280x860|dom|header.top > a.logo[text]|1
@@ -3018,6 +3234,7 @@ classic|item@1280x860|dom|header.top > span.spacer|1
 classic|item@1280x860|dom|main#main > div.hero|1
 classic|item@1280x860|dom|nav > a.active[text]|1
 classic|item@1280x860|dom|nav > a[text]|2
+classic|item@1280x860|dom|p[text] > b[text]|1
 classic|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|item@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
 classic|item@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -3039,7 +3256,7 @@ classic|item@1280x860|focus|012|button.btnplay "▶ Resume · 7s"
 classic|item@1280x860|focus|013|button.ghost "Start over"
 classic|item@1280x860|focus|014|button.ghost.sm "Mark watched"
 classic|item@1280x860|focus|015|button.ghost.sm "Analyze now"
-classic|item@1280x860|focus|016|a.ghost.sm "Analysis status"
+classic|item@1280x860|focus|016|a.ghost.sm "View queue"
 classic|item@1280x860|focus|017|<wrap>
 classic|item@1280x860|req|GET /api/v1/activity|2
 classic|item@1280x860|req|GET /api/v1/items/<id>|1
@@ -3056,7 +3273,8 @@ classic|item@390x780|dom|button.ghost.sm > span.tsw|1
 classic|item@390x780|dom|dd > div.langnote[text]|1
 classic|item@390x780|dom|dd > div.trks[text]|1
 classic|item@390x780|dom|dd > div.trks|1
-classic|item@390x780|dom|dd[text] > span.stat-warn[text]|1
+classic|item@390x780|dom|dd > span.live.mode-chip[text]|1
+classic|item@390x780|dom|dd > span.mode-detail[text]|1
 classic|item@390x780|dom|div > button.ghost.profile.sm|1
 classic|item@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|item@390x780|dom|div > button.ghost.sm[text]|1
@@ -3065,11 +3283,18 @@ classic|item@390x780|dom|div > div#appmenu.amenu|1
 classic|item@390x780|dom|div > div#profilemenu.amenu|1
 classic|item@390x780|dom|div > div#sizemenu.amenu|1
 classic|item@390x780|dom|div > div#thememenu.amenu|1
+classic|item@390x780|dom|div > h2[text]|1
+classic|item@390x780|dom|div > p[text]|1
 classic|item@390x780|dom|div#app > header.top|1
 classic|item@390x780|dom|div#app > main#main|1
 classic|item@390x780|dom|div.actions > button.btnplay[text]|1
 classic|item@390x780|dom|div.actions > button.ghost.sm[text]|1
 classic|item@390x780|dom|div.actions > button.ghost[text]|1
+classic|item@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|item@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+classic|item@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|item@390x780|dom|div.analysis-brief-head > div|1
+classic|item@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 classic|item@390x780|dom|div.chips > span[text]|3
 classic|item@390x780|dom|div.crumbs > a[text]|1
 classic|item@390x780|dom|div.crumbs > span.cur[text]|1
@@ -3088,17 +3313,15 @@ classic|item@390x780|dom|div.pagehead > div.phnav|1
 classic|item@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 classic|item@390x780|dom|div.phnav > div.crumbs|1
 classic|item@390x780|dom|div.poster > div.art.ph[text]|1
-classic|item@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-classic|item@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 classic|item@390x780|dom|div.topctl > div|4
 classic|item@390x780|dom|div.trks > span.on.trk[text]|1
 classic|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-classic|item@390x780|dom|div.version > div.px-admin.row.th-admin|1
+classic|item@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 classic|item@390x780|dom|div.version > dl.specs|1
 classic|item@390x780|dom|dl.specs > dd.fn[text]|1
-classic|item@390x780|dom|dl.specs > dd[text]|2
-classic|item@390x780|dom|dl.specs > dd|2
+classic|item@390x780|dom|dl.specs > dd[text]|1
+classic|item@390x780|dom|dl.specs > dd|3
 classic|item@390x780|dom|dl.specs > dt[text]|5
 classic|item@390x780|dom|h1[text] > button.ghost.sm[aria-label=* text]|1
 classic|item@390x780|dom|header.top > a.logo[text]|1
@@ -3110,6 +3333,7 @@ classic|item@390x780|dom|header.top > span.spacer|1
 classic|item@390x780|dom|main#main > div.hero|1
 classic|item@390x780|dom|nav > a.active[text]|1
 classic|item@390x780|dom|nav > a[text]|2
+classic|item@390x780|dom|p[text] > b[text]|1
 classic|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|item@390x780|dom|span.on.trk[text] > span.tdef[text]|1
 classic|item@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -3131,7 +3355,7 @@ classic|item@390x780|focus|012|button.btnplay "▶ Resume · 7s"
 classic|item@390x780|focus|013|button.ghost "Start over"
 classic|item@390x780|focus|014|button.ghost.sm "Mark watched"
 classic|item@390x780|focus|015|button.ghost.sm "Analyze now"
-classic|item@390x780|focus|016|a.ghost.sm "Analysis status"
+classic|item@390x780|focus|016|a.ghost.sm "View queue"
 classic|item@390x780|focus|017|<wrap>
 classic|item@390x780|req|GET /api/v1/activity|2
 classic|item@390x780|req|GET /api/v1/items/<id>|1
@@ -3317,7 +3541,8 @@ classic|player@1280x860|dom|button.ghost.sm > span.tsw|1
 classic|player@1280x860|dom|dd > div.langnote[text]|1
 classic|player@1280x860|dom|dd > div.trks[text]|1
 classic|player@1280x860|dom|dd > div.trks|1
-classic|player@1280x860|dom|dd > span.muted[text]|1
+classic|player@1280x860|dom|dd > span.live.mode-chip[text]|1
+classic|player@1280x860|dom|dd > span.mode-detail[text]|1
 classic|player@1280x860|dom|div > button.ghost.profile.sm|1
 classic|player@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|player@1280x860|dom|div > button.ghost.sm[text]|1
@@ -3326,6 +3551,8 @@ classic|player@1280x860|dom|div > div#appmenu.amenu|1
 classic|player@1280x860|dom|div > div#profilemenu.amenu|1
 classic|player@1280x860|dom|div > div#sizemenu.amenu|1
 classic|player@1280x860|dom|div > div#thememenu.amenu|1
+classic|player@1280x860|dom|div > h2[text]|1
+classic|player@1280x860|dom|div > p[text]|1
 classic|player@1280x860|dom|div#app > header.top|1
 classic|player@1280x860|dom|div#app > main#main|1
 classic|player@1280x860|dom|div#modal.modal.open > div#player.player|1
@@ -3363,6 +3590,10 @@ classic|player@1280x860|dom|div#statsov.statsov > div#statsbody.statsbody|1
 classic|player@1280x860|dom|div#statsov.statsov > div.statshd|1
 classic|player@1280x860|dom|div.actions > button.btnplay[text]|1
 classic|player@1280x860|dom|div.actions > button.ghost.sm[text]|1
+classic|player@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|player@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|player@1280x860|dom|div.analysis-brief-head > div|1
+classic|player@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 classic|player@1280x860|dom|div.chips > span[text]|3
 classic|player@1280x860|dom|div.crumbs > a[text]|1
 classic|player@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -3383,8 +3614,6 @@ classic|player@1280x860|dom|div.phnav > div.crumbs|1
 classic|player@1280x860|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 classic|player@1280x860|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 classic|player@1280x860|dom|div.poster > div.art.ph[text]|1
-classic|player@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-classic|player@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 classic|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button#audiobtn.pbtn[text]|1
 classic|player@1280x860|dom|div.row > button#autonextbtn.on.pbtn[text]|1
@@ -3402,7 +3631,7 @@ classic|player@1280x860|dom|div.topctl > div|4
 classic|player@1280x860|dom|div.trks > span.on.trk[text]|1
 classic|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|player@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-classic|player@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+classic|player@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 classic|player@1280x860|dom|div.version > dl.specs|1
 classic|player@1280x860|dom|dl.specs > dd.fn[text]|1
 classic|player@1280x860|dom|dl.specs > dd[text]|1
@@ -3418,6 +3647,7 @@ classic|player@1280x860|dom|header.top > span.spacer|1
 classic|player@1280x860|dom|main#main > div.hero|1
 classic|player@1280x860|dom|nav > a.active[text]|1
 classic|player@1280x860|dom|nav > a[text]|2
+classic|player@1280x860|dom|p[text] > b[text]|1
 classic|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|player@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|player@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
@@ -3425,22 +3655,21 @@ classic|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidde
 classic|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
 classic|player@1280x860|dom|svg[aria-hidden=true] > rect|4
 classic|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-classic|player@1280x860|focus|001|button.ghost.sm "Analyze now"
-classic|player@1280x860|focus|002|a.ghost.sm "Analysis status"
-classic|player@1280x860|focus|003|button#qualbtn.pbtn "Playback quality"
-classic|player@1280x860|focus|004|button#syncbtn.pbtn "Audio sync adjustment"
-classic|player@1280x860|focus|005|button#statsbtn.pbtn "Playback info (i)"
-classic|player@1280x860|focus|006|button#skipbtn.pbtn "Auto-skip intro & credits"
-classic|player@1280x860|focus|007|button#autonextbtn.pbtn.on "Auto-play the next episode when
-classic|player@1280x860|focus|008|button.pbtn "Close (Esc)"
-classic|player@1280x860|focus|009|button#pbplay.picon "Play"
-classic|player@1280x860|focus|010|button.picon.nudge "Back 10 seconds"
-classic|player@1280x860|focus|011|button.picon.nudge "Forward 10 seconds"
-classic|player@1280x860|focus|012|div#pseek.pseek "Seek"
-classic|player@1280x860|focus|013|button#pbinfo.picon.on "Title info"
-classic|player@1280x860|focus|014|button#pbpip.picon "Picture in picture"
-classic|player@1280x860|focus|015|button#pbfs.picon "Fullscreen"
-classic|player@1280x860|focus|016|<wrap>
+classic|player@1280x860|focus|001|a.ghost.sm "View queue"
+classic|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
+classic|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
+classic|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
+classic|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
+classic|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
+classic|player@1280x860|focus|007|button.pbtn "Close (Esc)"
+classic|player@1280x860|focus|008|button#pbplay.picon "Play"
+classic|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
+classic|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
+classic|player@1280x860|focus|011|div#pseek.pseek "Seek"
+classic|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
+classic|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
+classic|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
+classic|player@1280x860|focus|015|<wrap>
 classic|player@1280x860|req|GET /api/v1/activity|2
 classic|player@1280x860|req|GET /api/v1/files/<id>/decision|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -3460,7 +3689,8 @@ classic|player@390x780|dom|button.ghost.sm > span.tsw|1
 classic|player@390x780|dom|dd > div.langnote[text]|1
 classic|player@390x780|dom|dd > div.trks[text]|1
 classic|player@390x780|dom|dd > div.trks|1
-classic|player@390x780|dom|dd > span.muted[text]|1
+classic|player@390x780|dom|dd > span.live.mode-chip[text]|1
+classic|player@390x780|dom|dd > span.mode-detail[text]|1
 classic|player@390x780|dom|div > button.ghost.profile.sm|1
 classic|player@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|player@390x780|dom|div > button.ghost.sm[text]|1
@@ -3469,6 +3699,8 @@ classic|player@390x780|dom|div > div#appmenu.amenu|1
 classic|player@390x780|dom|div > div#profilemenu.amenu|1
 classic|player@390x780|dom|div > div#sizemenu.amenu|1
 classic|player@390x780|dom|div > div#thememenu.amenu|1
+classic|player@390x780|dom|div > h2[text]|1
+classic|player@390x780|dom|div > p[text]|1
 classic|player@390x780|dom|div#app > header.top|1
 classic|player@390x780|dom|div#app > main#main|1
 classic|player@390x780|dom|div#modal.modal.open > div#player.player|1
@@ -3506,6 +3738,10 @@ classic|player@390x780|dom|div#statsov.statsov > div#statsbody.statsbody|1
 classic|player@390x780|dom|div#statsov.statsov > div.statshd|1
 classic|player@390x780|dom|div.actions > button.btnplay[text]|1
 classic|player@390x780|dom|div.actions > button.ghost.sm[text]|1
+classic|player@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+classic|player@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+classic|player@390x780|dom|div.analysis-brief-head > div|1
+classic|player@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 classic|player@390x780|dom|div.chips > span[text]|3
 classic|player@390x780|dom|div.crumbs > a[text]|1
 classic|player@390x780|dom|div.crumbs > span.cur[text]|1
@@ -3526,8 +3762,6 @@ classic|player@390x780|dom|div.phnav > div.crumbs|1
 classic|player@390x780|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 classic|player@390x780|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
 classic|player@390x780|dom|div.poster > div.art.ph[text]|1
-classic|player@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-classic|player@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 classic|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
 classic|player@390x780|dom|div.row > button#audiobtn.pbtn[text]|1
 classic|player@390x780|dom|div.row > button#autonextbtn.on.pbtn[text]|1
@@ -3545,7 +3779,7 @@ classic|player@390x780|dom|div.topctl > div|4
 classic|player@390x780|dom|div.trks > span.on.trk[text]|1
 classic|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 classic|player@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-classic|player@390x780|dom|div.version > div.px-admin.row.th-admin|1
+classic|player@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 classic|player@390x780|dom|div.version > dl.specs|1
 classic|player@390x780|dom|dl.specs > dd.fn[text]|1
 classic|player@390x780|dom|dl.specs > dd[text]|1
@@ -3561,6 +3795,7 @@ classic|player@390x780|dom|header.top > span.spacer|1
 classic|player@390x780|dom|main#main > div.hero|1
 classic|player@390x780|dom|nav > a.active[text]|1
 classic|player@390x780|dom|nav > a[text]|2
+classic|player@390x780|dom|p[text] > b[text]|1
 classic|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|player@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 classic|player@390x780|dom|span.on.trk[text] > span.tdef[text]|1
@@ -3568,20 +3803,19 @@ classic|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden
 classic|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
 classic|player@390x780|dom|svg[aria-hidden=true] > rect|4
 classic|player@390x780|focus|000|button.ghost.sm "Mark watched"
-classic|player@390x780|focus|001|button.ghost.sm "Analyze now"
-classic|player@390x780|focus|002|a.ghost.sm "Analysis status"
-classic|player@390x780|focus|003|button#qualbtn.pbtn "Playback quality"
-classic|player@390x780|focus|004|button#syncbtn.pbtn "Audio sync adjustment"
-classic|player@390x780|focus|005|button#statsbtn.pbtn "Playback info (i)"
-classic|player@390x780|focus|006|button#skipbtn.pbtn "Auto-skip intro & credits"
-classic|player@390x780|focus|007|button#autonextbtn.pbtn.on "Auto-play the next episode when
-classic|player@390x780|focus|008|button.pbtn "Close (Esc)"
-classic|player@390x780|focus|009|button#pbplay.picon "Play"
-classic|player@390x780|focus|010|div#pseek.pseek "Seek"
-classic|player@390x780|focus|011|button#pbinfo.picon.on "Title info"
-classic|player@390x780|focus|012|button#pbpip.picon "Picture in picture"
-classic|player@390x780|focus|013|button#pbfs.picon "Fullscreen"
-classic|player@390x780|focus|014|<wrap>
+classic|player@390x780|focus|001|a.ghost.sm "View queue"
+classic|player@390x780|focus|002|button#qualbtn.pbtn "Playback quality"
+classic|player@390x780|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
+classic|player@390x780|focus|004|button#statsbtn.pbtn "Playback info (i)"
+classic|player@390x780|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
+classic|player@390x780|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
+classic|player@390x780|focus|007|button.pbtn "Close (Esc)"
+classic|player@390x780|focus|008|button#pbplay.picon "Play"
+classic|player@390x780|focus|009|div#pseek.pseek "Seek"
+classic|player@390x780|focus|010|button#pbinfo.picon.on "Title info"
+classic|player@390x780|focus|011|button#pbpip.picon "Picture in picture"
+classic|player@390x780|focus|012|button#pbfs.picon "Fullscreen"
+classic|player@390x780|focus|013|<wrap>
 classic|player@390x780|req|GET /api/v1/activity|2
 classic|player@390x780|req|GET /api/v1/files/<id>/decision|1
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -3753,7 +3987,7 @@ classic|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
 classic|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
 classic|settings@1280x860|dom|div.sched > span.schedpair[text]|9
 classic|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
-classic|settings@1280x860|dom|div.settabs > button.settab[text]|5
+classic|settings@1280x860|dom|div.settabs > button.settab[text]|6
 classic|settings@1280x860|dom|div.setwarn[text] > a[text]|1
 classic|settings@1280x860|dom|div.setwarn[text] > b[text]|2
 classic|settings@1280x860|dom|div.topctl > div|4
@@ -3838,47 +4072,48 @@ classic|settings@1280x860|focus|008|button.ghost.sm.profile "Account"
 classic|settings@1280x860|focus|009|button.settab.active "Libraries"
 classic|settings@1280x860|focus|010|button.settab "Metadata"
 classic|settings@1280x860|focus|011|button.settab "Playback"
-classic|settings@1280x860|focus|012|button.settab "Users"
-classic|settings@1280x860|focus|013|button.settab "System"
-classic|settings@1280x860|focus|014|button.settab "Cluster"
-classic|settings@1280x860|focus|015|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@1280x860|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@1280x860|focus|017|select#sched-scan-2 "How often to look for new & changed fil
-classic|settings@1280x860|focus|018|select#sched-ref-2 "How often to re-fetch metadata for every
-classic|settings@1280x860|focus|019|button.ghost.sm "Save"
-classic|settings@1280x860|focus|020|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|022|button.ghost.sm "Edit"
-classic|settings@1280x860|focus|023|button.ghost.sm "Delete"
-classic|settings@1280x860|focus|024|select#sched-scan-1 "How often to look for new & changed fil
-classic|settings@1280x860|focus|025|select#sched-ref-1 "How often to re-fetch metadata for every
-classic|settings@1280x860|focus|026|button.ghost.sm "Save"
-classic|settings@1280x860|focus|027|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|029|button.ghost.sm "Edit"
-classic|settings@1280x860|focus|030|button.ghost.sm "Delete"
-classic|settings@1280x860|focus|031|select#sched-scan-3 "How often to look for new & changed fil
-classic|settings@1280x860|focus|032|select#sched-ref-3 "How often to re-fetch metadata for every
-classic|settings@1280x860|focus|033|button.ghost.sm "Save"
-classic|settings@1280x860|focus|034|button.ghost.sm "Scan"
-classic|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@1280x860|focus|036|button.ghost.sm "Edit"
-classic|settings@1280x860|focus|037|button.ghost.sm "Delete"
-classic|settings@1280x860|focus|038|input#ln "Library name"
-classic|settings@1280x860|focus|039|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-classic|settings@1280x860|focus|040|input#lp "Media paths"
-classic|settings@1280x860|focus|041|button "Add & scan"
-classic|settings@1280x860|focus|042|select#job-probe "Re-run ffprobe on files whose media detail
-classic|settings@1280x860|focus|043|select#job-art "Re-fetch posters for items a provider matche
-classic|settings@1280x860|focus|044|select#job-clean "Delete leftover transcode working director
-classic|settings@1280x860|focus|045|input#job-boot
-classic|settings@1280x860|focus|046|button.ghost.sm "Save"
-classic|settings@1280x860|focus|047|select#telemetry-retain "How long node-local playback measur
-classic|settings@1280x860|focus|048|button.ghost.sm "Save"
-classic|settings@1280x860|focus|049|select#cache-produce "How often to check what's worth encodi
-classic|settings@1280x860|focus|050|select#cache-gb "How much disk finished pre-transcodes may o
-classic|settings@1280x860|focus|051|button.ghost.sm "Save"
-classic|settings@1280x860|focus|052|<wrap>
+classic|settings@1280x860|focus|012|button.settab "Analysis"
+classic|settings@1280x860|focus|013|button.settab "Users"
+classic|settings@1280x860|focus|014|button.settab "System"
+classic|settings@1280x860|focus|015|button.settab "Cluster"
+classic|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@1280x860|focus|018|select#sched-scan-2 "How often to look for new & changed fil
+classic|settings@1280x860|focus|019|select#sched-ref-2 "How often to re-fetch metadata for every
+classic|settings@1280x860|focus|020|button.ghost.sm "Save"
+classic|settings@1280x860|focus|021|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|023|button.ghost.sm "Edit"
+classic|settings@1280x860|focus|024|button.ghost.sm "Delete"
+classic|settings@1280x860|focus|025|select#sched-scan-1 "How often to look for new & changed fil
+classic|settings@1280x860|focus|026|select#sched-ref-1 "How often to re-fetch metadata for every
+classic|settings@1280x860|focus|027|button.ghost.sm "Save"
+classic|settings@1280x860|focus|028|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|030|button.ghost.sm "Edit"
+classic|settings@1280x860|focus|031|button.ghost.sm "Delete"
+classic|settings@1280x860|focus|032|select#sched-scan-3 "How often to look for new & changed fil
+classic|settings@1280x860|focus|033|select#sched-ref-3 "How often to re-fetch metadata for every
+classic|settings@1280x860|focus|034|button.ghost.sm "Save"
+classic|settings@1280x860|focus|035|button.ghost.sm "Scan"
+classic|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@1280x860|focus|037|button.ghost.sm "Edit"
+classic|settings@1280x860|focus|038|button.ghost.sm "Delete"
+classic|settings@1280x860|focus|039|input#ln "Library name"
+classic|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+classic|settings@1280x860|focus|041|input#lp "Media paths"
+classic|settings@1280x860|focus|042|button "Add & scan"
+classic|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+classic|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
+classic|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
+classic|settings@1280x860|focus|046|input#job-boot
+classic|settings@1280x860|focus|047|button.ghost.sm "Save"
+classic|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
+classic|settings@1280x860|focus|049|button.ghost.sm "Save"
+classic|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
+classic|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@1280x860|focus|052|button.ghost.sm "Save"
+classic|settings@1280x860|focus|053|<wrap>
 classic|settings@1280x860|req|GET /api/v1/activity|2
 classic|settings@1280x860|req|GET /api/v1/libraries|1
 classic|settings@1280x860|req|GET /api/v1/me|1
@@ -3924,7 +4159,7 @@ classic|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
 classic|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
 classic|settings@390x780|dom|div.sched > span.schedpair[text]|9
 classic|settings@390x780|dom|div.settabs > button.active.settab[text]|1
-classic|settings@390x780|dom|div.settabs > button.settab[text]|5
+classic|settings@390x780|dom|div.settabs > button.settab[text]|6
 classic|settings@390x780|dom|div.setwarn[text] > a[text]|1
 classic|settings@390x780|dom|div.setwarn[text] > b[text]|2
 classic|settings@390x780|dom|div.topctl > div|4
@@ -4009,47 +4244,48 @@ classic|settings@390x780|focus|008|button.ghost.sm.profile "Account"
 classic|settings@390x780|focus|009|button.settab.active "Libraries"
 classic|settings@390x780|focus|010|button.settab "Metadata"
 classic|settings@390x780|focus|011|button.settab "Playback"
-classic|settings@390x780|focus|012|button.settab "Users"
-classic|settings@390x780|focus|013|button.settab "System"
-classic|settings@390x780|focus|014|button.settab "Cluster"
-classic|settings@390x780|focus|015|button.ghost.sm "Scan every library for new & changed files"
-classic|settings@390x780|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
-classic|settings@390x780|focus|017|select#sched-scan-2 "How often to look for new & changed fil
-classic|settings@390x780|focus|018|select#sched-ref-2 "How often to re-fetch metadata for every
-classic|settings@390x780|focus|019|button.ghost.sm "Save"
-classic|settings@390x780|focus|020|button.ghost.sm "Scan"
-classic|settings@390x780|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|022|button.ghost.sm "Edit"
-classic|settings@390x780|focus|023|button.ghost.sm "Delete"
-classic|settings@390x780|focus|024|select#sched-scan-1 "How often to look for new & changed fil
-classic|settings@390x780|focus|025|select#sched-ref-1 "How often to re-fetch metadata for every
-classic|settings@390x780|focus|026|button.ghost.sm "Save"
-classic|settings@390x780|focus|027|button.ghost.sm "Scan"
-classic|settings@390x780|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|029|button.ghost.sm "Edit"
-classic|settings@390x780|focus|030|button.ghost.sm "Delete"
-classic|settings@390x780|focus|031|select#sched-scan-3 "How often to look for new & changed fil
-classic|settings@390x780|focus|032|select#sched-ref-3 "How often to re-fetch metadata for every
-classic|settings@390x780|focus|033|button.ghost.sm "Save"
-classic|settings@390x780|focus|034|button.ghost.sm "Scan"
-classic|settings@390x780|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-classic|settings@390x780|focus|036|button.ghost.sm "Edit"
-classic|settings@390x780|focus|037|button.ghost.sm "Delete"
-classic|settings@390x780|focus|038|input#ln "Library name"
-classic|settings@390x780|focus|039|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-classic|settings@390x780|focus|040|input#lp "Media paths"
-classic|settings@390x780|focus|041|button "Add & scan"
-classic|settings@390x780|focus|042|select#job-probe "Re-run ffprobe on files whose media detail
-classic|settings@390x780|focus|043|select#job-art "Re-fetch posters for items a provider matche
-classic|settings@390x780|focus|044|select#job-clean "Delete leftover transcode working director
-classic|settings@390x780|focus|045|input#job-boot
-classic|settings@390x780|focus|046|button.ghost.sm "Save"
-classic|settings@390x780|focus|047|select#telemetry-retain "How long node-local playback measur
-classic|settings@390x780|focus|048|button.ghost.sm "Save"
-classic|settings@390x780|focus|049|select#cache-produce "How often to check what's worth encodi
-classic|settings@390x780|focus|050|select#cache-gb "How much disk finished pre-transcodes may o
-classic|settings@390x780|focus|051|button.ghost.sm "Save"
-classic|settings@390x780|focus|052|<wrap>
+classic|settings@390x780|focus|012|button.settab "Analysis"
+classic|settings@390x780|focus|013|button.settab "Users"
+classic|settings@390x780|focus|014|button.settab "System"
+classic|settings@390x780|focus|015|button.settab "Cluster"
+classic|settings@390x780|focus|016|button.ghost.sm "Scan every library for new & changed files"
+classic|settings@390x780|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
+classic|settings@390x780|focus|018|select#sched-scan-2 "How often to look for new & changed fil
+classic|settings@390x780|focus|019|select#sched-ref-2 "How often to re-fetch metadata for every
+classic|settings@390x780|focus|020|button.ghost.sm "Save"
+classic|settings@390x780|focus|021|button.ghost.sm "Scan"
+classic|settings@390x780|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|023|button.ghost.sm "Edit"
+classic|settings@390x780|focus|024|button.ghost.sm "Delete"
+classic|settings@390x780|focus|025|select#sched-scan-1 "How often to look for new & changed fil
+classic|settings@390x780|focus|026|select#sched-ref-1 "How often to re-fetch metadata for every
+classic|settings@390x780|focus|027|button.ghost.sm "Save"
+classic|settings@390x780|focus|028|button.ghost.sm "Scan"
+classic|settings@390x780|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|030|button.ghost.sm "Edit"
+classic|settings@390x780|focus|031|button.ghost.sm "Delete"
+classic|settings@390x780|focus|032|select#sched-scan-3 "How often to look for new & changed fil
+classic|settings@390x780|focus|033|select#sched-ref-3 "How often to re-fetch metadata for every
+classic|settings@390x780|focus|034|button.ghost.sm "Save"
+classic|settings@390x780|focus|035|button.ghost.sm "Scan"
+classic|settings@390x780|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+classic|settings@390x780|focus|037|button.ghost.sm "Edit"
+classic|settings@390x780|focus|038|button.ghost.sm "Delete"
+classic|settings@390x780|focus|039|input#ln "Library name"
+classic|settings@390x780|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+classic|settings@390x780|focus|041|input#lp "Media paths"
+classic|settings@390x780|focus|042|button "Add & scan"
+classic|settings@390x780|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+classic|settings@390x780|focus|044|select#job-art "Re-fetch posters for items a provider matche
+classic|settings@390x780|focus|045|select#job-clean "Delete leftover transcode working director
+classic|settings@390x780|focus|046|input#job-boot
+classic|settings@390x780|focus|047|button.ghost.sm "Save"
+classic|settings@390x780|focus|048|select#telemetry-retain "How long node-local playback measur
+classic|settings@390x780|focus|049|button.ghost.sm "Save"
+classic|settings@390x780|focus|050|select#cache-produce "How often to check what's worth encodi
+classic|settings@390x780|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+classic|settings@390x780|focus|052|button.ghost.sm "Save"
+classic|settings@390x780|focus|053|<wrap>
 classic|settings@390x780|req|GET /api/v1/activity|2
 classic|settings@390x780|req|GET /api/v1/libraries|1
 classic|settings@390x780|req|GET /api/v1/me|1
@@ -4063,10 +4299,21 @@ theater|activity@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|activity@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|activity@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|activity@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
-theater|activity@1280x860|dom|div > a.ghost.sm[text]|1
+theater|activity@1280x860|dom|div > h2[text]|1
+theater|activity@1280x860|dom|div > p[text]|1
 theater|activity@1280x860|dom|div#app > header.th-top|1
 theater|activity@1280x860|dom|div#app > main#main|1
 theater|activity@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|activity@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|activity@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+theater|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-head|1
+theater|activity@1280x860|dom|div.analysis-brief > div.analysis-brief-status|1
+theater|activity@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|activity@1280x860|dom|div.analysis-brief-head > div|1
+theater|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+theater|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+theater|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+theater|activity@1280x860|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 theater|activity@1280x860|dom|div.card > p.muted[text]|1
 theater|activity@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|activity@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
@@ -4083,10 +4330,10 @@ theater|activity@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|activity@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|activity@1280x860|dom|header.th-top > span#activity.activity|1
 theater|activity@1280x860|dom|header.th-top > span.spacer|1
+theater|activity@1280x860|dom|main#main > div.analysis-brief|1
 theater|activity@1280x860|dom|main#main > div.card|1
 theater|activity@1280x860|dom|main#main > div.empty[text]|4
-theater|activity@1280x860|dom|main#main > div|1
-theater|activity@1280x860|dom|main#main > h2.section[text]|5
+theater|activity@1280x860|dom|main#main > h2.section[text]|6
 theater|activity@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|activity@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|activity@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -4102,9 +4349,10 @@ theater|activity@1280x860|focus|005|button.ghost.sm "Theme and layout"
 theater|activity@1280x860|focus|006|button.ghost.sm "Light or dark"
 theater|activity@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 theater|activity@1280x860|focus|008|button.ghost.sm.profile "Account"
-theater|activity@1280x860|focus|009|a.ghost.sm "Open analysis status"
-theater|activity@1280x860|focus|010|a "Settings"
-theater|activity@1280x860|focus|011|<wrap>
+theater|activity@1280x860|focus|009|a.ghost.sm "Open workspace"
+theater|activity@1280x860|focus|010|button.ghost.sm "Settings"
+theater|activity@1280x860|focus|011|a "Settings"
+theater|activity@1280x860|focus|012|<wrap>
 theater|activity@1280x860|req|GET /api/v1/activity/detail|2
 theater|activity@1280x860|req|GET /api/v1/me|1
 theater|activity@1280x860|req|GET /api/v1/server|1
@@ -4115,10 +4363,21 @@ theater|activity@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|activity@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|activity@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|activity@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
-theater|activity@390x780|dom|div > a.ghost.sm[text]|1
+theater|activity@390x780|dom|div > h2[text]|1
+theater|activity@390x780|dom|div > p[text]|1
 theater|activity@390x780|dom|div#app > header.th-top|1
 theater|activity@390x780|dom|div#app > main#main|1
 theater|activity@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
+theater|activity@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|activity@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+theater|activity@390x780|dom|div.analysis-brief > div.analysis-brief-head|1
+theater|activity@390x780|dom|div.analysis-brief > div.analysis-brief-status|1
+theater|activity@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|activity@390x780|dom|div.analysis-brief-head > div|1
+theater|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.cancelled[text]|2
+theater|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.failed[text]|1
+theater|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.ready[text]|1
+theater|activity@390x780|dom|div.analysis-brief-status > span.analysis-state.running[text]|1
 theater|activity@390x780|dom|div.card > p.muted[text]|1
 theater|activity@390x780|dom|div.th-ctl > div.th-pop|4
 theater|activity@390x780|dom|div.th-pop > button.ghost.profile.sm|1
@@ -4135,10 +4394,10 @@ theater|activity@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|activity@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|activity@390x780|dom|header.th-top > span#activity.activity|1
 theater|activity@390x780|dom|header.th-top > span.spacer|1
+theater|activity@390x780|dom|main#main > div.analysis-brief|1
 theater|activity@390x780|dom|main#main > div.card|1
 theater|activity@390x780|dom|main#main > div.empty[text]|4
-theater|activity@390x780|dom|main#main > div|1
-theater|activity@390x780|dom|main#main > h2.section[text]|5
+theater|activity@390x780|dom|main#main > h2.section[text]|6
 theater|activity@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|activity@390x780|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|activity@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
@@ -4151,12 +4410,13 @@ theater|activity@390x780|focus|002|button.ghost.sm "Theme and layout"
 theater|activity@390x780|focus|003|button.ghost.sm "Light or dark"
 theater|activity@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 theater|activity@390x780|focus|005|button.ghost.sm.profile "Account"
-theater|activity@390x780|focus|006|a.ghost.sm "Open analysis status"
-theater|activity@390x780|focus|007|a "Settings"
-theater|activity@390x780|focus|008|a "Home"
-theater|activity@390x780|focus|009|a.on "Activity"
-theater|activity@390x780|focus|010|a "Settings"
-theater|activity@390x780|focus|011|<wrap>
+theater|activity@390x780|focus|006|a.ghost.sm "Open workspace"
+theater|activity@390x780|focus|007|button.ghost.sm "Settings"
+theater|activity@390x780|focus|008|a "Settings"
+theater|activity@390x780|focus|009|a "Home"
+theater|activity@390x780|focus|010|a.on "Activity"
+theater|activity@390x780|focus|011|a "Settings"
+theater|activity@390x780|focus|012|<wrap>
 theater|activity@390x780|req|GET /api/v1/activity/detail|2
 theater|activity@390x780|req|GET /api/v1/me|1
 theater|activity@390x780|req|GET /api/v1/server|1
@@ -4167,16 +4427,36 @@ theater|analysis@1280x860|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|analysis@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|analysis@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|analysis@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
-theater|analysis@1280x860|dom|div > div.muted[text]|1
+theater|analysis@1280x860|dom|button.on[aria-pressed=true text] > b[text]|1
 theater|analysis@1280x860|dom|div > h1[text]|1
+theater|analysis@1280x860|dom|div > p[text]|1
 theater|analysis@1280x860|dom|div#app > header.th-top|1
 theater|analysis@1280x860|dom|div#app > main#main|1
 theater|analysis@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|analysis@1280x860|dom|div.chips > span[text]|1
-theater|analysis@1280x860|dom|div.clrefusal[text] > a[text]|1
+theater|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+theater|analysis@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|2
+theater|analysis@1280x860|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+theater|analysis@1280x860|dom|div.analysis-controls > div.analysis-filters|1
+theater|analysis@1280x860|dom|div.analysis-controls > div.analysis-search|1
+theater|analysis@1280x860|dom|div.analysis-controls > span|1
+theater|analysis@1280x860|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+theater|analysis@1280x860|dom|div.analysis-filters > button[aria-pressed=false text]|4
+theater|analysis@1280x860|dom|div.analysis-head > div.analysis-actions|1
+theater|analysis@1280x860|dom|div.analysis-head > div|1
+theater|analysis@1280x860|dom|div.analysis-metric > span.k[text]|4
+theater|analysis@1280x860|dom|div.analysis-metric > span.n[text]|4
+theater|analysis@1280x860|dom|div.analysis-metric.good > span.k[text]|1
+theater|analysis@1280x860|dom|div.analysis-metric.good > span.n[text]|1
+theater|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric.good|1
+theater|analysis@1280x860|dom|div.analysis-metrics > div.analysis-metric|4
+theater|analysis@1280x860|dom|div.analysis-pages > div.row|1
+theater|analysis@1280x860|dom|div.analysis-pages > span[text]|1
+theater|analysis@1280x860|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 theater|analysis@1280x860|dom|div.clrefusal[text] > b[text]|1
-theater|analysis@1280x860|dom|div.row > a.ghost.sm[text]|1
-theater|analysis@1280x860|dom|div.row > div|1
+theater|analysis@1280x860|dom|div.clrefusal[text] > button.ghost.sm[text]|1
+theater|analysis@1280x860|dom|div.row > button.ghost.sm[disabled text]|2
+theater|analysis@1280x860|dom|div.row > label[text]|1
+theater|analysis@1280x860|dom|div.row > span[text]|1
 theater|analysis@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|analysis@1280x860|dom|div.th-pop > button.ghost.profile.sm|1
 theater|analysis@1280x860|dom|div.th-pop > button.ghost.sizebtn.sm|1
@@ -4192,15 +4472,19 @@ theater|analysis@1280x860|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|analysis@1280x860|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|analysis@1280x860|dom|header.th-top > span#activity.activity|1
 theater|analysis@1280x860|dom|header.th-top > span.spacer|1
-theater|analysis@1280x860|dom|main#main > div.chips|1
+theater|analysis@1280x860|dom|label[text] > select|1
+theater|analysis@1280x860|dom|main#main > div.analysis-controls|1
+theater|analysis@1280x860|dom|main#main > div.analysis-head|1
+theater|analysis@1280x860|dom|main#main > div.analysis-metrics|1
+theater|analysis@1280x860|dom|main#main > div.analysis-pages|1
+theater|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 theater|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 theater|analysis@1280x860|dom|main#main > div.empty[text]|1
-theater|analysis@1280x860|dom|main#main > div.row|1
-theater|analysis@1280x860|dom|main#main > h2.section[text]|1
 theater|analysis@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|analysis@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|analysis@1280x860|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|analysis@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|2
+theater|analysis@1280x860|dom|select > option[text]|4
 theater|analysis@1280x860|dom|svg[aria-hidden=true] > rect|4
 theater|analysis@1280x860|focus|000|a.logo "cinema"
 theater|analysis@1280x860|focus|001|a "Home"
@@ -4211,11 +4495,21 @@ theater|analysis@1280x860|focus|005|button.ghost.sm "Theme and layout"
 theater|analysis@1280x860|focus|006|button.ghost.sm "Light or dark"
 theater|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 theater|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
-theater|analysis@1280x860|focus|009|a.ghost.sm "Activity"
-theater|analysis@1280x860|focus|010|a "Playback settings"
-theater|analysis@1280x860|focus|011|<wrap>
+theater|analysis@1280x860|focus|009|button.ghost.sm "Pause"
+theater|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
+theater|analysis@1280x860|focus|011|button.ghost.sm "Settings"
+theater|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
+theater|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
+theater|analysis@1280x860|focus|014|button.on "All 0"
+theater|analysis@1280x860|focus|015|button "Working"
+theater|analysis@1280x860|focus|016|button "Attention"
+theater|analysis@1280x860|focus|017|button "Expected"
+theater|analysis@1280x860|focus|018|button "Ready"
+theater|analysis@1280x860|focus|019|select "10 25 50 100"
+theater|analysis@1280x860|focus|020|<wrap>
 theater|analysis@1280x860|req|GET /api/v1/activity|2
 theater|analysis@1280x860|req|GET /api/v1/analysis/jobs|1
+theater|analysis@1280x860|req|GET /api/v1/analysis/summary|1
 theater|analysis@1280x860|req|GET /api/v1/me|1
 theater|analysis@1280x860|req|GET /api/v1/server|1
 theater|analysis@390x780|dom|^ > div#app|1
@@ -4225,16 +4519,36 @@ theater|analysis@390x780|dom|button.ghost.profile.sm > span.pname[text]|1
 theater|analysis@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|analysis@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|analysis@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
-theater|analysis@390x780|dom|div > div.muted[text]|1
+theater|analysis@390x780|dom|button.on[aria-pressed=true text] > b[text]|1
 theater|analysis@390x780|dom|div > h1[text]|1
+theater|analysis@390x780|dom|div > p[text]|1
 theater|analysis@390x780|dom|div#app > header.th-top|1
 theater|analysis@390x780|dom|div#app > main#main|1
 theater|analysis@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
-theater|analysis@390x780|dom|div.chips > span[text]|1
-theater|analysis@390x780|dom|div.clrefusal[text] > a[text]|1
+theater|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[aria-pressed=true text]|1
+theater|analysis@390x780|dom|div.analysis-actions > button.ghost.sm[text]|2
+theater|analysis@390x780|dom|div.analysis-actions > span.analysis-live[role=status aria-live=polite text]|1
+theater|analysis@390x780|dom|div.analysis-controls > div.analysis-filters|1
+theater|analysis@390x780|dom|div.analysis-controls > div.analysis-search|1
+theater|analysis@390x780|dom|div.analysis-controls > span|1
+theater|analysis@390x780|dom|div.analysis-filters > button.on[aria-pressed=true text]|1
+theater|analysis@390x780|dom|div.analysis-filters > button[aria-pressed=false text]|4
+theater|analysis@390x780|dom|div.analysis-head > div.analysis-actions|1
+theater|analysis@390x780|dom|div.analysis-head > div|1
+theater|analysis@390x780|dom|div.analysis-metric > span.k[text]|4
+theater|analysis@390x780|dom|div.analysis-metric > span.n[text]|4
+theater|analysis@390x780|dom|div.analysis-metric.good > span.k[text]|1
+theater|analysis@390x780|dom|div.analysis-metric.good > span.n[text]|1
+theater|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric.good|1
+theater|analysis@390x780|dom|div.analysis-metrics > div.analysis-metric|4
+theater|analysis@390x780|dom|div.analysis-pages > div.row|1
+theater|analysis@390x780|dom|div.analysis-pages > span[text]|1
+theater|analysis@390x780|dom|div.analysis-search > input#analysis-search[aria-label=*]|1
 theater|analysis@390x780|dom|div.clrefusal[text] > b[text]|1
-theater|analysis@390x780|dom|div.row > a.ghost.sm[text]|1
-theater|analysis@390x780|dom|div.row > div|1
+theater|analysis@390x780|dom|div.clrefusal[text] > button.ghost.sm[text]|1
+theater|analysis@390x780|dom|div.row > button.ghost.sm[disabled text]|2
+theater|analysis@390x780|dom|div.row > label[text]|1
+theater|analysis@390x780|dom|div.row > span[text]|1
 theater|analysis@390x780|dom|div.th-ctl > div.th-pop|4
 theater|analysis@390x780|dom|div.th-pop > button.ghost.profile.sm|1
 theater|analysis@390x780|dom|div.th-pop > button.ghost.sizebtn.sm|1
@@ -4250,15 +4564,19 @@ theater|analysis@390x780|dom|header.th-top > input#q.search[aria-label=*]|1
 theater|analysis@390x780|dom|header.th-top > nav.th-nav[aria-label=*]|1
 theater|analysis@390x780|dom|header.th-top > span#activity.activity|1
 theater|analysis@390x780|dom|header.th-top > span.spacer|1
-theater|analysis@390x780|dom|main#main > div.chips|1
+theater|analysis@390x780|dom|label[text] > select|1
+theater|analysis@390x780|dom|main#main > div.analysis-controls|1
+theater|analysis@390x780|dom|main#main > div.analysis-head|1
+theater|analysis@390x780|dom|main#main > div.analysis-metrics|1
+theater|analysis@390x780|dom|main#main > div.analysis-pages|1
+theater|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 theater|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 theater|analysis@390x780|dom|main#main > div.empty[text]|1
-theater|analysis@390x780|dom|main#main > div.row|1
-theater|analysis@390x780|dom|main#main > h2.section[text]|1
 theater|analysis@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
 theater|analysis@390x780|dom|nav.th-nav[aria-label=*] > a[text]|2
 theater|analysis@390x780|dom|nav.th-pills[aria-label=*] > a.on[aria-current=page text]|1
 theater|analysis@390x780|dom|nav.th-pills[aria-label=*] > a[text]|2
+theater|analysis@390x780|dom|select > option[text]|4
 theater|analysis@390x780|dom|svg[aria-hidden=true] > rect|4
 theater|analysis@390x780|focus|000|a.logo "cinema"
 theater|analysis@390x780|focus|001|input#q.search "Search cinema"
@@ -4266,14 +4584,24 @@ theater|analysis@390x780|focus|002|button.ghost.sm "Theme and layout"
 theater|analysis@390x780|focus|003|button.ghost.sm "Light or dark"
 theater|analysis@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 theater|analysis@390x780|focus|005|button.ghost.sm.profile "Account"
-theater|analysis@390x780|focus|006|a.ghost.sm "Activity"
-theater|analysis@390x780|focus|007|a "Playback settings"
-theater|analysis@390x780|focus|008|a "Home"
-theater|analysis@390x780|focus|009|a.on "Activity"
-theater|analysis@390x780|focus|010|a "Settings"
-theater|analysis@390x780|focus|011|<wrap>
+theater|analysis@390x780|focus|006|button.ghost.sm "Pause"
+theater|analysis@390x780|focus|007|button.ghost.sm "Refresh history"
+theater|analysis@390x780|focus|008|button.ghost.sm "Settings"
+theater|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
+theater|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
+theater|analysis@390x780|focus|011|button.on "All 0"
+theater|analysis@390x780|focus|012|button "Working"
+theater|analysis@390x780|focus|013|button "Attention"
+theater|analysis@390x780|focus|014|button "Expected"
+theater|analysis@390x780|focus|015|button "Ready"
+theater|analysis@390x780|focus|016|select "10 25 50 100"
+theater|analysis@390x780|focus|017|a "Home"
+theater|analysis@390x780|focus|018|a.on "Activity"
+theater|analysis@390x780|focus|019|a "Settings"
+theater|analysis@390x780|focus|020|<wrap>
 theater|analysis@390x780|req|GET /api/v1/activity|2
 theater|analysis@390x780|req|GET /api/v1/analysis/jobs|1
+theater|analysis@390x780|req|GET /api/v1/analysis/summary|1
 theater|analysis@390x780|req|GET /api/v1/me|1
 theater|analysis@390x780|req|GET /api/v1/server|1
 theater|auth@1280x860|dom|^ > div#app|1
@@ -4746,13 +5074,21 @@ theater|item@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|item@1280x860|dom|dd > div.langnote[text]|1
 theater|item@1280x860|dom|dd > div.trks[text]|1
 theater|item@1280x860|dom|dd > div.trks|1
-theater|item@1280x860|dom|dd[text] > span.stat-warn[text]|1
+theater|item@1280x860|dom|dd > span.live.mode-chip[text]|1
+theater|item@1280x860|dom|dd > span.mode-detail[text]|1
+theater|item@1280x860|dom|div > h2[text]|1
+theater|item@1280x860|dom|div > p[text]|1
 theater|item@1280x860|dom|div#app > header.th-top|1
 theater|item@1280x860|dom|div#app > main#main|1
 theater|item@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
 theater|item@1280x860|dom|div.actions > button.btnplay[text]|1
 theater|item@1280x860|dom|div.actions > button.ghost.sm[text]|1
 theater|item@1280x860|dom|div.actions > button.ghost[text]|1
+theater|item@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|item@1280x860|dom|div.analysis-actions > button.ghost.sm[text]|1
+theater|item@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|item@1280x860|dom|div.analysis-brief-head > div|1
+theater|item@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 theater|item@1280x860|dom|div.chips > span[text]|1
 theater|item@1280x860|dom|div.crumbs > a[text]|1
 theater|item@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -4760,8 +5096,6 @@ theater|item@1280x860|dom|div.crumbs > span.sep[text]|1
 theater|item@1280x860|dom|div.pagehead > div.phnav|1
 theater|item@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|item@1280x860|dom|div.phnav > div.crumbs|1
-theater|item@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-theater|item@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 theater|item@1280x860|dom|div.th-ctl > div.th-pop|4
 theater|item@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
 theater|item@1280x860|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hidden=true]|1
@@ -4787,11 +5121,11 @@ theater|item@1280x860|dom|div.th-rest > div.version|1
 theater|item@1280x860|dom|div.trks > span.on.trk[text]|1
 theater|item@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|item@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-theater|item@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+theater|item@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 theater|item@1280x860|dom|div.version > dl.specs|1
 theater|item@1280x860|dom|dl.specs > dd.fn[text]|1
-theater|item@1280x860|dom|dl.specs > dd[text]|2
-theater|item@1280x860|dom|dl.specs > dd|2
+theater|item@1280x860|dom|dl.specs > dd[text]|1
+theater|item@1280x860|dom|dl.specs > dd|3
 theater|item@1280x860|dom|dl.specs > dt[text]|5
 theater|item@1280x860|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@1280x860|dom|header.th-top > a.logo[text]|1
@@ -4804,6 +5138,7 @@ theater|item@1280x860|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|item@1280x860|dom|main#main > div.th-rest|1
 theater|item@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|item@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|item@1280x860|dom|p[text] > b[text]|1
 theater|item@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|item@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
 theater|item@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -4825,7 +5160,7 @@ theater|item@1280x860|focus|012|button.btnplay "▶ Resume · 7s"
 theater|item@1280x860|focus|013|button.ghost "Start over"
 theater|item@1280x860|focus|014|button.ghost.sm "Mark watched"
 theater|item@1280x860|focus|015|button.ghost.sm "Analyze now"
-theater|item@1280x860|focus|016|a.ghost.sm "Analysis status"
+theater|item@1280x860|focus|016|a.ghost.sm "View queue"
 theater|item@1280x860|focus|017|<wrap>
 theater|item@1280x860|req|GET /api/v1/activity|2
 theater|item@1280x860|req|GET /api/v1/items/<id>|1
@@ -4842,13 +5177,21 @@ theater|item@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|item@390x780|dom|dd > div.langnote[text]|1
 theater|item@390x780|dom|dd > div.trks[text]|1
 theater|item@390x780|dom|dd > div.trks|1
-theater|item@390x780|dom|dd[text] > span.stat-warn[text]|1
+theater|item@390x780|dom|dd > span.live.mode-chip[text]|1
+theater|item@390x780|dom|dd > span.mode-detail[text]|1
+theater|item@390x780|dom|div > h2[text]|1
+theater|item@390x780|dom|div > p[text]|1
 theater|item@390x780|dom|div#app > header.th-top|1
 theater|item@390x780|dom|div#app > main#main|1
 theater|item@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
 theater|item@390x780|dom|div.actions > button.btnplay[text]|1
 theater|item@390x780|dom|div.actions > button.ghost.sm[text]|1
 theater|item@390x780|dom|div.actions > button.ghost[text]|1
+theater|item@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|item@390x780|dom|div.analysis-actions > button.ghost.sm[text]|1
+theater|item@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|item@390x780|dom|div.analysis-brief-head > div|1
+theater|item@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 theater|item@390x780|dom|div.chips > span[text]|1
 theater|item@390x780|dom|div.crumbs > a[text]|1
 theater|item@390x780|dom|div.crumbs > span.cur[text]|1
@@ -4856,8 +5199,6 @@ theater|item@390x780|dom|div.crumbs > span.sep[text]|1
 theater|item@390x780|dom|div.pagehead > div.phnav|1
 theater|item@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|item@390x780|dom|div.phnav > div.crumbs|1
-theater|item@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-theater|item@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 theater|item@390x780|dom|div.th-ctl > div.th-pop|4
 theater|item@390x780|dom|div.th-detail.th-hero.th-noart > div.th-dwrap|1
 theater|item@390x780|dom|div.th-detail.th-hero.th-noart > div.th-scrim[aria-hidden=true]|1
@@ -4883,11 +5224,11 @@ theater|item@390x780|dom|div.th-rest > div.version|1
 theater|item@390x780|dom|div.trks > span.on.trk[text]|1
 theater|item@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|item@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-theater|item@390x780|dom|div.version > div.px-admin.row.th-admin|1
+theater|item@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 theater|item@390x780|dom|div.version > dl.specs|1
 theater|item@390x780|dom|dl.specs > dd.fn[text]|1
-theater|item@390x780|dom|dl.specs > dd[text]|2
-theater|item@390x780|dom|dl.specs > dd|2
+theater|item@390x780|dom|dl.specs > dd[text]|1
+theater|item@390x780|dom|dl.specs > dd|3
 theater|item@390x780|dom|dl.specs > dt[text]|5
 theater|item@390x780|dom|h1[text] > button.ghost.sm.th-admin[aria-label=* text]|1
 theater|item@390x780|dom|header.th-top > a.logo[text]|1
@@ -4900,6 +5241,7 @@ theater|item@390x780|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|item@390x780|dom|main#main > div.th-rest|1
 theater|item@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|item@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|item@390x780|dom|p[text] > b[text]|1
 theater|item@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|item@390x780|dom|span.on.trk[text] > span.tdef[text]|1
 theater|item@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden=true]|1
@@ -4918,7 +5260,7 @@ theater|item@390x780|focus|009|button.btnplay "▶ Resume · 7s"
 theater|item@390x780|focus|010|button.ghost "Start over"
 theater|item@390x780|focus|011|button.ghost.sm "Mark watched"
 theater|item@390x780|focus|012|button.ghost.sm "Analyze now"
-theater|item@390x780|focus|013|a.ghost.sm "Analysis status"
+theater|item@390x780|focus|013|a.ghost.sm "View queue"
 theater|item@390x780|focus|014|a "Home"
 theater|item@390x780|focus|015|a "Activity"
 theater|item@390x780|focus|016|a "Settings"
@@ -5115,7 +5457,10 @@ theater|player@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|player@1280x860|dom|dd > div.langnote[text]|1
 theater|player@1280x860|dom|dd > div.trks[text]|1
 theater|player@1280x860|dom|dd > div.trks|1
-theater|player@1280x860|dom|dd > span.muted[text]|1
+theater|player@1280x860|dom|dd > span.live.mode-chip[text]|1
+theater|player@1280x860|dom|dd > span.mode-detail[text]|1
+theater|player@1280x860|dom|div > h2[text]|1
+theater|player@1280x860|dom|div > p[text]|1
 theater|player@1280x860|dom|div#app > header.th-top|1
 theater|player@1280x860|dom|div#app > main#main|1
 theater|player@1280x860|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -5154,6 +5499,10 @@ theater|player@1280x860|dom|div#statsov.statsov > div#statsbody.statsbody|1
 theater|player@1280x860|dom|div#statsov.statsov > div.statshd|1
 theater|player@1280x860|dom|div.actions > button.btnplay[text]|1
 theater|player@1280x860|dom|div.actions > button.ghost.sm[text]|1
+theater|player@1280x860|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|player@1280x860|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|player@1280x860|dom|div.analysis-brief-head > div|1
+theater|player@1280x860|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 theater|player@1280x860|dom|div.chips > span[text]|1
 theater|player@1280x860|dom|div.crumbs > a[text]|1
 theater|player@1280x860|dom|div.crumbs > span.cur[text]|1
@@ -5163,8 +5512,6 @@ theater|player@1280x860|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|player@1280x860|dom|div.phnav > div.crumbs|1
 theater|player@1280x860|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 theater|player@1280x860|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
-theater|player@1280x860|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-theater|player@1280x860|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 theater|player@1280x860|dom|div.row > button#apbtn.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button#audiobtn.pbtn[text]|1
 theater|player@1280x860|dom|div.row > button#autonextbtn.on.pbtn[text]|1
@@ -5203,7 +5550,7 @@ theater|player@1280x860|dom|div.th-rest > div.version|1
 theater|player@1280x860|dom|div.trks > span.on.trk[text]|1
 theater|player@1280x860|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|player@1280x860|dom|div.vbadges > span.res.vbadge[text]|1
-theater|player@1280x860|dom|div.version > div.px-admin.row.th-admin|1
+theater|player@1280x860|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 theater|player@1280x860|dom|div.version > dl.specs|1
 theater|player@1280x860|dom|dl.specs > dd.fn[text]|1
 theater|player@1280x860|dom|dl.specs > dd[text]|1
@@ -5220,6 +5567,7 @@ theater|player@1280x860|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|player@1280x860|dom|main#main > div.th-rest|1
 theater|player@1280x860|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|player@1280x860|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|player@1280x860|dom|p[text] > b[text]|1
 theater|player@1280x860|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|player@1280x860|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|player@1280x860|dom|span.on.trk[text] > span.tdef[text]|1
@@ -5227,22 +5575,21 @@ theater|player@1280x860|dom|span.res.vbadge[text] > svg.material-icon[aria-hidde
 theater|player@1280x860|dom|svg.material-icon[aria-hidden=true] > path|4
 theater|player@1280x860|dom|svg[aria-hidden=true] > rect|4
 theater|player@1280x860|focus|000|button.ghost.sm "Mark watched"
-theater|player@1280x860|focus|001|button.ghost.sm "Analyze now"
-theater|player@1280x860|focus|002|a.ghost.sm "Analysis status"
-theater|player@1280x860|focus|003|button#qualbtn.pbtn "Playback quality"
-theater|player@1280x860|focus|004|button#syncbtn.pbtn "Audio sync adjustment"
-theater|player@1280x860|focus|005|button#statsbtn.pbtn "Playback info (i)"
-theater|player@1280x860|focus|006|button#skipbtn.pbtn "Auto-skip intro & credits"
-theater|player@1280x860|focus|007|button#autonextbtn.pbtn.on "Auto-play the next episode when
-theater|player@1280x860|focus|008|button.pbtn "Close (Esc)"
-theater|player@1280x860|focus|009|button#pbplay.picon "Play"
-theater|player@1280x860|focus|010|button.picon.nudge "Back 10 seconds"
-theater|player@1280x860|focus|011|button.picon.nudge "Forward 10 seconds"
-theater|player@1280x860|focus|012|div#pseek.pseek "Seek"
-theater|player@1280x860|focus|013|button#pbinfo.picon.on "Title info"
-theater|player@1280x860|focus|014|button#pbpip.picon "Picture in picture"
-theater|player@1280x860|focus|015|button#pbfs.picon "Fullscreen"
-theater|player@1280x860|focus|016|<wrap>
+theater|player@1280x860|focus|001|a.ghost.sm "View queue"
+theater|player@1280x860|focus|002|button#qualbtn.pbtn "Playback quality"
+theater|player@1280x860|focus|003|button#syncbtn.pbtn "Audio sync adjustment"
+theater|player@1280x860|focus|004|button#statsbtn.pbtn "Playback info (i)"
+theater|player@1280x860|focus|005|button#skipbtn.pbtn "Auto-skip intro & credits"
+theater|player@1280x860|focus|006|button#autonextbtn.pbtn.on "Auto-play the next episode when
+theater|player@1280x860|focus|007|button.pbtn "Close (Esc)"
+theater|player@1280x860|focus|008|button#pbplay.picon "Play"
+theater|player@1280x860|focus|009|button.picon.nudge "Back 10 seconds"
+theater|player@1280x860|focus|010|button.picon.nudge "Forward 10 seconds"
+theater|player@1280x860|focus|011|div#pseek.pseek "Seek"
+theater|player@1280x860|focus|012|button#pbinfo.picon.on "Title info"
+theater|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
+theater|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
+theater|player@1280x860|focus|015|<wrap>
 theater|player@1280x860|req|GET /api/v1/activity|2
 theater|player@1280x860|req|GET /api/v1/files/<id>/decision|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
@@ -5262,7 +5609,10 @@ theater|player@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|player@390x780|dom|dd > div.langnote[text]|1
 theater|player@390x780|dom|dd > div.trks[text]|1
 theater|player@390x780|dom|dd > div.trks|1
-theater|player@390x780|dom|dd > span.muted[text]|1
+theater|player@390x780|dom|dd > span.live.mode-chip[text]|1
+theater|player@390x780|dom|dd > span.mode-detail[text]|1
+theater|player@390x780|dom|div > h2[text]|1
+theater|player@390x780|dom|div > p[text]|1
 theater|player@390x780|dom|div#app > header.th-top|1
 theater|player@390x780|dom|div#app > main#main|1
 theater|player@390x780|dom|div#app > nav.th-pills[aria-label=*]|1
@@ -5301,6 +5651,10 @@ theater|player@390x780|dom|div#statsov.statsov > div#statsbody.statsbody|1
 theater|player@390x780|dom|div#statsov.statsov > div.statshd|1
 theater|player@390x780|dom|div.actions > button.btnplay[text]|1
 theater|player@390x780|dom|div.actions > button.ghost.sm[text]|1
+theater|player@390x780|dom|div.analysis-actions > a.ghost.sm[text]|1
+theater|player@390x780|dom|div.analysis-brief-head > div.analysis-actions|1
+theater|player@390x780|dom|div.analysis-brief-head > div|1
+theater|player@390x780|dom|div.analysis-brief.px-admin.th-admin > div.analysis-brief-head|1
 theater|player@390x780|dom|div.chips > span[text]|1
 theater|player@390x780|dom|div.crumbs > a[text]|1
 theater|player@390x780|dom|div.crumbs > span.cur[text]|1
@@ -5310,8 +5664,6 @@ theater|player@390x780|dom|div.phnav > a.pgback[aria-label=* text]|1
 theater|player@390x780|dom|div.phnav > div.crumbs|1
 theater|player@390x780|dom|div.pifacts.vbadges > span.audio.vbadge[text]|1
 theater|player@390x780|dom|div.pifacts.vbadges > span.res.vbadge[text]|1
-theater|player@390x780|dom|div.px-admin.row.th-admin > a.ghost.sm[text]|1
-theater|player@390x780|dom|div.px-admin.row.th-admin > button.ghost.sm[text]|1
 theater|player@390x780|dom|div.row > button#apbtn.pbtn[text]|1
 theater|player@390x780|dom|div.row > button#audiobtn.pbtn[text]|1
 theater|player@390x780|dom|div.row > button#autonextbtn.on.pbtn[text]|1
@@ -5350,7 +5702,7 @@ theater|player@390x780|dom|div.th-rest > div.version|1
 theater|player@390x780|dom|div.trks > span.on.trk[text]|1
 theater|player@390x780|dom|div.vbadges > span.codec.vbadge[text]|1
 theater|player@390x780|dom|div.vbadges > span.res.vbadge[text]|1
-theater|player@390x780|dom|div.version > div.px-admin.row.th-admin|1
+theater|player@390x780|dom|div.version > div.analysis-brief.px-admin.th-admin|1
 theater|player@390x780|dom|div.version > dl.specs|1
 theater|player@390x780|dom|dl.specs > dd.fn[text]|1
 theater|player@390x780|dom|dl.specs > dd[text]|1
@@ -5367,6 +5719,7 @@ theater|player@390x780|dom|main#main > div.th-detail.th-hero.th-noart|1
 theater|player@390x780|dom|main#main > div.th-rest|1
 theater|player@390x780|dom|nav.th-nav[aria-label=*] > a[text]|3
 theater|player@390x780|dom|nav.th-pills[aria-label=*] > a[text]|3
+theater|player@390x780|dom|p[text] > b[text]|1
 theater|player@390x780|dom|span.audio.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|player@390x780|dom|span.codec.vbadge[text] > svg.material-icon[aria-hidden=true]|1
 theater|player@390x780|dom|span.on.trk[text] > span.tdef[text]|1
@@ -5374,23 +5727,22 @@ theater|player@390x780|dom|span.res.vbadge[text] > svg.material-icon[aria-hidden
 theater|player@390x780|dom|svg.material-icon[aria-hidden=true] > path|4
 theater|player@390x780|dom|svg[aria-hidden=true] > rect|4
 theater|player@390x780|focus|000|button.ghost.sm "Mark watched"
-theater|player@390x780|focus|001|button.ghost.sm "Analyze now"
-theater|player@390x780|focus|002|a.ghost.sm "Analysis status"
-theater|player@390x780|focus|003|a "Home"
-theater|player@390x780|focus|004|a "Activity"
-theater|player@390x780|focus|005|a "Settings"
-theater|player@390x780|focus|006|button#qualbtn.pbtn "Playback quality"
-theater|player@390x780|focus|007|button#syncbtn.pbtn "Audio sync adjustment"
-theater|player@390x780|focus|008|button#statsbtn.pbtn "Playback info (i)"
-theater|player@390x780|focus|009|button#skipbtn.pbtn "Auto-skip intro & credits"
-theater|player@390x780|focus|010|button#autonextbtn.pbtn.on "Auto-play the next episode when
-theater|player@390x780|focus|011|button.pbtn "Close (Esc)"
-theater|player@390x780|focus|012|button#pbplay.picon "Play"
-theater|player@390x780|focus|013|div#pseek.pseek "Seek"
-theater|player@390x780|focus|014|button#pbinfo.picon.on "Title info"
-theater|player@390x780|focus|015|button#pbpip.picon "Picture in picture"
-theater|player@390x780|focus|016|button#pbfs.picon "Fullscreen"
-theater|player@390x780|focus|017|<wrap>
+theater|player@390x780|focus|001|a.ghost.sm "View queue"
+theater|player@390x780|focus|002|a "Home"
+theater|player@390x780|focus|003|a "Activity"
+theater|player@390x780|focus|004|a "Settings"
+theater|player@390x780|focus|005|button#qualbtn.pbtn "Playback quality"
+theater|player@390x780|focus|006|button#syncbtn.pbtn "Audio sync adjustment"
+theater|player@390x780|focus|007|button#statsbtn.pbtn "Playback info (i)"
+theater|player@390x780|focus|008|button#skipbtn.pbtn "Auto-skip intro & credits"
+theater|player@390x780|focus|009|button#autonextbtn.pbtn.on "Auto-play the next episode when
+theater|player@390x780|focus|010|button.pbtn "Close (Esc)"
+theater|player@390x780|focus|011|button#pbplay.picon "Play"
+theater|player@390x780|focus|012|div#pseek.pseek "Seek"
+theater|player@390x780|focus|013|button#pbinfo.picon.on "Title info"
+theater|player@390x780|focus|014|button#pbpip.picon "Picture in picture"
+theater|player@390x780|focus|015|button#pbfs.picon "Fullscreen"
+theater|player@390x780|focus|016|<wrap>
 theater|player@390x780|req|GET /api/v1/activity|2
 theater|player@390x780|req|GET /api/v1/files/<id>/decision|1
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
@@ -5563,7 +5915,7 @@ theater|settings@1280x860|dom|div.row.setrow > label.schedpair[text]|1
 theater|settings@1280x860|dom|div.row.setrow > span.schedpair[text]|6
 theater|settings@1280x860|dom|div.sched > span.schedpair[text]|9
 theater|settings@1280x860|dom|div.settabs > button.active.settab[text]|1
-theater|settings@1280x860|dom|div.settabs > button.settab[text]|5
+theater|settings@1280x860|dom|div.settabs > button.settab[text]|6
 theater|settings@1280x860|dom|div.setwarn[text] > a[text]|1
 theater|settings@1280x860|dom|div.setwarn[text] > b[text]|2
 theater|settings@1280x860|dom|div.th-ctl > div.th-pop|4
@@ -5658,47 +6010,48 @@ theater|settings@1280x860|focus|008|button.ghost.sm.profile "Account"
 theater|settings@1280x860|focus|009|button.settab.active "Libraries"
 theater|settings@1280x860|focus|010|button.settab "Metadata"
 theater|settings@1280x860|focus|011|button.settab "Playback"
-theater|settings@1280x860|focus|012|button.settab "Users"
-theater|settings@1280x860|focus|013|button.settab "System"
-theater|settings@1280x860|focus|014|button.settab "Cluster"
-theater|settings@1280x860|focus|015|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@1280x860|focus|016|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@1280x860|focus|017|select#sched-scan-2 "How often to look for new & changed fil
-theater|settings@1280x860|focus|018|select#sched-ref-2 "How often to re-fetch metadata for every
-theater|settings@1280x860|focus|019|button.ghost.sm "Save"
-theater|settings@1280x860|focus|020|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|021|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|022|button.ghost.sm "Edit"
-theater|settings@1280x860|focus|023|button.ghost.sm "Delete"
-theater|settings@1280x860|focus|024|select#sched-scan-1 "How often to look for new & changed fil
-theater|settings@1280x860|focus|025|select#sched-ref-1 "How often to re-fetch metadata for every
-theater|settings@1280x860|focus|026|button.ghost.sm "Save"
-theater|settings@1280x860|focus|027|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|028|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|029|button.ghost.sm "Edit"
-theater|settings@1280x860|focus|030|button.ghost.sm "Delete"
-theater|settings@1280x860|focus|031|select#sched-scan-3 "How often to look for new & changed fil
-theater|settings@1280x860|focus|032|select#sched-ref-3 "How often to re-fetch metadata for every
-theater|settings@1280x860|focus|033|button.ghost.sm "Save"
-theater|settings@1280x860|focus|034|button.ghost.sm "Scan"
-theater|settings@1280x860|focus|035|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@1280x860|focus|036|button.ghost.sm "Edit"
-theater|settings@1280x860|focus|037|button.ghost.sm "Delete"
-theater|settings@1280x860|focus|038|input#ln "Library name"
-theater|settings@1280x860|focus|039|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-theater|settings@1280x860|focus|040|input#lp "Media paths"
-theater|settings@1280x860|focus|041|button "Add & scan"
-theater|settings@1280x860|focus|042|select#job-probe "Re-run ffprobe on files whose media detail
-theater|settings@1280x860|focus|043|select#job-art "Re-fetch posters for items a provider matche
-theater|settings@1280x860|focus|044|select#job-clean "Delete leftover transcode working director
-theater|settings@1280x860|focus|045|input#job-boot
-theater|settings@1280x860|focus|046|button.ghost.sm "Save"
-theater|settings@1280x860|focus|047|select#telemetry-retain "How long node-local playback measur
-theater|settings@1280x860|focus|048|button.ghost.sm "Save"
-theater|settings@1280x860|focus|049|select#cache-produce "How often to check what's worth encodi
-theater|settings@1280x860|focus|050|select#cache-gb "How much disk finished pre-transcodes may o
-theater|settings@1280x860|focus|051|button.ghost.sm "Save"
-theater|settings@1280x860|focus|052|<wrap>
+theater|settings@1280x860|focus|012|button.settab "Analysis"
+theater|settings@1280x860|focus|013|button.settab "Users"
+theater|settings@1280x860|focus|014|button.settab "System"
+theater|settings@1280x860|focus|015|button.settab "Cluster"
+theater|settings@1280x860|focus|016|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@1280x860|focus|017|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@1280x860|focus|018|select#sched-scan-2 "How often to look for new & changed fil
+theater|settings@1280x860|focus|019|select#sched-ref-2 "How often to re-fetch metadata for every
+theater|settings@1280x860|focus|020|button.ghost.sm "Save"
+theater|settings@1280x860|focus|021|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|022|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|023|button.ghost.sm "Edit"
+theater|settings@1280x860|focus|024|button.ghost.sm "Delete"
+theater|settings@1280x860|focus|025|select#sched-scan-1 "How often to look for new & changed fil
+theater|settings@1280x860|focus|026|select#sched-ref-1 "How often to re-fetch metadata for every
+theater|settings@1280x860|focus|027|button.ghost.sm "Save"
+theater|settings@1280x860|focus|028|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|029|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|030|button.ghost.sm "Edit"
+theater|settings@1280x860|focus|031|button.ghost.sm "Delete"
+theater|settings@1280x860|focus|032|select#sched-scan-3 "How often to look for new & changed fil
+theater|settings@1280x860|focus|033|select#sched-ref-3 "How often to re-fetch metadata for every
+theater|settings@1280x860|focus|034|button.ghost.sm "Save"
+theater|settings@1280x860|focus|035|button.ghost.sm "Scan"
+theater|settings@1280x860|focus|036|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@1280x860|focus|037|button.ghost.sm "Edit"
+theater|settings@1280x860|focus|038|button.ghost.sm "Delete"
+theater|settings@1280x860|focus|039|input#ln "Library name"
+theater|settings@1280x860|focus|040|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+theater|settings@1280x860|focus|041|input#lp "Media paths"
+theater|settings@1280x860|focus|042|button "Add & scan"
+theater|settings@1280x860|focus|043|select#job-probe "Re-run ffprobe on files whose media detail
+theater|settings@1280x860|focus|044|select#job-art "Re-fetch posters for items a provider matche
+theater|settings@1280x860|focus|045|select#job-clean "Delete leftover transcode working director
+theater|settings@1280x860|focus|046|input#job-boot
+theater|settings@1280x860|focus|047|button.ghost.sm "Save"
+theater|settings@1280x860|focus|048|select#telemetry-retain "How long node-local playback measur
+theater|settings@1280x860|focus|049|button.ghost.sm "Save"
+theater|settings@1280x860|focus|050|select#cache-produce "How often to check what's worth encodi
+theater|settings@1280x860|focus|051|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@1280x860|focus|052|button.ghost.sm "Save"
+theater|settings@1280x860|focus|053|<wrap>
 theater|settings@1280x860|req|GET /api/v1/activity|2
 theater|settings@1280x860|req|GET /api/v1/libraries|1
 theater|settings@1280x860|req|GET /api/v1/me|1
@@ -5737,7 +6090,7 @@ theater|settings@390x780|dom|div.row.setrow > label.schedpair[text]|1
 theater|settings@390x780|dom|div.row.setrow > span.schedpair[text]|6
 theater|settings@390x780|dom|div.sched > span.schedpair[text]|9
 theater|settings@390x780|dom|div.settabs > button.active.settab[text]|1
-theater|settings@390x780|dom|div.settabs > button.settab[text]|5
+theater|settings@390x780|dom|div.settabs > button.settab[text]|6
 theater|settings@390x780|dom|div.setwarn[text] > a[text]|1
 theater|settings@390x780|dom|div.setwarn[text] > b[text]|2
 theater|settings@390x780|dom|div.th-ctl > div.th-pop|4
@@ -5829,50 +6182,51 @@ theater|settings@390x780|focus|005|button.ghost.sm.profile "Account"
 theater|settings@390x780|focus|006|button.settab.active "Libraries"
 theater|settings@390x780|focus|007|button.settab "Metadata"
 theater|settings@390x780|focus|008|button.settab "Playback"
-theater|settings@390x780|focus|009|button.settab "Users"
-theater|settings@390x780|focus|010|button.settab "System"
-theater|settings@390x780|focus|011|button.settab "Cluster"
-theater|settings@390x780|focus|012|button.ghost.sm "Scan every library for new & changed files"
-theater|settings@390x780|focus|013|button.ghost.sm "Re-fetch metadata & artwork for every libra
-theater|settings@390x780|focus|014|select#sched-scan-2 "How often to look for new & changed fil
-theater|settings@390x780|focus|015|select#sched-ref-2 "How often to re-fetch metadata for every
-theater|settings@390x780|focus|016|button.ghost.sm "Save"
-theater|settings@390x780|focus|017|button.ghost.sm "Scan"
-theater|settings@390x780|focus|018|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|019|button.ghost.sm "Edit"
-theater|settings@390x780|focus|020|button.ghost.sm "Delete"
-theater|settings@390x780|focus|021|select#sched-scan-1 "How often to look for new & changed fil
-theater|settings@390x780|focus|022|select#sched-ref-1 "How often to re-fetch metadata for every
-theater|settings@390x780|focus|023|button.ghost.sm "Save"
-theater|settings@390x780|focus|024|button.ghost.sm "Scan"
-theater|settings@390x780|focus|025|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|026|button.ghost.sm "Edit"
-theater|settings@390x780|focus|027|button.ghost.sm "Delete"
-theater|settings@390x780|focus|028|select#sched-scan-3 "How often to look for new & changed fil
-theater|settings@390x780|focus|029|select#sched-ref-3 "How often to re-fetch metadata for every
-theater|settings@390x780|focus|030|button.ghost.sm "Save"
-theater|settings@390x780|focus|031|button.ghost.sm "Scan"
-theater|settings@390x780|focus|032|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
-theater|settings@390x780|focus|033|button.ghost.sm "Edit"
-theater|settings@390x780|focus|034|button.ghost.sm "Delete"
-theater|settings@390x780|focus|035|input#ln "Library name"
-theater|settings@390x780|focus|036|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
-theater|settings@390x780|focus|037|input#lp "Media paths"
-theater|settings@390x780|focus|038|button "Add & scan"
-theater|settings@390x780|focus|039|select#job-probe "Re-run ffprobe on files whose media detail
-theater|settings@390x780|focus|040|select#job-art "Re-fetch posters for items a provider matche
-theater|settings@390x780|focus|041|select#job-clean "Delete leftover transcode working director
-theater|settings@390x780|focus|042|input#job-boot
-theater|settings@390x780|focus|043|button.ghost.sm "Save"
-theater|settings@390x780|focus|044|select#telemetry-retain "How long node-local playback measur
-theater|settings@390x780|focus|045|button.ghost.sm "Save"
-theater|settings@390x780|focus|046|select#cache-produce "How often to check what's worth encodi
-theater|settings@390x780|focus|047|select#cache-gb "How much disk finished pre-transcodes may o
-theater|settings@390x780|focus|048|button.ghost.sm "Save"
-theater|settings@390x780|focus|049|a "Home"
-theater|settings@390x780|focus|050|a "Activity"
-theater|settings@390x780|focus|051|a.on "Settings"
-theater|settings@390x780|focus|052|<wrap>
+theater|settings@390x780|focus|009|button.settab "Analysis"
+theater|settings@390x780|focus|010|button.settab "Users"
+theater|settings@390x780|focus|011|button.settab "System"
+theater|settings@390x780|focus|012|button.settab "Cluster"
+theater|settings@390x780|focus|013|button.ghost.sm "Scan every library for new & changed files"
+theater|settings@390x780|focus|014|button.ghost.sm "Re-fetch metadata & artwork for every libra
+theater|settings@390x780|focus|015|select#sched-scan-2 "How often to look for new & changed fil
+theater|settings@390x780|focus|016|select#sched-ref-2 "How often to re-fetch metadata for every
+theater|settings@390x780|focus|017|button.ghost.sm "Save"
+theater|settings@390x780|focus|018|button.ghost.sm "Scan"
+theater|settings@390x780|focus|019|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|020|button.ghost.sm "Edit"
+theater|settings@390x780|focus|021|button.ghost.sm "Delete"
+theater|settings@390x780|focus|022|select#sched-scan-1 "How often to look for new & changed fil
+theater|settings@390x780|focus|023|select#sched-ref-1 "How often to re-fetch metadata for every
+theater|settings@390x780|focus|024|button.ghost.sm "Save"
+theater|settings@390x780|focus|025|button.ghost.sm "Scan"
+theater|settings@390x780|focus|026|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|027|button.ghost.sm "Edit"
+theater|settings@390x780|focus|028|button.ghost.sm "Delete"
+theater|settings@390x780|focus|029|select#sched-scan-3 "How often to look for new & changed fil
+theater|settings@390x780|focus|030|select#sched-ref-3 "How often to re-fetch metadata for every
+theater|settings@390x780|focus|031|button.ghost.sm "Save"
+theater|settings@390x780|focus|032|button.ghost.sm "Scan"
+theater|settings@390x780|focus|033|button.ghost.sm "Re-fetch all metadata & artwork (incl. seas
+theater|settings@390x780|focus|034|button.ghost.sm "Edit"
+theater|settings@390x780|focus|035|button.ghost.sm "Delete"
+theater|settings@390x780|focus|036|input#ln "Library name"
+theater|settings@390x780|focus|037|select#lk "Movies TV Shows Anime Books & audiobooks Home vid
+theater|settings@390x780|focus|038|input#lp "Media paths"
+theater|settings@390x780|focus|039|button "Add & scan"
+theater|settings@390x780|focus|040|select#job-probe "Re-run ffprobe on files whose media detail
+theater|settings@390x780|focus|041|select#job-art "Re-fetch posters for items a provider matche
+theater|settings@390x780|focus|042|select#job-clean "Delete leftover transcode working director
+theater|settings@390x780|focus|043|input#job-boot
+theater|settings@390x780|focus|044|button.ghost.sm "Save"
+theater|settings@390x780|focus|045|select#telemetry-retain "How long node-local playback measur
+theater|settings@390x780|focus|046|button.ghost.sm "Save"
+theater|settings@390x780|focus|047|select#cache-produce "How often to check what's worth encodi
+theater|settings@390x780|focus|048|select#cache-gb "How much disk finished pre-transcodes may o
+theater|settings@390x780|focus|049|button.ghost.sm "Save"
+theater|settings@390x780|focus|050|a "Home"
+theater|settings@390x780|focus|051|a "Activity"
+theater|settings@390x780|focus|052|a.on "Settings"
+theater|settings@390x780|focus|053|<wrap>
 theater|settings@390x780|req|GET /api/v1/activity|2
 theater|settings@390x780|req|GET /api/v1/libraries|1
 theater|settings@390x780|req|GET /api/v1/me|1

@@ -4,11 +4,14 @@ use async_trait::async_trait;
 use hiqlite::macros::params;
 use hiqlite::Row;
 
+use super::fragment_index_cluster::{ANALYSIS_CANONICAL_CTE, ANALYSIS_SUMMARY_CTE};
 use super::hiqlite::{database_error, validate_sql, HiqliteAuthStore};
 use super::{
-    cluster_fragment_index_key, AnalysisFileLabel, AnalysisRequest, ClusterFragmentIndexArtifact,
-    ClusterFragmentIndexJob, ClusterFragmentIndexLocation, ClusterFragmentIndexStore,
-    FragmentIndexSourceObservation, NewAnalysisRequest, NewClusterFragmentIndexJob,
+    cluster_fragment_index_key, AnalysisFileLabel, AnalysisHistoryCursor, AnalysisHistoryFilter,
+    AnalysisHistoryPage, AnalysisHistoryQuery, AnalysisHistoryRow, AnalysisRequest,
+    AnalysisStatusSummary, ClusterFragmentIndexArtifact, ClusterFragmentIndexJob,
+    ClusterFragmentIndexLocation, ClusterFragmentIndexStore, FragmentIndexSourceObservation,
+    NewAnalysisRequest, NewClusterFragmentIndexJob,
 };
 use crate::error::StoreError;
 
@@ -21,8 +24,8 @@ const QUEUE_ELIGIBILITY_MS: i64 = 6 * 60 * 60 * 1_000;
 const MAX_ANALYSIS_REQUESTS: i64 = 4_096;
 const MAX_LIST_ROWS: i64 = 500;
 
-// These arrays are the immutable replicated-store migrations for schema v12
-// and v13. Keep them as individual statements: Hiqlite's `batch` API applies
+// These arrays are the immutable replicated-store migrations for schema v12,
+// v13, and v15. Keep them as individual statements: Hiqlite's `batch` API applies
 // statements independently, while `txn` rolls the complete version step back
 // if any statement or the version-marker update fails.
 //
@@ -154,6 +157,14 @@ const ANALYSIS_REQUEST_SCHEMA_STATEMENTS: &[&str] = &[
     END"#,
 ];
 
+const ANALYSIS_HISTORY_INDEX_STATEMENTS: &[&str] = &[
+    r#"CREATE INDEX IF NOT EXISTS analysis_requests_result_history
+        ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+        WHERE result_cache_key IS NOT NULL AND result_cache_key <> ''"#,
+    r#"CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
+        ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key)"#,
+];
+
 fn migration_statements(
     statements: &'static [&'static str],
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
@@ -176,9 +187,15 @@ pub(super) fn analysis_request_schema_migration_statements(
     migration_statements(ANALYSIS_REQUEST_SCHEMA_STATEMENTS)
 }
 
+pub(super) fn analysis_history_index_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_HISTORY_INDEX_STATEMENTS)
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let mut statements = fragment_index_schema_migration_statements()?;
     statements.extend(analysis_request_schema_migration_statements()?);
+    statements.extend(analysis_history_index_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -259,6 +276,113 @@ impl From<&mut Row<'_>> for LabelRow {
             item_id: row.get("item_id"),
             title: row.get("title"),
         })
+    }
+}
+
+const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
+    component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
+    action, owner_node_id, lease_expires_ms, attempts, not_before_ms, request_error_code,
+    job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
+
+const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
+    COALESCE(page.request_id, '') AS request_id, COALESCE(page.job_id, '') AS job_id,
+    COALESCE(page.file_id, 0) AS file_id, COALESCE(page.item_id, 0) AS item_id,
+    COALESCE(page.title, '') AS title, COALESCE(page.component, '') AS component,
+    COALESCE(page.force_rebuild, 0) AS force_rebuild,
+    COALESCE(page.target_node_id, '') AS target_node_id,
+    COALESCE(page.request_state, '') AS request_state,
+    COALESCE(page.job_state, '') AS job_state, COALESCE(page.state, '') AS state,
+    COALESCE(page.disposition, '') AS disposition, COALESCE(page.action, 'none') AS action,
+    COALESCE(page.owner_node_id, '') AS owner_node_id,
+    COALESCE(page.lease_expires_ms, 0) AS lease_expires_ms,
+    COALESCE(page.attempts, 0) AS attempts, COALESCE(page.not_before_ms, 0) AS not_before_ms,
+    COALESCE(page.request_error_code, '') AS request_error_code,
+    COALESCE(page.job_error_code, '') AS job_error_code,
+    COALESCE(page.created_at_ms, 0) AS created_at_ms,
+    COALESCE(page.updated_at_ms, 0) AS updated_at_ms,
+    COALESCE(page.pipeline_version, '') AS pipeline_version,
+    COALESCE(page.source_size, 0) AS source_size";
+
+struct HistoryRow(AnalysisHistoryRow, AnalysisHistoryCursor, i64);
+
+impl From<&mut Row<'_>> for HistoryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        let history = AnalysisHistoryRow {
+            row_key: row.get("row_key"),
+            request_id: row.get("request_id"),
+            job_id: row.get("job_id"),
+            file_id: row.get("file_id"),
+            item_id: row.get("item_id"),
+            title: row.get("title"),
+            component: row.get("component"),
+            force_rebuild: row.get::<i64>("force_rebuild") != 0,
+            target_node_id: row.get("target_node_id"),
+            request_state: row.get("request_state"),
+            job_state: row.get("job_state"),
+            state: row.get("state"),
+            disposition: row.get("disposition"),
+            action: row.get("action"),
+            owner_node_id: row.get("owner_node_id"),
+            lease_expires_ms: row.get("lease_expires_ms"),
+            attempts: row.get("attempts"),
+            not_before_ms: row.get("not_before_ms"),
+            request_error_code: row.get("request_error_code"),
+            job_error_code: row.get("job_error_code"),
+            created_at_ms: row.get("created_at_ms"),
+            updated_at_ms: row.get("updated_at_ms"),
+            pipeline_version: row.get("pipeline_version"),
+            source_size: row.get("source_size"),
+        };
+        let cursor = AnalysisHistoryCursor {
+            sort_rank: row.get("sort_rank"),
+            updated_at_ms: history.updated_at_ms,
+            row_key: history.row_key.clone(),
+        };
+        Self(history, cursor, row.get("filtered_total"))
+    }
+}
+
+struct StatusSummaryRow(AnalysisStatusSummary);
+
+impl From<&mut Row<'_>> for StatusSummaryRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self(AnalysisStatusSummary {
+            total: row.get("total"),
+            working: row.get("working"),
+            queued: row.get("queued"),
+            running: row.get("running"),
+            submitted: row.get("submitted"),
+            attention: row.get("attention"),
+            expected: row.get("expected"),
+            ready: row.get("ready"),
+            latest_error_code: row.get("latest_error_code"),
+            latest_error_file_id: row.get("latest_error_file_id"),
+            latest_error_updated_at_ms: row.get("latest_error_updated_at_ms"),
+        })
+    }
+}
+
+fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
+    match filter {
+        AnalysisHistoryFilter::All => 0,
+        AnalysisHistoryFilter::Working => 1,
+        AnalysisHistoryFilter::Attention => 2,
+        AnalysisHistoryFilter::Ready => 3,
+        AnalysisHistoryFilter::Expected => 4,
+    }
+}
+
+fn analysis_search_pattern(search: &str) -> String {
+    let escaped = search
+        .trim()
+        .to_lowercase()
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_");
+    if escaped.is_empty() {
+        String::new()
+    } else {
+        format!("%{escaped}%")
     }
 }
 
@@ -786,6 +910,106 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .into_iter()
             .map(|row| row.0)
             .collect())
+    }
+
+    async fn analysis_history(
+        &self,
+        query: &AnalysisHistoryQuery,
+    ) -> Result<AnalysisHistoryPage, StoreError> {
+        let limit = query.limit.clamp(10, 100);
+        let filter = analysis_filter_code(query.filter);
+        let search = analysis_search_pattern(&query.search);
+        let cursor = query.cursor.clone().unwrap_or(AnalysisHistoryCursor {
+            sort_rank: -1,
+            updated_at_ms: 0,
+            row_key: String::new(),
+        });
+        let sql = format!(
+            "{ANALYSIS_CANONICAL_CTE}, matching AS (
+               SELECT * FROM classified
+                WHERE ($1 = 0
+                  OR ($1 = 1 AND disposition IN ('working', 'automatic'))
+                  OR ($1 = 2 AND disposition = 'attention')
+                  OR ($1 = 3 AND disposition = 'ready')
+                  OR ($1 = 4 AND disposition IN ('expected', 'unsupported')))
+                  AND ($2 = '' OR LOWER(title) LIKE $2 ESCAPE '\\'
+                    OR CAST(file_id AS TEXT) LIKE $2 ESCAPE '\\'
+                    OR LOWER(row_key) LIKE $2 ESCAPE '\\'
+                    OR LOWER(owner_node_id) LIKE $2 ESCAPE '\\'
+                    OR LOWER(target_node_id) LIKE $2 ESCAPE '\\'
+                    OR LOWER(request_error_code) LIKE $2 ESCAPE '\\'
+                    OR LOWER(job_error_code) LIKE $2 ESCAPE '\\'
+                    OR LOWER(state) LIKE $2 ESCAPE '\\')
+             ), page AS (
+               SELECT {HISTORY_COLS}, sort_rank FROM matching
+                WHERE $3 < 0 OR sort_rank > $3
+                   OR (sort_rank = $3 AND updated_at_ms < $4)
+                   OR (sort_rank = $3 AND updated_at_ms = $4 AND row_key > $5)
+                ORDER BY sort_rank, updated_at_ms DESC, row_key
+                LIMIT $6
+             ), totals AS (
+               SELECT COUNT(*) AS filtered_total FROM matching
+             )
+             SELECT {HISTORY_PAGE_COLS}, COALESCE(page.sort_rank, -1) AS sort_rank,
+                    totals.filtered_total
+               FROM totals LEFT JOIN page ON 1 = 1
+              ORDER BY page.sort_rank, page.updated_at_ms DESC, page.row_key"
+        );
+        let mut rows = self
+            .client()
+            .query_consistent_map::<HistoryRow, _>(
+                sql,
+                params!(
+                    filter,
+                    search,
+                    cursor.sort_rank,
+                    cursor.updated_at_ms,
+                    cursor.row_key,
+                    limit + 1
+                ),
+            )
+            .await?;
+        let filtered_total = rows.first().map_or(0, |row| row.2);
+        rows.retain(|row| !row.0.row_key.is_empty());
+        let has_more = rows.len() > limit as usize;
+        if has_more {
+            rows.pop();
+        }
+        let next_cursor = has_more.then(|| rows.last().expect("non-empty history page").1.clone());
+        Ok(AnalysisHistoryPage {
+            rows: rows.into_iter().map(|row| row.0).collect(),
+            filtered_total,
+            next_cursor,
+        })
+    }
+
+    async fn analysis_status_summary(&self) -> Result<AnalysisStatusSummary, StoreError> {
+        let sql = format!(
+            "{ANALYSIS_SUMMARY_CTE}
+             SELECT COUNT(*) AS total,
+                    COALESCE(SUM(CASE WHEN disposition IN ('working', 'automatic') THEN 1 ELSE 0 END), 0) AS working,
+                    COALESCE(SUM(CASE WHEN state = 'queued' THEN 1 ELSE 0 END), 0) AS queued,
+                    COALESCE(SUM(CASE WHEN state = 'running' THEN 1 ELSE 0 END), 0) AS running,
+                    COALESCE(SUM(CASE WHEN state = 'submitted' THEN 1 ELSE 0 END), 0) AS submitted,
+                    COALESCE(SUM(CASE WHEN disposition = 'attention' THEN 1 ELSE 0 END), 0) AS attention,
+                    COALESCE(SUM(CASE WHEN disposition IN ('expected', 'unsupported') THEN 1 ELSE 0 END), 0) AS expected,
+                    COALESCE(SUM(CASE WHEN disposition = 'ready' THEN 1 ELSE 0 END), 0) AS ready,
+                    COALESCE((SELECT COALESCE(NULLIF(job_error_code, ''), request_error_code)
+                      FROM summary_classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), '') AS latest_error_code,
+                    COALESCE((SELECT file_id FROM summary_classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_file_id,
+                    COALESCE((SELECT updated_at_ms FROM summary_classified WHERE disposition = 'attention'
+                      ORDER BY updated_at_ms DESC, row_key LIMIT 1), 0) AS latest_error_updated_at_ms
+               FROM summary_classified"
+        );
+        self.client()
+            .query_consistent_map::<StatusSummaryRow, _>(sql, params!())
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0)
+            .ok_or_else(|| StoreError::Task("analysis summary returned no row".to_owned()))
     }
 
     async fn analysis_file_labels(&self, limit: i64) -> Result<Vec<AnalysisFileLabel>, StoreError> {
@@ -1492,9 +1716,12 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
 mod tests {
     use rusqlite::Connection;
 
-    use super::{ANALYSIS_REQUEST_SCHEMA_STATEMENTS, FRAGMENT_INDEX_SCHEMA_STATEMENTS};
+    use super::{
+        ANALYSIS_HISTORY_INDEX_STATEMENTS, ANALYSIS_REQUEST_SCHEMA_STATEMENTS,
+        FRAGMENT_INDEX_SCHEMA_STATEMENTS,
+    };
     use crate::store::fragment_index_cluster::{
-        ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
+        ANALYSIS_HISTORY_INDEX_SCHEMA, ANALYSIS_REQUESTS_SCHEMA, CLUSTER_FRAGMENT_INDEX_SCHEMA,
     };
 
     fn fixture() -> Connection {
@@ -1540,6 +1767,7 @@ mod tests {
     fn replicated_migration_statements_match_sqlite_schema_versions() {
         assert_eq!(FRAGMENT_INDEX_SCHEMA_STATEMENTS.len(), 8);
         assert_eq!(ANALYSIS_REQUEST_SCHEMA_STATEMENTS.len(), 7);
+        assert_eq!(ANALYSIS_HISTORY_INDEX_STATEMENTS.len(), 2);
 
         let sqlite = fixture();
         sqlite
@@ -1548,11 +1776,15 @@ mod tests {
         sqlite
             .execute_batch(ANALYSIS_REQUESTS_SCHEMA)
             .expect("SQLite v31 analysis-request schema");
+        sqlite
+            .execute_batch(ANALYSIS_HISTORY_INDEX_SCHEMA)
+            .expect("SQLite v33 analysis-history indexes");
 
         let replicated = fixture();
         for sql in FRAGMENT_INDEX_SCHEMA_STATEMENTS
             .iter()
             .chain(ANALYSIS_REQUEST_SCHEMA_STATEMENTS)
+            .chain(ANALYSIS_HISTORY_INDEX_STATEMENTS)
         {
             replicated
                 .execute_batch(sql)
