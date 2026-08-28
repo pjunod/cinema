@@ -44,10 +44,11 @@ command in its error. Once `<PLURX_DATA>/hiqlite/activation.json` exists, the
 replicated target is authoritative; do not replace `plurx.db` and assume you
 have restored current state.
 
-M6 owns the quorum-aware replicated backup, restore, and older-binary rollback
-runbook. Until that work lands, a post-activation rollback means roll forward
-with an M2-capable binary against the retained active target. The commands
-below are only for the pre-activation SQLite case.
+There is no automated quorum-aware backup, restore, or permanent-majority
+recovery path for an activated cluster. No active milestone owns one. A
+post-activation code rollback therefore means rolling forward with a binary
+that supports the active replicated schema, against the retained Hiqlite
+target. The commands below are only for the pre-activation SQLite case.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
@@ -88,9 +89,10 @@ of import, so each new snapshot is another copy of the same pre-activation
 state — the redeploy captures nothing written since. Restoring one does not
 roll the node back; it only makes a stale database sit beside the authoritative
 target, and `plurxd` refuses to import it precisely so that mistake cannot pass
-silently (see the refusal below). Capturing current replicated state is M6's
-quorum-aware backup work and does not exist yet; until it does, treat
-`<PLURX_DATA>/hiqlite/` itself as the thing to copy while the daemon is stopped.
+silently (see the refusal below). Capturing current replicated state as a
+portable backup does not exist. Treat each node's
+`<PLURX_DATA>/hiqlite/` directory as evidence to preserve while that daemon is
+stopped; do not treat one copied directory as a supported single-node restore.
 
 `plurxd` records `<PLURX_DATA>/hiqlite-activated.json` when it activates. If the
 replicated target is missing while that file is present, startup refuses rather
@@ -287,8 +289,10 @@ read when you open the tab, not on every Settings visit.
 | `Reconfiguration in progress — not redundant` | Two voters. Both machines are required for every write and every membership change, so this survives no failure — read the same warning in the table above. Add a third node. |
 | `Redundant — N voters` | Three or more voters. The panel names the majority required and how many nodes may be down. |
 | `… is a learner` appended to any of the above | One or more admitted non-voting members. The sentence is appended, never substituted: a learner changes none of the quorum arithmetic in front of it. |
+| `Leader election required` | A voter majority is reachable, but no leader is elected. Normal mutations stay locked; a bounded force-election request is available when a caught-up voter can campaign. |
+| `Recovery required` | The latest committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
 
-The node table leads with each machine's short OS hostname, labels the current
+The node cards lead with each machine's short OS hostname, label the current
 leader beside it, then shows the advertised host and stable node id underneath.
 The advertised host may be a DNS name or IP; loopback is written `localhost`
 instead of `127.0.0.1`, and listener ports stay private. A native daemon reads
@@ -301,6 +305,112 @@ the durable one the node was admitted under, not a phase of joining; a learner
 keeps it for as long as it is a member. Read the nested replication status for
 leader and apply-lag health. Media paths and token material are not in that
 payload and are not shown.
+
+### Planned node maintenance — fence, drain, update, resume
+
+Use **Enter maintenance** for an update or reboot. Do not use **Remove** or
+**Leave this cluster**: those permanently tombstone the node identity, while
+maintenance is a reversible replicated fence.
+
+The server accepts maintenance only when every active member proves it runs a
+binary that understands the fence, no join, promotion, removal, or other
+maintenance is pending, and a quorum is available. A two-voter cluster refuses
+voter maintenance because restarting either voter leaves no write quorum. A
+one-voter cluster may enter maintenance with an expected service outage; three
+or more voters keep their majority while one voter restarts.
+
+The workflow in **Maintenance & leadership** is the authoritative checklist;
+the full-width **Operations** card above it remains the stricter direct-peer
+restart verdict and WAL/snapshot evidence surface:
+
+1. If the target is leader, a reachable zero-lag follower campaigns and a
+   stable successor is observed before the maintenance row commits.
+2. The target reads the replicated row from its local applied state, fences
+   new HTTP work and cluster-wide singleton jobs, refuses media placement, and
+   acknowledges that fence in its next heartbeat.
+3. Existing HLS, publication, and offline media capabilities may finish. The
+   card counts active replicated media-session leases; maintenance never kills
+   them implicitly.
+4. **Ready to update or reboot** means the target acknowledged the fence, is
+   not leader, is reachable with zero apply lag, and owns no active media
+   sessions. You may then update or reboot it.
+5. After restart, wait for a fresh heartbeat and zero apply lag, then choose
+   **Resume service**. The server refuses an early resume.
+
+The maintenance row is replicated and survives the target process restarting.
+`GET /readyz` answers `503 maintenance`, new application work answers the typed
+`node_maintenance` refusal, and the target remains a Raft member. Losing the UI
+or restarting the process cannot silently reopen it. A binary that predates
+maintenance cannot publish the transaction-local heartbeat intent; replicated
+SQLite rejects that heartbeat while the fence exists, so an accidental code
+rollback fails closed instead of serving through maintenance.
+
+The admin API is the same operation:
+
+```bash
+# Fence one node. Poll GET /cluster/nodes until maintenance_ready is true.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  "http://plurx.example/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+
+# Resume only after the node is reachable and apply_lag_entries is zero.
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  "http://plurx.example/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+```
+
+### Force election — a campaign request, never a quorum override
+
+**Force election** asks one reachable, caught-up voter to campaign. When a
+leader exists, the panel requires a stable different leader before reporting
+success. When the cluster is leaderless but still has a reachable majority,
+the same action can start the election needed to restore writes.
+
+The operation is refused when no voter majority is reachable, no zero-lag
+candidate exists, maintenance or another node lifecycle is pending, or every
+active node has not proved the election capability. Raft chooses the winner;
+the selected campaign target is not a promised successor.
+
+```bash
+# Request one bounded campaign; the response is the refreshed cluster status.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://plurx.example/api/v1/cluster/election
+```
+
+### Lost-quorum recovery — restore an original voter
+
+The Recovery workspace makes one distinction before offering an action:
+
+```text
+ voter majority reachable? ── yes ─▶ leader elected? ── no ─▶ Force election
+          │ no                         │ yes
+          ▼                            ▼
+ restore an original voter        normal operations
+ with its original identity
+          │
+          ▼
+ permanent majority lost? ──▶ preserve every node; no supported reconfigure
+```
+
+If quorum is lost, keep every surviving node and data directory unchanged.
+Restore any missing original voter with its existing data directory and node
+identity. Do not initialize a replacement cluster over those files, delete
+membership records, copy one voter's Raft directory onto another identity, or
+repeatedly press force election: none of those actions can create the missing
+majority.
+
+**Permanent majority loss is not recoverable by this release.** There is no
+force-reconfigure or "form new cluster" button. Stop writes, copy every
+surviving data directory independently, record node IDs and Raft IDs, and keep
+the originals untouched. **Export support bundle** downloads the bounded,
+redacted all-voter status, cluster log, README, and checksum manifest;
+**Download roster snapshot** captures the current browser roster and loaded log.
+Both are evidence for repair work, not restore artifacts.
 
 The **Cluster log** under the roster holds membership, Hiqlite, and Raft events
 in its own 2,000-line process-local ring. Those events do not consume the
@@ -1780,7 +1890,6 @@ exact build/image digest, supervisor, topology and voter count, first observed
 time, last known successful rollout step, and whether the original majority can
 still be restored. Never attach admin token files, cluster secrets, raw media
 paths, or a copied live data directory.
-
 **Gracefully remove the node you are connected to.** Settings → Cluster →
 **Leave this cluster** calls the same admin-only operation. It resolves the
 node's offline work and coordinates a safe membership change with the

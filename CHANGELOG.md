@@ -10,6 +10,25 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **Cluster nodes now have reversible, restart-safe maintenance mode.** An
+  admin can fence one node from new HTTP work, media placement, readiness, and
+  cluster-wide singleton jobs without removing it from Raft membership.
+  Leaders hand off first, the target acknowledges only after its local fence
+  is active, existing media sessions drain, and resume is refused until the
+  node is reachable and caught up. Rolling maintenance is refused for a
+  two-voter cluster because restarting either voter would lose quorum. A
+  separate force-election operation asks a caught-up voter to campaign and
+  waits for a stable result; it works for a leaderless reachable majority but
+  never bypasses quorum.
+
+- **The Cluster tab now has an explicit recovery workspace.** Health summary,
+  node cards, reversible operations, permanent membership changes, and
+  diagnostics are separate surfaces. Lost quorum names the original voters to
+  restore, offers a preservation checklist and privacy-safe diagnostic export,
+  disables force election, and states that permanent-majority force
+  reconfiguration is unsupported instead of presenting an unsafe recovery
+  button.
+
 - **The web player adopts the film-addressed VOD presentation (milestone
   M4).** Every web HLS session now declares `presentation:"vod"` and an
   8-second server block budget from one client contract whose explicit

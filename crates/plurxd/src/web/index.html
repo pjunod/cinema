@@ -652,6 +652,7 @@
      which left the sticky header narrower than the body. minmax(0,…) lets the
      track shrink so the table scrolls inside its card instead. */
   .adminwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;max-width:960px}
+  .adminwrap.clusterwrap{max-width:1240px}
   /* Keep action cells in the table formatting context. Applying `.row`
      directly to a <td> changes it to display:flex, so its height and bottom
      rule stop following a taller multi-line row. The flex row belongs inside
@@ -876,6 +877,57 @@
   .clrefusal{border:1px solid var(--warn,#fbbf24);border-radius:8px;background:var(--panel2);
     padding:11px 14px;margin-top:12px;font-size:13px;line-height:1.55}
   .clrefusal b{display:block;margin-bottom:3px;color:var(--text)}
+  .cluster-dashboard{display:grid;gap:16px}
+  .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
+  .cluster-health>.clstate{margin:0}
+  .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
+  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
+  .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
+  .cluster-main{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(290px,.8fr);gap:16px;align-items:start}
+  .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
+  .cluster-card h3{font-size:15px;margin:0 0 5px}
+  .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
+  .clnodes{display:grid;gap:10px;margin-top:12px}
+  .clnode{border:1px solid var(--line);border-radius:10px;padding:13px;background:var(--panel)}
+  .clnode.maintenance{border-color:var(--warn,#fbbf24);background:color-mix(in srgb,var(--warn) 5%,var(--panel))}
+  .clnode.stale{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+  .clnodehead,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .clnodemeta{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:7px;margin-top:12px}
+  .clnodemeta div{border-top:1px solid var(--line);padding-top:8px;font-size:12px;color:var(--text)}
+  .clnodemeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
+  .clnodefoot{align-items:center;margin-top:12px}
+  .clnodefoot .hint{margin:0;max-width:450px}
+  .clactions{display:grid;gap:9px;margin-top:14px}
+  .claction{border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:var(--panel)}
+  .claction .row{margin-top:9px}
+  .clsteps{display:grid;gap:7px;margin:12px 0 0;padding:0;list-style:none}
+  .clsteps li{position:relative;padding-left:25px;color:var(--muted);font-size:12px;line-height:1.4}
+  .clsteps li::before{content:"";position:absolute;left:1px;top:1px;width:15px;height:15px;border:1px solid var(--line);border-radius:50%}
+  .clsteps li.done{color:var(--text)}
+  .clsteps li.done::before{content:"✓";display:grid;place-items:center;color:var(--good);border-color:var(--good);font-size:10px;font-weight:800}
+  .clrecovery{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 5%,var(--panel2))}
+  .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
+  .clvoters{display:grid;gap:6px;margin:12px 0}
+  .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
+  .cldanger{margin-top:0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:0 14px}
+  .cldanger>summary{cursor:pointer;padding:13px 0;font-weight:650;font-size:13px}
+  .cldangerbody{padding:0 0 14px}
+  .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
+  .cldialog::backdrop{background:#0009}
+  .cldialogbody{padding:20px}
+  .cldialogbody h3{margin:0 0 7px}
+  .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
+  .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+  @media(max-width:900px){
+    .cluster-health{grid-template-columns:repeat(3,1fr)}
+    .cluster-health>.clstate{grid-column:1/-1}
+    .cluster-main{grid-template-columns:1fr}
+  }
+  @media(max-width:620px){
+    .cluster-health{grid-template-columns:1fr}
+    .cluster-health>.clstate{grid-column:auto}
+    .clnodemeta{grid-template-columns:repeat(2,1fr)}
+  }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}
   .syncnow{padding:6px 10px 2px;font-size:13px;font-weight:600}
@@ -10629,7 +10681,7 @@ function settingsTabsHtml(tab){
   return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
 }
 function settingsShell(tab){
-  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
 }
 function patchSettingsSecondary(tab,key){
   if(tab==="metadata"&&key==="libs"){
@@ -11354,6 +11406,18 @@ function membershipRefusalText(code,message){
       "This learner has not yet published a fresh zero-lag apply proof. Leave it running until its Read worker badge says ready, then retry promotion.",
     voter_storage_preflight_failed:
       "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
+    maintenance_conflict:
+      "Another membership or node-lifecycle operation is already in progress. Let that operation settle, refresh the roster, and retry maintenance.",
+    maintenance_would_lose_quorum:
+      "A two-voter cluster needs both voters for every write, so restarting either one loses quorum. Add a third voter before using rolling maintenance.",
+    maintenance_resume_unsafe:
+      "The node is not yet both reachable and caught up. Keep it in maintenance until its heartbeat is fresh and apply lag reaches zero, then resume service.",
+    election_quorum_unavailable:
+      "Raft cannot elect a leader without a reachable voter majority. Restore an original voter instead of repeatedly forcing elections.",
+    election_candidate_unavailable:
+      "No reachable follower has published a fresh zero-lag apply proof. Restore or catch up a follower, then retry the election.",
+    election_lifecycle_pending:
+      "A maintenance, promotion, join, or removal operation is still pending. Let it settle before changing leadership.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
   return message?`The server refused this cluster operation: ${message}`
@@ -11361,7 +11425,7 @@ function membershipRefusalText(code,message){
 }
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
-function clusterNodeRow(n,localNodeId){
+function clusterNodeRow(n,localNodeId,maintenanceAllowed=true){
   const voter=n.is_voter;
   const admittedVoter=n.role==="voter";
   const role=voter
@@ -11376,6 +11440,7 @@ function clusterNodeRow(n,localNodeId){
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
   const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
+  const maintenance=n.maintenance?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Maintenance</span>`:"";
   const worker=!voter&&n.role==="learner"
     ? n.bounded_read_ready
       ? `<span class="pill" style="color:var(--good);border-color:var(--good)">Read worker ready</span>`
@@ -11387,16 +11452,92 @@ function clusterNodeRow(n,localNodeId){
   const promote=!voter&&n.role==="learner"
     ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
     : "";
-  const action=n.node_id===localNodeId
-    ? `<span class="muted">Use graceful leave below</span>`
-    : `${promote}<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${worker}</div>
-      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
-    <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
-    <td data-label="Role">${role}</td>
-    <td data-label="Heartbeat">${heartbeat}</td>
-    <td data-label="Last seen" class="muted">${seen}</td>
-    <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
+  const maintenanceAction=n.maintenance
+    ? `<button class="sm" ${n.maintenance_ready?"":"disabled"} onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
+    : `<button class="ghost sm" ${!maintenanceAllowed||!n.reachable||n.removal_pending?"disabled":""} title="${!maintenanceAllowed?'A two-voter cluster cannot keep quorum while one voter restarts.':'Fence new work and drain this node.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
+  const remove=n.node_id===localNodeId
+    ? `<span class="muted">Use graceful leave in Danger zone</span>`
+    : `<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
+  const sessions=Number(n.active_media_sessions||0);
+  const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const note=n.maintenance
+    ? n.maintenance_ready
+      ? "Fenced, caught up, and drained. This node is ready to update or reboot."
+      : `New work is fenced. ${sessions?`${sessions} active media session${sessions===1?" is":"s are"} still draining.`:"Waiting for acknowledgement, leader handoff, or catch-up."}`
+    : "Maintenance is reversible and does not remove this node from membership.";
+  return `<article class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}">
+    <div class="clnodehead"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
+      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div>${role}</div></div>
+    <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
+      <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div>
+    <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div>
+  </article>`;
+}
+function clusterRecoveryState(cluster){
+  if(cluster.recovery) return cluster.recovery;
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const required=Math.floor(voters.length/2)+1;
+  const reachable=voters.filter(n=>n.reachable).length;
+  const leader=voters.some(n=>n.is_leader);
+  return {required:voters.length>1&&(reachable<required||!leader),quorum_available:reachable>=required,
+    reachable_voters:reachable,required_voters:required,leader_elected:leader,
+    permanent_majority_loss_supported:false};
+}
+function clusterRecoveryPanel(cluster,recovery){
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const electionCandidate=voters.some(n=>n.reachable&&n.apply_lag_entries===0&&!n.removal_pending&&!n.maintenance);
+  const electionReady=recovery.quorum_available&&electionCandidate;
+  const title=recovery.quorum_available?"Leader election required":"Recovery required";
+  const badge=recovery.quorum_available?"Leader unavailable":"Quorum unavailable";
+  const rows=voters.map(n=>`<div class="clvoter"><span>${esc(n.hostname||n.node_id)}${n.is_leader?" · last known leader":""}</span>
+    <b style="color:${n.reachable?'var(--good)':'var(--bad)'}">${n.reachable?"heartbeat fresh":"unreachable / stale"}</b></div>`).join("");
+  return `<section class="cluster-card clrecovery"><div class="clophead"><div><h3>${title}</h3>
+      <p>${recovery.quorum_available?"A voter majority is reachable, but no leader is currently elected. A bounded election is safe to request.":"The voter majority cannot be proved. Normal cluster mutations are locked."}</p></div><span class="pill" style="color:var(--bad);border-color:var(--bad)">${badge}</span></div>
+    <div class="recovery-count">${recovery.reachable_voters} / ${recovery.required_voters}</div><p>reachable voters needed for quorum</p>
+    <div class="clvoters">${rows}</div>
+    ${recovery.quorum_available?`<div class="claction"><b>Request an election</b><p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p><div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div>${forceElectionDialog(electionReady)}`:
+    `<div class="claction"><b>Recommended recovery</b><p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.</p></div>
+    <div class="claction"><b>Permanent majority loss</b><p>This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
+      <div class="row"><button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+      <button class="ghost sm" onclick="downloadClusterDiagnostics()">Download roster snapshot</button>
+      <button class="ghost sm" onclick="toggleRecoveryChecklist(this)">Preservation checklist</button></div>
+      <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div></div>
+    <button class="ghost sm" disabled title="Raft cannot elect a leader without quorum">Force election unavailable without quorum</button>`}
+  </section>`;
+}
+function clusterOperationsPanel(cluster){
+  const recovery=clusterRecoveryState(cluster);
+  if(recovery.required) return clusterRecoveryPanel(cluster,recovery);
+  const active=(cluster.nodes||[]).find(n=>n.maintenance);
+  if(active){
+    const sessions=Number(active.active_media_sessions||0);
+    return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance in progress</h3><p>${esc(active.hostname||active.node_id)}</p></div><span class="pill" style="color:var(--warn);border-color:var(--warn)">Fenced</span></div>
+      <ol class="clsteps"><li class="${active.maintenance_acknowledged?'done':''}">Target acknowledged the replicated work fence</li>
+        <li class="${!active.is_leader?'done':''}">Leadership is on another voter</li>
+        <li class="${active.apply_lag_entries===0?'done':''}">Node is reachable and fully caught up</li>
+        <li class="${sessions===0?'done':''}">Existing media sessions drained (${sessions} active)</li></ol>
+      <div class="claction"><b>${active.maintenance_ready?"Ready to update or reboot":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only after the updated node is reachable and caught up.</p>
+        <div class="row"><button class="sm" ${active.maintenance_ready?"":"disabled"} onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>
+    </section>`;
+  }
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+  const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
+  const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance &amp; leadership</h3><p>Planned work without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
+    <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
+      <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
+        <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
+    ${forceElectionDialog(electionReady)}
+  </section>`;
+}
+function forceElectionDialog(enabled){
+  return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
+    <p>This briefly interrupts writes while a caught-up follower campaigns. The current voter majority stays unchanged, and Raft—not this screen—selects the next leader.</p>
+    <ol class="clsteps"><li class="done">A voter quorum is reachable</li><li class="done">A caught-up follower is available</li><li class="done">No maintenance or removal is pending</li></ol>
+    <label class="row" style="margin-top:16px;font-size:13px"><input id="clelectionconfirm" type="checkbox" style="width:auto" onchange="document.getElementById('clelectiongo').disabled=!this.checked"> I understand this may briefly pause writes</label>
+    <div class="cldialogactions"><button class="ghost sm" onclick="this.closest('dialog').close()">Cancel</button><button id="clelectiongo" disabled onclick="forceClusterElection(this)">Force election</button></div>
+  </div></dialog>`;
 }
 function clusterOperationAge(ms){
   if(ms===null||ms===undefined) return "unknown age";
@@ -11612,33 +11753,87 @@ function clusterPanel(d){
       `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
     : "Capacity details unavailable.";
   const roster=nodes.length
-    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
-       <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
+    ? `<div class="clnodes">${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id,!capacity||capacity.voting_nodes!==2||!node.is_voter)).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
-  return `${operations}<div class="card"><h2 class="section" style="margin-top:0">Cluster membership</h2>
-    <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
-    ${roster}
-    <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
-      Leader, commit, and apply-lag readings below describe Raft replication health.</div>
-    <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
-      — the same reading as the Server card on the System tab.</div>
-    <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div>
-    ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
+  const recovery=clustered?clusterRecoveryState(cluster):null;
+  const leader=nodes.find(n=>n.is_leader);
+  const reachable=nodes.filter(n=>n.reachable).length;
+  return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recovery&&recovery.required?'warn':state.tone}"><h3>${esc(recovery&&recovery.required?'Recovery required':state.title)}</h3><p>${esc(recovery&&recovery.required?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
+    <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
+    <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
+    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
+    ${operations}
+    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Nodes</h3><p>Heartbeat freshness is committed state, not a direct network probe; the Operations table above contains direct peer observations.</p></div><button class="ghost sm" onclick="retryCluster()">Refresh</button></div>${roster}
+      <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"} — the same reading as the System tab.</div>
+      <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div></section>
+      ${clustered?clusterOperationsPanel(cluster):`<section class="cluster-card"><h3>Cluster operations</h3><p>Clustering is not enabled on this server.</p></section>`}</div>
+    ${statusFailure?`<div class="row"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
-    ${clustered?joinPanel()+leavePanel(cluster.local_node_id):""}</div>
-    <div class="card"><h2 class="section" style="margin-top:0">Cluster log</h2>
+    ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel()}${leavePanel(cluster.local_node_id)}</div></details>`:""}
+    <details class="cldanger"><summary>Cluster diagnostics</summary><div class="cldangerbody"><h2 class="section" style="margin-top:0">Cluster log</h2>
       <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
           <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
           <option value="error">Errors</option><option value="debug">Debug+</option></select>
         <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
         <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
       <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
-      <div class="logbox" id="cllogbox">Loading…</div></div>`;
+      <div class="logbox" id="cllogbox">Loading…</div></div></details></div>`;
 }
 function retryCluster(){
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
   viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+async function setNodeMaintenance(nodeId,enter){
+  if(enter&&!confirm(`Enter maintenance on ${nodeId}?\n\nNew work will be fenced and existing streams will drain. If this node is leader, leadership moves before it is marked ready.`)) return;
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  try{
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/maintenance`,{method:enter?"POST":"DELETE",body:enter?{}:undefined});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    toast(enter?"Maintenance requested":"Node returned to service");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:nodeId,code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+function openElectionDialog(){
+  const dialog=document.getElementById("clelection");
+  if(dialog) dialog.showModal();
+}
+async function forceClusterElection(btn){
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  btn.disabled=true; btn.textContent="Electing…";
+  try{
+    const cluster=await api("/cluster/election",{method:"POST",body:{}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    toast("Leader election completed");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:"Cluster",code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+function downloadClusterDiagnostics(){
+  const cluster=SETTINGS_DATA&&SETTINGS_DATA.cluster;
+  if(!cluster) return;
+  const logs=document.getElementById("cllogbox")?.textContent||"Cluster log is not loaded.";
+  const blob=new Blob([JSON.stringify({captured_at:new Date().toISOString(),cluster,logs},null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");
+  a.href=url; a.download=`plurx-cluster-diagnostics-${Date.now()}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),0);
+}
+function toggleRecoveryChecklist(btn){
+  const checklist=document.getElementById("clpreserve");
+  if(!checklist) return;
+  checklist.hidden=!checklist.hidden;
+  btn.textContent=checklist.hidden?"Preservation checklist":"Hide checklist";
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
@@ -11874,6 +12069,24 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
       const mount=document.getElementById("analysis-settings-summary");
       if(mount) mount.innerHTML=analysisSummaryCard(snapshot,"settings");
+    }
+    if(tab==="cluster"){
+      const current=SETTINGS_DATA.cluster;
+      const recovery=current&&!current.unavailable?clusterRecoveryState(current):null;
+      const live=current&&!current.unavailable&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
+      if(live){
+        const snapshot=await api("/cluster/nodes");
+        if(!settingsCurrent(generation,tab)) return;
+        const operational=cluster=>JSON.stringify({
+          recovery:clusterRecoveryState(cluster),
+          nodes:(cluster.nodes||[]).map(n=>({id:n.node_id,leader:n.is_leader,reachable:n.reachable,
+            lag:n.apply_lag_entries,maintenance:n.maintenance,ack:n.maintenance_acknowledged,
+            ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
+        });
+        const changed=operational(current)!==operational(snapshot);
+        SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+        if(changed) renderSettings();
+      }
     }
     await Promise.all(secondary);
   }catch(e){ if(e&&e.status===401) return; }

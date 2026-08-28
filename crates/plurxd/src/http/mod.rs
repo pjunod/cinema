@@ -458,9 +458,17 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     if method == Method::GET
         && matches!(
             path,
-            "/api/v1/cluster/nodes" | "/api/v1/cluster/media" | "/api/v1/cluster/ingress"
+            "/api/v1/cluster/nodes"
+                | "/api/v1/cluster/status"
+                | "/api/v1/cluster/support-bundle"
+                | "/api/v1/cluster/media"
+                | "/api/v1/cluster/ingress"
+                | cluster_operations::INTERNAL_PATH
         )
     {
+        return true;
+    }
+    if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/election" {
@@ -469,6 +477,12 @@ fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
     if matches!(method, &Method::POST | &Method::DELETE)
         && path.starts_with("/api/v1/cluster/nodes/")
         && path.ends_with("/maintenance")
+    {
+        return true;
+    }
+    if method == Method::DELETE
+        && path.starts_with("/api/v1/cluster/nodes/")
+        && path.ends_with("/restart-preparation")
     {
         return true;
     }
@@ -912,8 +926,17 @@ mod tests {
             (Method::GET, "/healthz"),
             (Method::GET, "/readyz"),
             (Method::GET, "/api/v1/cluster/nodes"),
+            (Method::GET, "/api/v1/cluster/status"),
+            (Method::GET, "/api/v1/cluster/support-bundle"),
+            (Method::GET, cluster_operations::INTERNAL_PATH),
+            (Method::POST, "/api/v1/auth/login"),
+            (Method::POST, "/api/v1/auth/logout"),
             (Method::POST, "/api/v1/cluster/election"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
+            (
+                Method::DELETE,
+                "/api/v1/cluster/nodes/node-b/restart-preparation",
+            ),
             (Method::GET, "/api/v1/hls/session/index.m3u8"),
             (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
             (Method::DELETE, "/api/v1/hls/session"),
