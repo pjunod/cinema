@@ -6,13 +6,18 @@
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Last reviewed committed head:** `43bd459d` (response-publication contract
-correction; four findings fixed, exact delta approved)
+**Last formally reviewed head:** `ab3808b1ce48b1493075cdf4f1022e73a7010a2b`
+(rejected: one P1, five P2, and one P3; repairs complete in the working tree,
+new immutable review head pending)
 **Runtime implementation head:** `0e80c6ba` (`feat(playback): own transcode
 prepublication recovery`; formal exact-head review pending)
-**Runtime review state:** all three targeted working-tree reviewers approve the
-repaired actor, transcode, and HTTP scopes with no remaining P1/P2/P3 finding;
-formal review of the synchronized exact implementation hash is still required
+**Runtime review state:** the actor scope was approved, but transcode and HTTP
+formal review found confirmed-reap admission, owner-ledger, false-`404`, ETag,
+shared-wait-budget, and bounded-settlement defects. The working tree repairs
+all of them. A follow-up moving-tree audit also closed unbounded actor,
+storage/lock, polling, telemetry, and flow-control work inside playlist
+preparation. No formal approval exists for the active candidate until this
+repaired tree is committed and re-reviewed.
 **Current implementation:** actor, HTTP response admission, transcode executor,
 frozen rolling presentation, cancellation settlement, synchronous first-media
 handoff, status projection, and checked owner inventory are committed at
@@ -20,9 +25,10 @@ handoff, status projection, and checked owner inventory are committed at
 production-authoritative cut: initial transcode startup uses one actor
 deadline, one validated prepublication retry, exact response publication
 admission, and one cancellation-safe executor. Published-lifetime and copy
-compatibility owners remain later cuts. Working-tree review findings are fixed
-and the targeted delta is approved; the synchronized branch head is awaiting
-formal exact-head review.
+compatibility owners remain later cuts. Runtime `0e80c6ba` is committed; the
+formal findings against documentation head `ab3808b1` are repaired in the
+worktree. Formatting, whitespace, and a read-only exact ownership recount are
+clean; no build or test has run.
 **Test state:** no tests have run on the active branch by design. The user
 requires adversarial implementation review before unit tests and exactly one
 full unit-suite run on the final reviewed merge candidate. If that run fails,
@@ -113,9 +119,39 @@ P1/P2/P3 finding:
   range binding, subtitle typed-error propagation, and exact rolling/VOD owner
   fencing.
 
-These are working-tree approvals, not the immutable merge-candidate approval.
-Commit the synchronized runtime, inventory, and status documents, then review
-that exact hash before opening the unit-test gate.
+Those were working-tree approvals, not the immutable merge-candidate approval.
+Formal review of `ab3808b1` subsequently found these additional defects:
+
+- P1: routine End/expiry/supersession could return hardware/software admission
+  before the exact prepublication child was confirmed reaped;
+- P2: the mechanical owner ledger omitted the replyless termination request,
+  shared terminal wait, and reap-attempt timeout;
+- P2: a same-incarnation publication race could collapse to fatal `404`;
+- P2: rolling ETags did not bind Session incarnation/attempt and could validate
+  different equal-length successor bytes;
+- P2: each playlist reclassification restarted the whole startup wait instead
+  of sharing one absolute request budget; and
+- P2: actor admission, first-media handoff, commit, and detached EOF settlement
+  had no actual lifecycle bound or bounded settlement owner.
+
+The continuation ledger itself was the P3: it still described runtime and docs
+as uncommitted. The working tree now closes every formal item: routine
+prepublication retirement transfers child, scratch, and admissions to a
+confirmed-reap owner; every new lifecycle action/timer is counted; response
+state races stay typed `503`; rolling validators bind incarnation and exact
+attempt; playlist reclassification shares one deadline; actor admission,
+first-media application, buffered commit, and streamed EOF settlement are
+bounded; and the continuation ledger names the real committed heads.
+
+A final moving-tree audit then found that the playlist byte-resolution path
+itself still awaited an unbounded actor observation, synchronous flow-control
+refresh, registry/storage/segment locks, and fixed polling sleeps. The repair
+puts the whole operation under the existing absolute playlist deadline, makes
+the HTTP observation command deadline-aware and fail-closed after
+cancellation, clamps polling to the remaining time, queues consequential flow
+work to the session-owned worker, detaches non-response slide telemetry, and
+publishes cached-integrity failure before cleanup can be cancelled. These
+repairs still require immutable exact-head review before the test gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -441,14 +477,14 @@ topology, and daemon-integration contracts.
 ## 4. Immediate continuation procedure
 
 PR #626 is merged as `9063bb1e`. The current disposable branch is
-`codex/playback-control-m4-prepublication`; contract commit `43bd459d` is the
-only committed active-branch change. Actor, HTTP, transcode, status-fixture,
-owner-inventory, and documentation changes are assembled in the worktree. The
-preserved untracked vendor build artifacts remain outside every commit.
+`codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
+runtime `0e80c6ba`, and rejected documentation/review head `ab3808b1` are
+committed. Formal and moving-tree repairs are complete in the worktree. The preserved untracked vendor
+build artifacts remain outside every commit.
 Continue in this order:
 
-1. Commit the synchronized status/handoff documents without including either
-   vendor target tree.
+1. Commit the completed `ab3808b1` and playlist-deadline repairs without
+   including either vendor target tree.
 2. Obtain independent adversarial approval of the resulting exact branch head
    without running unit tests.
 3. If review changes behavior, re-review only the changed behavioral delta and
@@ -496,7 +532,12 @@ termination attempt is bounded and the cleanup owner releases the child
 transition before waiting to retry. Neither timer can select a recipe, publish
 a response, declare playback failure, or replace a producer. Exact-EOF
 settlement and bounded HTTP actor/handoff waits likewise remain response and
-network lifecycle bounds rather than recovery watchdogs.
+network lifecycle bounds rather than recovery watchdogs. Streamed responses
+reserve one of 256 completion owners before visibility and receive a fresh
+five-second settlement deadline at exact advertised EOF. Buffered response
+admission/commit and playlist actor observation share their existing absolute
+request deadlines; queued commands reject cancellation or expiry before
+mutation.
 
 The first review must specifically challenge exact-deadline response ordering,
 stable-master contract freezing, same-ID Session ABA, executor cancellation at
@@ -720,13 +761,13 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After the current decision-transport/projection slice, the remaining M4 work
-is:
+After the active prepublication candidate, the remaining work is:
 
-1. Emit production decisions from deadline, exit, and classifier facts and
-   replace the passive executor scaffold with actor-authorized actions.
-2. Move the single allowed pre-publication validated retry behind that owner.
-3. Convert exact exits and copy classification to actor decisions.
+1. Review, validate, open, and merge the current production decision,
+   prepublication retry, response-admission, and confirmed-reap cut.
+2. Move published-lifetime stall classification and recovery behind the actor
+   without overlapping the retained compatibility watcher.
+3. Convert copy startup/exit classification and fallback to actor decisions.
 4. Add desired physical hold/resume command/intention barriers to the shared
    actor sequence; retain the successful physical acknowledgements already in
    producer ingress.

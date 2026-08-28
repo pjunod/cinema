@@ -12,9 +12,21 @@ are now assembled. The working-tree adversarial passes found and repaired
 deadline, failure-replay, retry-cutoff, cancellation, executor-loss,
 metadata-commit, process-reap, registry-lock, typed-error, and subtitle-owner
 defects. Independent actor, transcode, and HTTP reviewers now report no
-remaining P1/P2/P3 finding in their targeted scopes. Runtime commit
-`0e80c6ba` and the synchronized documentation branch head are ready for the
-required formal exact-head review. No unit test has run on this branch. The
+remaining P1/P2/P3 finding in their targeted scopes. Formal exact-head review
+of `ab3808b1` then rejected the combined candidate: normal prepublication
+retirement released admissions before confirmed reap; the owner ledger missed
+the new termination wrappers; response rejection could still become false
+`404`; rolling ETags could collide across attempts; playlist reclassification
+could restart the full wait budget; and HTTP/EOF settlement lacked its claimed
+bound. Every finding is now repaired in the working tree. A follow-up moving
+tree audit also found that playlist preparation could outlive its shared
+deadline in actor observation, storage/registry waits, polling, and synchronous
+flow control; those paths now share one outer absolute deadline, HTTP actor
+observation is fail-closed, and consequential flow work is queued to the
+session-owned worker. Formatting, whitespace, and the read-only mechanical
+ownership recount are clean. The repaired tree still needs to be committed and
+approved as one immutable exact head.
+No unit test has run on this branch. The
 full unit suite runs once, only after final exact-head adversarial approval; a
 failure permits only the failed or directly affected tests to rerun. PR #626's runtime commits
 `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
@@ -141,7 +153,7 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Active candidate assembled.** The actor now exposes startup policy, contract fingerprint, response/retry cutoff, executor state, and immutable decision application. The transcode executor is the sole prepublication action owner; the first admitted attempt-media response synchronously transfers to the retained published-lifetime owner. |
-| Adversarial implementation review | **Targeted working-tree passes approved; formal exact-head review pending.** The response contract pass fixed four defects. Runtime passes then repaired deadline/retry ordering, first-media cancellation and handoff, immediate-exit replay, executor loss, bounded confirmed reap, registry-lock scope, typed error reclassification, and subtitle owner fencing. Independent actor, transcode, and HTTP reviewers report no remaining P1/P2/P3 finding in their targeted scopes. These approvals do not authorize tests until the synchronized implementation head is committed and approved by exact hash. |
+| Adversarial implementation review | **Exact head `ab3808b1` rejected; repairs complete in the working tree, immutable review pending.** Earlier targeted passes repaired deadline/retry ordering, first-media cancellation and handoff, immediate-exit replay, executor loss, bounded failure cleanup, registry-lock scope, typed error reclassification, and subtitle owner fencing. Formal review then found one P1 admission-before-reap defect, five P2 lifecycle/HTTP/owner-ledger defects, and one stale-handoff P3. The repair pass also closed a later moving-tree audit of the full playlist deadline. A new exact head must receive independent approval before tests. |
 | Unit/focused tests | **Gate closed; none run on this branch.** Per user direction there will be one full unit-suite run, on the final reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
 | Full/cluster/hosted gates | **Pending active-candidate review.** The merged #626 baseline is green. Cluster/integration and required hosted PR checks remain required, but no local unit suite runs during review. |
 
@@ -168,8 +180,9 @@ overlap the actor-owned scope after their respective cutovers.
 | `child_transition` and `replacing_child` | **Retained for process/resource serialization and compatibility replacement.** | Exact child ownership, confirmed reap, published-lifetime handling, and copy replacement still require serialization until the later cuts remove in-place replacement. |
 | copy fallback/recovery | **Retained.** | Copy delivery has not yet moved its recovery decision into the actor. |
 | `PREPUBLICATION_REAP_RETRY` and `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` | **Retained lifecycle cleanup bounds, not playback watchdogs.** | They retry bounded termination until the exact predecessor is confirmed reaped; they cannot choose retry, replacement, playback failure, or response publication. |
-| exact-EOF settlement task | **Retained response completion owner, not a watchdog.** | It records a streamed response commit only after the final advertised bytes are read and safely discards the commit on cancellation or truncation. |
-| bounded HTTP actor/handoff waits | **Retained network lifecycle limits, not recovery watchdogs.** | They keep a request from occupying resources forever and cannot select a producer recipe or replace a child. |
+| exact-EOF settlement task | **Retained bounded response completion owner, not a watchdog.** | At most 256 visible streams can reserve one owner; each owner gets one fresh five-second deadline at exact advertised EOF, commits only complete delivery, and releases capacity on every terminal path. |
+| absolute playlist preparation budget | **Retained network lifecycle limit, not a watchdog.** | One deadline covers registry/storage reads, actor observation, catalog projection, and every poll across reclassification; timeout returns retryable `503` and cannot select or replace a producer. |
+| bounded HTTP actor/handoff waits | **Retained network lifecycle limits, not recovery watchdogs.** | One five-second absolute publication deadline covers admission, first-media application, buffered commit, and actor command/reply waits; cancellation is fail-closed before later actor mutation. |
 
 ### Server mechanisms still present on merged `main`
 

@@ -48,6 +48,14 @@ use crate::transcode::{ClusterReplacementGuard, PlaylistError};
 /// skipped inspection rather than a truncated response.
 const INIT_INSPECTION_LIMIT_BYTES: u64 = 1024 * 1024;
 const MIN_RESOLVED_REPLAY_REMAINING_MS: i64 = 1_000;
+/// One absolute bound for the actor/manager portion of response publication.
+/// Storage and network streaming have their own budgets; this prevents a live
+/// HTTP request or detached EOF owner from waiting forever on control state.
+const RESPONSE_PUBLICATION_LIFECYCLE_BUDGET: Duration = Duration::from_secs(5);
+/// Completed streams retain one permit from pre-exposure admission through
+/// exact EOF settlement. This bounds both active settlement ownership and the
+/// detached tasks that can be alive at once.
+const RESPONSE_COMPLETION_CAPACITY: usize = 256;
 
 #[derive(Deserialize)]
 pub struct StartQuery {
@@ -2383,12 +2391,20 @@ async fn authorize_response_publication(
     session: &str,
     owner: &crate::transcode::MediaResponseOwner,
     publication: crate::transcode::MediaResponsePublication,
+    deadline: Instant,
 ) -> Result<crate::transcode::MediaResponseAuthorization, ApiError> {
-    state
-        .transcode
-        .authorize_response_publication(session, owner, publication)
-        .await
-        .ok_or(ApiError::NotFound("transcode session"))
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state
+            .transcode
+            .authorize_response_publication(session, owner, publication, deadline),
+    )
+    .await
+    {
+        Ok(Ok(authorization)) => Ok(authorization),
+        Ok(Err(rejection)) => Err(response_publication_rejection(rejection)),
+        Err(_) => Err(response_publication_timeout()),
+    }
 }
 
 /// Commit completion using the authorization issued for these exact response
@@ -2398,15 +2414,88 @@ async fn commit_authorized_media(
     state: &AppState,
     authorization: crate::transcode::MediaResponseAuthorization,
     complete_object: bool,
+    deadline: Instant,
 ) -> Result<(), ApiError> {
-    if state
-        .transcode
-        .commit_authorized_media(authorization, complete_object)
-        .await
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state
+            .transcode
+            .commit_authorized_media(authorization, complete_object, deadline),
+    )
+    .await
     {
-        Ok(())
-    } else {
-        Err(ApiError::NotFound("transcode session"))
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(rejection)) => Err(response_publication_rejection(rejection)),
+        Err(_) => Err(response_publication_timeout()),
+    }
+}
+
+fn response_publication_deadline() -> Instant {
+    tokio::time::Instant::now().into_std() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET
+}
+
+fn response_publication_rejection(
+    rejection: crate::transcode::MediaResponsePublicationRejection,
+) -> ApiError {
+    match rejection {
+        crate::transcode::MediaResponsePublicationRejection::OwnerGone => {
+            ApiError::NotFound("transcode session")
+        }
+        crate::transcode::MediaResponsePublicationRejection::StateChanged => ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_state_changed",
+            "the stream changed state while the response was prepared; retry shortly",
+        ),
+    }
+}
+
+fn response_publication_timeout() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "response_publication_timeout",
+        "response publication did not settle before its control deadline; retry shortly",
+    )
+}
+
+fn response_publication_state_changed(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Typed {
+            code: "response_state_changed",
+            ..
+        }
+    )
+}
+
+fn response_completion_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(
+        SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RESPONSE_COMPLETION_CAPACITY))),
+    )
+}
+
+async fn reserve_response_completion(
+    deadline: Instant,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    reserve_response_completion_from(response_completion_slots(), deadline).await
+}
+
+async fn reserve_response_completion_from(
+    slots: Arc<tokio::sync::Semaphore>,
+    deadline: Instant,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        slots.acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) | Err(_) => Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_completion_capacity",
+            "response completion capacity is full; retry shortly",
+        )),
     }
 }
 
@@ -2419,16 +2508,27 @@ fn settle_streamed_response_completion(
     session: String,
     authorization: crate::transcode::MediaResponseAuthorization,
     complete_object: bool,
+    permit: tokio::sync::OwnedSemaphorePermit,
 ) {
+    let deadline = response_publication_deadline();
     tokio::spawn(async move {
-        if !manager
-            .commit_authorized_media(authorization, complete_object)
-            .await
+        let _completion_permit = permit;
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            manager.commit_authorized_media(authorization, complete_object, deadline),
+        )
+        .await
         {
-            tracing::debug!(
+            Ok(Ok(())) => {}
+            Ok(Err(rejection)) => tracing::debug!(
                 session = %crate::transcode::session_log_id(&session),
-                "discarded exact response completion after its owner was replaced"
-            );
+                ?rejection,
+                "discarded exact response completion after publication state changed"
+            ),
+            Err(_) => tracing::warn!(
+                session = %crate::transcode::session_log_id(&session),
+                "exact response completion exceeded its control deadline"
+            ),
         }
     });
 }
@@ -2454,8 +2554,30 @@ async fn complete_buffered_response(
     complete_object: bool,
     response: Response,
 ) -> Result<Response, ApiError> {
-    let authorization = authorize_response_publication(state, session, owner, publication).await?;
-    commit_authorized_media(state, authorization, complete_object).await?;
+    complete_buffered_response_before(
+        state,
+        session,
+        owner,
+        publication,
+        complete_object,
+        response,
+        response_publication_deadline(),
+    )
+    .await
+}
+
+async fn complete_buffered_response_before(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+    publication: crate::transcode::MediaResponsePublication,
+    complete_object: bool,
+    response: Response,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let authorization =
+        authorize_response_publication(state, session, owner, publication, deadline).await?;
+    commit_authorized_media(state, authorization, complete_object, deadline).await?;
     Ok(response)
 }
 
@@ -2687,25 +2809,24 @@ async fn admitted_playlist_error(
     state: &AppState,
     session: &str,
     err: crate::transcode::PlaylistPublicationError,
+    deadline: Instant,
 ) -> Result<ApiError, ()> {
     if let Some(owner) = err.owner.as_ref() {
-        if !state
+        match state
             .transcode
-            .authorize_playlist_error_publication(session, owner, &err.error)
+            .authorize_playlist_error_publication(session, owner, &err.error, deadline)
             .await
         {
-            return if state
-                .transcode
-                .playlist_error_owner_is_current_incarnation(session, owner)
-                .await
-            {
+            Ok(()) => {}
+            Err(crate::transcode::MediaResponsePublicationRejection::StateChanged) => {
                 // The same generation changed attempt/publication/decision
                 // state during admission. Re-resolve instead of relabeling a
                 // live producer as an anonymous fatal 404.
-                Err(())
-            } else {
-                Ok(ApiError::NotFound("transcode session"))
-            };
+                return Err(());
+            }
+            Err(crate::transcode::MediaResponsePublicationRejection::OwnerGone) => {
+                return Ok(ApiError::NotFound("transcode session"));
+            }
         }
     }
     Ok(playlist_error(session, err.error))
@@ -2751,11 +2872,19 @@ async fn video_playlist_local(
         )
         .await;
     }
+    let playlist_deadline = state.transcode.playlist_request_deadline();
+    let mut publication_deadline = None;
     for reclassification in 0..=2 {
-        match state.transcode.playlist_with_owner(session).await {
+        match state
+            .transcode
+            .playlist_with_owner_before(session, playlist_deadline)
+            .await
+        {
             Ok((bytes, owner)) => {
+                let response_deadline =
+                    *publication_deadline.get_or_insert_with(response_publication_deadline);
                 let response = playlist_response(bytes);
-                return complete_buffered_response(
+                let result = complete_buffered_response_before(
                     state,
                     session,
                     &owner,
@@ -2765,8 +2894,19 @@ async fn video_playlist_local(
                     ),
                     true,
                     response,
+                    response_deadline,
                 )
                 .await;
+                match result {
+                    Err(error)
+                        if response_publication_state_changed(&error)
+                            && reclassification < 2
+                            && tokio::time::Instant::now().into_std() < response_deadline =>
+                    {
+                        continue;
+                    }
+                    result => return result,
+                }
             }
             Err(err)
                 if matches!(&err.error, PlaylistError::SessionGone)
@@ -2774,9 +2914,11 @@ async fn video_playlist_local(
             {
                 return match state.transcode.vod_playlist(session).await {
                     Some(answer) => {
+                        let response_deadline =
+                            *publication_deadline.get_or_insert_with(response_publication_deadline);
                         let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
                         let response = playlist_response(bytes);
-                        complete_buffered_response(
+                        complete_buffered_response_before(
                             state,
                             session,
                             &owner,
@@ -2786,15 +2928,29 @@ async fn video_playlist_local(
                             ),
                             true,
                             response,
+                            response_deadline,
                         )
                         .await
                     }
                     None => Err(playlist_error(session, PlaylistError::SessionGone)),
                 };
             }
-            Err(err) => match admitted_playlist_error(state, session, err).await {
+            Err(err) => match admitted_playlist_error(
+                state,
+                session,
+                err,
+                *publication_deadline.get_or_insert_with(response_publication_deadline),
+            )
+            .await
+            {
                 Ok(error) => return Err(error),
-                Err(()) if reclassification < 2 => continue,
+                Err(())
+                    if reclassification < 2
+                        && tokio::time::Instant::now().into_std()
+                            < publication_deadline.expect("publication deadline initialized") =>
+                {
+                    continue;
+                }
                 Err(()) => {
                     return Err(ApiError::typed(
                         StatusCode::SERVICE_UNAVAILABLE,
@@ -2838,37 +2994,102 @@ async fn subtitle_playlist_local(
     // subtitle facts. A failed actor is stored before End; consulting the
     // live-only presentation facade first would erase that still-registered
     // failure into a 404 and bypass its exact 502 owner fence.
-    let (video, owner) = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
-        None => {
-            let mut resolved = None;
-            for reclassification in 0..=2 {
-                match state.transcode.playlist_with_owner(session).await {
-                    Ok(answer) => {
-                        resolved = Some(answer);
-                        break;
-                    }
-                    Err(err) => match admitted_playlist_error(state, session, err).await {
-                        Ok(error) => return Err(error),
-                        Err(()) if reclassification < 2 => continue,
-                        Err(()) => {
-                            return Err(ApiError::typed(
-                                StatusCode::SERVICE_UNAVAILABLE,
-                                "playlist_state_changed",
-                                "the stream changed state while the subtitle playlist was prepared; retry shortly",
-                            ));
-                        }
-                    },
+    if let Some(answer) = state.transcode.vod_playlist(session).await {
+        let (video, owner) = answer.map_err(|err| vod_error(session, err))?;
+        return complete_subtitle_playlist_response(
+            state,
+            session,
+            index,
+            video,
+            owner,
+            response_publication_deadline(),
+        )
+        .await;
+    }
+
+    let playlist_deadline = state.transcode.playlist_request_deadline();
+    let mut publication_deadline = None;
+    for reclassification in 0..=2 {
+        let (video, owner) = match state
+            .transcode
+            .playlist_with_owner_before(session, playlist_deadline)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(err) => match admitted_playlist_error(
+                state,
+                session,
+                err,
+                *publication_deadline.get_or_insert_with(response_publication_deadline),
+            )
+            .await
+            {
+                Ok(error) => return Err(error),
+                Err(())
+                    if reclassification < 2
+                        && tokio::time::Instant::now().into_std()
+                            < publication_deadline.expect("publication deadline initialized") =>
+                {
+                    continue;
                 }
+                Err(()) => {
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "playlist_state_changed",
+                        "the stream changed state while the subtitle playlist was prepared; retry shortly",
+                    ));
+                }
+            },
+        };
+        let result = complete_subtitle_playlist_response(
+            state,
+            session,
+            index,
+            video,
+            owner,
+            *publication_deadline.get_or_insert_with(response_publication_deadline),
+        )
+        .await;
+        match result {
+            Err(error)
+                if response_publication_state_changed(&error)
+                    && reclassification < 2
+                    && tokio::time::Instant::now().into_std()
+                        < publication_deadline.expect("publication deadline initialized") =>
+            {
+                continue;
             }
-            resolved.expect("bounded playlist reclassification resolves or returns")
+            result => return result,
         }
-    };
-    let (_, file) = state
+    }
+    unreachable!("bounded subtitle playlist reclassification loop always returns")
+}
+
+async fn complete_subtitle_playlist_response(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    video: Vec<u8>,
+    owner: crate::transcode::MediaResponseOwner,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let Some((_, file)) = state
         .transcode
         .hls_presentation_for_owner(session, &owner)
         .await
-        .ok_or(ApiError::NotFound("transcode session"))?;
+    else {
+        return if state
+            .transcode
+            .playlist_error_owner_is_current_incarnation(session, &owner, deadline)
+            .await
+        {
+            Err(response_publication_rejection(
+                crate::transcode::MediaResponsePublicationRejection::StateChanged,
+            ))
+        } else {
+            Err(ApiError::NotFound("transcode session"))
+        };
+    };
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2889,7 +3110,7 @@ async fn subtitle_playlist_local(
     // span fallback, and a VOD attachment may be replaced under the same id;
     // a fresh lookup here would authorize the wrong incarnation in both cases.
     let object_name = format!("subs/{index}/index.m3u8");
-    complete_buffered_response(
+    complete_buffered_response_before(
         state,
         session,
         &owner,
@@ -2899,6 +3120,7 @@ async fn subtitle_playlist_local(
         ),
         true,
         response,
+        deadline,
     )
     .await
 }
@@ -3971,10 +4193,6 @@ fn range_covers_object(range: Option<(u64, u64)>, len: u64) -> bool {
     }
 }
 
-fn segment_etag(session: &str, segment: &str, len: u64) -> String {
-    format!("\"{session}-{segment}-{len:x}\"")
-}
-
 fn etag_matches(request: Option<&str>, etag: &str) -> bool {
     request.is_some_and(|request| {
         request
@@ -4113,6 +4331,7 @@ async fn vod_segment_response(
                     "segment-range-not-satisfiable",
                     Some(seg),
                 ),
+                response_publication_deadline(),
             )
             .await?;
             return Ok(response);
@@ -4202,6 +4421,8 @@ async fn vod_segment_response(
         None => (StatusCode::OK, ready.len, None),
     };
     let complete_object = range_covers_object(requested_range, ready.len);
+    let publication_deadline = response_publication_deadline();
+    let completion_permit = reserve_response_completion(publication_deadline).await?;
     let authorization = authorize_response_publication(
         state,
         session,
@@ -4210,6 +4431,7 @@ async fn vod_segment_response(
             segment_publication_kind(seg, requested_range),
             Some(seg),
         ),
+        publication_deadline,
     )
     .await?;
     let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
@@ -4218,6 +4440,7 @@ async fn vod_segment_response(
         session.to_owned(),
         authorization,
         complete_object,
+        completion_permit,
     );
     let stream = futures_util::stream::unfold(
         (Some(reader), Some(completion), 0_u64, len),
@@ -4228,14 +4451,20 @@ async fn vod_segment_response(
                     let delivered = delivered.saturating_add(bytes.len() as u64);
                     let mut completion = completion;
                     if delivered == expected {
-                        if let Some((manager, session, authorization, complete_object)) =
-                            completion.take()
+                        if let Some((
+                            manager,
+                            session,
+                            authorization,
+                            complete_object,
+                            completion_permit,
+                        )) = completion.take()
                         {
                             settle_streamed_response_completion(
                                 manager,
                                 session,
                                 authorization,
                                 complete_object,
+                                completion_permit,
                             );
                         }
                     }
@@ -4246,7 +4475,7 @@ async fn vod_segment_response(
                     if delivered != expected {
                         let session = completion
                             .as_ref()
-                            .map(|(_, session, _, _)| session.as_str())
+                            .map(|(_, session, _, _, _)| session.as_str())
                             .unwrap_or_default();
                         tracing::warn!(
                             session = %crate::transcode::session_log_id(session),
@@ -4326,7 +4555,9 @@ async fn segment_local(
         return Err(ApiError::NotFound("segment"));
     }
     let content_type = segment_content_type(seg);
-    let etag = segment_etag(session, seg, opened.len);
+    let etag = response_owner
+        .rolling_etag(session, seg, opened.len)
+        .expect("a live segment carries a rolling response owner");
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
         let response = (
             StatusCode::NOT_MODIFIED,
@@ -4340,6 +4571,7 @@ async fn segment_local(
             ],
         )
             .into_response();
+        let publication_deadline = response_publication_deadline();
         let authorization = match authorize_response_publication(
             state,
             session,
@@ -4348,6 +4580,7 @@ async fn segment_local(
                 "segment-not-modified",
                 Some(seg),
             ),
+            publication_deadline,
         )
         .await
         {
@@ -4357,7 +4590,9 @@ async fn segment_local(
                 return Err(error);
             }
         };
-        if let Err(error) = commit_authorized_media(state, authorization, true).await {
+        if let Err(error) =
+            commit_authorized_media(state, authorization, true, publication_deadline).await
+        {
             opened.delivery.finish_without_body();
             return Err(error);
         }
@@ -4384,6 +4619,7 @@ async fn segment_local(
                     "segment-range-not-satisfiable",
                     Some(seg),
                 ),
+                response_publication_deadline(),
             )
             .await
             {
@@ -4456,6 +4692,7 @@ async fn segment_local(
         let response = response
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let publication_deadline = response_publication_deadline();
         let authorization = match authorize_response_publication(
             state,
             session,
@@ -4464,6 +4701,7 @@ async fn segment_local(
                 segment_publication_kind(seg, requested_range),
                 Some(seg),
             ),
+            publication_deadline,
         )
         .await
         {
@@ -4477,6 +4715,7 @@ async fn segment_local(
             state,
             authorization,
             range_covers_object(requested_range, opened.len),
+            publication_deadline,
         )
         .await
         {
@@ -4511,6 +4750,14 @@ async fn segment_local(
     let opened_len = end.saturating_sub(start).saturating_add(1);
     let total_len = opened.len;
     let complete_object = range_covers_object(requested_range, opened.len);
+    let publication_deadline = response_publication_deadline();
+    let completion_permit = match reserve_response_completion(publication_deadline).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            opened.delivery.finish_without_body();
+            return Err(error);
+        }
+    };
     let authorization = match authorize_response_publication(
         state,
         session,
@@ -4519,6 +4766,7 @@ async fn segment_local(
             segment_publication_kind(seg, requested_range),
             Some(seg),
         ),
+        publication_deadline,
     )
     .await
     {
@@ -4536,6 +4784,7 @@ async fn segment_local(
         session.to_owned(),
         authorization,
         complete_object,
+        completion_permit,
     );
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
@@ -4555,14 +4804,20 @@ async fn segment_local(
                     let delivered = delivered.saturating_add(bytes.len() as u64);
                     let mut completion = completion;
                     if delivered == expected && delivery.finish() {
-                        if let Some((manager, session, authorization, complete_object)) =
-                            completion.take()
+                        if let Some((
+                            manager,
+                            session,
+                            authorization,
+                            complete_object,
+                            completion_permit,
+                        )) = completion.take()
                         {
                             settle_streamed_response_completion(
                                 manager,
                                 session,
                                 authorization,
                                 complete_object,
+                                completion_permit,
                             );
                         }
                     }
@@ -4627,6 +4882,44 @@ mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
     use std::time::Duration;
+
+    #[test]
+    fn same_incarnation_publication_rejection_is_retryable_not_not_found() {
+        let error = response_publication_rejection(
+            crate::transcode::MediaResponsePublicationRejection::StateChanged,
+        );
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "response_state_changed",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streamed_response_settlement_capacity_is_bounded_before_visibility() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("first settlement permit");
+        let deadline = tokio::time::Instant::now().into_std() + Duration::from_millis(1);
+        let error = reserve_response_completion_from(slots, deadline)
+            .await
+            .err()
+            .expect("a second streamed response must not exceed settlement capacity");
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "response_completion_capacity",
+                ..
+            }
+        ));
+        drop(held);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn terminal_store_wait_uses_the_absolute_attempt_deadline() {
@@ -5857,6 +6150,11 @@ mod tests {
         .await
         .expect("full-span range response");
         assert_eq!(full_span.status(), StatusCode::PARTIAL_CONTENT);
+        let full_span_etag = full_span
+            .headers()
+            .get(header::ETAG)
+            .cloned()
+            .expect("rolling response ETag");
         assert_eq!(
             axum::body::to_bytes(full_span.into_body(), body.len() + 1)
                 .await
@@ -5875,12 +6173,7 @@ mod tests {
         let delivered_after_full_span = fixture.delivered_bytes();
 
         let mut conditional = HeaderMap::new();
-        conditional.insert(
-            header::IF_NONE_MATCH,
-            segment_etag("range", "seg00004.m4s", body.len() as u64)
-                .parse()
-                .expect("etag"),
-        );
+        conditional.insert(header::IF_NONE_MATCH, full_span_etag);
         let not_modified = segment(
             State(fixture.state.clone()),
             AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),

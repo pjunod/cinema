@@ -2191,6 +2191,14 @@ impl RollingFirstMediaPublicationWaiter {
         }
     }
 
+    pub(crate) fn settled_outcome(&self) -> Option<bool> {
+        match self.state.outcome.load(Ordering::Acquire) {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     fn is_accepted(&self) -> bool {
         self.state.outcome.load(Ordering::Acquire) == 1
@@ -3058,6 +3066,7 @@ enum RollingControlCommand {
     AuthorizeResponsePublication {
         publication: RollingResponsePublication,
         handoff: Option<RollingFirstMediaPublicationHandoff>,
+        deadline: Instant,
         reply: tokio::sync::oneshot::Sender<
             Result<RollingResponseAuthorization, ResponsePublicationRejection>,
         >,
@@ -3074,6 +3083,7 @@ enum RollingControlCommand {
     },
     ObservePublication {
         observation: RollingPublicationObservation,
+        deadline: Option<Instant>,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     CommitMedia {
@@ -3081,11 +3091,13 @@ enum RollingControlCommand {
         producer_attempt: u64,
         segment_index: Option<i64>,
         segment_end_ms: Option<i64>,
+        deadline: Instant,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     CommitGenerationMetadata {
         presentation_contract_fingerprint: String,
         kind: &'static str,
+        deadline: Instant,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
     Snapshot {
@@ -5323,9 +5335,10 @@ impl RollingControlActor {
                         ..
                     },
                     handoff: Some(_),
+                    deadline,
                     reply,
                     ..
-                } if !reply.is_closed()
+                } if !reply.is_closed() && rolling_now() < *deadline
             );
             self.fold_producer_blocks_at(published_at, preceding_producer);
             if !publication_may_win_exact_deadline {
@@ -5444,9 +5457,10 @@ impl RollingControlActor {
                 RollingControlCommand::AuthorizeResponsePublication {
                     publication,
                     handoff,
+                    deadline,
                     reply,
                 } => {
-                    if reply.is_closed() {
+                    if reply.is_closed() || rolling_now() >= deadline {
                         if let Some(handoff) = handoff {
                             handoff.settle(false);
                         }
@@ -5493,23 +5507,33 @@ impl RollingControlActor {
                     let _ =
                         reply.send(self.decision_applied_at(decision_sequence, installed_attempt));
                 }
-                RollingControlCommand::ObservePublication { observation, reply } => {
-                    let _ = reply.send(self.observe_publication_at(published_at, observation));
+                RollingControlCommand::ObservePublication {
+                    observation,
+                    deadline,
+                    reply,
+                } => {
+                    let accepted = !reply.is_closed()
+                        && deadline.is_none_or(|deadline| rolling_now() < deadline)
+                        && self.observe_publication_at(published_at, observation);
+                    let _ = reply.send(accepted);
                 }
                 RollingControlCommand::CommitMedia {
                     kind,
                     producer_attempt,
                     segment_index,
                     segment_end_ms,
+                    deadline,
                     reply,
                 } => {
-                    let committed = self.commit_media_at(
-                        published_at,
-                        kind,
-                        producer_attempt,
-                        segment_index,
-                        segment_end_ms,
-                    );
+                    let committed = !reply.is_closed()
+                        && rolling_now() < deadline
+                        && self.commit_media_at(
+                            published_at,
+                            kind,
+                            producer_attempt,
+                            segment_index,
+                            segment_end_ms,
+                        );
                     if committed {
                         transition.lease_deadline = self.deadline();
                     }
@@ -5518,13 +5542,16 @@ impl RollingControlActor {
                 RollingControlCommand::CommitGenerationMetadata {
                     presentation_contract_fingerprint,
                     kind,
+                    deadline,
                     reply,
                 } => {
-                    let committed = self.commit_generation_metadata_at(
-                        published_at,
-                        &presentation_contract_fingerprint,
-                        kind,
-                    );
+                    let committed = !reply.is_closed()
+                        && rolling_now() < deadline
+                        && self.commit_generation_metadata_at(
+                            published_at,
+                            &presentation_contract_fingerprint,
+                            kind,
+                        );
                     if committed {
                         transition.lease_deadline = self.deadline();
                     }
@@ -5776,6 +5803,62 @@ impl RollingControlHandle {
         permit.send(envelope);
         drop(transition);
         Ok(())
+    }
+
+    /// Publish an HTTP response command without allowing mailbox pressure or
+    /// the synchronous producer fence to outlive the request's one absolute
+    /// publication deadline. The actor receives the same deadline and checks
+    /// it again immediately before mutation, closing the cancellation race
+    /// between a timed-out oneshot receiver and later mailbox dispatch.
+    async fn enqueue_response_command_before(
+        &self,
+        command: RollingControlCommand,
+        deadline: Instant,
+    ) -> Result<(), ()> {
+        if rolling_now() >= deadline {
+            return Err(());
+        }
+        let permit = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sender.reserve(),
+        )
+        .await
+        .map_err(|_| ())?
+        .map_err(|_| ())?;
+        loop {
+            if rolling_now() >= deadline {
+                return Err(());
+            }
+            match self.producer_transition.try_lock() {
+                Ok(transition) => {
+                    if rolling_now() >= deadline {
+                        drop(transition);
+                        return Err(());
+                    }
+                    let envelope = self.producer_events.seal_command(command);
+                    permit.send(envelope);
+                    drop(transition);
+                    return Ok(());
+                }
+                Err(std::sync::TryLockError::Poisoned(error)) => {
+                    let transition = error.into_inner();
+                    if rolling_now() >= deadline {
+                        drop(transition);
+                        return Err(());
+                    }
+                    let envelope = self.producer_events.seal_command(command);
+                    permit.send(envelope);
+                    drop(transition);
+                    return Ok(());
+                }
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    // The match temporary may contain a non-Send mutex
+                    // guard in its other variants, so end its scope before
+                    // yielding back to the runtime.
+                }
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     #[cfg(test)]
@@ -6059,17 +6142,24 @@ impl RollingControlHandle {
         &self,
         publication: RollingResponsePublication,
         handoff: Option<RollingFirstMediaPublicationHandoff>,
+        deadline: Instant,
     ) -> Result<RollingResponseAuthorization, ResponsePublicationRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_command(RollingControlCommand::AuthorizeResponsePublication {
-            publication,
-            handoff,
-            reply,
-        })
+        self.enqueue_response_command_before(
+            RollingControlCommand::AuthorizeResponsePublication {
+                publication,
+                handoff,
+                deadline,
+                reply,
+            },
+            deadline,
+        )
         .await
         .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
-        response
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
             .await
+            .ok()
+            .and_then(Result::ok)
             .unwrap_or(Err(ResponsePublicationRejection::ControlUnavailable))
     }
 
@@ -6242,13 +6332,49 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_command(RollingControlCommand::ObservePublication { observation, reply })
+            .enqueue_command(RollingControlCommand::ObservePublication {
+                observation,
+                deadline: None,
+                reply,
+            })
             .await
             .is_err()
         {
             return false;
         }
         response.await.unwrap_or(false)
+    }
+
+    /// Publish an observation required by one HTTP playlist response within
+    /// that request's existing absolute deadline. Unlike the background flow
+    /// refresh above, a queued HTTP observation is fail-closed when its reply
+    /// receiver disappears or its deadline has elapsed, so cancelling the
+    /// request cannot mutate actor publication state later.
+    pub(crate) async fn observe_publication_before(
+        &self,
+        observation: RollingPublicationObservation,
+        deadline: Instant,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_response_command_before(
+                RollingControlCommand::ObservePublication {
+                    observation,
+                    deadline: Some(deadline),
+                    reply,
+                },
+                deadline,
+            )
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
     }
 
     pub(crate) async fn commit_media(
@@ -6257,42 +6383,60 @@ impl RollingControlHandle {
         producer_attempt: u64,
         segment_index: Option<i64>,
         segment_end_ms: Option<i64>,
+        deadline: Instant,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_command(RollingControlCommand::CommitMedia {
-                kind,
-                producer_attempt,
-                segment_index,
-                segment_end_ms,
-                reply,
-            })
+            .enqueue_response_command_before(
+                RollingControlCommand::CommitMedia {
+                    kind,
+                    producer_attempt,
+                    segment_index,
+                    segment_end_ms,
+                    deadline,
+                    reply,
+                },
+                deadline,
+            )
             .await
             .is_err()
         {
             return false;
         }
-        response.await.unwrap_or(false)
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
     }
 
     pub(crate) async fn commit_generation_metadata(
         &self,
         presentation_contract_fingerprint: &str,
         kind: &'static str,
+        deadline: Instant,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_command(RollingControlCommand::CommitGenerationMetadata {
-                presentation_contract_fingerprint: presentation_contract_fingerprint.to_owned(),
-                kind,
-                reply,
-            })
+            .enqueue_response_command_before(
+                RollingControlCommand::CommitGenerationMetadata {
+                    presentation_contract_fingerprint: presentation_contract_fingerprint.to_owned(),
+                    kind,
+                    deadline,
+                    reply,
+                },
+                deadline,
+            )
             .await
             .is_err()
         {
             return false;
         }
-        response.await.unwrap_or(false)
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
     }
 
     #[cfg(test)]
@@ -10784,6 +10928,7 @@ mod tests {
                         1,
                     ),
                     handoff: Some(handoff),
+                    deadline: rolling_now() + Duration::from_secs(1),
                     reply,
                 },
             })
@@ -10875,6 +11020,7 @@ mod tests {
                     command: RollingControlCommand::AuthorizeResponsePublication {
                         publication,
                         handoff: None,
+                        deadline: rolling_now() + Duration::from_secs(1),
                         reply,
                     },
                 })
@@ -10921,6 +11067,7 @@ mod tests {
                         1,
                     ),
                     handoff: Some(handoff),
+                    deadline: rolling_now() + Duration::from_secs(1),
                     reply,
                 },
             })
@@ -10940,6 +11087,114 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_response_commits_do_not_mutate_actor_delivery() {
+        let started = rolling_now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        let before = actor.snapshot_at(started);
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        drop(response);
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 1,
+                published_at: started + Duration::from_millis(1),
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::CommitMedia {
+                    kind: "cancelled-response-eof",
+                    producer_attempt: attempt,
+                    segment_index: Some(7),
+                    segment_end_ms: Some(28_000),
+                    deadline: rolling_now() + Duration::from_secs(1),
+                    reply,
+                },
+            })
+            .await;
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 2,
+                published_at: started + Duration::from_millis(2),
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::CommitMedia {
+                    kind: "expired-response-eof",
+                    producer_attempt: attempt,
+                    segment_index: Some(8),
+                    segment_end_ms: Some(32_000),
+                    deadline: rolling_now() - Duration::from_millis(1),
+                    reply,
+                },
+            })
+            .await;
+        assert!(!response.await.expect("expired commit reply"));
+        let after = actor.snapshot_at(started + Duration::from_millis(2));
+        assert_eq!(after.last_renewal_kind, before.last_renewal_kind);
+        assert_eq!(
+            after.delivery.fetched_segment,
+            before.delivery.fetched_segment
+        );
+        assert_eq!(
+            after.delivery.fetched_end_ms,
+            before.delivery.fetched_end_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_or_expired_http_observations_do_not_mutate_actor_delivery() {
+        let started = rolling_now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        let before = actor.snapshot_at(started).delivery;
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        drop(response);
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 1,
+                published_at: started + Duration::from_millis(1),
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::ObservePublication {
+                    observation: publication(attempt, true, 7, 28_000, None),
+                    deadline: Some(rolling_now() + Duration::from_secs(1)),
+                    reply,
+                },
+            })
+            .await;
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 2,
+                published_at: started + Duration::from_millis(2),
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::ObservePublication {
+                    observation: publication(attempt, true, 8, 32_000, None),
+                    deadline: Some(rolling_now() - Duration::from_millis(1)),
+                    reply,
+                },
+            })
+            .await;
+        assert!(!response.await.expect("expired observation reply"));
+        assert_eq!(
+            actor
+                .snapshot_at(started + Duration::from_millis(2))
+                .delivery,
+            before
+        );
     }
 
     #[tokio::test]
@@ -10968,6 +11223,7 @@ mod tests {
                         1,
                     ),
                     handoff: Some(handoff),
+                    deadline: rolling_now() + Duration::from_secs(1),
                     reply,
                 },
             })

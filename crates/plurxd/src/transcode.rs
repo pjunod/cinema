@@ -190,6 +190,17 @@ const TRANSCODE_START_CUSHION_MS: i64 = transcode::SEGMENT_SECONDS as i64 * 2 * 
 /// survives a dropped HTTP request and a failed session still exits
 /// immediately.
 const PLAYLIST_WAIT_POLL: Duration = Duration::from_millis(100);
+
+async fn wait_for_playlist_poll_before(deadline: Instant) {
+    let now = tokio::time::Instant::now().into_std();
+    if now >= deadline {
+        return;
+    }
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        (now + PLAYLIST_WAIT_POLL).min(deadline),
+    ))
+    .await;
+}
 /// Compatibility mirror of the actor's bounded hardware startup budget. It
 /// sizes only the HTTP playlist wait; it is not a timer or recovery owner.
 /// The prepublication actor exclusively commits the 12-second verdict.
@@ -2075,14 +2086,15 @@ async fn finish_prepublication_cleanup_after_reap(session: &Session) {
     }
 }
 
-/// One detached cleanup owner survives cancellation of whichever request or
-/// executor discovered the failure. It never clears scratch or returns an
-/// admission resource until the exact supervised child has confirmed reap.
-/// A failed first reap terminalizes serving (the typed Session failure was
-/// stored before this task was spawned) but retains the Session, child handle,
-/// and permits while retrying physical convergence.
+/// One detached cleanup owner survives cancellation of whichever request,
+/// executor, or routine retirement transferred prepublication ownership. It
+/// never clears scratch or returns an admission resource until the exact
+/// supervised child has confirmed reap. A failed first reap terminalizes
+/// serving but retains the Session, child handle, and permits while retrying
+/// physical convergence; callers decide separately whether to record a typed
+/// producer failure.
 #[cfg(any(test, feature = "live-hls-recovery"))]
-async fn own_prepublication_failure_cleanup(
+async fn own_prepublication_cleanup(
     session: Arc<Session>,
     first_attempt_settled: tokio::sync::oneshot::Sender<()>,
 ) {
@@ -2126,16 +2138,15 @@ async fn own_prepublication_failure_cleanup(
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
-async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String) {
-    // Publish the typed local failure before actor End can make a concurrent
-    // playlist lookup collapse the generation into an anonymous 404.
-    session.fail(PlaylistError::SessionFailed(reason));
+fn spawn_prepublication_cleanup_owner(
+    session: &Arc<Session>,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
     if session
         .prepublication_cleanup_active
         .compare_exchange(false, true, AcqRel, Acquire)
         .is_err()
     {
-        return;
+        return None;
     }
     let (first_attempt_settled, settled) = tokio::sync::oneshot::channel();
     let cleanup_session = Arc::clone(session);
@@ -2143,8 +2154,19 @@ async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String)
         // The cleanup owner is detached before the caller awaits it. Dropping
         // the HTTP/start/executor future therefore cannot drop the child or
         // release its admission half-way through a reap.
-        own_prepublication_failure_cleanup(cleanup_session, first_attempt_settled).await;
+        own_prepublication_cleanup(cleanup_session, first_attempt_settled).await;
     });
+    Some(settled)
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String) {
+    // Publish the typed local failure before actor End can make a concurrent
+    // playlist lookup collapse the generation into an anonymous 404.
+    session.fail(PlaylistError::SessionFailed(reason));
+    let Some(settled) = spawn_prepublication_cleanup_owner(session) else {
+        return;
+    };
     let _ = settled.await;
 }
 
@@ -2559,6 +2581,22 @@ fn frozen_video_frame_rate(probe_json: Option<&str>) -> Option<f64> {
 /// it. The attempt cannot be reconstructed from current session state: actor
 /// admission advances before a replacement kills its predecessor, and that
 /// exact overlap is where an untagged exit gets blamed on the successor.
+#[cfg(test)]
+struct LifecycleTestPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl LifecycleTestPause {
+    fn new() -> Self {
+        Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
 struct AttemptChild {
     producer_attempt: u64,
     pid: Option<u32>,
@@ -2569,6 +2607,10 @@ struct AttemptChild {
     signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
     #[cfg(test)]
     signal_after_flow_reservation_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
+    /// Test-only seam after exact-attempt termination has been requested but
+    /// before the supervisor can observe and publish the terminal wait.
+    #[cfg(test)]
+    terminate_before_reap_pause: Arc<std::sync::Mutex<Option<Arc<LifecycleTestPause>>>>,
 }
 
 #[derive(Clone)]
@@ -2618,6 +2660,11 @@ impl AttemptChild {
             Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
         #[cfg(test)]
         let supervisor_flow_reservation_pause = Arc::clone(&signal_after_flow_reservation_pause);
+        #[cfg(test)]
+        let terminate_before_reap_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<LifecycleTestPause>>));
+        #[cfg(test)]
+        let supervisor_terminate_pause = Arc::clone(&terminate_before_reap_pause);
         tokio::spawn(async move {
             let mut command_open = true;
             let mut terminate_replies = Vec::new();
@@ -2720,6 +2767,16 @@ impl AttemptChild {
                                         if let Some(reply) = reply {
                                             terminate_replies.push(reply);
                                         }
+                                        #[cfg(test)]
+                                        let pause = supervisor_terminate_pause
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .take();
+                                        #[cfg(test)]
+                                        if let Some(pause) = pause {
+                                            pause.reached.notify_one();
+                                            pause.release.notified().await;
+                                        }
                                     }
                                     Err(error) => {
                                         if let Some(reply) = reply {
@@ -2757,6 +2814,8 @@ impl AttemptChild {
             signal_after_authorization_pause,
             #[cfg(test)]
             signal_after_flow_reservation_pause,
+            #[cfg(test)]
+            terminate_before_reap_pause,
         }
     }
 
@@ -3131,6 +3190,11 @@ impl RollingTerminalOperation {
 
 struct Session {
     dir: PathBuf,
+    /// Process-local response incarnation. The bearer session id can be reused
+    /// by a durable reattachment, while segment names and lengths can repeat
+    /// across producer attempts. Strong HTTP validators therefore need this
+    /// additional immutable coordinate.
+    response_incarnation: uuid::Uuid,
     frozen_presentation: Option<FrozenHlsPresentation>,
     /// True for generations whose response publication is admitted by the
     /// explicit prepublication actor. Copy/cache keep their merged legacy
@@ -3149,9 +3213,10 @@ struct Session {
     /// this shared completion, not a request-local handoff future.
     first_media_handoff_applied: AtomicBool,
     first_media_handoff_notify: tokio::sync::Notify,
-    /// Exactly one cancellation-safe task owns failed prepublication reap and
-    /// resource settlement. It remains true while an unconfirmed child keeps
-    /// the Session and its admission resources retained for repair.
+    /// Exactly one cancellation-safe task owns actor-managed prepublication
+    /// reap and resource settlement, whether entered by failure or routine
+    /// retirement. It remains true while an unconfirmed child keeps the
+    /// Session and its admission resources retained for repair.
     prepublication_cleanup_active: AtomicBool,
     /// The legacy lifetime watcher may start once, and only after the actor
     /// has ended prepublication ownership. This remains until the later
@@ -3233,6 +3298,11 @@ struct Session {
     /// paused replacement is released.
     #[cfg(test)]
     retirement_started: AtomicBool,
+    /// Test-only seam after routine retirement has handed prepublication
+    /// cleanup to its detached owner but before any cancellation-sensitive
+    /// registry work. It proves caller cancellation cannot revoke ownership.
+    #[cfg(test)]
+    retirement_cleanup_handoff_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
     /// Served from the pre-transcode cache.
     ///
     /// Two things follow, and the second is the dangerous one. A cached
@@ -3604,7 +3674,14 @@ impl Session {
         (*projected_attempt == producer_attempt).then(|| self.playlist_published.load(Relaxed))
     }
 
-    async fn publish_compatibility_playlist(&self, producer_attempt: u64) -> bool {
+    async fn publish_compatibility_playlist(
+        &self,
+        producer_attempt: u64,
+        deadline: Instant,
+    ) -> bool {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
+        }
         #[cfg(test)]
         {
             let pause = self
@@ -3616,6 +3693,9 @@ impl Session {
                 pause.wait().await;
                 pause.wait().await;
             }
+        }
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
         }
         let projected_attempt = self
             .compatibility_attempt
@@ -3721,7 +3801,13 @@ impl Session {
     #[cfg(test)]
     async fn touch_attempt_if_active(&self, kind: &'static str, producer_attempt: u64) -> bool {
         self.control
-            .commit_media(kind, producer_attempt, None, None)
+            .commit_media(
+                kind,
+                producer_attempt,
+                None,
+                None,
+                tokio::time::Instant::now().into_std() + Duration::from_secs(5),
+            )
             .await
     }
 
@@ -4188,8 +4274,8 @@ impl Session {
         self.release_hardware_after_confirmed_reap();
     }
 
-    /// Bypass the failed-reap retention fence only when the caller has either
-    /// confirmed physical reap or is intentionally transferring a live
+    /// Bypass the prepublication-reap retention fence only when the caller has
+    /// either confirmed physical reap or is intentionally transferring a live
     /// hardware producer to its admitted software successor.
     fn release_hardware_after_confirmed_reap(&self) {
         let _ = self.hw_slot.lock().expect("hw slot mutex").take();
@@ -4687,6 +4773,44 @@ impl SegmentFile {
 #[derive(Clone)]
 pub(crate) struct MediaResponseOwner(MediaResponseOwnerKind);
 
+impl MediaResponseOwner {
+    /// A strong validator for one rolling object. VOD supplies its own
+    /// artifact digest; rolling scratch needs both the process-local Session
+    /// incarnation and exact producer attempt so an ABA reuse can never turn
+    /// different bytes with the same length into a false 304.
+    pub(crate) fn rolling_etag(
+        &self,
+        session_id: &str,
+        object_name: &str,
+        len: u64,
+    ) -> Option<String> {
+        let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &self.0
+        else {
+            return None;
+        };
+        let identity = format!(
+            "{session_id}\0{}\0{producer_attempt}\0{object_name}\0{len}",
+            session.response_incarnation
+        );
+        Some(format!(
+            "\"{}\"",
+            hex::encode(Sha256::digest(identity.as_bytes()))
+        ))
+    }
+}
+
+/// Why exact response publication could not linearize. HTTP must distinguish
+/// a reusable capability whose owner disappeared from a live incarnation that
+/// merely changed attempt/decision state while the response was prepared.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MediaResponsePublicationRejection {
+    OwnerGone,
+    StateChanged,
+}
+
 /// A typed playlist refusal plus the exact rolling incarnation that produced
 /// it. `SessionGone` deliberately carries no owner; live startup and immutable
 /// failure responses must revalidate this owner before HTTP exposes them.
@@ -4711,6 +4835,10 @@ impl PlaylistPublicationError {
                 producer_attempt: session.control.current_producer_attempt(),
             })),
         }
+    }
+
+    fn without_owner(error: PlaylistError) -> Self {
+        Self { error, owner: None }
     }
 }
 
@@ -8894,12 +9022,16 @@ impl TranscodeManager {
         session: &Arc<Session>,
         reason: &'static str,
     ) {
-        if let Some(location) = &session.cache_location {
-            self.invalidate_cache_location(location, reason).await;
-        }
+        // Publish the response-visible verdict before any database, mount, or
+        // retirement await. A bounded playlist request may cancel this cleanup
+        // at its deadline, but it must still return the exact integrity
+        // failure instead of relabeling a known-bad cache entry as "starting".
         session.fail(PlaylistError::SessionFailed(
             "cached media failed an integrity check".to_owned(),
         ));
+        if let Some(location) = &session.cache_location {
+            self.invalidate_cache_location(location, reason).await;
+        }
         let _ = self.retire_session(session_id, session).await;
     }
 
@@ -9526,6 +9658,7 @@ impl TranscodeManager {
         );
         let session = Arc::new(Session {
             dir,
+            response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: false,
             actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
@@ -9566,6 +9699,8 @@ impl TranscodeManager {
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
             cached: true,
             _cache_reader: cache_reader,
             subtitle_handle: None,
@@ -12420,9 +12555,11 @@ impl TranscodeManager {
                 .collect()
         };
         for (session_id, session) in doomed {
-            // Retirement releases both admission pools before the caller goes
-            // on to ask for a slot of its own. A player replacing its own
-            // session must not queue behind the session it just replaced.
+            // Actor-managed prepublication retirement transfers child,
+            // scratch, and admission ownership to confirmed-reap cleanup.
+            // The replacement may therefore queue for the predecessor's slot
+            // until physical termination is proven instead of overcommitting
+            // a scarce encoder or software budget.
             if !self
                 .retire_session_until(&session_id, &session, deadline)
                 .await?
@@ -12880,6 +13017,7 @@ impl TranscodeManager {
 
         let session = Arc::new(Session {
             dir: dir.clone(),
+            response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: true,
             actor_prepublication_transcode: Arc::new(AtomicBool::new(true)),
@@ -12920,6 +13058,8 @@ impl TranscodeManager {
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
             cached: false,
             _cache_reader: None,
             subtitle_handle,
@@ -13564,6 +13704,7 @@ impl TranscodeManager {
             // reads its range off the source and `preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             dir: dir.clone(),
+            response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: false,
             actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
@@ -13604,6 +13745,8 @@ impl TranscodeManager {
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
             cached: false,
             _cache_reader: None,
             subtitle_handle: None,
@@ -14490,10 +14633,13 @@ impl TranscodeManager {
     /// Linearize manager retirement with producer replacement.
     ///
     /// Replacement holds `child_transition` until a successor is published.
-    /// Teardown takes the same gate before removing the manager entry and
-    /// keeps it through process kill and scratch deletion. Whichever wins is
-    /// therefore complete before the other can act: a late replacement sees
-    /// `retired`, while a late retirement kills the published successor.
+    /// Teardown takes the same gate before removing the manager entry. Legacy
+    /// teardown keeps it through process kill and scratch deletion; an
+    /// actor-managed prepublication generation instead transfers those
+    /// resources to the detached confirmed-reap owner before any cancellable
+    /// registry work. Whichever wins still fixes the exact child: a late
+    /// replacement sees `retired`, while late retirement owns the installed
+    /// successor until terminal proof.
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
         self.retire_session_until(session_id, session, None)
             .await
@@ -14520,6 +14666,10 @@ impl TranscodeManager {
         if session.prepublication_cleanup_active.load(Acquire) {
             return Ok(false);
         }
+        #[cfg(any(test, feature = "live-hls-recovery"))]
+        let mut prepublication_cleanup_owned = false;
+        #[cfg(not(any(test, feature = "live-hls-recovery")))]
+        let prepublication_cleanup_owned = false;
         let removed = {
             let mut sessions = match deadline {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
@@ -14534,6 +14684,30 @@ impl TranscodeManager {
                 if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                     return Err(replacement_deadline_error());
                 }
+                #[cfg(any(test, feature = "live-hls-recovery"))]
+                if session.actor_managed_response_publication
+                    && session.actor_prepublication_transcode.load(Acquire)
+                {
+                    // This task may be cancelled by the explicit stop/start
+                    // deadline while it awaits actor or registry work. Hand
+                    // the exact child, scratch, and admissions to an
+                    // independent owner first. A lost CAS means another
+                    // cleanup owner already holds the same resources.
+                    let _ = spawn_prepublication_cleanup_owner(session);
+                    prepublication_cleanup_owned = true;
+
+                    #[cfg(test)]
+                    let pause = session
+                        .retirement_cleanup_handoff_pause
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .take();
+                    #[cfg(test)]
+                    if let Some(pause) = pause {
+                        pause.reached.notify_one();
+                        pause.release.notified().await;
+                    }
+                }
                 session.end_activity().await;
                 sessions.remove(session_id);
                 self.active_session_count.store(sessions.len(), Relaxed);
@@ -14542,6 +14716,12 @@ impl TranscodeManager {
         };
         if !removed {
             return Ok(false);
+        }
+        if prepublication_cleanup_owned {
+            // The detached owner is waiting on this gate. It alone may clear
+            // scratch or release either admission after exact terminal proof.
+            drop(_transition);
+            return Ok(true);
         }
         session.release_hardware();
         session.release_software();
@@ -14903,26 +15083,37 @@ impl TranscodeManager {
         session_id: &str,
         owner: &MediaResponseOwner,
         publication: MediaResponsePublication,
-    ) -> Option<MediaResponseAuthorization> {
+        deadline: Instant,
+    ) -> Result<MediaResponseAuthorization, MediaResponsePublicationRejection> {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
         if let MediaResponseOwnerKind::Rolling {
             session,
             producer_attempt,
         } = &owner.0
         {
-            let current = self.sessions.lock().await.get(session_id).cloned();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
             {
-                return None;
+                return Err(MediaResponsePublicationRejection::OwnerGone);
             }
             if !session.actor_managed_response_publication {
                 if session.control.current_producer_attempt() != *producer_attempt
                     || session.control.is_retired()
                 {
-                    return None;
+                    return Err(MediaResponsePublicationRejection::StateChanged);
                 }
-                return Some(MediaResponseAuthorization {
+                return Ok(MediaResponseAuthorization {
                     session_id: session_id.to_owned(),
                     owner: owner.clone(),
                     kind: publication.kind,
@@ -14935,19 +15126,34 @@ impl TranscodeManager {
             // not the global registry lock: a concurrent second response
             // cannot emit while the actor has closed prepublication but the
             // retained lifetime owner is not installed yet.
-            let _response_transition = session.response_publication_transition.lock().await;
-            let current = self.sessions.lock().await.get(session_id).cloned();
+            let _response_transition = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                session.response_publication_transition.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?;
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
             {
-                return None;
+                return Err(MediaResponsePublicationRejection::OwnerGone);
             }
             let object = publication.rolling_object();
             let mut rolling_generation_metadata_fingerprint = None;
             let actor_publication = match publication.binding {
                 MediaResponsePublicationBinding::GenerationMetadata => {
-                    let frozen = session.frozen_presentation.as_ref()?;
+                    let frozen = session
+                        .frozen_presentation
+                        .as_ref()
+                        .ok_or(MediaResponsePublicationRejection::StateChanged)?;
                     if frozen
                         .sealed_stable_master_contract
                         .as_ref()
@@ -14993,19 +15199,24 @@ impl TranscodeManager {
             };
             let actor_authorization = session
                 .control
-                .authorize_response_publication(actor_publication, actor_handoff)
+                .authorize_response_publication(actor_publication, actor_handoff, deadline)
                 .await
-                .ok()?;
+                .map_err(|_| MediaResponsePublicationRejection::StateChanged)?;
             if actor_authorization.first_producer_media_publication {
                 let Some(applied) = first_media_applied else {
-                    return None;
+                    return Err(MediaResponsePublicationRejection::StateChanged);
                 };
-                if !applied.await.unwrap_or(false) {
-                    return None;
+                if !tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), applied)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
                 }
             }
             if attempt_media_publication && session.actor_prepublication_transcode.load(Acquire) {
-                return None;
+                return Err(MediaResponsePublicationRejection::StateChanged);
             }
             if attempt_media_publication {
                 loop {
@@ -15016,20 +15227,35 @@ impl TranscodeManager {
                     if session.first_media_handoff_applied.load(Acquire) {
                         break;
                     }
-                    applied.await;
+                    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), applied)
+                        .await
+                        .is_err()
+                    {
+                        return Err(MediaResponsePublicationRejection::StateChanged);
+                    }
                 }
             }
-            let current = self.sessions.lock().await.get(session_id).cloned();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
             {
-                return None;
+                return Err(MediaResponsePublicationRejection::OwnerGone);
             }
             if object == crate::playback_control::RollingResponseObject::VideoMediaPlaylist
-                && !session
-                    .publish_compatibility_playlist(*producer_attempt)
-                    .await
+                && !tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    session.publish_compatibility_playlist(*producer_attempt, deadline),
+                )
+                .await
+                .unwrap_or(false)
             {
                 #[cfg(any(test, feature = "live-hls-recovery"))]
                 fail_prepublication_transaction(
@@ -15040,9 +15266,9 @@ impl TranscodeManager {
                 .await;
                 #[cfg(not(any(test, feature = "live-hls-recovery")))]
                 session.control.fence_unavailable();
-                return None;
+                return Err(MediaResponsePublicationRejection::StateChanged);
             }
-            return Some(MediaResponseAuthorization {
+            return Ok(MediaResponseAuthorization {
                 session_id: session_id.to_owned(),
                 owner: owner.clone(),
                 kind: publication.kind,
@@ -15054,10 +15280,16 @@ impl TranscodeManager {
         let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
             unreachable!("rolling response owner returned above")
         };
-        if !self.vod.response_owner_is_live(session_id, vod_owner).await {
-            return None;
+        if !tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.response_owner_is_live(session_id, vod_owner),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
         }
-        Some(MediaResponseAuthorization {
+        Ok(MediaResponseAuthorization {
             session_id: session_id.to_owned(),
             owner: owner.clone(),
             kind: publication.kind,
@@ -15075,20 +15307,28 @@ impl TranscodeManager {
         session_id: &str,
         owner: &MediaResponseOwner,
         error: &PlaylistError,
-    ) -> bool {
+        deadline: Instant,
+    ) -> Result<(), MediaResponsePublicationRejection> {
         let MediaResponseOwnerKind::Rolling {
             session,
             producer_attempt,
         } = &owner.0
         else {
-            return false;
+            return Err(MediaResponsePublicationRejection::OwnerGone);
         };
-        let current = self.sessions.lock().await.get(session_id).cloned();
+        let current = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        .get(session_id)
+        .cloned();
         if !current
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, session))
         {
-            return false;
+            return Err(MediaResponsePublicationRejection::OwnerGone);
         }
         let authorized = match error {
             PlaylistError::StartupTimedOut(_) if session.actor_managed_response_publication => {
@@ -15101,6 +15341,7 @@ impl TranscodeManager {
                             *producer_attempt,
                         ),
                         None,
+                        deadline,
                     )
                     .await
                     .is_ok()
@@ -15115,12 +15356,24 @@ impl TranscodeManager {
             PlaylistError::SessionGone => false,
         };
         if !authorized {
-            return false;
+            return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let current = self.sessions.lock().await.get(session_id).cloned();
-        current
+        let current = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        .get(session_id)
+        .cloned();
+        if current
             .as_ref()
             .is_some_and(|current| Arc::ptr_eq(current, session))
+        {
+            Ok(())
+        } else {
+            Err(MediaResponsePublicationRejection::OwnerGone)
+        }
     }
 
     /// Distinguish a stale attempt/decision classification from replacement
@@ -15131,15 +15384,22 @@ impl TranscodeManager {
         &self,
         session_id: &str,
         owner: &MediaResponseOwner,
+        deadline: Instant,
     ) -> bool {
         let MediaResponseOwnerKind::Rolling { session, .. } = &owner.0 else {
             return false;
         };
-        self.sessions
-            .lock()
-            .await
-            .get(session_id)
-            .is_some_and(|current| Arc::ptr_eq(current, session))
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .ok()
+        .is_some_and(|sessions| {
+            sessions
+                .get(session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+        })
     }
 
     /// Consume an exact response authorization at advertised EOF. The token
@@ -15149,50 +15409,68 @@ impl TranscodeManager {
         self: &Arc<Self>,
         authorization: MediaResponseAuthorization,
         complete_object: bool,
-    ) -> bool {
+        deadline: Instant,
+    ) -> Result<(), MediaResponsePublicationRejection> {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
         if let Some(presentation_contract_fingerprint) = authorization
             .rolling_generation_metadata_fingerprint
             .as_deref()
         {
             let MediaResponseOwnerKind::Rolling { session, .. } = &authorization.owner.0 else {
-                return false;
+                return Err(MediaResponsePublicationRejection::StateChanged);
             };
-            let current = self
-                .sessions
-                .lock()
-                .await
-                .get(&authorization.session_id)
-                .cloned();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(&authorization.session_id)
+            .cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
-                || !session
-                    .control
-                    .commit_generation_metadata(
-                        presentation_contract_fingerprint,
-                        authorization.kind,
-                    )
-                    .await
             {
-                return false;
+                return Err(MediaResponsePublicationRejection::OwnerGone);
             }
-            let current = self
-                .sessions
-                .lock()
+            if !session
+                .control
+                .commit_generation_metadata(
+                    presentation_contract_fingerprint,
+                    authorization.kind,
+                    deadline,
+                )
                 .await
-                .get(&authorization.session_id)
-                .cloned();
-            return current
+            {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(&authorization.session_id)
+            .cloned();
+            return if current
                 .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, session));
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                Ok(())
+            } else {
+                Err(MediaResponsePublicationRejection::OwnerGone)
+            };
         }
         let committed = self
-            .commit_resolved_media(
+            .commit_resolved_media_before(
                 &authorization.session_id,
                 &authorization.owner,
                 authorization.kind,
                 authorization.object_name.as_deref(),
                 complete_object,
+                deadline,
             )
             .await;
         if committed {
@@ -15202,8 +15480,58 @@ impl TranscodeManager {
                 authorization.object_name.as_deref(),
                 complete_object,
             );
+            Ok(())
+        } else {
+            Err(self
+                .response_publication_rejection(
+                    &authorization.session_id,
+                    &authorization.owner,
+                    deadline,
+                )
+                .await)
         }
-        committed
+    }
+
+    async fn response_publication_rejection(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        deadline: Instant,
+    ) -> MediaResponsePublicationRejection {
+        match &owner.0 {
+            MediaResponseOwnerKind::Rolling { session, .. } => {
+                let Ok(current) = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.sessions.lock(),
+                )
+                .await
+                else {
+                    return MediaResponsePublicationRejection::StateChanged;
+                };
+                let current = current.get(session_id).cloned();
+                if current
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, session))
+                {
+                    MediaResponsePublicationRejection::StateChanged
+                } else {
+                    MediaResponsePublicationRejection::OwnerGone
+                }
+            }
+            MediaResponseOwnerKind::Vod(owner) => {
+                if tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.vod.response_owner_is_live(session_id, owner),
+                )
+                .await
+                .unwrap_or(true)
+                {
+                    MediaResponsePublicationRejection::StateChanged
+                } else {
+                    MediaResponsePublicationRejection::OwnerGone
+                }
+            }
+        }
     }
 
     /// Commit a completed response against its resolved incarnation.
@@ -15219,12 +15547,43 @@ impl TranscodeManager {
         object_name: Option<&str>,
         complete_object: bool,
     ) -> bool {
+        self.commit_resolved_media_before(
+            session_id,
+            owner,
+            kind,
+            object_name,
+            complete_object,
+            tokio::time::Instant::now().into_std() + Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn commit_resolved_media_before(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        kind: &'static str,
+        object_name: Option<&str>,
+        complete_object: bool,
+        deadline: Instant,
+    ) -> bool {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
+        }
         if let MediaResponseOwnerKind::Rolling {
             session,
             producer_attempt,
         } = &owner.0
         {
-            let current = self.sessions.lock().await.get(session_id).cloned();
+            let Ok(current) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            else {
+                return false;
+            };
+            let current = current.get(session_id).cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
@@ -15235,13 +15594,27 @@ impl TranscodeManager {
                 .then(|| object_name.and_then(segment_index))
                 .flatten();
             let fetched_end_ms = if let Some(index) = fetched_segment {
-                session.segments.lock().await.end_ms_of(index)
+                let Ok(segments) = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    session.segments.lock(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                segments.end_ms_of(index)
             } else {
                 None
             };
             if !session
                 .control
-                .commit_media(kind, *producer_attempt, fetched_segment, fetched_end_ms)
+                .commit_media(
+                    kind,
+                    *producer_attempt,
+                    fetched_segment,
+                    fetched_end_ms,
+                    deadline,
+                )
                 .await
             {
                 return false;
@@ -15254,11 +15627,26 @@ impl TranscodeManager {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone();
                 if let Some(pause) = pause {
-                    pause.wait().await;
-                    pause.wait().await;
+                    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                        pause.wait().await;
+                        pause.wait().await;
+                    })
+                    .await
+                    .is_err()
+                    {
+                        return false;
+                    }
                 }
             }
-            let current = self.sessions.lock().await.get(session_id).cloned();
+            let Ok(current) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            else {
+                return false;
+            };
+            let current = current.get(session_id).cloned();
             if !current
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, session))
@@ -15294,9 +15682,12 @@ impl TranscodeManager {
         let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
             unreachable!("rolling response owner returned above")
         };
-        self.vod
-            .commit_resolved_media(session_id, owner, vod_index)
-            .await
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.commit_resolved_media(session_id, owner, vod_index),
+        )
+        .await
+        .unwrap_or(false)
     }
 
     /// Verify response ownership without renewing the lease or moving the
@@ -15494,7 +15885,7 @@ impl TranscodeManager {
     /// [`PlaylistError`] for why an anonymous `None` was not survivable
     /// downstream.
     #[cfg(test)]
-    pub async fn playlist(&self, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
+    pub async fn playlist(self: &Arc<Self>, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
         self.playlist_with_owner(session_id)
             .await
             .map(|(bytes, _)| bytes)
@@ -15506,17 +15897,88 @@ impl TranscodeManager {
     /// must carry this owner through their own response commit rather than
     /// reconstructing ownership from a reusable session id afterward.
     pub(crate) async fn playlist_with_owner(
-        &self,
+        self: &Arc<Self>,
         session_id: &str,
     ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+        self.playlist_with_owner_before(session_id, self.playlist_request_deadline())
+            .await
+    }
+
+    /// One absolute HTTP patience boundary. Reclassification may inspect a
+    /// newer attempt, but it must never mint another complete startup budget.
+    pub(crate) fn playlist_request_deadline(&self) -> Instant {
+        tokio::time::Instant::now().into_std() + self.playlist_wait()
+    }
+
+    pub(crate) async fn playlist_with_owner_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+        let budget = self.playlist_wait();
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(PlaylistPublicationError::without_owner(
+                PlaylistError::StartupTimedOut(budget),
+            ));
+        }
         // Resolve the exact registry incarnation even if its actor has just
         // retired. A prepublication failure is stored before End and must
         // remain publishable as its typed 502 while that exact Session still
         // occupies the id; prefiltering retired actors here would erase the
         // failure into an anonymous 404 before the owner fence can validate it.
-        let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
+        let session = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .ok()
+        .and_then(|sessions| sessions.get(session_id).cloned());
+        let Some(session) = session else {
+            if tokio::time::Instant::now().into_std() >= deadline {
+                return Err(PlaylistPublicationError::without_owner(
+                    PlaylistError::StartupTimedOut(budget),
+                ));
+            }
             return Err(PlaylistPublicationError::gone());
         };
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.playlist_with_owner_for_session_before(
+                session_id,
+                Arc::clone(&session),
+                deadline,
+                budget,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) if session.failed.load(Relaxed) => Err(PlaylistPublicationError::for_session(
+                session.failure_reason(),
+                &session,
+            )),
+            Err(_) if session.control.is_retired() => Err(PlaylistPublicationError::gone()),
+            Err(_) => {
+                tracing::warn!(
+                    session = %session_log_id(session_id),
+                    waited_s = budget.as_secs(),
+                    "playlist preparation exhausted its one absolute HTTP budget"
+                );
+                Err(PlaylistPublicationError::for_session(
+                    PlaylistError::StartupTimedOut(budget),
+                    &session,
+                ))
+            }
+        }
+    }
+
+    async fn playlist_with_owner_for_session_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: Arc<Session>,
+        deadline: Instant,
+        budget: Duration,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
         // Hold the request until the playlist exists. On the transcode path
         // that is a beat after ffmpeg starts; on the copy path it is the
         // publish gate filling (COPY_PUBLISH_GATE_SECS), which on a
@@ -15531,8 +15993,6 @@ impl TranscodeManager {
         // spends one of a single error retry. A failed session still returns
         // immediately — the budget below is only ever spent on a session that
         // is genuinely still starting, never on one that has already lost.
-        let budget = self.playlist_wait();
-        let deadline = Instant::now() + budget;
         loop {
             // `touch` resolves the Arc once, but retirement is allowed to
             // remove that session while this request is waiting. The Arc
@@ -15550,13 +16010,13 @@ impl TranscodeManager {
                 return Err(PlaylistPublicationError::gone());
             }
             let Some(producer_attempt) = session.coherent_path_producer_attempt().await else {
-                if Instant::now() >= deadline {
+                if tokio::time::Instant::now().into_std() >= deadline {
                     return Err(PlaylistPublicationError::for_session(
                         PlaylistError::StartupTimedOut(budget),
                         &session,
                     ));
                 }
-                tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
+                wait_for_playlist_poll_before(deadline).await;
                 continue;
             };
             // A startup request is allowed to span a pre-publication
@@ -15631,13 +16091,13 @@ impl TranscodeManager {
                                     &session,
                                 ));
                             }
-                            if Instant::now() >= deadline {
+                            if tokio::time::Instant::now().into_std() >= deadline {
                                 return Err(PlaylistPublicationError::for_session(
                                     PlaylistError::StartupTimedOut(budget),
                                     &session,
                                 ));
                             }
-                            tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
+                            wait_for_playlist_poll_before(deadline).await;
                             continue;
                         }
                     }
@@ -15651,7 +16111,7 @@ impl TranscodeManager {
                     };
                     if !session
                         .control
-                        .observe_publication(
+                        .observe_publication_before(
                             crate::playback_control::RollingPublicationObservation {
                                 producer_attempt,
                                 playlist_ready: true,
@@ -15664,6 +16124,7 @@ impl TranscodeManager {
                                 resolved_fetched_segment: None,
                                 resolved_fetched_end_ms: None,
                             },
+                            deadline,
                         )
                         .await
                     {
@@ -15672,9 +16133,13 @@ impl TranscodeManager {
                         }
                         continue;
                     }
-                    // The playlist just told us what is published — the one
-                    // moment the segment index can be refreshed for free.
-                    self.flow_control(&session, session_id).await;
+                    // The exact bytes above are the response prerequisite.
+                    // Refreshing storage/accounting and signalling the child
+                    // is consequential background work, so queue it on the
+                    // session-owned worker instead of extending (or inheriting
+                    // cancellation from) this HTTP request.
+                    self.ensure_flow_worker(session_id, Arc::clone(&session));
+                    session.control.request_flow();
                     if session.control.is_retired() {
                         if session.failed.load(Relaxed) {
                             return Err(PlaylistPublicationError::for_session(
@@ -15722,21 +16187,27 @@ impl TranscodeManager {
                                     now_unix.saturating_sub(session.started_unix),
                                 "served HLS playlist began sliding"
                             );
-                            self.emit_session_event(
-                                session_id,
-                                &session,
-                                "playlist_slide",
-                                SessionEventFields {
-                                    extra: Some(
-                                        serde_json::json!({
-                                            "first_retained_index": first_retained_index
-                                        })
-                                        .to_string(),
-                                    ),
-                                    ..SessionEventFields::default()
-                                },
-                            )
-                            .await;
+                            let manager = Arc::clone(self);
+                            let event_session = Arc::clone(&session);
+                            let event_session_id = session_id.to_owned();
+                            tokio::spawn(async move {
+                                manager
+                                    .emit_session_event(
+                                        &event_session_id,
+                                        &event_session,
+                                        "playlist_slide",
+                                        SessionEventFields {
+                                            extra: Some(
+                                                serde_json::json!({
+                                                    "first_retained_index": first_retained_index
+                                                })
+                                                .to_string(),
+                                            ),
+                                            ..SessionEventFields::default()
+                                        },
+                                    )
+                                    .await;
+                            });
                         }
                     }
                     if session.control.is_retired() {
@@ -15802,7 +16273,7 @@ impl TranscodeManager {
             // session that has already lost must not be reported as one that
             // merely ran out of time, and a session that is still inside the
             // recovery path must not be reported as terminal.
-            if Instant::now() >= deadline {
+            if tokio::time::Instant::now().into_std() >= deadline {
                 tracing::warn!(
                     session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
@@ -15814,7 +16285,7 @@ impl TranscodeManager {
                     &session,
                 ));
             }
-            tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
+            wait_for_playlist_poll_before(deadline).await;
         }
     }
 
@@ -17635,6 +18106,7 @@ fn test_session(dir: PathBuf) -> Session {
     let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
+        response_incarnation: uuid::Uuid::new_v4(),
         frozen_presentation: None,
         actor_managed_response_publication: false,
         actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
@@ -17666,6 +18138,8 @@ fn test_session(dir: PathBuf) -> Session {
         response_projection_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
+        #[cfg(test)]
+        retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
         cached: false,
         _cache_reader: None,
         subtitle_handle: None,
@@ -17722,6 +18196,42 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rolling_etag_changes_with_incarnation_and_producer_attempt() {
+        let first_dir = crate::test_tempdir().expect("first rolling ETag session");
+        let second_dir = crate::test_tempdir().expect("second rolling ETag session");
+        let first = Arc::new(test_session(first_dir.path().to_path_buf()));
+        let second = Arc::new(test_session(second_dir.path().to_path_buf()));
+        let first_attempt = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&first),
+            producer_attempt: 0,
+        });
+        let successor_attempt = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&first),
+            producer_attempt: 1,
+        });
+        let replacement_incarnation = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: second,
+            producer_attempt: 0,
+        });
+
+        let first_etag = first_attempt
+            .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+            .expect("rolling ETag");
+        assert_ne!(
+            first_etag,
+            successor_attempt
+                .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+                .expect("successor-attempt ETag")
+        );
+        assert_ne!(
+            first_etag,
+            replacement_incarnation
+                .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+                .expect("replacement-incarnation ETag")
+        );
+    }
 
     async fn activate_control_route(
         store: &dyn Store,
@@ -19381,13 +19891,12 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
-
+        ));
         let mut session = test_session(dir.path().join("session"));
         session.takeover = Some(SessionTakeoverStart {
             incarnation_id: "incarnation-a".to_owned(),
@@ -22445,12 +22954,12 @@ mod tests {
         seeded_session_dir(dir.path(), 1, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -22686,12 +23195,12 @@ mod tests {
         assert!(!status.success(), "the fixture must exit unsuccessfully");
         let session = watchdog_session(dir.path(), Some(child), false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -22741,6 +23250,88 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn playlist_reclassification_reuses_one_absolute_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("playlist deadline dir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(25, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("shared-deadline".into(), session);
+
+        let deadline = mgr.playlist_request_deadline();
+        assert!(matches!(
+            mgr.playlist_with_owner_before("shared-deadline", deadline)
+                .await
+                .map_err(|error| error.error),
+            Err(PlaylistError::StartupTimedOut(_))
+        ));
+        let after_first = tokio::time::Instant::now();
+        assert!(matches!(
+            mgr.playlist_with_owner_before("shared-deadline", deadline)
+                .await
+                .map_err(|error| error.error),
+            Err(PlaylistError::StartupTimedOut(_))
+        ));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            after_first,
+            "reclassification must not mint another playlist wait budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_deadline_bounds_work_after_exact_bytes_are_observed() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("playlist bounded work dir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(40, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("bounded-ready-playlist".into(), Arc::clone(&session));
+
+        // Exact bytes and actor observation are ready, but the response still
+        // needs the retained-window projection. Holding that lock models any
+        // post-read storage/catalog stall: it must share the same deadline,
+        // not extend the request indefinitely after useful bytes exist.
+        let segments = session.segments.lock().await;
+        let budget = Duration::from_millis(40);
+        let started = Instant::now();
+        let refused = mgr
+            .playlist_with_owner_before("bounded-ready-playlist", mgr.playlist_request_deadline())
+            .await
+            .map_err(|error| error.error);
+        assert_eq!(
+            refused,
+            Err(PlaylistError::StartupTimedOut(mgr.playlist_wait()))
+        );
+        assert!(
+            started.elapsed() >= budget && started.elapsed() < Duration::from_secs(1),
+            "the outer absolute deadline must own every await after the playlist read"
+        );
+        drop(segments);
+    }
+
     /// The wait ends at its budget and not a poll before it.
     ///
     /// Pinned in milliseconds through the same deadline the production budget
@@ -22751,14 +23342,14 @@ mod tests {
     async fn a_playlist_is_held_for_the_whole_budget_and_no_longer() {
         use plurx_core::store::SqliteStore;
 
-        async fn manager(dir: &std::path::Path, budget_ms: u64) -> TranscodeManager {
+        async fn manager(dir: &std::path::Path, budget_ms: u64) -> Arc<TranscodeManager> {
             let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-            let mgr = TranscodeManager::new(
+            let mgr = Arc::new(TranscodeManager::new(
                 store,
                 dir.join("manager-work"),
                 EncoderCaps::default(),
                 Pipeline::Cpu,
-            );
+            ));
             mgr.playlist_wait_override_ms.store(budget_ms, Relaxed);
             mgr
         }
@@ -22843,12 +23434,12 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let session = watchdog_session(dir.path(), None, false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // A long budget, so a wait would be unmistakable: a session that has
         // already lost must not spend one poll of it.
         mgr.playlist_wait_override_ms.store(30_000, Relaxed);
@@ -22934,12 +23525,12 @@ mod tests {
         assert!(status.success(), "the fixture must exit successfully");
         let session = watchdog_session(dir.path(), Some(child), false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -22975,12 +23566,12 @@ mod tests {
             .await
             .expect("a live session may replace its child");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -23280,6 +23871,7 @@ mod tests {
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let dir = crate::test_tempdir().expect("session dir");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         mgr.sessions
@@ -24074,12 +24666,12 @@ mod tests {
 
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             p.join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -24997,13 +25589,19 @@ mod tests {
     /// A session for driving `watch_for_stall` directly: a real (harmless)
     /// child process, a directory the test controls, and telemetry the test
     /// can backdate.
-    fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
+    fn watchdog_session_with_publication(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+    ) -> Arc<Session> {
         let control = crate::playback_control::RollingControlHandle::spawn("test-start");
         Arc::new(Session {
             dir: dir.to_path_buf(),
+            response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: None,
-            actor_managed_response_publication: false,
-            actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
+            actor_managed_response_publication: actor_managed_prepublication,
+            actor_prepublication_transcode: Arc::new(AtomicBool::new(actor_managed_prepublication)),
             response_publication_transition: Mutex::new(()),
             first_media_handoff_applied: AtomicBool::new(false),
             first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -25032,6 +25630,8 @@ mod tests {
             response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
             cached,
             _cache_reader: None,
             subtitle_handle: None,
@@ -25079,6 +25679,170 @@ mod tests {
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })
+    }
+
+    fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
+        watchdog_session_with_publication(dir, child, cached, false)
+    }
+
+    fn reserve_test_admissions(session: &Session, admissions: &Admissions) {
+        *session.hw_slot.lock().expect("hw slot mutex") = Some(
+            admissions
+                .try_acquire(1, Priority::Live)
+                .expect("test hardware slot"),
+        );
+        *session.sw_permit.lock().expect("sw permit mutex") =
+            Some(admissions.software_pool().take_forced(2));
+    }
+
+    async fn await_prepublication_cleanup(session: &Session) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.prepublication_cleanup_active.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prepublication cleanup must settle");
+    }
+
+    async fn await_lifecycle_pause(pause: &LifecycleTestPause) {
+        tokio::time::timeout(Duration::from_secs(2), pause.reached.notified())
+            .await
+            .expect("lifecycle pause must be reached");
+    }
+
+    #[tokio::test]
+    async fn prepublication_retirement_holds_admissions_until_confirmed_reap() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("prepublication retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        tokio::fs::write(scratch.join("index.m3u8"), b"prepublication")
+            .await
+            .expect("seed scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        reserve_test_admissions(&session, &admissions);
+        let reap_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .expect("attempt child")
+            .terminate_before_reap_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("prepublication".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        assert!(
+            manager.retire_session("prepublication", &session).await,
+            "routine retirement must transfer cleanup ownership"
+        );
+        await_lifecycle_pause(&reap_pause).await;
+        assert!(session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1, "hardware remains owned before reap");
+        assert_eq!(
+            admissions.software_in_use(),
+            2,
+            "software remains owned before reap"
+        );
+        assert!(scratch.exists(), "scratch remains owned before reap");
+        assert!(
+            !session.failed.load(Acquire),
+            "routine retirement is not a producer failure"
+        );
+
+        reap_pause.release.notify_one();
+        await_prepublication_cleanup(&session).await;
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(session.child.lock().await.is_none());
+        assert!(!scratch.exists());
+        assert!(!session.failed.load(Acquire));
+    }
+
+    #[tokio::test]
+    async fn bounded_retirement_cleanup_survives_caller_cancellation() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("cancelled retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        reserve_test_admissions(&session, &admissions);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cancelled".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let retirement = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .retire_session_until(
+                        "cancelled",
+                        &session,
+                        Some(tokio::time::Instant::now() + Duration::from_secs(2)),
+                    )
+                    .await
+            }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+
+        // Cancelling the bounded caller drops both registry and transition
+        // guards. The already-spawned cleanup owner then inherits the exact
+        // child and remains responsible through physical terminal proof.
+        retirement.abort();
+        assert!(retirement
+            .await
+            .expect_err("retirement task must be cancelled")
+            .is_cancelled());
+        await_prepublication_cleanup(&session).await;
+
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(session.child.lock().await.is_none());
+        assert!(!scratch.exists());
+        assert!(!session.failed.load(Acquire));
     }
 
     #[tokio::test]
@@ -26363,6 +27127,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let hash = recipe_hash_for(&mgr, &file, 1080).await;
         let dir = seed_cache_dir(cache.path(), "cd/entry").await;
@@ -26521,6 +27286,7 @@ mod tests {
         write_real_video(&source, 6);
         let file_id = seed_real_file(&store, &source).await;
         let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
 
         let hash = mgr
@@ -27378,12 +28144,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
 
         // Defaults with an empty store.
         let prefs = mgr.lang_prefs().await;
@@ -27475,12 +28241,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // Two players deliberately coexist below; this test is about the
         // supersession key, not the CPU pool, so give the pool room — on a
         // 2-core runner the machine-derived budget would refuse the second
