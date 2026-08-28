@@ -4887,7 +4887,7 @@ impl RollingControlActor {
     #[cfg(test)]
     fn run_due_first_cutoff_at(&mut self, now: Instant) {
         let transition = Arc::clone(&self.producer_transition);
-        let _transition = transition
+        let mut transition = transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let producer_events = Arc::clone(&self.producer_events);

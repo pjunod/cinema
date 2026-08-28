@@ -2114,7 +2114,8 @@ async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_pag
                     publication_ready_at_ms: 0,
                     media_origin_ms: 0,
                     now_ms: 100,
-                    lease_expires_at_ms: 200 + i64::try_from(index).unwrap(),
+                    lease_expires_at_ms: 200
+                        + i64::try_from(index).expect("33-row cursor index fits in i64"),
                 })
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: seed cursor route {index}: {error}"))

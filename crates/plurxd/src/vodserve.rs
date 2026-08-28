@@ -959,7 +959,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
-                file: Arc::new(file.clone()),
+                file: file.clone(),
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
@@ -1011,7 +1011,7 @@ impl VodServe {
             Session {
                 rendition: Some(Arc::clone(&rendition)),
                 rendition_key: rendition.key.clone(),
-                file: file.clone(),
+                file: Arc::new(file.clone()),
                 playback_id: "http-vod-test".to_owned(),
                 user_name: "test".to_owned(),
                 item_title: "HTTP VOD fixture".to_owned(),
@@ -5482,10 +5482,10 @@ mod tests {
         );
 
         pending.abort();
-        assert!(pending
-            .await
-            .expect_err("attach is cancelled after publication")
-            .is_cancelled());
+        assert!(matches!(
+            pending.await,
+            Err(error) if error.is_cancelled()
+        ), "attach is cancelled after publication");
         install_pause.wait().await;
         *serve
             .shared

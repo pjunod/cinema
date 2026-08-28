@@ -2468,7 +2468,6 @@ async fn own_rolling_retirement(
                 .control
                 .snapshot()
                 .await
-                .ok()
                 .and_then(|snapshot| snapshot.terminal)
                 .unwrap_or(crate::playback_control::RollingTerminalCause::AuthorityFence)
         }
@@ -14300,11 +14299,11 @@ impl TranscodeManager {
             if let Err(join_error) = worker.await {
                 if let Some(session) = executor_monitor_session.upgrade() {
                     let actor_still_owns_prepublication = match session.control.snapshot().await {
-                        Ok(snapshot) => {
+                        Some(snapshot) => {
                             snapshot.terminal.is_none()
                                 && !snapshot.producer_control.producer_media_published
                         }
-                        Err(_) => true,
+                        None => true,
                     };
                     if session.actor_prepublication_transcode.load(Acquire)
                         && actor_still_owns_prepublication
@@ -15583,7 +15582,7 @@ impl TranscodeManager {
     /// clock with the explicit `control` reason; replay and rejection do not.
     #[cfg(test)]
     pub(crate) async fn hls_session_control(
-        &self,
+        self: &Arc<Self>,
         control: crate::playback_control::LocalControlRequest<'_>,
     ) -> Option<
         Result<
@@ -19822,7 +19821,8 @@ impl HlsDeliveryFixture {
                 incarnation_id: incarnation_id.to_owned(),
                 origin_base_ms: 0,
                 frontier_offset_ms: 0,
-                media_sequence: owner_epoch.saturating_mul(TAKEOVER_SEQUENCE_STRIDE),
+                media_sequence: owner_epoch
+                    .saturating_mul(crate::media_sessions::TAKEOVER_SEQUENCE_STRIDE),
                 discontinuity_sequence: owner_epoch.saturating_sub(1),
                 owner_epoch,
             }),
@@ -23701,12 +23701,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         let info = mgr
             .start(file_id, 720, 0.0, None, None, "paul", "pb-paul")
             .await
@@ -25362,10 +25362,11 @@ mod tests {
             .playlist_with_owner_before("bounded-ready-playlist", mgr.playlist_request_deadline())
             .await
             .map_err(|error| error.error);
-        assert_eq!(
+        assert!(matches!(
             refused,
-            Err(PlaylistError::StartupTimedOut(mgr.playlist_wait()))
-        );
+            Err(PlaylistError::StartupTimedOut(waited))
+                if waited == mgr.playlist_wait()
+        ));
         assert!(
             started.elapsed() >= budget && started.elapsed() < Duration::from_secs(1),
             "the outer absolute deadline must own every await after the playlist read"
@@ -26304,7 +26305,7 @@ mod tests {
         let (bytes, owner) = playlist
             .await
             .expect("playlist task")
-            .expect("successor playlist");
+            .unwrap_or_else(|_| panic!("successor playlist"));
         let text = String::from_utf8(bytes).expect("playlist text");
         assert!(text.contains("#EXTINF:3.000"), "{text}");
         assert!(!text.contains("#EXTINF:2.000"), "{text}");
@@ -26841,12 +26842,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file_at(&store, &src.to_string_lossy()).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // Burst then crawl. The burst gives the session something to be ahead
         // *with* straight away; the realtime pace afterwards keeps it alive for
         // the rest of the test, because an unpaced copy of a short clip

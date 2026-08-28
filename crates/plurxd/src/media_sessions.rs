@@ -188,7 +188,7 @@ pub(crate) fn try_admit_release_cleanup() -> Option<tokio::sync::OwnedSemaphoreP
 /// negative filename that no allowlist accepts — every segment 404s. A
 /// million-wide range keeps roughly two thousand epochs inside that ceiling,
 /// which is far more failovers than one playback session can survive.
-const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000;
+pub(crate) const TAKEOVER_SEQUENCE_STRIDE: i64 = 1_000_000;
 
 /// Session ids whose durable route must survive a process-local transition,
 /// counted rather than set-valued.
@@ -655,7 +655,7 @@ impl<W: TakeoverWorkerLifecycle> TakeoverCreationOwner<W> {
 
 impl<W: TakeoverWorkerLifecycle> Drop for TakeoverCreationOwner<W> {
     fn drop(&mut self) {
-        let Some(mut handle) = self.handle.take() else {
+        let Some(handle) = self.handle.take() else {
             return;
         };
         let Some(worker) = self.worker.take() else {
@@ -3416,6 +3416,7 @@ pub(crate) async fn lease_loop(state: AppState) {
         for (route, previous_failures) in unsettled {
             let cleanup_state = state.clone();
             let session_id = route.session_id.clone();
+            let known_incarnation_id = route.incarnation_id.clone();
             let settled_tx = settled_tx.clone();
             tokio::spawn(async move {
                 // Re-read the full row before acting. The lean owner
@@ -3648,7 +3649,7 @@ pub(crate) async fn lease_loop(state: AppState) {
                     })
                     .await;
             });
-            known.remove(&route.incarnation_id);
+            known.remove(&known_incarnation_id);
         }
     }
 }
@@ -3897,7 +3898,7 @@ where
 /// task renews from the still-provisional worker before adopting its public id.
 async fn reconcile_pending_takeover<I, W, A>(
     io: &I,
-    mut pending: PendingTakeoverSettlement<W, A>,
+    pending: PendingTakeoverSettlement<W, A>,
     initial_winner: Option<MediaSessionRoute>,
 ) -> Result<(), String>
 where
@@ -5018,7 +5019,7 @@ mod tests {
             &'a self,
             _provisional_id: &'a str,
             durable_session_id: &'a str,
-            mut worker: ProbeTakeoverWorker,
+            worker: ProbeTakeoverWorker,
             adoption: ProbeTakeoverAdoption,
         ) -> BoxFuture<'a, Result<ProbeTakeoverWorker, ProbeTakeoverWorker>> {
             Box::pin(async move {
@@ -5725,10 +5726,13 @@ mod tests {
             settled: false,
         };
 
-        let error = TakeoverCreationOwner::new(handle, worker)
+        let error = match TakeoverCreationOwner::new(handle, worker)
             .finish(tokio::time::Instant::now() + Duration::from_secs(30))
             .await
-            .expect_err("creation panic must fail settlement");
+        {
+            Ok(_) => panic!("creation panic must fail settlement"),
+            Err(error) => error,
+        };
         assert!(error.starts_with("media-session takeover creation task failed:"));
         assert_eq!(
             *events
