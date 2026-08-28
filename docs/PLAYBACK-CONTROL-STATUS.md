@@ -2,40 +2,77 @@
 
 **Updated:** 2026-08-28
 **Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
-**Current work:** first actor-owned prepublication recovery cut on
-`codex/playback-control-m4-prepublication` in the disposable clone. The
-response-publication contract correction is committed at `43bd459d` after an
-adversarial review found and resolved four race and classification defects.
-The assembled implementation and its prior repair rounds were frozen as exact
-head `1bee10d9f6f6d427151dbc3587089b367806c30a`. Formal review rejected that
-head without running builds or tests. The actor scope found no runtime
-P1/P2/P3 defect, but the combined review found five P1s: ownerless VOD status
-could publish after same-ID reattach; `OwnerGone` erased active remote-handoff
-and durable terminal distinctions; relay layers renewed an abandoned request's
-deadline; default copy and rolling-cache responses bypassed actor publication;
-and VOD resurrection was cancellable between detach, attach, and registry
-publication. It also found five P2s: transformed init bytes reused the source
-strong ETag; VOD EOF/touch/frontier mutation was only partially
-cancellation-safe; first-media projection cleared before lifetime ownership
-transferred; and the global sessions lock covered both slow VOD supersession
-and an unbounded actor `End`. Weak ETag comparison was the runtime P3; stale
-status and handoff documentation was a separate P3. Runtime repair
-`8cc28bc8134412149829a37a0cfe8ba83f5da795` closes that ledger with exact
-owner-bearing VOD outcomes, authoritative durable reclassification, one
-authenticated relay deadline, cancellation-safe VOD attachment/supersession/
-EOF settlement, actor-admitted copy/cache publication, a monotone
-compatibility failure fence, a complete first-media ownership transfer,
-representation-specific init validators, weak ETag comparison, and narrower
-global-lock scope. A pre-freeze review also found and repaired queued-End,
-pre-entry durable-ID adoption, and fail-after-reap races. Root review removed
-executable relay clock-skew slack. Formatting, whitespace, and the read-only
-mechanical ownership recount are clean; documentation reconciliation is the
-only remaining tracked working-tree change. The combined exact head still
-requires independent approval before the test gate opens. Do not infer a
-candidate from `0e80c6ba` or `e40c56d4`.
-No unit test has run on this branch. The
-full unit suite runs once, only after final exact-head adversarial approval; a
-failure permits only the failed or directly affected tests to rerun. PR #626's runtime commits
+**Current work:** first actor-owned prepublication recovery cut on branch
+`codex/playback-control-m4-prepublication` in the disposable clone at
+`/private/tmp/plurx-playback-control-clone`. Exact reviewed head
+`763c230cc5de98adc7b07f4635016e5d9db06f2a` was rejected. The current repair
+implementation is frozen in `031065ab3c28195505fa0249700fe964d9ec5c45`;
+this status update will become the final immutable review head.
+
+The post-rejection work is assembled in three tracks:
+
+- HTTP/routing/relay now carries exact owner authority through VOD status,
+  durable local/remote/terminal classification, status rerouting, release,
+  remote abort, resurrection, range/`If-Range`, and EOF. Request preparation
+  retains one inherited deadline; an admitted relay body owns a separate
+  bounded streaming lifecycle. DELETE elects one cancellation-safe settlement
+  token, duplicates join its exact result, commit-unknown End retries through a
+  sharded bounded registry, and terminal authority is published before
+  detached process reclamation.
+- Rolling authority/settlement now makes Terminal admission irreversible once
+  queued, finds the exact Session across durable-ID adoption, releases the
+  global registry before actor/process settlement, publishes failure before
+  kill/reap, and retains process admission plus scratch until confirmed reap.
+  Detached retirement and scratch owners survive caller cancellation.
+- VOD uses per-rendition single-flight ownership for slow builds, bounded and
+  confirmed-reap missing-init regeneration, cancellation-safe dormant purge,
+  immediate heavyweight terminal-graph compaction, and bounded compact `410`
+  replay followed by fail-closed durable eviction.
+
+The implementation frozen in `031065ab` joins those tracks at their
+shared publication boundary:
+
+- replacement is make-before-break: the provisional successor activates by
+  Store CAS before the authoritative predecessor is projected terminal, while
+  persisted `publication_ready_at_ms` is an explicit three-state fence. Only
+  `0` is publishable; activation writes an indefinitely blocked sentinel, the
+  first exact post-commit observer arms a fresh 372-second not-before value,
+  and exact acknowledgement or an exact elapsed-boundary Store proof clears
+  it. Routing and idempotent replay never infer readiness from wall time;
+- Store rows now retain the first `terminal_reason` across public release,
+  supersession, admin/revoke paths, stale-owner cleanup, and node removal.
+  SQLite and Hiqlite migrations, route queries, replicated dump/import, and
+  old-schema import defaults carry both new fields;
+- release is explicitly two phase: install a cause-neutral local publication
+  fence, await the uncancelled first-writer Store End, cache its exact terminal
+  route or definitive absence, then project that durable cause to the exact
+  owner. A shared `204` is published only after replay-visible proof and owner
+  acknowledgement, or after the finite admitted-body safety boundary. Ended
+  rows reuse `publication_ready_at_ms` as a durable projection ledger:
+  sentinel means the post-End boundary is not armed, finite means the one
+  restart-stable fallback is pending, and `0` means exact acknowledgement or
+  exact boundary proof was persisted. A restart never mints a second window;
+- attempt-derived bodyless status and typed failure validate the exact
+  Session/attachment and rolling attempt without renewing demand or advancing
+  delivery. Streamed body authorization commits only after all advertised
+  bytes have been read and accepted by the bounded HTTP-body channel; a fully
+  buffered body commits only after exact preparation immediately before
+  exposure and is then wrapped by the same absolute body deadline.
+  Cancellation, short read, storage error, and abandonment before the final
+  streamed chunk is accepted are non-commits; and
+- every admitted local or relayed media body has a 300-second absolute
+  lifetime and a 30-second upstream or downstream no-progress bound. Driven
+  local bodies retain at most one unacknowledged chunk and account/commit only
+  after the public Body accepts that chunk; the relay pump retains two and all
+  public bodies discard queued bytes after a terminal or absolute deadline.
+
+This is still a repair candidate, not immutable-head approved or dynamically
+validated implementation.
+Only `cargo fmt`, static diff inspection, and static ownership recounts have
+run. No compile, build, focused test, or unit test has run. One full unit-suite
+run remains locked until every required adversarial reviewer approves the
+same immutable exact head. A failure permits only failed or directly affected
+tests to rerun after repair and behavioral review. PR #626's runtime commits
 `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
 command, and one bounded passive executor inbox/task. Root static review
@@ -92,7 +129,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; runtime repair `8cc28bc8` assembles production response admission and actor-owned transcode startup recovery | Freeze the reconciled documentation head and obtain exact-head approval, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the post-`763c230c` candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, and VOD ownership | Freeze and unanimously review one immutable repair head, run the full unit suite once, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -156,13 +193,14 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Merged in #619 and extended in runtime repair `8cc28bc8`.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It records `FIRST_SEGMENT_GRACE` at zero, names the actor executor/response/cancellation/first-media owners plus the new response contract, failure fence, durable-route, VOD-outcome, relay-deadline, and terminal-admission owners, and truthfully retains published-lifetime and copy compatibility counts. The read-only mechanical recount matches every row. |
+| Static owner inventory | **Reconciled for source freeze.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. A direct read-only recount matches all 36 source-symbol rows, 119 module-symbol rows, and 22 structural rows. The ownership test itself has not run. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Runtime repair committed at `8cc28bc8`; final documentation head not yet frozen.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, and first-media lifetime ownership are assembled. |
-| Adversarial implementation review | **Exact head `1bee10d9` frozen and rejected; repair pre-review complete.** Its five P1, five P2, runtime P3, and documentation P3 findings are repaired in `8cc28bc8`. A moving-tree review found three additional retirement/failure races and root found one relay-skew defect; all four were repaired before the runtime commit. A fresh independent exact-head review is required after this documentation reconciliation and before tests. |
-| Unit/focused tests | **Gate closed; none run on this branch.** Per user direction there will be one full unit-suite run, on the final reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
-| Full/cluster/hosted gates | **Pending final exact-head review.** The merged #626 baseline is green. Cluster/integration and required hosted PR checks remain required, but no local unit suite runs during review. |
+| Operational projection | **Implementation frozen in `031065ab`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
+| Adversarial implementation review | **Exact head `763c230c` rejected; repaired moving tree approved.** Independent moving-tree reviews closed HTTP/routing/relay, rolling-settlement, VOD, Store binding, durable release/projection, and regression-test findings. They are diagnostic evidence, not approval of the final docs-bearing hash. Commit this update and obtain unanimous review of that exact immutable head before tests. |
+| Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts are the only candidate validation so far. No compile or build command has run. |
+| Unit/focused tests | **Gate closed; none run on the repair candidate.** Per user direction there will be one full unit-suite run, on the unanimously reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
+| Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
 
 ## Watchdog-removal ledger
 
@@ -185,11 +223,21 @@ overlap the actor-owned scope after their respective cutovers.
 | `PROGRESS_STALL` | **Retained in disjoint scopes.** The actor uses the explicit prepublication progress budget; compatibility code still uses the published-lifetime/copy threshold. | A producer cannot self-report a silent wedge. The later published/copy cuts must move the remaining decisions without overlapping prepublication. |
 | `WATCHDOG_POLL`, `watch_for_stall*`, and `watchdog_active` | **Retained only for published-lifetime and copy compatibility.** | They cannot decide actor-owned prepublication recovery after this cut; later M4 cuts replace and delete those decision owners. |
 | `child_transition` and `replacing_child` | **Retained for process/resource serialization and compatibility replacement.** | Exact child ownership, confirmed reap, published-lifetime handling, and copy replacement still require serialization until the later cuts remove in-place replacement. |
-| copy fallback/recovery | **Retained.** | Copy delivery has not yet moved its recovery decision into the actor. |
-| `PREPUBLICATION_REAP_RETRY` and `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` | **Retained lifecycle cleanup bounds, not playback watchdogs.** | They retry bounded termination until the exact predecessor is confirmed reaped; they cannot choose retry, replacement, playback failure, or response publication. |
+| copy fallback/recovery | **Recovery retained; response authorization actor-fenced in the candidate.** | The candidate orders compatibility failure before kill/reap and admits copy/cache responses through the actor, but copy recovery decisions have not moved into it. |
+| `PREPUBLICATION_REAP_RETRY` (5 s) and `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) | **Retained lifecycle cleanup bounds, not playback watchdogs.** | They retry bounded termination until the exact predecessor is confirmed reaped while retaining process admission and scratch; they cannot choose retry, replacement, playback failure, or response publication. |
+| rolling retirement/scratch settlement | **New bounded lifecycle owners.** | Exact retirement survives caller cancellation and holds process resources through reap. Scratch cleanup makes three 5-second attempts separated by 5 seconds, then leaves the orphan for startup/maintenance cleanup; it makes no recovery decision. |
 | exact-EOF settlement task | **Retained bounded response completion owner, not a watchdog.** | At most 256 visible streams can reserve one owner; each owner gets one fresh five-second deadline at exact advertised EOF, commits only complete delivery, and releases capacity on every terminal path. |
+| first-media settlement | **Retained bounded handoff owner, not a watchdog.** | At most 256 settlements bridge actor authorization to published-lifetime ownership without clearing confirmed-reap state early. |
 | absolute playlist preparation budget | **Retained network lifecycle limit, not a watchdog.** | One deadline covers registry/storage reads, actor observation, catalog projection, and every poll across reclassification; timeout returns retryable `503` and cannot select or replace a producer. |
 | bounded HTTP actor/handoff waits | **Retained network lifecycle limits, not recovery watchdogs.** | One five-second absolute publication deadline covers admission, first-media application, buffered commit, and actor command/reply waits; cancellation is fail-closed before later actor mutation. |
+| admitted local and relay body lifecycle | **New post-admission network/storage owner.** | Preparation uses the inherited request deadline; after admission, every prepared, local-file, and relay body has a 300-second absolute lifetime, while active file/network pumps also enforce 30 seconds without upstream or downstream progress. Independent bounded pumps own file/network readers and EOF authority under socket backpressure: local bodies retain one unacknowledged chunk, relay bodies two, and queued data is rejected after terminal/absolute timeout. The common finite resource lifetime makes the terminal-projection safety bound meaningful; M8 may change transport, but body-liveness bounds remain. |
+| make-before-break successor publication | **New durable handoff fence, not a playback watchdog.** | A provisional successor must exist before the Store pointer CAS can end its predecessor. Activation persists an indefinitely blocked sentinel; the first exact post-commit observation arms a 372-second boundary, and publication requires an explicit Store transition to `0`. Exact predecessor acknowledgement may clear early because it prevents future old-capability admission; already-admitted bodies may drain under the predecessor's distinct never-reused URL. Without acknowledgement, only an exact elapsed-boundary proof clears the fence. M6 generalizes this transaction to quality/HDR/track changes. |
+| public release and internal abort settlement | **New bounded terminal owners.** | Public DELETE elects one exact shared settlement before immediately detaching ownership; duplicates join without another task or permit. Five seconds bounds capacity admission and each caller's wait, never an admitted Store mutation. A commit-unknown End remains fail-closed in a 128-entry, 32-shard registry and retries at fanout four with 1–30-second backoff under panic supervision. The first Store `terminal_reason` wins. Ended rows persist sentinel → finite boundary → `0`, so exact owner acknowledgement and fallback completion survive ingress/owner restart without extending the window. Replay-visible terminal/absence proof plus durable projection completion settles `204`; an unreachable peer may settle only after the 372-second terminal-projection boundary covering the 62-second pre-header ceiling, 300-second body lifetime, and margin. Remote delivery is capped at three attempts with 100 ms delay, while physical reclamation remains independently bounded. M8 prepared handoff may replace the cleanup transport. |
+| VOD missing-init regeneration | **New bounded lifecycle fallback.** | Four node-wide slots, a 15-second deadline, an 8 MiB ceiling, and per-key ownership through confirmed child reap prevent unbounded forks/buffers and same-key overlap. Later VOD/index hardening may delete on-demand regeneration. |
+| VOD terminal cleanup/replay | **New compact lifecycle owner.** | Heavy media/process graphs release immediately after exact cleanup. A compact owner replays `410` for 60 seconds, then a 3-second, 16-way fail-closed durable confirmation permits eviction. M8 may centralize the durable replay record. |
+| VOD idle/dormant retention | **Retained cache lifecycle policy.** | Sessions idle after 300 seconds; renditions become dormant after 1,800 seconds. Detached purge owns the key, child, accounting, directory, and identity cleanup before any await, preventing rebuild overlap. |
+| cluster lease/takeover timers | **Retained failure fencing, not playback-progress watchdogs.** | Three-second renewal and 12-second lease bounds distinguish a live owner from a dead node. M8 replaces compatibility takeover with prepared handoff; lease expiry remains. |
+| 15-second repair/flow-control tick | **Retained maintenance schedule.** | It refreshes indexes, retention, speed, pacing, and lease projection. M4 removes recovery authority from the tick; periodic maintenance remains. |
 
 ### Server mechanisms still present on merged `main`
 
@@ -231,11 +279,12 @@ playback, replacement, restart, or failure decision. It is not a watchdog.
 
 ## Remaining delivery order
 
-1. Freeze the documentation reconciliation over runtime repair `8cc28bc8` and
-   obtain exact-head adversarial approval before tests. Then run the full local
-   unit suite once, make cluster/hosted gates green, merge the active
-   prepublication cut, migrate published-lifetime and copy recovery, and prove
-   the old server watchdog/replacement symbols are gone.
+1. Freeze the complete post-`763c230c` repair and reconciled owner ledger as
+   one immutable head, and obtain unanimous adversarial
+   approval before tests. Then run the full local unit suite once, make
+   cluster/hosted gates green, merge the active prepublication cut, migrate
+   published-lifetime and copy recovery, and prove the old server watchdog/
+   replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
 3. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and
