@@ -2,13 +2,13 @@ version = 1
 
 [[coverage]]
 commits = [
-  "3433558e",
-  "0400e2bf",
-  "87166e73",
-  "c3244100",
-  "b4750c65",
-  "a725a7f2",
-  "21ecd47f",
+  "52f6b7ec",
+  "feaeb268",
+  "a27daf68",
+  "978fd372",
+  "6f88c230",
+  "8f89403e",
+  "8ff70435",
 ]
 points = ["playback.pipeline"]
 checks = ["rust-gate", "rust-gate-ci", "playback-recovery", "resource-bounds"]

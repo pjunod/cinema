@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["d8d93779", "be2d9bfe", "40b06404"]
+commits = ["7320f908", "cceeec0a", "77e292d1"]
 points = ["core.media", "playback.pipeline"]
 checks = ["rust-gate", "rust-gate-ci", "resource-bounds"]
 reason = "The workspace Rust gate compiles the actor-owned playback-control, durable-route, VOD release-fence, and exact response-owner contracts across production and test targets. The retained fixtures keep the runtime takeover sequence invariant, bind each publication result to its exact owner, exercise cancellation and panic settlement without widening Debug bounds, and exclude obsolete compatibility/watchdog seams from the production surface."
