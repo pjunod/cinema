@@ -40,19 +40,8 @@ impl Client {
         self.rate_limit_db().await?;
 
         let sql = sql.into();
-        match self.batch_execute(sql.clone()).await {
-            Ok(res) => Ok(res),
-            Err(err) => {
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    self.batch_execute(sql).await
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        self.retry_db_after_leader_change(|| self.batch_execute(sql.clone()))
+            .await
     }
 
     async fn batch_execute(

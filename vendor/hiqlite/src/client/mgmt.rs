@@ -193,23 +193,8 @@ impl Client {
     /// leader stream. The method performs no SQL or state-machine mutation.
     #[cfg(feature = "sqlite")]
     pub async fn db_quorum_watermark(&self) -> Result<DbQuorumWatermark, Error> {
-        match self.db_quorum_watermark_req().await {
-            Ok(watermark) => Ok(watermark),
-            Err(error) => {
-                if self
-                    .was_leader_update_error(
-                        &error,
-                        &self.inner.leader_db,
-                        &self.inner.tx_client_db,
-                    )
-                    .await
-                {
-                    self.db_quorum_watermark_req().await
-                } else {
-                    Err(error)
-                }
-            }
-        }
+        self.retry_db_after_leader_change(|| self.db_quorum_watermark_req())
+            .await
     }
 
     #[cfg(feature = "sqlite")]

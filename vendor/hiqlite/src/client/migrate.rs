@@ -68,19 +68,8 @@ impl Client {
             return Ok(());
         }
 
-        match self.migrate_execute(migrations).await {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    self.migrate_execute(Migrations::build::<T>()).await
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        self.retry_db_after_leader_change(|| self.migrate_execute(migrations.clone()))
+            .await
     }
 
     #[cold]
@@ -115,5 +104,24 @@ impl Client {
                 _ => unreachable!(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn migration_retry_reuses_only_the_filtered_migration_set() {
+        let source = include_str!("migrate.rs");
+        let retry = source
+            .split_once("if migrations.is_empty()")
+            .expect("filtered migration guard")
+            .1
+            .split_once("pub(crate) async fn migrate_execute")
+            .expect("migration request helper")
+            .0;
+
+        assert!(retry.contains("retry_db_after_leader_change"));
+        assert!(retry.contains("migrate_execute(migrations.clone())"));
+        assert!(!retry.contains("Migrations::build"));
     }
 }
