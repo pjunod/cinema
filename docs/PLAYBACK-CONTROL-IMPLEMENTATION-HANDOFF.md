@@ -2,7 +2,7 @@
 
 **Updated:** 2026-08-28
 **Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
-**Active PR:** not opened yet
+**Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
@@ -410,9 +410,8 @@ abort-then-join-before-worker-stop. No dynamic test has run.
 
 These changes have source-level and backend contract regressions, but none has
 run. Implementation commit `f2869120` has not been compiled, built, or tested.
-The immutable docs-bearing head containing this handoff must be pushed to a PR
-and receive the required exact-head adversarial approval before the unit-test
-gate opens.
+The immutable PR #636 head containing this handoff must receive the required
+exact-head adversarial approval before the unit-test gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -749,8 +748,8 @@ remain outside every commit.
 
 Continue in this order:
 
-1. Verify the status/handoff commit excludes both vendor target trees, push the
-   branch, open its PR, and record the exact immutable branch head.
+1. Verify this final status-only commit excludes both vendor target trees,
+   push it to PR #636, and record the exact immutable branch head.
 2. Obtain unanimous independent adversarial approval of that PR head. If a
    finding changes behavior, repair it and freeze/review a new exact head.
 3. Run the full local unit suite once. If it fails, fix the cause and rerun
