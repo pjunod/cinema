@@ -423,12 +423,12 @@ expected_occurrences = 23
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
 pattern = "playlist_request_deadlines"
-expected_occurrences = 11
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-segment-request-deadline"
 pattern = "segment_request_deadline"
-expected_occurrences = 4
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-bounded-vod-lookup"
@@ -518,7 +518,7 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-durable-route-resolution"
 pattern = "DurableRouteResolution"
-expected_occurrences = 73
+expected_occurrences = 80
 
 [[module_symbols]]
 id = "m4-authoritative-route-reclassification"
