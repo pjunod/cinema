@@ -2,6 +2,6 @@ version = 1
 
 [[coverage]]
 commits = ["33c7cb38", "a09e8d9c", "4d33a8f9"]
-points = ["playback.pipeline", "persistence.upgrades"]
+points = ["core.media", "playback.pipeline", "persistence.upgrades"]
 checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "resource-bounds"]
 reason = "The retained Store inventory now names all 240 async methods and all 46 explicit production SQLite transaction sites, while the media-session contract preserves the previously published sequence high-water mark across lower renewals. The migration contract pins the append-only v35 schema, and the legacy-import helper lives behind a top-level test-and-Hiqlite feature gate so production transaction scanning remains exhaustive."

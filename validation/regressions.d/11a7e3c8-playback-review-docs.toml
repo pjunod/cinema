@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["11a7e3c8", "f418c977", "d54f62b9", "c589aec3", "b37d863c"]
+commits = ["11a7e3c8", "f418c977", "d54f62b9", "c589aec3", "b37d863c", "b1fe8151", "4fe76cef", "f0c2297c", "fd086221", "2bb65af3"]
 points = []
 checks = []
 reason = "These commits only record adversarial-review findings and implementation handoff/status state; they do not change runtime behavior."
