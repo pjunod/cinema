@@ -91,6 +91,10 @@ const SURVIVOR_LEADER_WAIT: Duration = Duration::from_secs(8);
 /// if this best-effort final tombstone write does not finish in time.
 const FINAL_TOMBSTONE_WAIT: Duration = Duration::from_secs(1);
 const REMOVAL_ATTEMPT_CAPABILITY: &str = "membership_removal_attempt_refs_v1";
+/// Proof that the running binary understands the replicated maintenance fence
+/// and the bounded election operation. An older process must never be allowed
+/// to acknowledge maintenance while it continues admitting work.
+const NODE_MAINTENANCE_CAPABILITY: &str = "node_maintenance_v1";
 /// Proof that the binary running on this node implements protocol 5, the
 /// non-voting learner admission protocol. Written coupled to the heartbeat for
 /// the same reason as [`REMOVAL_ATTEMPT_CAPABILITY`]: activation must be
@@ -336,6 +340,27 @@ const MEMBERSHIP_SCHEMA: &[&str] = &[
          attempt_id TEXT NOT NULL, \
          barrier_index INTEGER, \
          started_at INTEGER NOT NULL) STRICT",
+    // A reversible, replicated request fence. The target acknowledges only
+    // after its local admission atomics have observed this row.
+    "CREATE TABLE IF NOT EXISTS cluster_node_maintenance (\
+         node_id TEXT PRIMARY KEY, \
+         requested_at INTEGER NOT NULL, \
+         acknowledged_at INTEGER) STRICT",
+    // Transaction-local proof for the maintenance-aware heartbeat. Once a
+    // maintenance row exists, the trigger below makes a rollback to a binary
+    // that does not understand the fence fail before that process can bind its
+    // normal serving surface after startup.
+    "CREATE TABLE IF NOT EXISTS cluster_node_maintenance_heartbeat_intents (\
+         node_id TEXT PRIMARY KEY, \
+         last_seen_at INTEGER NOT NULL) STRICT",
+    "CREATE TRIGGER IF NOT EXISTS cluster_node_maintenance_heartbeat_guard \
+         BEFORE UPDATE OF last_seen_at ON cluster_nodes \
+         WHEN EXISTS (SELECT 1 FROM cluster_node_maintenance maintenance \
+                WHERE maintenance.node_id = NEW.node_id) \
+           AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance_heartbeat_intents intent \
+                WHERE intent.node_id = NEW.node_id \
+                  AND intent.last_seen_at = NEW.last_seen_at) \
+         BEGIN SELECT RAISE(ABORT, 'node maintenance requires current binary'); END",
     // A transaction-local marker lets replicated triggers distinguish this
     // binary's heartbeat from an older statement without trusting wall-clock
     // uniqueness. Every new heartbeat creates and consumes its marker in one
@@ -571,6 +596,22 @@ pub enum MembershipError {
     LocalNodeNotActive,
     #[error("removal would leave fewer than two voters and lose the reconfiguration quorum")]
     QuorumLoss,
+    #[error("node maintenance operation for {0} conflicts with another cluster lifecycle change")]
+    MaintenanceConflict(String),
+    #[error(
+        "putting voter {0} into maintenance would leave a two-voter cluster without quorum during its restart"
+    )]
+    MaintenanceWouldLoseQuorum(String),
+    #[error("node {0} must be reachable and caught up before maintenance can be cleared")]
+    MaintenanceResumeUnsafe(String),
+    #[error("the cluster cannot force an election without a reachable voter quorum")]
+    ElectionQuorumUnavailable,
+    #[error(
+        "the cluster has no healthy caught-up follower that can safely campaign for leadership"
+    )]
+    ElectionCandidateUnavailable,
+    #[error("force election is unavailable while a node lifecycle operation is pending")]
+    ElectionLifecyclePending,
     #[error("node owns active media sessions that must drain before removal")]
     ActiveMediaSessions,
     /// The removal was refused because this node's offline work could not be
@@ -636,6 +677,12 @@ impl MembershipError {
             Self::LeaveNodeMismatch => "leave_node_mismatch",
             Self::LocalNodeNotActive => "local_node_not_active",
             Self::QuorumLoss => "removal_would_lose_quorum",
+            Self::MaintenanceConflict(_) => "maintenance_conflict",
+            Self::MaintenanceWouldLoseQuorum(_) => "maintenance_would_lose_quorum",
+            Self::MaintenanceResumeUnsafe(_) => "maintenance_resume_unsafe",
+            Self::ElectionQuorumUnavailable => "election_quorum_unavailable",
+            Self::ElectionCandidateUnavailable => "election_candidate_unavailable",
+            Self::ElectionLifecyclePending => "election_lifecycle_pending",
             Self::ActiveMediaSessions => "media_sessions_active",
             Self::OfflineWork(_) => "node_owns_offline_work",
             Self::LeaderChanged(_) | Self::Internal(_) => "membership_internal",
@@ -935,6 +982,23 @@ pub struct ClusterNodeRecord {
     /// refuses unless this node reports true in a fresh heartbeat.
     #[serde(default)]
     pub voter_storage_ready: bool,
+    /// A replicated request is keeping this node out of new work while its
+    /// existing node-local sessions drain.
+    #[serde(default)]
+    pub maintenance: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub maintenance_requested_at: Option<i64>,
+    /// The target process has observed the fence in local applied state.
+    #[serde(default)]
+    pub maintenance_acknowledged: bool,
+    /// Raft-facing preconditions are satisfied. Media-session drain remains a
+    /// separate preflight exposed by the cluster media directory.
+    #[serde(default)]
+    pub maintenance_ready: bool,
+    /// Live replicated leases owned by this node. Maintenance waits for this
+    /// to reach zero; it never terminates a household stream implicitly.
+    #[serde(default)]
+    pub active_media_sessions: usize,
 }
 
 /// Capacity and quorum are deliberately separate arithmetic. A replicated
@@ -947,6 +1011,18 @@ pub struct ClusterCapacityStatus {
     pub voting_failure_tolerance: usize,
     pub non_voting_replicas: usize,
     pub ready_read_workers: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClusterRecoveryStatus {
+    /// The roster cannot prove a leader backed by a reachable voter quorum.
+    /// This signal never authorizes a consensus-bypassing mutation.
+    pub required: bool,
+    pub quorum_available: bool,
+    pub reachable_voters: usize,
+    pub required_voters: usize,
+    pub leader_elected: bool,
+    pub permanent_majority_loss_supported: bool,
 }
 
 /// What protocol range the cluster is on, what this binary can do, and — when
@@ -1089,6 +1165,7 @@ pub struct MembershipStatus {
     pub capacity: ClusterCapacityStatus,
     /// The cluster's active protocol range and this binary's support for it.
     pub protocol: ClusterProtocolStatus,
+    pub recovery: ClusterRecoveryStatus,
 }
 
 /// Fixed-cardinality, process-local projection for Prometheus scrapes.
@@ -1701,6 +1778,9 @@ struct ReplicatedMembership {
     /// before publishing progress, so removal cannot cross its barrier while
     /// the target still admits work. HTTP requests read only this atomic.
     local_serving_role: AtomicU8,
+    /// Restart-persistent request admission fence, refreshed from local
+    /// applied replicated state before each heartbeat is acknowledged.
+    local_maintenance: AtomicBool,
     /// First local observation of an older-term claim. `Instant` deliberately
     /// never crosses a process boundary: a successor waits the entire lease
     /// regardless of either host's wall clock.
@@ -2106,6 +2186,7 @@ impl MembershipManager {
                 membership_metrics,
                 heartbeat_writes: HeartbeatWriteGate::default(),
                 local_serving_role: AtomicU8::new(LocalServingRole::Fenced.encoded()),
+                local_maintenance: AtomicBool::new(true),
                 artwork_claim_observed_at: Mutex::new(BTreeMap::new()),
             })),
         };
@@ -3024,6 +3105,10 @@ impl MembershipManager {
     }
 
     async fn commit_heartbeat(&self, inner: &ReplicatedMembership) -> Result<(), MembershipError> {
+        // Observe maintenance before publishing any acknowledgement. From this
+        // point onward request admission and singleton jobs are fenced even if
+        // the transaction below is delayed or the response is lost.
+        let maintenance_requested = self.refresh_local_maintenance(inner).await?;
         // This local read is also the removal protocol's target-side route
         // barrier. It happens before sampling and publishing last_applied, so
         // a coordinator that observes the barrier knows this process has
@@ -3054,6 +3139,13 @@ impl MembershipManager {
                 "INSERT INTO cluster_node_heartbeat_intents (node_id, last_seen_at) \
                      VALUES ($1, $2) ON CONFLICT(node_id) DO UPDATE SET \
                        last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), now),
+            ),
+            (
+                "INSERT INTO cluster_node_maintenance_heartbeat_intents \
+                     (node_id, last_seen_at) VALUES ($1, $2) \
+                     ON CONFLICT(node_id) DO UPDATE SET last_seen_at = excluded.last_seen_at"
                     .to_owned(),
                 params!(inner.identity.node_id.as_str(), now),
             ),
@@ -3125,6 +3217,18 @@ impl MembershipManager {
                     now
                 ),
             ),
+            (
+                "INSERT INTO cluster_node_capabilities \
+                     (node_id, capability, last_seen_at) VALUES ($1, $2, $3) \
+                     ON CONFLICT(node_id, capability) DO UPDATE SET \
+                       last_seen_at = excluded.last_seen_at"
+                    .to_owned(),
+                params!(
+                    inner.identity.node_id.as_str(),
+                    NODE_MAINTENANCE_CAPABILITY,
+                    now
+                ),
+            ),
         ];
         // Same transaction, same timestamp, same coupling: a protocol-5
         // capability row can only carry this heartbeat's `last_seen_at` if this
@@ -3159,12 +3263,26 @@ impl MembershipManager {
                 ),
             ));
         }
+        if maintenance_requested {
+            statements.push((
+                "UPDATE cluster_node_maintenance SET acknowledged_at = COALESCE(acknowledged_at, $2) \
+                     WHERE node_id = $1"
+                    .to_owned(),
+                params!(inner.identity.node_id.as_str(), now),
+            ));
+        }
         statements.push((
             "DELETE FROM cluster_node_join_staging WHERE node_id = $1".to_owned(),
             params!(inner.identity.node_id.as_str()),
         ));
         statements.push((
             "DELETE FROM cluster_node_heartbeat_intents WHERE node_id = $1 \
+                     AND last_seen_at = $2"
+                .to_owned(),
+            params!(inner.identity.node_id.as_str(), now),
+        ));
+        statements.push((
+            "DELETE FROM cluster_node_maintenance_heartbeat_intents WHERE node_id = $1 \
                      AND last_seen_at = $2"
                 .to_owned(),
             params!(inner.identity.node_id.as_str(), now),
@@ -3178,7 +3296,28 @@ impl MembershipManager {
         // Initial bootstrap may create the active node row in this very
         // transaction. Refresh once more so HTTP starts with an authoritative
         // answer instead of waiting one heartbeat interval.
-        self.refresh_local_route_admission(inner).await.map(|_| ())
+        self.refresh_local_route_admission(inner).await?;
+        self.refresh_local_maintenance(inner).await.map(|_| ())
+    }
+
+    async fn refresh_local_maintenance(
+        &self,
+        inner: &ReplicatedMembership,
+    ) -> Result<bool, MembershipError> {
+        // Fail closed. A transient local read error must not reopen a process
+        // that previously observed a durable maintenance request.
+        inner.local_maintenance.store(true, Ordering::Release);
+        let requested = inner
+            .client
+            .query_map::<CountRow, _>(
+                "SELECT COUNT(*) AS count FROM cluster_node_maintenance WHERE node_id = $1",
+                params!(inner.identity.node_id.as_str()),
+            )
+            .await?
+            .first()
+            .is_some_and(|row| row.count == 1);
+        inner.local_maintenance.store(requested, Ordering::Release);
+        Ok(requested)
     }
 
     async fn refresh_local_route_admission(
@@ -3683,7 +3822,20 @@ impl MembershipManager {
         if self.inner.is_none() {
             return true;
         }
+        if self.local_maintenance_active() {
+            return false;
+        }
         decide_cluster_job_authority(self.local_node_is_committed_voter().await)
+    }
+
+    /// Fast local admission projection. This deliberately does not perform a
+    /// quorum read on an HTTP request path; heartbeat acknowledgement is what
+    /// proves the process has already refreshed it from local applied state.
+    #[must_use]
+    pub fn local_maintenance_active(&self) -> bool {
+        self.inner
+            .as_deref()
+            .is_some_and(|inner| inner.local_maintenance.load(Ordering::Acquire))
     }
 
     pub async fn local_node_is_committed_voter(&self) -> Result<bool, MembershipError> {
@@ -3757,6 +3909,323 @@ impl MembershipManager {
     pub async fn trigger_local_election(&self) -> Result<(), MembershipError> {
         let inner = self.replicated_inner()?;
         trigger_election(&inner.local.api_address, &inner.secrets.api).await
+    }
+
+    /// Enter reversible maintenance for one node. Leadership moves first;
+    /// only then is the replicated admission fence committed. The target's
+    /// next heartbeat acknowledges after its local atomics have observed it.
+    pub async fn enter_maintenance(
+        &self,
+        node_id: &str,
+    ) -> Result<MembershipStatus, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_maintenance_capability().await?;
+        let status = self.status().await?;
+        let target = status
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .cloned()
+            .ok_or(MembershipError::NodeNotFound)?;
+        if target.maintenance {
+            return Ok(status);
+        }
+        if status.recovery.required || !status.recovery.quorum_available {
+            return Err(MembershipError::ElectionQuorumUnavailable);
+        }
+        if target.removal_pending || self.lifecycle_operation_pending().await? {
+            return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+        }
+        if target.is_voter && status.capacity.voting_nodes == 2 {
+            return Err(MembershipError::MaintenanceWouldLoseQuorum(
+                node_id.to_owned(),
+            ));
+        }
+        if target.is_leader && status.capacity.voting_nodes > 1 {
+            self.handoff_leadership(target.raft_id, &status).await?;
+        }
+        let now = unix_ms()?;
+        let changed = inner
+            .client
+            .execute(
+                format!(
+                    "INSERT INTO cluster_node_maintenance (node_id, requested_at, acknowledged_at) \
+                     SELECT $1, $2, NULL WHERE {} \
+                       AND EXISTS (SELECT 1 FROM cluster_nodes node \
+                         WHERE node.node_id = $1 AND node.removed_at IS NULL) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_removals) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_promotions) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_join_staging) \
+                       AND NOT EXISTS (SELECT 1 FROM cluster_node_maintenance) \
+                     ON CONFLICT(node_id) DO NOTHING",
+                    capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
+                ),
+                params!(node_id, now),
+            )
+            .await?;
+        if changed != 1 {
+            let current = self.status().await?;
+            if current
+                .nodes
+                .iter()
+                .any(|node| node.node_id == node_id && node.maintenance)
+            {
+                return Ok(current);
+            }
+            return Err(MembershipError::MaintenanceConflict(node_id.to_owned()));
+        }
+        if node_id == inner.identity.node_id {
+            self.refresh_local_maintenance(inner).await?;
+            self.heartbeat().await?;
+        }
+        self.status().await
+    }
+
+    /// Clear maintenance only after the target is back, fresh, and caught up.
+    /// This keeps a rebooting node fenced even if an operator double-clicks.
+    pub async fn exit_maintenance(
+        &self,
+        node_id: &str,
+    ) -> Result<MembershipStatus, MembershipError> {
+        let inner = self.replicated_inner()?;
+        self.require_maintenance_capability().await?;
+        let status = self.status().await?;
+        let target = status
+            .nodes
+            .iter()
+            .find(|node| node.node_id == node_id)
+            .cloned()
+            .ok_or(MembershipError::NodeNotFound)?;
+        if !target.maintenance {
+            return Ok(status);
+        }
+        if !target.reachable || target.apply_lag_entries != Some(0) {
+            return Err(MembershipError::MaintenanceResumeUnsafe(node_id.to_owned()));
+        }
+        let cutoff = reachable_after(unix_ms()?);
+        let changed = inner
+            .client
+            .execute(
+                "DELETE FROM cluster_node_maintenance WHERE node_id = $1 \
+                   AND EXISTS (SELECT 1 FROM cluster_nodes node \
+                     JOIN cluster_node_progress progress ON progress.node_id = node.node_id \
+                     WHERE node.node_id = $1 AND node.removed_at IS NULL \
+                       AND node.last_seen_at >= $2 AND progress.observed_at >= $2 \
+                       AND progress.apply_lag_entries = 0)",
+                params!(node_id, cutoff),
+            )
+            .await?;
+        if changed != 1 {
+            return Err(MembershipError::MaintenanceResumeUnsafe(node_id.to_owned()));
+        }
+        if node_id == inner.identity.node_id {
+            self.refresh_local_maintenance(inner).await?;
+        }
+        self.status().await
+    }
+
+    /// Ask one healthy caught-up follower to campaign, then require a stable
+    /// quorum observation of a different leader before reporting success.
+    pub async fn force_election(&self) -> Result<MembershipStatus, MembershipError> {
+        // A leaderless but otherwise reachable voter set is the main reason
+        // this operation exists. Its preflights therefore use local applied
+        // state; Raft itself still requires a real quorum before the campaign
+        // can elect or commit anything.
+        self.require_maintenance_capability_local().await?;
+        let status = self.status().await?;
+        if !status.recovery.quorum_available {
+            return Err(MembershipError::ElectionQuorumUnavailable);
+        }
+        if self.lifecycle_operation_pending_local().await?
+            || status.nodes.iter().any(|node| node.maintenance)
+        {
+            return Err(MembershipError::ElectionLifecyclePending);
+        }
+        let leader = status.nodes.iter().find(|node| node.is_leader);
+        if let Some(leader) = leader {
+            self.force_leader_change(leader.raft_id, &status).await?;
+        } else {
+            self.campaign_without_leader(&status).await?;
+        }
+        self.status().await
+    }
+
+    async fn require_maintenance_capability(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                    capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
+                ),
+                params!(),
+            )
+            .await?;
+        if rows.first().is_some_and(|row| row.count == 1) {
+            Ok(())
+        } else {
+            Err(MembershipError::MembershipUpgradeRequired)
+        }
+    }
+
+    async fn require_maintenance_capability_local(&self) -> Result<(), MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                format!(
+                    "SELECT CASE WHEN {} THEN 1 ELSE 0 END AS count",
+                    capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY)
+                ),
+                params!(),
+            )
+            .await?;
+        if rows.first().is_some_and(|row| row.count == 1) {
+            Ok(())
+        } else {
+            Err(MembershipError::MembershipUpgradeRequired)
+        }
+    }
+
+    async fn lifecycle_operation_pending(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_consistent_map::<CountRow, _>(
+                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
+                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
+                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    async fn lifecycle_operation_pending_local(&self) -> Result<bool, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let rows = inner
+            .client
+            .query_map::<CountRow, _>(
+                "SELECT (SELECT COUNT(*) FROM cluster_node_removals) \
+                   + (SELECT COUNT(*) FROM cluster_node_promotions) \
+                   + (SELECT COUNT(*) FROM cluster_node_join_staging) AS count",
+                params!(),
+            )
+            .await?;
+        Ok(rows.first().is_some_and(|row| row.count > 0))
+    }
+
+    async fn handoff_leadership(
+        &self,
+        departed: u64,
+        status: &MembershipStatus,
+    ) -> Result<u64, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let remaining = metrics
+            .membership_config
+            .voter_ids()
+            .filter(|raft_id| *raft_id != departed)
+            .collect::<BTreeSet<_>>();
+        let survivor_nodes = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .filter(|(raft_id, _)| remaining.contains(raft_id))
+            .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+            .collect::<Vec<_>>();
+        let candidate = status.nodes.iter().find(|node| {
+            remaining.contains(&node.raft_id)
+                && node.is_voter
+                && node.reachable
+                && !node.maintenance
+                && !node.removal_pending
+                && node.apply_lag_entries == Some(0)
+        });
+        let candidate = candidate.ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        let candidate_api = survivor_nodes
+            .iter()
+            .find(|(raft_id, _)| *raft_id == candidate.raft_id)
+            .map(|(_, api)| api.as_str())
+            .ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        trigger_election(candidate_api, &inner.secrets.api).await?;
+        self.await_survivor_leader(departed, &remaining, &survivor_nodes, &inner.secrets.api)
+            .await
+    }
+
+    async fn campaign_without_leader(
+        &self,
+        status: &MembershipStatus,
+    ) -> Result<u64, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        let voter_nodes = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .filter(|(raft_id, _)| voters.contains(raft_id))
+            .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+            .collect::<Vec<_>>();
+        let candidate = status.nodes.iter().find(|node| {
+            node.is_voter
+                && node.reachable
+                && !node.maintenance
+                && !node.removal_pending
+                && node.apply_lag_entries == Some(0)
+        });
+        let candidate = candidate.ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        let candidate_api = voter_nodes
+            .iter()
+            .find(|(raft_id, _)| *raft_id == candidate.raft_id)
+            .map(|(_, api)| api.as_str())
+            .ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        trigger_election(candidate_api, &inner.secrets.api).await?;
+        self.await_survivor_leader(0, &voters, &voter_nodes, &inner.secrets.api)
+            .await
+    }
+
+    async fn force_leader_change(
+        &self,
+        departed: u64,
+        status: &MembershipStatus,
+    ) -> Result<u64, MembershipError> {
+        let inner = self.replicated_inner()?;
+        let metrics = inner.client.metrics_db().await?;
+        let voters = metrics
+            .membership_config
+            .voter_ids()
+            .collect::<BTreeSet<_>>();
+        let voter_nodes = metrics
+            .membership_config
+            .membership()
+            .nodes()
+            .filter(|(raft_id, _)| voters.contains(raft_id))
+            .map(|(raft_id, node)| (*raft_id, node.addr_api.clone()))
+            .collect::<Vec<_>>();
+        let candidate = status.nodes.iter().find(|node| {
+            node.raft_id != departed
+                && node.is_voter
+                && node.reachable
+                && !node.maintenance
+                && !node.removal_pending
+                && node.apply_lag_entries == Some(0)
+        });
+        let candidate = candidate.ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        let candidate_api = voter_nodes
+            .iter()
+            .find(|(raft_id, _)| *raft_id == candidate.raft_id)
+            .map(|(_, api)| api.as_str())
+            .ok_or(MembershipError::ElectionCandidateUnavailable)?;
+        trigger_election(candidate_api, &inner.secrets.api).await?;
+        // Unlike maintenance, the old leader is not about to leave. Its vote
+        // and observation count toward the unchanged cluster majority.
+        self.await_survivor_leader(departed, &voters, &voter_nodes, &inner.secrets.api)
+            .await
     }
 
     /// Public HTTP bases for currently reachable peers.
@@ -4581,13 +5050,24 @@ impl MembershipManager {
                         progress.storage_headroom_bytes, \
                         progress.storage_probe_observed_at, \
                         progress.observed_at AS progress_observed_at, \
+                        maintenance.requested_at AS maintenance_requested_at, \
+                        maintenance.acknowledged_at AS maintenance_acknowledged_at, \
+                        EXISTS (SELECT 1 FROM cluster_node_capabilities capability \
+                          WHERE capability.node_id = n.node_id \
+                            AND capability.capability = $2 \
+                            AND capability.last_seen_at = n.last_seen_at) AS maintenance_capable, \
+                        (SELECT COUNT(*) FROM media_sessions session \
+                          WHERE session.owner_node_id = n.node_id \
+                            AND session.state = 'active' \
+                            AND session.lease_expires_at_ms > $1) AS active_media_sessions, \
                         EXISTS (SELECT 1 FROM cluster_node_removals AS removal \
                           WHERE removal.node_id = n.node_id) AS removal_pending \
                  FROM cluster_nodes n \
                  LEFT JOIN cluster_node_hostnames h ON h.node_id = n.node_id \
                  LEFT JOIN cluster_node_progress progress ON progress.node_id = n.node_id \
+                 LEFT JOIN cluster_node_maintenance maintenance ON maintenance.node_id = n.node_id \
                  WHERE n.removed_at IS NULL ORDER BY n.raft_id",
-                params!(),
+                params!(now, NODE_MAINTENANCE_CAPABILITY),
             )
             .await?;
         let protocol = self.protocol_status().await?;
@@ -4602,6 +5082,10 @@ impl MembershipManager {
             .map(|row| {
                 let admitted_role = ClusterRole::from_stored(row.admitted_role.as_deref())?;
                 let raft_id = row.raft_id as u64;
+                let reachable = node_is_reachable(now, row.last_seen_at);
+                let maintenance = row.maintenance_requested_at.is_some();
+                let maintenance_acknowledged =
+                    row.maintenance_acknowledged_at.is_some() && row.maintenance_capable;
                 Ok(ClusterNodeRecord {
                     learner_protocol_ready: !pending.contains(&row.node_id),
                     node_id: row.node_id,
@@ -4614,7 +5098,7 @@ impl MembershipManager {
                     },
                     is_voter: voters.contains(&raft_id),
                     is_leader: metrics.current_leader == Some(raft_id),
-                    reachable: node_is_reachable(now, row.last_seen_at),
+                    reachable,
                     last_seen_at: row.last_seen_at,
                     removal_pending: row.removal_pending,
                     bounded_read_ready: row.bounded_read_ready
@@ -4631,6 +5115,17 @@ impl MembershipManager {
                             now,
                             row.storage_probe_observed_at.unwrap_or_default(),
                         ),
+                    maintenance,
+                    maintenance_requested_at: row.maintenance_requested_at,
+                    maintenance_acknowledged,
+                    maintenance_ready: maintenance
+                        && maintenance_acknowledged
+                        && reachable
+                        && (voters.len() == 1 || metrics.current_leader != Some(raft_id))
+                        && row.apply_lag_entries == Some(0)
+                        && row.active_media_sessions == 0,
+                    active_media_sessions: usize::try_from(row.active_media_sessions)
+                        .unwrap_or(usize::MAX),
                 })
             })
             .collect::<Result<Vec<_>, MembershipError>>()?;
@@ -4640,6 +5135,12 @@ impl MembershipManager {
             _ => ClusterAvailability::HighAvailability,
         };
         let voting_quorum = voters.len() / 2 + 1;
+        let reachable_voters = nodes
+            .iter()
+            .filter(|node| node.is_voter && node.reachable)
+            .count();
+        let quorum_available = reachable_voters >= voting_quorum;
+        let leader_elected = metrics.current_leader.is_some();
         let non_voting_replicas = nodes
             .iter()
             .filter(|node| node.role == NodeRole::Learner && !node.is_voter)
@@ -4650,11 +5151,12 @@ impl MembershipManager {
                 counts_as_ready_read_worker(&node.role, node.is_voter, node.bounded_read_ready)
             })
             .count();
+        let replication = inner.replication.status().await;
         Ok(MembershipStatus {
             local_node_id: inner.identity.node_id.clone(),
             availability,
             nodes,
-            replication: inner.replication.status().await,
+            replication,
             capacity: ClusterCapacityStatus {
                 voting_nodes: voters.len(),
                 voting_quorum,
@@ -4663,6 +5165,14 @@ impl MembershipManager {
                 ready_read_workers,
             },
             protocol,
+            recovery: ClusterRecoveryStatus {
+                required: !quorum_available || !leader_elected,
+                quorum_available,
+                reachable_voters,
+                required_voters: voting_quorum,
+                leader_elected,
+                permanent_majority_loss_supported: false,
+            },
         })
     }
 
@@ -7208,6 +7718,10 @@ struct MembershipNodeRow {
     storage_headroom_bytes: Option<i64>,
     storage_probe_observed_at: Option<i64>,
     progress_observed_at: Option<i64>,
+    maintenance_requested_at: Option<i64>,
+    maintenance_acknowledged_at: Option<i64>,
+    maintenance_capable: bool,
+    active_media_sessions: i64,
 }
 
 struct MembershipMetricsRow {
@@ -7500,6 +8014,10 @@ impl From<&mut Row<'_>> for MembershipNodeRow {
             storage_headroom_bytes: row.get("storage_headroom_bytes"),
             storage_probe_observed_at: row.get("storage_probe_observed_at"),
             progress_observed_at: row.get("progress_observed_at"),
+            maintenance_requested_at: row.get("maintenance_requested_at"),
+            maintenance_acknowledged_at: row.get("maintenance_acknowledged_at"),
+            maintenance_capable: row.get("maintenance_capable"),
+            active_media_sessions: row.get("active_media_sessions"),
         }
     }
 }
@@ -7730,6 +8248,94 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maintenance_is_replicated_and_rollout_gated() {
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement.contains("CREATE TABLE IF NOT EXISTS cluster_node_maintenance")
+                && statement.contains("acknowledged_at")
+        }));
+        assert!(MEMBERSHIP_SCHEMA.iter().any(|statement| {
+            statement
+                .contains("CREATE TRIGGER IF NOT EXISTS cluster_node_maintenance_heartbeat_guard")
+                && statement.contains("node maintenance requires current binary")
+        }));
+        let ready = capability_ready_predicate(NODE_MAINTENANCE_CAPABILITY);
+        assert!(ready.contains(NODE_MAINTENANCE_CAPABILITY));
+        assert!(ready.contains("capability.last_seen_at = active.last_seen_at"));
+    }
+
+    #[test]
+    fn maintenance_rejects_a_heartbeat_without_the_current_binary_intent() {
+        let connection = rusqlite::Connection::open_in_memory().expect("sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_nodes (node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL); \
+                 CREATE TABLE cluster_node_maintenance (node_id TEXT PRIMARY KEY, requested_at INTEGER NOT NULL, acknowledged_at INTEGER); \
+                 CREATE TABLE cluster_node_maintenance_heartbeat_intents (node_id TEXT PRIMARY KEY, last_seen_at INTEGER NOT NULL);",
+            )
+            .expect("maintenance tables");
+        let trigger = MEMBERSHIP_SCHEMA
+            .iter()
+            .find(|statement| statement.contains("cluster_node_maintenance_heartbeat_guard"))
+            .expect("maintenance heartbeat trigger");
+        connection.execute_batch(trigger).expect("guard trigger");
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_nodes VALUES ('node-a', 100); \
+                 INSERT INTO cluster_node_maintenance VALUES ('node-a', 100, 100);",
+            )
+            .expect("maintained node");
+        let old = connection.execute(
+            "UPDATE cluster_nodes SET last_seen_at = 200 WHERE node_id = 'node-a'",
+            [],
+        );
+        assert!(
+            old.is_err(),
+            "a binary without the intent must not heartbeat through maintenance"
+        );
+        connection
+            .execute_batch(
+                "INSERT INTO cluster_node_maintenance_heartbeat_intents VALUES ('node-a', 200); \
+                 UPDATE cluster_nodes SET last_seen_at = 200 WHERE node_id = 'node-a';",
+            )
+            .expect("current heartbeat");
+    }
+
+    #[test]
+    fn maintenance_acknowledgement_follows_the_target_local_read() {
+        let source = production_source();
+        let heartbeat = source
+            .split_once("async fn commit_heartbeat")
+            .expect("heartbeat")
+            .1
+            .split_once("async fn refresh_local_maintenance")
+            .expect("end heartbeat")
+            .0;
+        let local_read = heartbeat
+            .find("let maintenance_requested = self.refresh_local_maintenance")
+            .expect("local maintenance read");
+        let guard = heartbeat
+            .find("if maintenance_requested")
+            .expect("acknowledgement guard");
+        let acknowledgement = heartbeat
+            .find("UPDATE cluster_node_maintenance SET acknowledged_at")
+            .expect("acknowledgement statement");
+        assert!(local_read < guard && guard < acknowledgement, "{heartbeat}");
+    }
+
+    #[test]
+    fn maintenance_and_election_refusals_are_typed_for_operator_recovery() {
+        assert_eq!(
+            MembershipError::MaintenanceResumeUnsafe("node-b".to_owned()).code(),
+            "maintenance_resume_unsafe"
+        );
+        assert_eq!(
+            MembershipError::ElectionQuorumUnavailable.code(),
+            "election_quorum_unavailable"
+        );
+        assert!(!production_source().contains("force_reconfigure"));
+    }
 
     #[test]
     fn passive_membership_metrics_distinguish_unavailable_from_fresh_cluster_state() {

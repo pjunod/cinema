@@ -163,6 +163,44 @@ pub async fn promote_node(
         .map_err(api_error)
 }
 
+pub async fn enter_maintenance(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<MembershipStatus>, ApiError> {
+    state
+        .membership
+        .enter_maintenance(&node_id)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+pub async fn exit_maintenance(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(node_id): Path<String>,
+) -> Result<Json<MembershipStatus>, ApiError> {
+    state
+        .membership
+        .exit_maintenance(&node_id)
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
+pub async fn force_election(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+) -> Result<Json<MembershipStatus>, ApiError> {
+    state
+        .membership
+        .force_election()
+        .await
+        .map(Json)
+        .map_err(api_error)
+}
+
 /// Permanently remove this voter, then ask the daemon to drain and exit.
 /// Membership removal is synchronous; shutdown is signalled only after the
 /// Raft change has committed, so a refused leave keeps serving normally.
@@ -295,6 +333,12 @@ fn api_error(error: MembershipError) -> ApiError {
         | MembershipError::LeaveNodeMismatch
         | MembershipError::LocalNodeNotActive
         | MembershipError::QuorumLoss
+        | MembershipError::MaintenanceConflict(_)
+        | MembershipError::MaintenanceWouldLoseQuorum(_)
+        | MembershipError::MaintenanceResumeUnsafe(_)
+        | MembershipError::ElectionQuorumUnavailable
+        | MembershipError::ElectionCandidateUnavailable
+        | MembershipError::ElectionLifecyclePending
         | MembershipError::ActiveMediaSessions
         | MembershipError::OfflineWork(_) => StatusCode::CONFLICT,
         MembershipError::NodeNotFound => StatusCode::NOT_FOUND,
