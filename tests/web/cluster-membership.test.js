@@ -49,15 +49,17 @@ const BORROWED = [
   "clusterQuorum",
   "clusterStateView",
   "membershipRefusalText",
+  "clusterDirectOperationRow",
   "clusterDirectMaintenanceStatus",
   "clusterMaintenanceEntryVerdict",
   "clusterMaintenanceReady",
   "clusterMaintenanceResumeReady",
+  "clusterNodeOperationsBadge",
+  "clusterNodeOperationsHtml",
   "clusterNodeRow",
   "clusterOperationAge",
   "clusterOperationReason",
   "clusterOperationsUnavailable",
-  "clusterOperationsNodeRow",
   "clusterRestartPreparationHtml",
   "clusterOperationsCard",
   "clusterRecoveryState",
@@ -70,6 +72,8 @@ const BORROWED = [
   "leavePanel",
   "joinTokenHtml",
   "clusterPanel",
+  "toggleClusterNodes",
+  "syncClusterNodeToggle",
   "promoteNode",
 ];
 
@@ -358,13 +362,16 @@ test("operations card renders the server rollout verdict and direct evidence", (
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterOperationsCard(operationStatus(membership));
-  assert.match(html, /Ready to restart one voter/);
-  assert.match(html, /3 voters · majority 2 · 3 ready/);
-  assert.match(html, /Follower · term 81 · lag 0/);
-  assert.match(html, /open.*3 segments.*6\.0 MB.*durable 482191/s);
-  assert.match(html, /Unknown here — drain proxy connections separately/);
-  assert.match(html, /v0\.2\.7-operations/);
+  const operations = operationStatus(membership);
+  const summary = ui.clusterOperationsCard(operations);
+  const nodeHtml = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
+  assert.match(summary, /Ready to restart one voter/);
+  assert.match(summary, /3 voters · majority 2 · 3 ready/);
+  assert.match(nodeHtml, /Follower · term 81 · lag 0/);
+  assert.match(nodeHtml, /open.*3 segments.*6\.0 MB/s);
+  assert.match(nodeHtml, /WAL durable index[\s\S]*482191/);
+  assert.match(nodeHtml, /Unknown here — drain proxy connections separately/);
+  assert.match(nodeHtml, /v0\.2\.7-operations/);
 });
 
 test("an unreachable voter is written as a blocker, never a healthy row", () => {
@@ -374,18 +381,13 @@ test("an unreachable voter is written as a blocker, never a healthy row", () => 
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterOperationsCard(
-    operationStatus(membership, { safe: false, unreachable: true }),
-  );
+  const operations = operationStatus(membership, { safe: false, unreachable: true });
+  const html = ui.clusterOperationsCard(operations);
+  const nodeHtml = ui.clusterNodeOperationsHtml(membership.nodes[1], operations);
   assert.match(html, /Do not restart another voter/);
   assert.match(html, /voter not observed/);
-  assert.match(html, /Not observed · unreachable/);
-  const nodeBAt = html.indexOf('<div class="clhost">node-b');
-  const nodeBRow = html.slice(
-    html.lastIndexOf("<tr>", nodeBAt),
-    html.indexOf("</tr>", nodeBAt) + 5,
-  );
-  assert.doesNotMatch(nodeBRow, /Ready/);
+  assert.match(nodeHtml, /Not observed · unreachable/);
+  assert.doesNotMatch(nodeHtml, />Ready</);
 });
 
 test("election and fenced fixtures state why rollout is blocked", () => {
@@ -403,8 +405,9 @@ test("election and fenced fixtures state why rollout is blocked", () => {
     message: "voters do not agree on one current term and known leader",
   }];
   const electionHtml = ui.clusterOperationsCard(election);
+  const electionNode = ui.clusterNodeOperationsHtml(membership.nodes[2], election);
   assert.match(electionHtml, /term disagreement/);
-  assert.match(electionHtml, /stale or incomplete proof/);
+  assert.match(electionNode, /stale or incomplete proof/);
   assert.match(electionHtml, /leader term disagreement/);
 
   const fenced = operationStatus(membership, { safe: false });
@@ -415,7 +418,8 @@ test("election and fenced fixtures state why rollout is blocked", () => {
     message: "a voter is fenced from serving new work",
   }];
   const fencedHtml = ui.clusterOperationsCard(fenced);
-  assert.match(fencedHtml, /Fenced: quorum stale/);
+  const fencedNode = ui.clusterNodeOperationsHtml(membership.nodes[1], fenced);
+  assert.match(fencedNode, /Fenced: quorum stale/);
   assert.match(fencedHtml, /voter not ready.*node-b/s);
 });
 
@@ -433,9 +437,10 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
     message: "voters are directly observed on mixed builds",
   }];
   const skewHtml = ui.clusterOperationsCard(skew);
+  const skewNode = ui.clusterNodeOperationsHtml(membership.nodes[2], skew);
   assert.match(skewHtml, /2 observed builds/);
   assert.match(skewHtml, /mixed builds/);
-  assert.match(skewHtml, /v0\.2\.8-next/);
+  assert.match(skewNode, /v0\.2\.8-next/);
 
   const walError = operationStatus(membership, { safe: false });
   walError.nodes[1].status.wal.snapshot.state = "error";
@@ -449,8 +454,9 @@ test("build skew and WAL errors remain visible in summary and node evidence", ()
     message: "a voter's live WAL reports an error",
   }];
   const walHtml = ui.clusterOperationsCard(walError);
+  const walNode = ui.clusterNodeOperationsHtml(membership.nodes[1], walError);
   assert.match(walHtml, /wal not healthy.*node-b/s);
-  assert.match(walHtml, /durability proof failed/);
+  assert.match(walNode, /durability proof failed/);
 });
 
 test("stale samples and four-voter-one-down fixtures never imply safety", () => {
@@ -470,7 +476,8 @@ test("stale samples and four-voter-one-down fixtures never imply safety", () => 
     message: "a voter did not answer with a fresh sample",
   }];
   const staleHtml = ui.clusterOperationsCard(stale);
-  assert.match(staleHtml, /Not observed · stale peer sample/);
+  const staleNode = ui.clusterNodeOperationsHtml(membership.nodes[1], stale);
+  assert.match(staleNode, /Not observed · stale peer sample/);
   assert.match(staleHtml, /Do not restart another voter/);
 
   const oneDown = operationStatus(membership, { safe: false, unreachable: true });
@@ -641,9 +648,9 @@ test("capacity text separates read workers, copies, and voting tolerance", () =>
     ]),
     sys: { replication: REPLICATION },
   });
-  assert.match(html, /1 ready non-voting read worker/);
+  assert.match(html, /1 ready read worker/);
   assert.match(html, /1 non-voting replicated copy/);
-  assert.match(html, /3 voters, quorum 2, tolerates 1 voter failure/);
+  assert.match(html, /3 voters · quorum 2 · tolerates 1 voter failure/);
   assert.match(html, /do not increase voting redundancy/i);
 });
 
@@ -829,7 +836,8 @@ test("the current leader is labeled beside its hostname", () => {
 test("node actions stay inside the node card footer", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(node("node-a", 1, "voter"));
-  assert.match(row, /<article class="clnode/);
+  assert.match(row, /<details class="clnode[^>]* open/);
+  assert.match(row, /<summary>[\s\S]*class="clnodesummary"/);
   assert.match(row, /<div class="clnodefoot">[\s\S]*<div class="row">/);
   assert.equal(row.includes("<td"), false);
 });
@@ -864,7 +872,35 @@ test("cluster diagnostics have a separate log surface", () => {
   assert.match(html, /instead of the general System log/);
 });
 
-test("the healthy cluster layout separates health, nodes, operations, and danger", () => {
+test("the healthy cluster layout combines node membership and operations evidence", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({
+    cluster,
+    clusterOps: operationStatus(cluster),
+    sys: { replication: REPLICATION },
+  });
+  assert.match(html, /class="cluster-health"/);
+  assert.match(html, /id="cluster-operations"/);
+  assert.match(html, /<h3>Cluster nodes<\/h3>/);
+  assert.match(html, /id="cluster-node-list"/);
+  assert.match(html, /Membership/);
+  assert.match(html, /Operations/);
+  assert.match(html, /WAL, snapshot, and protocol details/);
+  assert.match(html, /class="clcontextfact">[\s\S]*Watch state/);
+  assert.match(html, /class="clcontextfact">[\s\S]*Capacity/);
+  assert.match(html, /<h3>Maintenance &amp; leadership<\/h3>/);
+  assert.match(html, /Enter maintenance/);
+  assert.match(html, /Force election/);
+  assert.match(html, /Danger zone · membership changes/);
+  assert.equal(html.includes("<table"), false);
+});
+
+test("node cards start expanded and the all-nodes control toggles both ways", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -872,14 +908,34 @@ test("the healthy cluster layout separates health, nodes, operations, and danger
     node("node-c", 3, "voter"),
   ]);
   const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  assert.match(html, /class="cluster-health"/);
-  assert.match(html, /id="cluster-operations"/);
-  assert.match(html, /<h3>Nodes<\/h3>/);
-  assert.match(html, /<h3>Maintenance &amp; leadership<\/h3>/);
-  assert.match(html, /Enter maintenance/);
-  assert.match(html, /Force election/);
-  assert.match(html, /Danger zone · membership changes/);
-  assert.equal(html.includes("<table"), false);
+  assert.equal((html.match(/<details class="clnode[^>]*" open/g) || []).length, 3);
+  assert.match(html, /id="clnodes-toggle"[^>]*aria-expanded="true"[^>]*>Collapse all</);
+
+  const cards = [{ open: true }, { open: false }, { open: true }];
+  const attributes = {};
+  const button = {
+    textContent: "Collapse all",
+    setAttribute(name, value) { attributes[name] = value; },
+    focus() {},
+  };
+  const previousDocument = global.document;
+  global.document = {
+    querySelectorAll() { return cards; },
+    getElementById() { return button; },
+  };
+  try {
+    ui.toggleClusterNodes(button);
+    assert.deepEqual(cards.map((card) => card.open), [true, true, true]);
+    assert.equal(button.textContent, "Collapse all");
+    assert.equal(attributes["aria-expanded"], "true");
+    ui.toggleClusterNodes(button);
+    assert.deepEqual(cards.map((card) => card.open), [false, false, false]);
+    assert.equal(button.textContent, "Expand all");
+    assert.equal(attributes["aria-expanded"], "false");
+  } finally {
+    if (previousDocument === undefined) delete global.document;
+    else global.document = previousDocument;
+  }
 });
 
 test("maintenance entry is available directly on a leader, busy follower, and learner", () => {
@@ -895,15 +951,11 @@ test("maintenance entry is available directly on a leader, busy follower, and le
 
   for (const nodeId of ["node-a", "node-b", "node-d"]) {
     cluster.local_node_id = nodeId;
-    const html = ui.clusterPanel({
-      cluster,
-      clusterOps: ops,
-      sys: { replication: REPLICATION },
+    const target = cluster.nodes.find((entry) => entry.node_id === nodeId);
+    const card = ui.clusterNodeRow(target, nodeId, true, {
+      operations: ops,
+      lifecycleLocked: false,
     });
-    const marker = `<div class="clid">Node ID ${nodeId}</div>`;
-    const start = html.lastIndexOf(marker);
-    assert.notEqual(start, -1);
-    const card = html.slice(start, html.indexOf("</article>", start));
     assert.match(card, /Enter maintenance/);
     assert.doesNotMatch(card, /disabled[^>]*>Enter maintenance/);
   }
