@@ -261,6 +261,10 @@ impl<T> VodPublication<T> {
     fn is_ok(&self) -> bool {
         self.result.is_ok()
     }
+
+    fn expect(self, message: &str) -> (T, ResponseOwner) {
+        (self.result.expect(message), self.owner)
+    }
 }
 
 /// Live diagnostics for one VOD session. This is intentionally not the live
