@@ -996,7 +996,7 @@ fn local_hostname() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use plurx_core::cluster::membership::NodeRole;
+    use plurx_core::cluster::membership::{ClusterRecoveryStatus, NodeRole};
 
     #[tokio::test(start_paused = true)]
     async fn peer_fanout_uses_one_shared_deadline() {
@@ -1124,6 +1124,11 @@ mod tests {
             apply_lag_entries: Some(0),
             storage_headroom_bytes: Some(1),
             voter_storage_ready: true,
+            maintenance: false,
+            maintenance_requested_at: None,
+            maintenance_acknowledged: false,
+            maintenance_ready: false,
+            active_media_sessions: 0,
         };
         let membership = MembershipStatus {
             local_node_id: "local".to_owned(),
@@ -1144,6 +1149,14 @@ mod tests {
                 binary_max: 1,
                 learner_protocol_active: false,
                 learner_protocol_pending: Vec::new(),
+            },
+            recovery: ClusterRecoveryStatus {
+                required: false,
+                quorum_available: true,
+                reachable_voters: 1,
+                required_voters: 1,
+                leader_elected: true,
+                permanent_majority_loss_supported: false,
             },
         };
         let status = test_local_status("node-a", Some(8));
@@ -1391,6 +1404,11 @@ mod tests {
                 apply_lag_entries: Some(0),
                 storage_headroom_bytes: Some(1),
                 voter_storage_ready: true,
+                maintenance: false,
+                maintenance_requested_at: None,
+                maintenance_acknowledged: false,
+                maintenance_ready: false,
+                active_media_sessions: 0,
             })
             .collect::<Vec<_>>();
         let quorum = voters / 2 + 1;
@@ -1413,6 +1431,14 @@ mod tests {
                 binary_max: 1,
                 learner_protocol_active: false,
                 learner_protocol_pending: Vec::new(),
+            },
+            recovery: ClusterRecoveryStatus {
+                required: false,
+                quorum_available: true,
+                reachable_voters: voters,
+                required_voters: quorum,
+                leader_elected: true,
+                permanent_majority_loss_supported: false,
             },
         }
     }

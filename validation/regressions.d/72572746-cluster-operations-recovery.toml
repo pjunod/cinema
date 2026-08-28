@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["72572746"]
+points = ["cluster.membership", "cluster.operations", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract"]
+reason = "The membership and HTTP fixtures retain the restart-persistent maintenance fence, current-binary acknowledgement, quorum-preserving leader handoff, admission and media placement refusal, safe resume, and bounded election rules; the web membership and operations suites retain the combined direct-voter rollout evidence, redesigned maintenance workflow, leaderless-quorum election path, and lost-quorum original-voter recovery surface without any force-reconfiguration action."
