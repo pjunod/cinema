@@ -13,7 +13,7 @@ rounds 1 through 3 found timer-only terminal wake, executor-loss visibility,
 terminal-cause projection, compile/lint, test-scheduling, actor-loss
 classification, terminal/receiver-loss races, stale executor-state overwrite,
 and a four-variant poll-contract violation. The final defensive pass also made
-the first terminal-or-lost settlement win in either order. The current head
+the first terminal-or-lost settlement win in either order. The runtime head
 received unanimous exact-head approval at `981ebb51`. The focused Rust suite
 then passed 85/85; the ownership inventory exposed six stale normalized
 counts/anchors and one warnings-as-errors risk. `73cd33e9` fixed the normalized
@@ -28,8 +28,10 @@ passed catalog, history, 121 validation tests, and 52 additional tests, then
 Clippy identified the intentionally retained strong transport owner as unread
 outside tests. `f463d4d4` documents and allows that one lifetime-owner field.
 The repair received targeted approval, the corrected handoff received final
-static approval at `1a0c48cd`, `make check` passed, and `make cluster-check`
-passed. Hosted run `33127427163` is in progress.
+static approval, and the final documentation corrections received exact-head
+approval at `1ead3944`. `make check` and `make cluster-check` passed. Hosted
+run `33127652859` then passed every selected job and the aggregate PR
+validation gate on that reviewed implementation/status head.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
@@ -57,7 +59,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, and sequenced actor/producer ordering; reviewed and locally green PR #626 adds the passive decision transport | Complete hosted validation and merge the transport, then add production decision emission, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, and sequenced actor/producer ordering; reviewed and fully green PR #626 adds the passive decision transport | Merge the transport, then add production decision emission, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -122,9 +124,9 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Approved.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact runtime head `981ebb51`. Every post-test corrective delta was reviewed before its affected gate reran; the final documentation correction was approved at `1a0c48cd`. PR #626 now awaits hosted evidence. |
+| Adversarial implementation review | **Approved.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact runtime head `981ebb51`. Every post-test corrective delta was reviewed before its affected gate reran; the final documentation corrections were approved at `1ead3944`. |
 | Unit/focused tests | **Green.** Rust playback control passed 85/85 twice without warnings; after reviewed bookkeeping repairs, the ownership inventory passed 7/7. |
-| Full/cluster/hosted gates | **Local full and cluster gates green; hosted in progress.** `make check` passed catalog/history, Clippy with warnings denied, the full workspace suite, and doc tests. `make cluster-check` passed vendor WAL/recovery, replicated-store, topology, failure-drill, activation, and activity integration contracts. PR #626 hosted run `33127427163` is in progress. |
+| Full/cluster/hosted gates | **Green.** `make check` passed catalog/history, Clippy with warnings denied, the full workspace suite, and doc tests. `make cluster-check` passed vendor WAL/recovery, replicated-store, topology, failure-drill, activation, and activity integration contracts. PR #626 hosted run `33127652859` passed every selected job and the aggregate validation gate on reviewed head `1ead3944`. |
 
 ## Watchdog-removal ledger
 

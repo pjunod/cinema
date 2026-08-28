@@ -6,8 +6,9 @@
 **Active branch:** `codex/playback-control-m4-producer-decision`
 **Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
 (PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `1a0c48cd2e4591a12c9869468031b9a8cf044a73`
-(final targeted approval; runtime head `981ebb51` was unanimously approved)
+**Last reviewed exact head:** `1ead394488df1f3ba6730ec21697ad8e357a31ff`
+(final documentation approval; runtime head `981ebb51` was unanimously
+approved)
 **Current implementation:** behavior-neutral decision transport committed at
 `c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
 repairs at `91486148`, absorbing executor-state/poll-contract repairs at
@@ -18,7 +19,8 @@ enum-warning, and strong lifetime-owner lint repairs are committed through
 `f463d4d4`
 **Test state:** focused Rust playback control passed 85/85 twice without
 warnings; ownership inventory passed 7/7; `make check` and
-`make cluster-check` passed; PR #626 hosted run `33127427163` is in progress
+`make cluster-check` passed; PR #626 hosted run `33127652859` passed every
+selected job and the aggregate validation gate on reviewed head `1ead3944`
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -71,7 +73,10 @@ The rewrite is not starting from scratch:
 
 The active branch builds on #624 with reusable local evidence: focused
 playback-control tests, the ownership inventory, `make check`, and
-`make cluster-check` are green. Hosted PR evidence is still in progress.
+`make cluster-check` are green. Hosted run `33127652859` passed every selected
+job and the aggregate PR validation gate on reviewed head `1ead3944`; only the
+evidence-only status update, its final-head hosted validation, and merge remain
+for PR #626.
 Legacy watchdogs, recovery actions, response admission, and compatibility
 owners remain active; no decision/action cutover has happened.
 
@@ -399,13 +404,15 @@ topology, and daemon-integration contracts.
 
 PR #624 is merged as `dba35f98`. The current disposable decision-transport
 slice is PR #626 on `codex/playback-control-m4-producer-decision`; its runtime
-is committed through `f463d4d4` and its tested/documented head is `1a0c48cd`.
-Continue in this order:
+is committed through `f463d4d4`, its reviewed implementation/status head is
+`1ead3944`, and local plus hosted gates are green on that head. The worktree
+contains only the final evidence update as tracked changes; the preserved
+untracked vendor build artifacts remain outside the commit. Continue in this
+order:
 
-1. Record the final local evidence and obtain adversarial PR review of the
-   resulting documentation-only head.
-2. Require every hosted PR #626 check to pass on that exact head; repair any
-   failure, re-review changed code, and repeat the affected gates.
+1. Commit and push the adversarially reviewed evidence-only update.
+2. Require every hosted PR #626 check to pass on the resulting final head;
+   repair any failure, re-review changed code, and repeat the affected gates.
 3. Merge PR #626.
 4. Immediately begin the first authoritative vertical cut: actor-owned
    hardware startup retry plus response admission and cleanup, followed by
@@ -518,7 +525,8 @@ head `1a0c48cd2e4591a12c9869468031b9a8cf044a73`. The rerun of `make check`
 passed catalog/history, Clippy with warnings denied, the full workspace suite,
 and doc tests. `make cluster-check` then passed vendor WAL/recovery,
 replicated-store, topology, failure-drill, activation, and activity integration
-contracts. PR #626 is open; hosted run `33127427163` is in progress.
+contracts. PR #626 is open and hosted run `33127652859` passed every selected
+job plus the aggregate validation gate on reviewed head `1ead3944`.
 
 `ProducerDecision` is now a typed, test-installable actor value and the
 executor polls it without consuming it. No production decision is emitted,
