@@ -105,7 +105,6 @@ if [ "$DO_DEPLOY" -eq 1 ]; then
   [ -f "$ANSIBLE_INVENTORY" ] || die "no ansible inventory at $ANSIBLE_INVENTORY (set PLURX_ANSIBLE_INVENTORY)"
   note "playbooks: $ANSIBLE_DIR (private repo; production inventory stays local)"
   note "nodes follow origin/main, so push first or you will deploy the old tree"
-  note "nuc4's port is held by Plex; that is accepted, not a failure"
 
   # The rung is a per-deploy environment change on the nodes. This script
   # cannot set it for you, and pretending otherwise would be worse than
