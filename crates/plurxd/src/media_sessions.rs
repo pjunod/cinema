@@ -14,8 +14,8 @@ use futures_util::{future::BoxFuture, stream, StreamExt};
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
     MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRoute,
-    MediaSessionTakeover, OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
-    MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
+    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::store::Store;
@@ -270,7 +270,6 @@ struct PendingTakeoverSettlement<W = TakeoverWorkerGuard, A = SessionAdoptionTok
 }
 
 trait TakeoverWorkerLifecycle: Send + Sized + 'static {
-    fn adopted(&mut self, durable_session_id: &str);
     fn retain_until(&mut self, expires_at_ms: i64, monotonic_expiry: tokio::time::Instant);
     fn stop(self, reason: &'static str) -> BoxFuture<'static, ()>;
     fn stop_and_retain_until(
@@ -282,8 +281,12 @@ trait TakeoverWorkerLifecycle: Send + Sized + 'static {
     fn publish(self);
 }
 
-trait TakeoverSettlementIo<A>: Sync {
+trait TakeoverSettlementIo<A: Send + 'static, W: Send + 'static>: Sync {
     fn route_generation(&self, session_id: &str) -> u64;
+    fn claim<'a>(
+        &'a self,
+        claim: &'a MediaSessionTakeover,
+    ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>>;
     fn replay<'a>(
         &'a self,
         claim: &'a MediaSessionTakeover,
@@ -301,11 +304,13 @@ trait TakeoverSettlementIo<A>: Sync {
         &'a self,
         provisional_id: &'a str,
         durable_session_id: &'a str,
+        worker: W,
         adoption: A,
-    ) -> BoxFuture<'a, bool>;
+    ) -> BoxFuture<'a, Result<W, W>>;
     fn renew_first<'a>(
         &'a self,
         route: &'a MediaSessionRoute,
+        local_session_id: &'a str,
         lease_expires_at_ms: i64,
     ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>>;
     fn seed<'a>(&'a self, route: &'a MediaSessionRoute) -> BoxFuture<'a, ()>;
@@ -316,9 +321,16 @@ trait TakeoverSettlementIo<A>: Sync {
     ) -> BoxFuture<'a, bool>;
 }
 
-impl TakeoverSettlementIo<SessionAdoptionToken> for AppState {
+impl TakeoverSettlementIo<SessionAdoptionToken, TakeoverWorkerGuard> for AppState {
     fn route_generation(&self, session_id: &str) -> u64 {
         self.media_sessions.route_generation(session_id)
+    }
+
+    fn claim<'a>(
+        &'a self,
+        claim: &'a MediaSessionTakeover,
+    ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
+        Box::pin(self.store.claim_media_session_takeover(claim))
     }
 
     fn replay<'a>(
@@ -355,26 +367,30 @@ impl TakeoverSettlementIo<SessionAdoptionToken> for AppState {
         &'a self,
         provisional_id: &'a str,
         durable_session_id: &'a str,
+        worker: TakeoverWorkerGuard,
         adoption: SessionAdoptionToken,
-    ) -> BoxFuture<'a, bool> {
-        Box::pin(self.transcode.adopt_session_id_with_token(
+    ) -> BoxFuture<'a, Result<TakeoverWorkerGuard, TakeoverWorkerGuard>> {
+        Box::pin(self.transcode.adopt_session_id_with_owner(
             provisional_id,
             durable_session_id,
             adoption,
+            worker,
         ))
     }
 
     fn renew_first<'a>(
         &'a self,
         route: &'a MediaSessionRoute,
+        local_session_id: &'a str,
         lease_expires_at_ms: i64,
     ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
         Box::pin(async move {
+            let local_session_id = local_session_id.to_owned();
             let frontiers = self
                 .transcode
-                .session_frontiers(std::slice::from_ref(&route.session_id))
+                .session_frontiers(std::slice::from_ref(&local_session_id))
                 .await;
-            let Some(frontier) = frontiers.get(&route.session_id) else {
+            let Some(frontier) = frontiers.get(&local_session_id) else {
                 return Ok(None);
             };
             let now_ms = unix_ms();
@@ -528,10 +544,6 @@ impl TakeoverWorkerGuard {
 }
 
 impl TakeoverWorkerLifecycle for TakeoverWorkerGuard {
-    fn adopted(&mut self, durable_session_id: &str) {
-        TakeoverWorkerGuard::adopted(self, durable_session_id);
-    }
-
     fn retain_until(&mut self, expires_at_ms: i64, monotonic_expiry: tokio::time::Instant) {
         self.retain_settlement_until(expires_at_ms, monotonic_expiry);
     }
@@ -559,6 +571,12 @@ impl TakeoverWorkerLifecycle for TakeoverWorkerGuard {
     }
 }
 
+impl crate::transcode::SessionAdoptionOwner for TakeoverWorkerGuard {
+    fn adopted_session_id(&mut self, durable_session_id: &str) {
+        self.adopted(durable_session_id);
+    }
+}
+
 impl Drop for TakeoverWorkerGuard {
     fn drop(&mut self) {
         drop(self.spawn_teardown("media-session takeover settlement owner dropped"));
@@ -568,26 +586,20 @@ impl Drop for TakeoverWorkerGuard {
 /// Owns the creation child and its exact cleanup capability as one value.
 /// Dropping a JoinHandle detaches its task, so supervisor cancellation must
 /// instead abort and await that child before exact worker teardown can begin.
-struct TakeoverCreationOwner {
+struct TakeoverCreationOwner<W: TakeoverWorkerLifecycle = TakeoverWorkerGuard> {
     handle: Option<tokio::task::JoinHandle<Result<StartInfo, String>>>,
-    worker: Option<TakeoverWorkerGuard>,
+    worker: Option<W>,
 }
 
-impl TakeoverCreationOwner {
-    fn new(
-        handle: tokio::task::JoinHandle<Result<StartInfo, String>>,
-        worker: TakeoverWorkerGuard,
-    ) -> Self {
+impl<W: TakeoverWorkerLifecycle> TakeoverCreationOwner<W> {
+    fn new(handle: tokio::task::JoinHandle<Result<StartInfo, String>>, worker: W) -> Self {
         Self {
             handle: Some(handle),
             worker: Some(worker),
         }
     }
 
-    async fn finish(
-        mut self,
-        deadline: tokio::time::Instant,
-    ) -> Result<(StartInfo, TakeoverWorkerGuard), String> {
+    async fn finish(mut self, deadline: tokio::time::Instant) -> Result<(StartInfo, W), String> {
         let outcome = tokio::time::timeout_at(
             deadline,
             self.handle
@@ -641,7 +653,7 @@ impl TakeoverCreationOwner {
     }
 }
 
-impl Drop for TakeoverCreationOwner {
+impl<W: TakeoverWorkerLifecycle> Drop for TakeoverCreationOwner<W> {
     fn drop(&mut self) {
         let Some(mut handle) = self.handle.take() else {
             return;
@@ -3662,6 +3674,10 @@ pub(crate) async fn maintenance_loop(state: AppState) {
 pub(crate) async fn takeover_loop(state: AppState) {
     let mut interval = tokio::time::interval(TAKEOVER_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Keep the keyset position across ticks. Permanently ineligible legacy or
+    // malformed recipes remain authoritative until expiry/maintenance, but
+    // cannot pin this bounded scanner to the oldest page in the meantime.
+    let mut scan_cursor: Option<MediaSessionTakeoverCursor> = None;
     loop {
         interval.tick().await;
         let media_pool_enabled = state
@@ -3684,12 +3700,15 @@ pub(crate) async fn takeover_loop(state: AppState) {
             || !takeover_enabled
             || !state.media_pool.remote_rollout_ready().await
         {
+            scan_cursor = None;
             continue;
         }
         let now_ms = unix_ms();
         let routes = match tokio::time::timeout(
             Duration::from_secs(3),
-            state.store.expired_media_sessions(now_ms, TAKEOVER_BATCH),
+            state
+                .store
+                .expired_media_sessions(now_ms, scan_cursor.clone(), TAKEOVER_BATCH),
         )
         .await
         {
@@ -3700,6 +3719,14 @@ pub(crate) async fn takeover_loop(state: AppState) {
             }
             Err(_) => continue,
         };
+        if routes.is_empty() {
+            // Reaching the end starts a fresh oldest-first pass on the next
+            // tick. This also revisits transient refusals without sacrificing
+            // bounded progress through the current inventory.
+            scan_cursor = None;
+            continue;
+        }
+        scan_cursor = routes.last().map(MediaSessionTakeoverCursor::from);
         // A route stays expired-and-claimable until somebody's CAS lands, so
         // it reappears on every tick until then. Contesting it again while
         // this node's own attempt is still in flight buys nothing and costs an
@@ -3821,19 +3848,60 @@ async fn stop_pending_takeover<W, A>(
     pending.worker.stop(reason).await;
 }
 
+/// Submit the immutable claim once, then hand every ambiguous outcome to the
+/// exact replay/read reconciler. Keeping this boundary generic lets the
+/// cancellation contract be exercised without a real Store or worker.
+async fn settle_initial_takeover_claim<I, W, A>(
+    io: &I,
+    pending: PendingTakeoverSettlement<W, A>,
+) -> Result<(), String>
+where
+    I: TakeoverSettlementIo<A, W>,
+    W: TakeoverWorkerLifecycle,
+    A: Send + 'static,
+{
+    let Some(claim_deadline) = takeover_reconciliation_deadline(
+        pending.claim.lease_expires_at_ms,
+        pending.monotonic_expiry,
+    ) else {
+        stop_pending_takeover(
+            pending,
+            "media-session takeover claim expired",
+            TAKEOVER_FAILED,
+        )
+        .await;
+        return Err("media-session takeover claim expired before submission".to_owned());
+    };
+    match tokio::time::timeout_at(claim_deadline, io.claim(&pending.claim)).await {
+        Ok(Ok(Some(claimed))) => reconcile_pending_takeover(io, pending, Some(claimed)).await,
+        Ok(Ok(None)) => {
+            stop_pending_takeover(pending, "media-session takeover lost", TAKEOVER_LOST).await;
+            Ok(())
+        }
+        Ok(Err(error)) => {
+            tracing::debug!(%error, "media-session takeover claim reply is ambiguous");
+            reconcile_pending_takeover(io, pending, None).await
+        }
+        Err(_) => {
+            tracing::debug!("media-session takeover claim deadline became ambiguous");
+            reconcile_pending_takeover(io, pending, None).await
+        }
+    }
+}
+
 /// Resolve one takeover CAS independently of the inventory tick that started
 /// it. The loop replays the exact fixed proposal and then reads by incarnation:
 /// replay is safe before or after a lost reply, while the read distinguishes
 /// our successor from a terminal, renewed, or competing generation. The
-/// proposed lease is the sole lifetime owner; this task cannot renew it until
-/// the worker is adopted and published.
+/// proposed lease owns reconciliation; after proving the exact winner, this
+/// task renews from the still-provisional worker before adopting its public id.
 async fn reconcile_pending_takeover<I, W, A>(
     io: &I,
     mut pending: PendingTakeoverSettlement<W, A>,
     initial_winner: Option<MediaSessionRoute>,
 ) -> Result<(), String>
 where
-    I: TakeoverSettlementIo<A>,
+    I: TakeoverSettlementIo<A, W>,
     W: TakeoverWorkerLifecycle,
     A: Send + 'static,
 {
@@ -4018,43 +4086,10 @@ where
         return Err("media-session takeover pin consumed its publication runway".to_owned());
     }
 
-    let Some(adoption_deadline) =
-        takeover_reconciliation_deadline(claim.lease_expires_at_ms, monotonic_expiry)
-    else {
-        metric.outcome = TAKEOVER_FAILED;
-        worker
-            .stop_and_retain_until(
-                "media-session takeover adoption expired",
-                claim.lease_expires_at_ms,
-                monotonic_expiry,
-            )
-            .await;
-        return Err("media-session takeover claim expired before adoption".to_owned());
-    };
-    let adopted = tokio::time::timeout_at(
-        adoption_deadline,
-        io.adopt(&provisional_id, &claimed.session_id, adoption),
-    )
-    .await
-    .unwrap_or(false);
-    if !adopted {
-        metric.outcome = TAKEOVER_FAILED;
-        worker
-            .stop_and_retain_until(
-                "media-session takeover adoption failed",
-                claim.lease_expires_at_ms,
-                monotonic_expiry,
-            )
-            .await;
-        return Err("takeover winner could not adopt its local worker".to_owned());
-    }
-
-    worker.adopted(&claimed.session_id);
-    // Do not hand a takeover to the ordinary interval before it has completed
-    // one exact renewal itself. That loop may already be midway through an
-    // inventory/publication/cleanup tick. This bounded bootstrap renewal runs
-    // immediately against the adopted worker and gives publication a fresh
-    // full takeover lease; later interval renewals return to LEASE_TTL_MS.
+    // Renew the durable route from the provisional worker's frontier before
+    // installing its stable public capability. The ordinary interval may be
+    // midway through an inventory/publication/cleanup tick, but no request can
+    // reach the successor by durable id until this exact bootstrap succeeds.
     let bootstrap_now = tokio::time::Instant::now();
     let bootstrap_monotonic_expiry = bootstrap_now
         + Duration::from_millis(u64::try_from(TAKEOVER_CLAIM_LEASE_TTL_MS).unwrap_or_default());
@@ -4063,7 +4098,7 @@ where
     let bootstrap_deadline = bootstrap_now + LEASE_RENEWAL_DEADLINE;
     claimed = match tokio::time::timeout_at(
         bootstrap_deadline,
-        io.renew_first(&claimed, bootstrap_expires_at_ms),
+        io.renew_first(&claimed, &provisional_id, bootstrap_expires_at_ms),
     )
     .await
     {
@@ -4098,6 +4133,46 @@ where
                 )
                 .await;
             return Err("takeover bootstrap renewal timed out".to_owned());
+        }
+    };
+
+    let Some(adoption_deadline) =
+        takeover_reconciliation_deadline(bootstrap_expires_at_ms, bootstrap_monotonic_expiry)
+    else {
+        metric.outcome = TAKEOVER_FAILED;
+        worker
+            .stop_and_retain_until(
+                "media-session takeover adoption expired",
+                bootstrap_expires_at_ms,
+                bootstrap_monotonic_expiry,
+            )
+            .await;
+        return Err("media-session takeover bootstrap lease expired before adoption".to_owned());
+    };
+    worker = match tokio::time::timeout_at(
+        adoption_deadline,
+        io.adopt(&provisional_id, &claimed.session_id, worker, adoption),
+    )
+    .await
+    {
+        Ok(Ok(worker)) => worker,
+        Ok(Err(worker)) => {
+            metric.outcome = TAKEOVER_FAILED;
+            worker
+                .stop_and_retain_until(
+                    "media-session takeover adoption failed",
+                    bootstrap_expires_at_ms,
+                    bootstrap_monotonic_expiry,
+                )
+                .await;
+            return Err("takeover winner could not adopt its local worker".to_owned());
+        }
+        Err(_) => {
+            // The timed-out future owned the worker. Dropping it invokes exact
+            // teardown using whichever identity the synchronous registry move
+            // had reached, and retains settlement through the bootstrap lease.
+            metric.outcome = TAKEOVER_FAILED;
+            return Err("media-session takeover adoption timed out".to_owned());
         }
     };
     io.seed(&claimed).await;
@@ -4189,38 +4264,7 @@ async fn supervise_takeover_settlement(
         claim_cache_generation,
         metric,
     };
-    let Some(claim_deadline) = takeover_reconciliation_deadline(
-        pending.claim.lease_expires_at_ms,
-        pending.monotonic_expiry,
-    ) else {
-        stop_pending_takeover(
-            pending,
-            "media-session takeover claim expired",
-            TAKEOVER_FAILED,
-        )
-        .await;
-        return Err("media-session takeover claim expired before submission".to_owned());
-    };
-    match tokio::time::timeout_at(
-        claim_deadline,
-        state.store.claim_media_session_takeover(&pending.claim),
-    )
-    .await
-    {
-        Ok(Ok(Some(claimed))) => reconcile_pending_takeover(&state, pending, Some(claimed)).await,
-        Ok(Ok(None)) => {
-            stop_pending_takeover(pending, "media-session takeover lost", TAKEOVER_LOST).await;
-            Ok(())
-        }
-        Ok(Err(error)) => {
-            tracing::debug!(%error, "media-session takeover claim reply is ambiguous");
-            reconcile_pending_takeover(&state, pending, None).await
-        }
-        Err(_) => {
-            tracing::debug!("media-session takeover claim deadline became ambiguous");
-            reconcile_pending_takeover(&state, pending, None).await
-        }
-    }
+    settle_initial_takeover_claim(&state, pending).await
 }
 
 async fn attempt_takeover(state: &AppState, route: MediaSessionRoute) -> Result<(), String> {
@@ -4715,6 +4759,7 @@ mod tests {
     struct ProbeTakeoverWorker {
         id: &'static str,
         events: Arc<StdMutex<Vec<String>>>,
+        stopped: Option<Arc<tokio::sync::Notify>>,
         settled: bool,
     }
 
@@ -4730,16 +4775,15 @@ mod tests {
     impl Drop for ProbeTakeoverWorker {
         fn drop(&mut self) {
             if !self.settled {
-                self.record("unexpected-drop");
+                // Production Drop starts exact detached teardown. Recording
+                // that transition makes cancellation/panic ownership visible
+                // without needing a TranscodeManager fixture in every script.
+                self.record("drop-teardown");
             }
         }
     }
 
     impl TakeoverWorkerLifecycle for ProbeTakeoverWorker {
-        fn adopted(&mut self, durable_session_id: &str) {
-            self.record(&format!("adopted:{durable_session_id}"));
-        }
-
         fn retain_until(&mut self, _expires_at_ms: i64, _monotonic_expiry: tokio::time::Instant) {
             self.record("retain");
         }
@@ -4747,12 +4791,16 @@ mod tests {
         fn stop(mut self, reason: &'static str) -> BoxFuture<'static, ()> {
             self.settled = true;
             let events = Arc::clone(&self.events);
+            let stopped = self.stopped.take();
             let id = self.id;
             Box::pin(async move {
                 events
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(format!("worker:{id}:stop:{reason}"));
+                if let Some(stopped) = stopped {
+                    stopped.notify_one();
+                }
             })
         }
 
@@ -4764,12 +4812,16 @@ mod tests {
         ) -> BoxFuture<'static, ()> {
             self.settled = true;
             let events = Arc::clone(&self.events);
+            let stopped = self.stopped.take();
             let id = self.id;
             Box::pin(async move {
                 events
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push(format!("worker:{id}:stop-retain:{reason}:{expires_at_ms}"));
+                if let Some(stopped) = stopped {
+                    stopped.notify_one();
+                }
             })
         }
 
@@ -4781,13 +4833,68 @@ mod tests {
 
     struct ProbeTakeoverAdoption(&'static str);
 
+    struct ScriptedPause {
+        entered: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+    }
+
+    struct ScriptedChildDrop(Arc<StdMutex<Vec<String>>>);
+
+    impl Drop for ScriptedChildDrop {
+        fn drop(&mut self) {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push("creation-child:drop".to_owned());
+        }
+    }
+
+    impl ScriptedPause {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                entered: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+            })
+        }
+
+        async fn wait(&self) {
+            self.entered.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    enum ScriptedOutcome<T> {
+        Ready(T),
+        Error(&'static str),
+        Never,
+        Panic(&'static str),
+        Paused(Arc<ScriptedPause>),
+    }
+
+    impl<T> ScriptedOutcome<T> {
+        async fn resolve(self) -> Result<T, StoreError> {
+            match self {
+                Self::Ready(value) => Ok(value),
+                Self::Error(message) => Err(StoreError::Database(message.to_owned())),
+                Self::Never => std::future::pending().await,
+                Self::Panic(message) => panic!("{message}"),
+                Self::Paused(pause) => {
+                    pause.wait().await;
+                    std::future::pending().await
+                }
+            }
+        }
+    }
+
     struct ScriptedTakeoverIo {
         events: Arc<StdMutex<Vec<String>>>,
-        replays: StdMutex<std::collections::VecDeque<Option<MediaSessionRoute>>>,
-        reads: StdMutex<std::collections::VecDeque<Option<MediaSessionRoute>>>,
+        claims: StdMutex<std::collections::VecDeque<ScriptedOutcome<Option<MediaSessionRoute>>>>,
+        replays: StdMutex<std::collections::VecDeque<ScriptedOutcome<Option<MediaSessionRoute>>>>,
+        reads: StdMutex<std::collections::VecDeque<ScriptedOutcome<Option<MediaSessionRoute>>>>,
         pins: StdMutex<std::collections::VecDeque<bool>>,
         adoptions: StdMutex<std::collections::VecDeque<bool>>,
-        renewals: StdMutex<std::collections::VecDeque<bool>>,
+        renewals: StdMutex<std::collections::VecDeque<ScriptedOutcome<bool>>>,
+        cache_results: StdMutex<std::collections::VecDeque<bool>>,
         next_generation: AtomicU64,
     }
 
@@ -4795,11 +4902,13 @@ mod tests {
         fn new(events: Arc<StdMutex<Vec<String>>>) -> Self {
             Self {
                 events,
+                claims: StdMutex::new(std::collections::VecDeque::new()),
                 replays: StdMutex::new(std::collections::VecDeque::new()),
                 reads: StdMutex::new(std::collections::VecDeque::new()),
                 pins: StdMutex::new(std::collections::VecDeque::new()),
                 adoptions: StdMutex::new(std::collections::VecDeque::new()),
                 renewals: StdMutex::new(std::collections::VecDeque::new()),
+                cache_results: StdMutex::new(std::collections::VecDeque::new()),
                 next_generation: AtomicU64::new(10),
             }
         }
@@ -4817,13 +4926,44 @@ mod tests {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
         }
+
+        fn allow_publication(&self) {
+            self.pins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(true);
+            self.renewals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(ScriptedOutcome::Ready(true));
+            self.adoptions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(true);
+        }
     }
 
-    impl TakeoverSettlementIo<ProbeTakeoverAdoption> for ScriptedTakeoverIo {
+    impl TakeoverSettlementIo<ProbeTakeoverAdoption, ProbeTakeoverWorker> for ScriptedTakeoverIo {
         fn route_generation(&self, _session_id: &str) -> u64 {
             let generation = self.next_generation.fetch_add(1, Ordering::Relaxed);
             self.record(format!("generation:{generation}"));
             generation
+        }
+
+        fn claim<'a>(
+            &'a self,
+            _claim: &'a MediaSessionTakeover,
+        ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
+            Box::pin(async move {
+                self.record("claim");
+                let outcome = self
+                    .claims
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .expect("scripted claim result");
+                outcome.resolve().await
+            })
         }
 
         fn replay<'a>(
@@ -4832,12 +4972,13 @@ mod tests {
         ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
             Box::pin(async move {
                 self.record("replay");
-                Ok(self
+                let outcome = self
                     .replays
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
-                    .expect("scripted replay result"))
+                    .expect("scripted replay result");
+                outcome.resolve().await
             })
         }
 
@@ -4847,12 +4988,13 @@ mod tests {
         ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
             Box::pin(async move {
                 self.record("read");
-                Ok(self
+                let outcome = self
                     .reads
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
-                    .expect("scripted exact read result"))
+                    .expect("scripted exact read result");
+                outcome.resolve().await
             })
         }
 
@@ -4875,32 +5017,42 @@ mod tests {
         fn adopt<'a>(
             &'a self,
             _provisional_id: &'a str,
-            _durable_session_id: &'a str,
+            durable_session_id: &'a str,
+            mut worker: ProbeTakeoverWorker,
             adoption: ProbeTakeoverAdoption,
-        ) -> BoxFuture<'a, bool> {
+        ) -> BoxFuture<'a, Result<ProbeTakeoverWorker, ProbeTakeoverWorker>> {
             Box::pin(async move {
                 self.record(format!("adopt:{}", adoption.0));
-                self.adoptions
+                let adopted = self
+                    .adoptions
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
-                    .expect("scripted adoption result")
+                    .expect("scripted adoption result");
+                if adopted {
+                    worker.record(&format!("adopted:{durable_session_id}"));
+                    Ok(worker)
+                } else {
+                    Err(worker)
+                }
             })
         }
 
         fn renew_first<'a>(
             &'a self,
             route: &'a MediaSessionRoute,
+            local_session_id: &'a str,
             lease_expires_at_ms: i64,
         ) -> BoxFuture<'a, Result<Option<MediaSessionRoute>, StoreError>> {
             Box::pin(async move {
-                self.record("renew");
-                let won = self
+                self.record(format!("renew:{local_session_id}"));
+                let outcome = self
                     .renewals
                     .lock()
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .pop_front()
                     .expect("scripted renewal result");
+                let won = outcome.resolve().await?;
                 Ok(won.then(|| {
                     let mut renewed = route.clone();
                     renewed.lease_expires_at_ms = lease_expires_at_ms;
@@ -4921,8 +5073,14 @@ mod tests {
             observed_generation: u64,
         ) -> BoxFuture<'a, bool> {
             Box::pin(async move {
-                self.record(format!("cache:{observed_generation}"));
-                true
+                let accepted = self
+                    .cache_results
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .pop_front()
+                    .unwrap_or(true);
+                self.record(format!("cache:{observed_generation}:{accepted}"));
+                accepted
             })
         }
     }
@@ -4961,6 +5119,7 @@ mod tests {
                 worker: ProbeTakeoverWorker {
                     id: "worker-a",
                     events,
+                    stopped: None,
                     settled: false,
                 },
                 adoption: ProbeTakeoverAdoption("adoption-a"),
@@ -5267,11 +5426,14 @@ mod tests {
         io.replays
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend([None, None]);
+            .extend([ScriptedOutcome::Ready(None), ScriptedOutcome::Ready(None)]);
         io.reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .extend([Some(source), Some(winner)]);
+            .extend([
+                ScriptedOutcome::Ready(Some(source)),
+                ScriptedOutcome::Ready(Some(winner)),
+            ]);
         io.pins
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5283,7 +5445,7 @@ mod tests {
         io.renewals
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(true);
+            .push_back(ScriptedOutcome::Ready(true));
 
         reconcile_pending_takeover(&io, pending, None)
             .await
@@ -5300,16 +5462,311 @@ mod tests {
                 "generation:13",
                 "read",
                 "pin",
+                "worker:worker-a:retain",
+                "renew:provisional-scripted",
                 "adopt:adoption-a",
                 "worker:worker-a:adopted:session-scripted-takeover",
-                "worker:worker-a:retain",
-                "renew",
                 "seed",
                 "worker:worker-a:publish",
-                "cache:13",
+                "cache:13:true",
             ],
             "Pending observations must not dispose the worker, and the winning read's cache generation follows seed/publication"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_initial_claim_error_and_timeout_reconcile_to_one_worker() {
+        for mode in ["error", "timeout"] {
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_takeover(Arc::clone(&events));
+            io.claims
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("scripted initial claim error")
+                } else {
+                    ScriptedOutcome::Never
+                });
+            io.replays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+
+            settle_initial_takeover_claim(&io, pending)
+                .await
+                .expect("ambiguous initial claim must reconcile");
+            let events = io.events();
+            assert_eq!(events.first().map(String::as_str), Some("claim"));
+            assert!(
+                events.iter().any(|event| event == "replay"),
+                "{mode}: {events:?}"
+            );
+            assert!(events.iter().any(|event| event.ends_with(":publish")));
+            assert!(!events.iter().any(|event| event.contains("drop-teardown")));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_replay_error_and_timeout_fall_through_to_exact_read() {
+        for mode in ["error", "timeout"] {
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_takeover(Arc::clone(&events));
+            io.replays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("scripted replay error")
+                } else {
+                    ScriptedOutcome::Never
+                });
+            io.reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(ScriptedOutcome::Ready(Some(winner)));
+            io.allow_publication();
+
+            reconcile_pending_takeover(&io, pending, None)
+                .await
+                .expect("ambiguous replay must reconcile through exact read");
+            let events = io.events();
+            assert!(events.iter().any(|event| event == "replay"));
+            assert!(
+                events.iter().any(|event| event == "read"),
+                "{mode}: {events:?}"
+            );
+            assert!(events.iter().any(|event| event.ends_with(":publish")));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ambiguous_exact_read_error_and_timeout_return_to_fixed_replay() {
+        for mode in ["error", "timeout"] {
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_takeover(Arc::clone(&events));
+            io.replays
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend([
+                    ScriptedOutcome::Ready(None),
+                    ScriptedOutcome::Ready(Some(winner)),
+                ]);
+            io.reads
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("scripted exact read error")
+                } else {
+                    ScriptedOutcome::Never
+                });
+            io.allow_publication();
+
+            reconcile_pending_takeover(&io, pending, None)
+                .await
+                .expect("ambiguous exact read must return to fixed replay");
+            let events = io.events();
+            assert_eq!(events.iter().filter(|event| *event == "replay").count(), 2);
+            assert!(
+                events.iter().any(|event| event == "read"),
+                "{mode}: {events:?}"
+            );
+            assert!(events.iter().any(|event| event.ends_with(":publish")));
+        }
+    }
+
+    #[tokio::test]
+    async fn settlement_supervisor_cancellation_drops_one_owned_worker() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let io = Arc::new(ScriptedTakeoverIo::new(Arc::clone(&events)));
+        let (pending, _) = scripted_takeover(Arc::clone(&events));
+        let pause = ScriptedPause::new();
+        io.replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(ScriptedOutcome::Paused(Arc::clone(&pause)));
+        let task = tokio::spawn({
+            let io = Arc::clone(&io);
+            async move { reconcile_pending_takeover(io.as_ref(), pending, None).await }
+        });
+        pause.entered.notified().await;
+
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("settlement supervisor must cancel")
+            .is_cancelled());
+        assert_eq!(
+            io.events(),
+            vec!["generation:10", "replay", "worker:worker-a:drop-teardown",],
+            "the reconciliation future owns exactly one teardown capability while suspended"
+        );
+    }
+
+    #[tokio::test]
+    async fn settlement_supervisor_panic_drops_one_owned_worker() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let io = Arc::new(ScriptedTakeoverIo::new(Arc::clone(&events)));
+        let (pending, _) = scripted_takeover(Arc::clone(&events));
+        io.replays
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(ScriptedOutcome::Panic("scripted replay panic"));
+        let task = tokio::spawn({
+            let io = Arc::clone(&io);
+            async move { reconcile_pending_takeover(io.as_ref(), pending, None).await }
+        });
+
+        assert!(task
+            .await
+            .expect_err("settlement supervisor must propagate panic")
+            .is_panic());
+        assert_eq!(
+            io.events(),
+            vec!["generation:10", "replay", "worker:worker-a:drop-teardown",],
+            "unwinding the supervisor cannot detach or duplicate worker ownership"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn creation_timeout_aborts_and_joins_child_before_worker_stop() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let pause = ScriptedPause::new();
+        let handle: tokio::task::JoinHandle<Result<StartInfo, String>> = tokio::spawn({
+            let events = Arc::clone(&events);
+            let pause = Arc::clone(&pause);
+            async move {
+                let _drop = ScriptedChildDrop(events);
+                pause.wait().await;
+                std::future::pending().await
+            }
+        });
+        pause.entered.notified().await;
+        let worker = ProbeTakeoverWorker {
+            id: "creation-worker",
+            events: Arc::clone(&events),
+            stopped: None,
+            settled: false,
+        };
+
+        let result = TakeoverCreationOwner::new(handle, worker)
+            .finish(tokio::time::Instant::now() + Duration::from_secs(1))
+            .await;
+        assert_eq!(
+            result.err().as_deref(),
+            Some("media-session takeover creation timed out")
+        );
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                "creation-child:drop",
+                "worker:creation-worker:stop:media-session takeover creation timed out",
+            ],
+            "worker teardown cannot begin until abort has joined the creation child"
+        );
+    }
+
+    #[tokio::test]
+    async fn creation_owner_drop_aborts_and_joins_child_before_worker_stop() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let pause = ScriptedPause::new();
+        let handle: tokio::task::JoinHandle<Result<StartInfo, String>> = tokio::spawn({
+            let events = Arc::clone(&events);
+            let pause = Arc::clone(&pause);
+            async move {
+                let _drop = ScriptedChildDrop(events);
+                pause.wait().await;
+                std::future::pending().await
+            }
+        });
+        pause.entered.notified().await;
+        let stopped = Arc::new(tokio::sync::Notify::new());
+        let worker = ProbeTakeoverWorker {
+            id: "creation-worker",
+            events: Arc::clone(&events),
+            stopped: Some(Arc::clone(&stopped)),
+            settled: false,
+        };
+
+        drop(TakeoverCreationOwner::new(handle, worker));
+        tokio::time::timeout(Duration::from_secs(1), stopped.notified())
+            .await
+            .expect("detached creation-owner settlement must finish");
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                "creation-child:drop",
+                "worker:creation-worker:stop:media-session takeover creation owner dropped",
+            ],
+            "supervisor cancellation transfers child join and worker teardown to one detached owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn creation_panic_joins_child_before_worker_stop() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let handle: tokio::task::JoinHandle<Result<StartInfo, String>> = tokio::spawn({
+            let events = Arc::clone(&events);
+            async move {
+                let _drop = ScriptedChildDrop(events);
+                panic!("scripted creation panic");
+            }
+        });
+        let worker = ProbeTakeoverWorker {
+            id: "creation-worker",
+            events: Arc::clone(&events),
+            stopped: None,
+            settled: false,
+        };
+
+        let error = TakeoverCreationOwner::new(handle, worker)
+            .finish(tokio::time::Instant::now() + Duration::from_secs(30))
+            .await
+            .expect_err("creation panic must fail settlement");
+        assert!(error.starts_with("media-session takeover creation task failed:"));
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec![
+                "creation-child:drop",
+                "worker:creation-worker:stop:media-session takeover creation task failed",
+            ],
+            "JoinError is observed only after child unwind, then the worker stops"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cache_generation_rejection_cannot_unpublish_the_owned_worker() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+        let (pending, winner) = scripted_takeover(Arc::clone(&events));
+        io.allow_publication();
+        io.cache_results
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(false);
+
+        reconcile_pending_takeover(&io, pending, Some(winner))
+            .await
+            .expect("cache generation rejection leaves Store ownership authoritative");
+        let events = io.events();
+        let publish = events
+            .iter()
+            .position(|event| event.ends_with(":publish"))
+            .expect("worker publication");
+        let rejected_cache = events
+            .iter()
+            .position(|event| event == "cache:9:false")
+            .expect("scripted generation rejection");
+        assert!(publish < rejected_cache, "{events:?}");
+        assert!(!events.iter().any(|event| event.contains("drop-teardown")));
     }
 
     #[tokio::test(start_paused = true)]
@@ -5322,11 +5779,11 @@ mod tests {
         io.replays
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(None);
+            .push_back(ScriptedOutcome::Ready(None));
         io.reads
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .push_back(Some(terminal));
+            .push_back(ScriptedOutcome::Ready(Some(terminal)));
 
         reconcile_pending_takeover(&io, pending, None)
             .await
@@ -5341,6 +5798,95 @@ mod tests {
                 "worker:worker-a:stop:media-session takeover lost",
             ]
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn takeover_bootstrap_renewal_loss_never_publishes_the_durable_identity() {
+        let events = Arc::new(StdMutex::new(Vec::new()));
+        let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+        let (pending, winner) = scripted_takeover(Arc::clone(&events));
+        io.pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(true);
+        io.renewals
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push_back(ScriptedOutcome::Ready(false));
+
+        reconcile_pending_takeover(&io, pending, Some(winner))
+            .await
+            .expect("a lost bootstrap renewal is a settled loss");
+        let events = io.events();
+        assert!(events.iter().any(|event| event == "pin"));
+        assert!(events
+            .iter()
+            .any(|event| event == "renew:provisional-scripted"));
+        assert!(events.iter().any(|event| {
+            event == "worker:worker-a:stop:media-session takeover bootstrap renewal lost"
+        }));
+        assert!(
+            !events.iter().any(|event| {
+                event.starts_with("adopt:")
+                    || event.contains(":adopted:")
+                    || event == "seed"
+                    || event.ends_with(":publish")
+                    || event.starts_with("cache:")
+            }),
+            "the durable capability must remain unreachable unless its fresh lease commits: {events:?}"
+        );
+        assert!(!events.iter().any(|event| event.contains("drop-teardown")));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bootstrap_renewal_error_and_timeout_retain_without_adoption() {
+        for mode in ["error", "timeout"] {
+            let events = Arc::new(StdMutex::new(Vec::new()));
+            let io = ScriptedTakeoverIo::new(Arc::clone(&events));
+            let (pending, winner) = scripted_takeover(Arc::clone(&events));
+            io.pins
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(true);
+            io.renewals
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push_back(if mode == "error" {
+                    ScriptedOutcome::Error("scripted bootstrap renewal error")
+                } else {
+                    ScriptedOutcome::Never
+                });
+
+            assert!(
+                reconcile_pending_takeover(&io, pending, Some(winner))
+                    .await
+                    .is_err(),
+                "{mode} must remain an ambiguous failure"
+            );
+            let events = io.events();
+            assert!(events
+                .iter()
+                .any(|event| event == "renew:provisional-scripted"));
+            assert!(
+                events.iter().any(|event| {
+                    event.starts_with(
+                        "worker:worker-a:stop-retain:media-session takeover bootstrap renewal",
+                    )
+                }),
+                "{mode}: {events:?}"
+            );
+            assert!(
+                !events.iter().any(|event| {
+                    event.starts_with("adopt:")
+                        || event.contains(":adopted:")
+                        || event == "seed"
+                        || event.ends_with(":publish")
+                        || event.starts_with("cache:")
+                }),
+                "{mode}: an ambiguous renewal cannot expose the durable identity: {events:?}"
+            );
+            assert!(!events.iter().any(|event| event.contains("drop-teardown")));
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -5360,6 +5906,10 @@ mod tests {
                     .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .push_back(failure != "pin");
                 if failure == "adoption" {
+                    io.renewals
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .push_back(ScriptedOutcome::Ready(true));
                     io.adoptions
                         .lock()
                         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -5375,13 +5925,10 @@ mod tests {
                 "{failure} failure must not publish"
             );
             let events = io.events();
-            assert!(
-                events.iter().any(|event| {
-                    event.starts_with("worker:worker-a:stop-retain:")
-                        && event.ends_with(&expected_expiry.to_string())
-                }),
-                "{failure}: known-winner cleanup must retain settlement through its exact fixed lease: {events:?}"
-            );
+            assert!(events.iter().any(|event| {
+                event.starts_with("worker:worker-a:stop-retain:")
+                    && (failure == "adoption" || event.ends_with(&expected_expiry.to_string()))
+            }), "{failure}: known-winner cleanup must retain settlement through its current exact lease: {events:?}");
             assert!(
                 !events.iter().any(|event| event.ends_with(":publish")
                     || event == "seed"
@@ -5390,10 +5937,13 @@ mod tests {
             );
             if failure == "adoption" {
                 assert!(events.iter().any(|event| event == "pin"));
+                assert!(events
+                    .iter()
+                    .any(|event| event == "renew:provisional-scripted"));
                 assert!(events.iter().any(|event| event == "adopt:adoption-a"));
                 assert!(!events.iter().any(|event| event.contains(":adopted:")));
             }
-            assert!(!events.iter().any(|event| event.contains("unexpected-drop")));
+            assert!(!events.iter().any(|event| event.contains("drop-teardown")));
         }
     }
 

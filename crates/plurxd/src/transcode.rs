@@ -1886,6 +1886,7 @@ struct PrepublicationTranscodeRetry {
 #[cfg(any(test, feature = "live-hls-recovery"))]
 struct PrepublicationStartSettlement {
     dir: PathBuf,
+    pending_child: Option<AttemptChild>,
     session: Option<Arc<Session>>,
     settled: bool,
 }
@@ -1895,12 +1896,31 @@ impl PrepublicationStartSettlement {
     fn new(dir: PathBuf) -> Self {
         Self {
             dir,
+            pending_child: None,
             session: None,
             settled: false,
         }
     }
 
+    /// Own a producer that was spawned before enough immutable presentation
+    /// state existed to construct its Session. There must be no await between
+    /// spawning the child and handing it here.
+    fn hold_child(&mut self, child: AttemptChild) {
+        debug_assert!(self.pending_child.is_none());
+        debug_assert!(self.session.is_none());
+        self.pending_child = Some(child);
+    }
+
+    /// Move the provisional producer into the Session. The guard remains the
+    /// scratch/session cleanup owner until manager registration linearizes.
+    fn take_child(&mut self) -> AttemptChild {
+        self.pending_child
+            .take()
+            .expect("prepublication child must be held before Session construction")
+    }
+
     fn attach(&mut self, session: &Arc<Session>) {
+        debug_assert!(self.pending_child.is_none());
         self.session = Some(Arc::clone(session));
     }
 
@@ -1921,6 +1941,7 @@ impl Drop for PrepublicationStartSettlement {
         if self.settled {
             return;
         }
+        let mut pending_child = self.pending_child.take();
         let session = self.session.take();
         let dir = self.dir.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -1932,6 +1953,15 @@ impl Drop for PrepublicationStartSettlement {
                     )
                     .await;
                 } else {
+                    if let Some(child) = pending_child.as_mut() {
+                        if let Err(error) = child.kill().await {
+                            tracing::error!(
+                                %error,
+                                "cancelled prepublication child could not be reaped"
+                            );
+                        }
+                    }
+                    drop(pending_child);
                     let _ = tokio::fs::remove_dir_all(dir).await;
                 }
             });
@@ -6490,6 +6520,19 @@ pub(crate) struct SessionAdoptionToken {
     gate: Arc<SessionReleaseGate>,
     registry: Arc<SessionReleaseGates>,
     session_id: String,
+}
+
+/// Move-only cleanup ownership that follows a rolling worker across the one
+/// registry mutation which changes its public capability. The adoption future
+/// owns this value, so cancellation drops the cleanup owner at whichever exact
+/// identity the registry currently contains. Implementations must update only
+/// process-local identity; durable publication is still owned by the caller.
+pub(crate) trait SessionAdoptionOwner: Send + Sized + 'static {
+    fn adopted_session_id(&mut self, durable_session_id: &str);
+}
+
+impl SessionAdoptionOwner for () {
+    fn adopted_session_id(&mut self, _durable_session_id: &str) {}
 }
 
 impl Drop for SessionAdoptionToken {
@@ -14645,6 +14688,7 @@ impl TranscodeManager {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
+        let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
 
         // An ffmpeg capability, read from the daemon's own record of which
         // ffmpeg it runs. It used to be read off the CACHE config — which
@@ -14710,7 +14754,7 @@ impl TranscodeManager {
         // unreadable, the reader task respawns this same session on the
         // arguments below, so the worst case is exactly today's behaviour.
         let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
-        let (mut child, pipe_stdout) = if segmenting {
+        let (child, pipe_stdout) = if segmenting {
             let args = transcode::copy_pipe_args_with_dolby_vision(
                 &file,
                 start_seconds,
@@ -14776,6 +14820,7 @@ impl TranscodeManager {
             )?;
             (child, None)
         };
+        start_settlement.hold_child(AttemptChild::new(generation, child, control.clone()));
 
         // Deliberately after the spawn: ffmpeg is already opening the source
         // while this runs, so the probe costs the viewer nothing it was not
@@ -14808,9 +14853,6 @@ impl TranscodeManager {
             )
             .await
         {
-            drop(pipe_stdout);
-            let _ = child.kill().await;
-            let _ = child.wait().await;
             return Err(format!(
                 "rolling control actor rejected copy response-publication ownership: {reason:?}"
             ));
@@ -14818,9 +14860,6 @@ impl TranscodeManager {
         let _install_authorization = match control.authorize_producer_install(generation).await {
             Ok(authorization) => authorization,
             Err(reason) => {
-                drop(pipe_stdout);
-                let _ = child.kill().await;
-                let _ = child.wait().await;
                 return Err(format!(
                     "rolling control actor rejected initial copy producer installation: {reason:?}"
                 ));
@@ -14847,7 +14886,7 @@ impl TranscodeManager {
             retirement_context: Some(self.rolling_retirement_context()),
             cache_integrity_cleanup_started: AtomicBool::new(false),
             published_lifetime_watcher_started: AtomicBool::new(false),
-            child: Mutex::new(Some(AttemptChild::new(generation, child, control.clone()))),
+            child: Mutex::new(Some(start_settlement.take_child())),
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
@@ -14936,14 +14975,19 @@ impl TranscodeManager {
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
+        start_settlement.attach(&session);
         if let Err(reason) = self
             .register_session(&session_id, Arc::clone(&session), generation)
             .await
         {
+            // Registration rejection owns synchronous/detached retirement;
+            // do not race that exact settlement with this start guard.
+            start_settlement.disarm();
             return Err(format!(
                 "rolling copy session registration rejected: {reason:?}"
             ));
         }
+        start_settlement.settle();
         self.emit_session_event(
             &session_id,
             &session,
@@ -15182,37 +15226,63 @@ impl TranscodeManager {
         durable_session_id: &str,
         adoption: SessionAdoptionToken,
     ) -> bool {
+        self.adopt_session_id_with_owner(provisional_id, durable_session_id, adoption, ())
+            .await
+            .is_ok()
+    }
+
+    /// Move a provisional worker and its cleanup owner through the same
+    /// cancellation boundary. Once the map contains the durable capability,
+    /// `owner` is updated synchronously before any further await or fallible
+    /// bookkeeping. A panic or cancellation after that point therefore tears
+    /// down the durable id; one before it still tears down the provisional id.
+    pub(crate) async fn adopt_session_id_with_owner<O: SessionAdoptionOwner>(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+        adoption: SessionAdoptionToken,
+        mut owner: O,
+    ) -> Result<O, O> {
         if provisional_id == durable_session_id {
-            return self.sessions.lock().await.contains_key(durable_session_id);
+            return if self.sessions.lock().await.contains_key(durable_session_id) {
+                owner.adopted_session_id(durable_session_id);
+                Ok(owner)
+            } else {
+                Err(owner)
+            };
         }
         let release_gate = &adoption.gate;
         if release_gate.released.load(Acquire) {
-            return false;
+            return Err(owner);
         }
         let _release_transition = Arc::clone(&release_gate.transition).lock_owned().await;
         if release_gate.released.load(Acquire) {
-            return false;
+            return Err(owner);
         }
         let mut sessions = self.sessions.lock().await;
         if release_gate.released.load(Acquire) {
-            return false;
+            return Err(owner);
         }
         if sessions.contains_key(durable_session_id) {
-            return false;
+            return Err(owner);
         }
         let Some(session) = sessions.remove(provisional_id) else {
-            return false;
+            return Err(owner);
         };
         sessions.insert(durable_session_id.to_owned(), session);
+        owner.adopted_session_id(durable_session_id);
         drop(sessions);
 
-        let mut requests = self.requests.lock().expect("requests mutex");
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for entry in requests.values_mut() {
             if matches!(&entry.state, RequestState::Ready(id) if id == provisional_id) {
                 entry.state = RequestState::Ready(durable_session_id.to_owned());
             }
         }
-        true
+        Ok(owner)
     }
 
     /// The fMP4 init object this session actually publishes.
@@ -28800,6 +28870,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn adoption_panic_drops_cleanup_owner_at_the_moved_identity() {
+        use plurx_core::store::SqliteStore;
+
+        struct PanicAfterMoveOwner {
+            identity: String,
+            events: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl SessionAdoptionOwner for PanicAfterMoveOwner {
+            fn adopted_session_id(&mut self, durable_session_id: &str) {
+                self.identity = durable_session_id.to_owned();
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("adopted:{durable_session_id}"));
+                panic!("scripted panic after registry move");
+            }
+        }
+
+        impl Drop for PanicAfterMoveOwner {
+            fn drop(&mut self) {
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("drop:{}", self.identity));
+            }
+        }
+
+        let root = crate::test_tempdir().expect("panic adoption root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("panic-provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+        let adoption = manager
+            .session_adoption_token("panic-durable")
+            .expect("adoption admission");
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let task = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let events = Arc::clone(&events);
+            async move {
+                let owner = PanicAfterMoveOwner {
+                    identity: "panic-provisional".to_owned(),
+                    events,
+                };
+                let _ = manager
+                    .adopt_session_id_with_owner(
+                        "panic-provisional",
+                        "panic-durable",
+                        adoption,
+                        owner,
+                    )
+                    .await;
+            }
+        });
+        assert!(task
+            .await
+            .expect_err("adoption callback must panic")
+            .is_panic());
+        assert!(manager.sessions.lock().await.contains_key("panic-durable"));
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["adopted:panic-durable", "drop:panic-durable"],
+            "the future owns cleanup and updates it synchronously with the map move"
+        );
+
+        manager
+            .stop_session("panic-durable", "panic adoption test cleanup")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn adoption_cancellation_drops_cleanup_owner_at_the_provisional_identity() {
+        use plurx_core::store::SqliteStore;
+
+        struct RecordingOwner {
+            identity: String,
+            dropped: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl SessionAdoptionOwner for RecordingOwner {
+            fn adopted_session_id(&mut self, durable_session_id: &str) {
+                self.identity = durable_session_id.to_owned();
+            }
+        }
+
+        impl Drop for RecordingOwner {
+            fn drop(&mut self) {
+                self.dropped
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(self.identity.clone());
+            }
+        }
+
+        let root = crate::test_tempdir().expect("cancelled adoption root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cancel-provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+        let adoption = manager
+            .session_adoption_token("cancel-durable")
+            .expect("adoption admission");
+        let transition = Arc::clone(&adoption.gate.transition).lock_owned().await;
+        let dropped = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let dropped = Arc::clone(&dropped);
+            let entered = Arc::clone(&entered);
+            async move {
+                let owner = RecordingOwner {
+                    identity: "cancel-provisional".to_owned(),
+                    dropped,
+                };
+                entered.notify_one();
+                let _ = manager
+                    .adopt_session_id_with_owner(
+                        "cancel-provisional",
+                        "cancel-durable",
+                        adoption,
+                        owner,
+                    )
+                    .await;
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("adoption waiter must cancel")
+            .is_cancelled());
+        drop(transition);
+
+        assert!(manager
+            .sessions
+            .lock()
+            .await
+            .contains_key("cancel-provisional"));
+        assert!(!manager.sessions.lock().await.contains_key("cancel-durable"));
+        assert_eq!(
+            *dropped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["cancel-provisional"],
+            "cancellation before the registry move drops the move-owned cleanup capability at its provisional id"
+        );
+        manager
+            .stop_session("cancel-provisional", "cancelled adoption test cleanup")
+            .await;
+    }
+
+    #[tokio::test]
     async fn durable_adoption_cannot_publish_after_release_generation() {
         use plurx_core::store::SqliteStore;
 
@@ -29091,6 +29347,33 @@ mod tests {
         assert!(session.child.lock().await.is_none());
         assert_eq!(admissions.in_use(), 0);
         assert_eq!(admissions.software_in_use(), 0);
+        await_scratch_removed(&scratch).await;
+    }
+
+    #[tokio::test]
+    async fn cancelled_copy_start_reaps_child_held_before_session_construction() {
+        let root = crate::test_tempdir().expect("cancelled copy start root");
+        let scratch = root.path().join("copy-prepublication");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create copy prepublication scratch");
+        tokio::fs::write(scratch.join("partial.m4s"), b"unpublished")
+            .await
+            .expect("seed copy prepublication scratch");
+        let control = crate::playback_control::RollingControlHandle::spawn("copy-start-test");
+        let generation = control
+            .begin_producer_attempt()
+            .await
+            .expect("begin copy producer attempt");
+
+        {
+            let mut settlement = PrepublicationStartSettlement::new(scratch.clone());
+            settlement.hold_child(AttemptChild::new(generation, long_running_child(), control));
+            // Model cancellation while the origin probe is awaiting: no
+            // Session or manager identity exists yet, so only this guard can
+            // own both the child and its unpublished scratch.
+        }
+
         await_scratch_removed(&scratch).await;
     }
 

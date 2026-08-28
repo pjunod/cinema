@@ -38,11 +38,11 @@ use plurx_core::domain::{
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
     ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionEnd,
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
-    MediaSessionTakeover, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem,
-    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
-    MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionTakeover, MediaSessionTakeoverCursor, MediaSessionTerminalAck, MetadataPatch,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
+    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
+    TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
@@ -1560,7 +1560,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
 
         let expired = store
-            .expired_media_sessions(399, 64)
+            .expired_media_sessions(399, None, 64)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
         let expired_b = expired
@@ -2056,7 +2056,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         // survivor may claim the incarnation back into life.
         assert!(
             store
-                .expired_media_sessions(4_000, 64)
+                .expired_media_sessions(4_000, None, 64)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
                 .iter()
@@ -2077,6 +2077,89 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
                 .unwrap_or_else(|error| panic!("{backend}: claim an ended incarnation: {error}"))
                 .is_none(),
             "{backend}: no replacement child may be created for an ended incarnation"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_page() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("session-expiry-cursor-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create cursor user: {error}"));
+        let fingerprint = "e".repeat(64);
+        for index in 0_u128..33 {
+            let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
+            store
+                .activate_media_session(&MediaSessionActivation {
+                    incarnation_id,
+                    session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
+                    user_id: user.id,
+                    playback_id: format!("expiry-cursor-{index}"),
+                    expected_predecessor_incarnation_id: None,
+                    fence_predecessor: false,
+                    request_id: None,
+                    request_fingerprint: fingerprint.clone(),
+                    owner_node_id: "cursor-owner".to_owned(),
+                    recipe_json: "{}".to_owned(),
+                    response_json: "{}".to_owned(),
+                    publication_ready_at_ms: 0,
+                    media_origin_ms: 0,
+                    now_ms: 100,
+                    lease_expires_at_ms: 200 + i64::try_from(index).unwrap(),
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed cursor route {index}: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: cursor route {index} must activate"));
+        }
+
+        let first = store
+            .expired_media_sessions(1_000, None, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"));
+        assert_eq!(first.len(), 16, "{backend}");
+        let second = store
+            .expired_media_sessions(
+                1_000,
+                first.last().map(MediaSessionTakeoverCursor::from),
+                16,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"));
+        assert_eq!(second.len(), 16, "{backend}");
+        let third = store
+            .expired_media_sessions(
+                1_000,
+                second.last().map(MediaSessionTakeoverCursor::from),
+                16,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"));
+        assert_eq!(third.len(), 1, "{backend}");
+
+        let routes = first
+            .iter()
+            .chain(&second)
+            .chain(&third)
+            .collect::<Vec<_>>();
+        assert_eq!(routes.len(), 33, "{backend}");
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.incarnation_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            33,
+            "{backend}: an exclusive cursor must neither repeat nor skip a route"
+        );
+        assert!(
+            routes.windows(2).all(|pair| {
+                (pair[0].lease_expires_at_ms, pair[0].incarnation_id.as_str())
+                    < (pair[1].lease_expires_at_ms, pair[1].incarnation_id.as_str())
+            }),
+            "{backend}: pages preserve the documented keyset ordering"
         );
     })
     .await;
@@ -2346,6 +2429,98 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
         .await
         .expect("reject removed-owner media lease")
         .is_none());
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated activation replay state");
+    let user = store
+        .create_user("activation-replay-user", "hash", false)
+        .await
+        .expect("create activation replay user");
+    let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
+    let session_id = "00000000-0000-4000-8000-0000000000d2";
+    let activation = MediaSessionActivation {
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        user_id: user.id,
+        playback_id: "activation-replay-playback".to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "d".repeat(64),
+        owner_node_id: "activation-replay-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: "{}".to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 100,
+        lease_expires_at_ms: 300,
+    };
+    let (pointer_read, release_stale_transaction) =
+        HiqliteAuthStore::validation_pause_next_activation_after_pointer_read();
+    let stale_store = store.clone();
+    let stale_activation = activation.clone();
+    let stale_replay =
+        tokio::spawn(async move { stale_store.activate_media_session(&stale_activation).await });
+    tokio::time::timeout(Duration::from_secs(10), pointer_read)
+        .await
+        .expect("stale activation reaches pointer-read seam")
+        .expect("stale activation publishes pointer-read seam");
+
+    store
+        .activate_media_session(&activation)
+        .await
+        .expect("winning activation")
+        .expect("winning activation commits");
+    assert_eq!(
+        store
+            .renew_media_sessions(
+                "activation-replay-node",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_id.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 22_000,
+                    fetched_through_ms: 11_000,
+                    media_sequence: 9,
+                }],
+                200,
+                1_000,
+            )
+            .await
+            .expect("renew winning activation"),
+        vec![incarnation_id.to_owned()]
+    );
+    release_stale_transaction
+        .send(())
+        .expect("release stale activation transaction");
+
+    let replay = stale_replay
+        .await
+        .expect("join stale activation replay")
+        .expect("stale activation replay result")
+        .expect("stale activation resolves exact committed route");
+    assert_eq!(replay.route.lease_expires_at_ms, 1_000);
+    assert_eq!(replay.route.updated_at_ms, 200);
+    assert_eq!(replay.route.produced_playable_through_ms, 22_000);
+    assert_eq!(replay.route.fetched_through_ms, 11_000);
+    assert_eq!(replay.route.media_sequence, 9);
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(incarnation_id)
+            .await
+            .expect("read route after stale replay")
+            .expect("route remains active"),
+        replay.route,
+        "the stale transaction must be entirely read-only"
+    );
 }
 
 #[tokio::test]

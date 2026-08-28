@@ -2168,10 +2168,14 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Vec<String>, StoreError>;
 
     /// Read a bounded, oldest-first inventory of expired active routes that a
-    /// survivor may independently prove it can reproduce.
+    /// survivor may independently prove it can reproduce. `after` is an
+    /// exclusive keyset cursor in `(lease_expires_at_ms, incarnation_id)`
+    /// order, allowing a bounded caller to make progress past routes it must
+    /// refuse without mutating those still-authoritative routes.
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
+        after: Option<crate::domain::MediaSessionTakeoverCursor>,
         limit: usize,
     ) -> Result<Vec<MediaSessionRoute>, StoreError>;
 

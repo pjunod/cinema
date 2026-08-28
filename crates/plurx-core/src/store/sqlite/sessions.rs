@@ -6,8 +6,9 @@ use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionEnd,
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
-    MediaSessionRoute, MediaSessionTakeover, MediaSessionTerminalAck, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, MediaSessionTerminalAck,
+    OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
 use crate::store::MediaSessionStore;
@@ -1383,6 +1384,7 @@ impl MediaSessionStore for SqliteStore {
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
+        after: Option<MediaSessionTakeoverCursor>,
         limit: usize,
     ) -> Result<Vec<MediaSessionRoute>, StoreError> {
         if now_ms < 0 {
@@ -1394,14 +1396,36 @@ impl MediaSessionStore for SqliteStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let (has_cursor, after_lease_expires_at_ms, after_incarnation_id) = match after {
+            Some(after) => {
+                if after.lease_expires_at_ms < 0 || after.incarnation_id.is_empty() {
+                    return Err(StoreError::Task(
+                        "invalid media-session takeover inventory cursor".to_owned(),
+                    ));
+                }
+                (1_i64, after.lease_expires_at_ms, after.incarnation_id)
+            }
+            None => (0_i64, 0_i64, String::new()),
+        };
         self.with_read(move |conn| {
             let mut statement = conn.prepare(&format!(
                 "SELECT {ROUTE_COLS} FROM media_sessions
                   WHERE state = 'active' AND lease_expires_at_ms <= ?1
-                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?2"
+                    AND (?2 = 0 OR lease_expires_at_ms > ?3
+                      OR (lease_expires_at_ms = ?3 AND incarnation_id > ?4))
+                  ORDER BY lease_expires_at_ms, incarnation_id LIMIT ?5"
             ))?;
             let routes = statement
-                .query_map(params![now_ms, limit], route_from_row)?
+                .query_map(
+                    params![
+                        now_ms,
+                        has_cursor,
+                        after_lease_expires_at_ms,
+                        after_incarnation_id,
+                        limit
+                    ],
+                    route_from_row,
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(routes)
         })

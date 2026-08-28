@@ -800,6 +800,26 @@ pub struct MediaSessionRoute {
     pub updated_at_ms: i64,
 }
 
+/// Stable keyset position for scanning expired active media sessions.
+///
+/// Takeover eligibility is deliberately decided above the Store boundary, so
+/// a caller must be able to advance past an expired route it cannot reproduce
+/// without allowing that route to monopolize every bounded inventory page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionTakeoverCursor {
+    pub lease_expires_at_ms: i64,
+    pub incarnation_id: String,
+}
+
+impl From<&MediaSessionRoute> for MediaSessionTakeoverCursor {
+    fn from(route: &MediaSessionRoute) -> Self {
+        Self {
+            lease_expires_at_ms: route.lease_expires_at_ms,
+            incarnation_id: route.incarnation_id.clone(),
+        }
+    }
+}
+
 /// Bounded, immutable acknowledgement for one accepted terminal control.
 ///
 /// The response body is retained independently of the process-local player so

@@ -10,10 +10,46 @@ use crate::cluster::coordination::removed_job_owner_key;
 use crate::domain::{
     MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionEnd,
     MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
-    MediaSessionRoute, MediaSessionTakeover, MediaSessionTerminalAck, OwnedMediaSessionLease,
-    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
+    MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, MediaSessionTerminalAck,
+    OwnedMediaSessionLease, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use crate::error::StoreError;
+
+#[cfg(feature = "hiqlite-contract-tests")]
+type ActivationPointerReadPause = (
+    tokio::sync::oneshot::Sender<()>,
+    tokio::sync::oneshot::Receiver<()>,
+);
+
+/// Contract-only seam which freezes one activation after its optimistic
+/// pointer read and before its replicated transaction is submitted. It lets
+/// the three-voter contract deterministically order activation+renewal inside
+/// that otherwise unobservable TOCTOU window.
+#[cfg(feature = "hiqlite-contract-tests")]
+static ACTIVATION_POINTER_READ_PAUSE: std::sync::LazyLock<
+    std::sync::Mutex<Option<ActivationPointerReadPause>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(feature = "hiqlite-contract-tests")]
+impl HiqliteAuthStore {
+    pub fn validation_pause_next_activation_after_pointer_read() -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let (reached_sender, reached_receiver) = tokio::sync::oneshot::channel();
+        let (release_sender, release_receiver) = tokio::sync::oneshot::channel();
+        let mut pause = ACTIVATION_POINTER_READ_PAUSE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            pause.is_none(),
+            "activation pointer-read pause already armed"
+        );
+        *pause = Some((reached_sender, release_receiver));
+        (reached_receiver, release_sender)
+    }
+}
 
 const MAX_IN_FLIGHT_PER_USER: i64 = 32;
 const MAX_CURRENT_PER_USER: i64 = 64;
@@ -677,6 +713,19 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0);
+        #[cfg(feature = "hiqlite-contract-tests")]
+        {
+            let pointer_read_pause = {
+                let mut pause = ACTIVATION_POINTER_READ_PAUSE
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                pause.take()
+            };
+            if let Some((reached, release)) = pointer_read_pause {
+                let _ = reached.send(());
+                let _ = release.await;
+            }
+        }
         if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
             let route = route_by(self, "incarnation_id", &activation.incarnation_id)
                 .await?
@@ -710,6 +759,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     (resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms)
                  SELECT $1, $2, 1, 1, $3, $4
                   WHERE NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media_playback_pointers
+                       WHERE user_id = $6 AND playback_id = $7
+                         AND current_incarnation_id = $8)
                  ON CONFLICT(resource) DO UPDATE SET
                     expires_at_ms = excluded.expires_at_ms,
                     revision = job_leases.revision + 1,
@@ -717,13 +770,20 @@ impl MediaSessionStore for HiqliteAuthStore {
                  WHERE job_leases.owner_node_id = excluded.owner_node_id
                    AND job_leases.fence = 1 AND job_leases.expires_at_ms > $4
                    AND job_leases.revision < 9223372036854775807
-                   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)",
+                   AND NOT EXISTS (SELECT 1 FROM settings WHERE key = $5)
+                   AND NOT EXISTS (
+                     SELECT 1 FROM media_playback_pointers
+                      WHERE user_id = $6 AND playback_id = $7
+                        AND current_incarnation_id = $8)",
                 params!(
                     lease_resource.as_str(),
                     activation.owner_node_id.as_str(),
                     activation.lease_expires_at_ms,
                     activation.now_ms,
-                    removed_owner_key.as_str()
+                    removed_owner_key.as_str(),
+                    activation.user_id,
+                    activation.playback_id.as_str(),
+                    activation.incarnation_id.as_str()
                 ),
             ),
             (
@@ -767,6 +827,10 @@ impl MediaSessionStore for HiqliteAuthStore {
                     AND ($19 = '' OR NOT EXISTS (SELECT 1 FROM media_sessions
                       WHERE incarnation_id = $19 AND state = 'active'
                         AND publication_ready_at_ms != 0))
+                    AND NOT EXISTS (
+                      SELECT 1 FROM media_playback_pointers
+                       WHERE user_id = $3 AND playback_id = $4
+                         AND current_incarnation_id = $1)
                  ON CONFLICT(incarnation_id) DO UPDATE SET
                     lease_expires_at_ms = excluded.lease_expires_at_ms,
                     response_json = excluded.response_json,
@@ -872,7 +936,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                  ON CONFLICT(user_id, playback_id) DO UPDATE SET
                     current_incarnation_id = excluded.current_incarnation_id,
                     updated_at_ms = excluded.updated_at_ms
-                  WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)",
+                  WHERE media_playback_pointers.current_incarnation_id IN ($7, $3)
+                    AND media_playback_pointers.current_incarnation_id
+                        != excluded.current_incarnation_id",
                 params!(
                     activation.user_id,
                     activation.playback_id.as_str(),
@@ -933,7 +999,9 @@ impl MediaSessionStore for HiqliteAuthStore {
                         claim_expires_at_ms = $2, updated_at_ms = $3
                   WHERE $4 != '' AND user_id = $5 AND request_id = $4
                     AND incarnation_id = $6 AND request_fingerprint = $7
-                    AND owner_node_id = $8 AND playback_id = $9 AND EXISTS (
+                    AND owner_node_id = $8 AND playback_id = $9
+                    AND (state != 'resolved' OR response_json != $1)
+                    AND EXISTS (
                       SELECT 1 FROM media_sessions WHERE incarnation_id = $6
                         AND session_id = $10 AND state = 'active')",
                 params!(
@@ -950,6 +1018,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                 ),
             ),
         ];
+        let statement_count = statements.len();
         let changed = self
             .client()
             .txn(statements)
@@ -957,11 +1026,19 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .collect::<Result<Vec<_>, _>>()
             .map_err(database_error)?;
-        if changed.first().copied() != Some(1)
-            || changed.get(1).copied() != Some(1)
-            || changed.get(5).copied() != Some(1)
-            || changed.get(6).copied() != Some(0)
-        {
+        let fresh_activation = changed.first().copied() == Some(1)
+            && changed.get(1).copied() == Some(1)
+            && changed.get(5).copied() == Some(1)
+            && changed.get(6).copied() == Some(0);
+        // The optimistic pointer read above may lose a race to this exact
+        // activation and a later renewal. Every write in that replay path is
+        // guarded inside the transaction, so the only valid alternative to a
+        // fresh activation is a wholly read-only transaction. The exact
+        // post-transaction projection below distinguishes that replay from a
+        // transaction which merely failed all of its preconditions.
+        let transaction_replay =
+            changed.len() == statement_count && changed.iter().all(|affected| *affected == 0);
+        if !fresh_activation && !transaction_replay {
             return Ok(None);
         }
         // INSERT conflict is an idempotent replay, not proof that every field
@@ -976,6 +1053,20 @@ impl MediaSessionStore for HiqliteAuthStore {
         let Some(route) = route else {
             return Ok(None);
         };
+        let committed_pointer = self
+            .client()
+            .query_consistent_map::<PointerRow, _>(
+                "SELECT current_incarnation_id FROM media_playback_pointers
+                  WHERE user_id = $1 AND playback_id = $2",
+                params!(activation.user_id, activation.playback_id.as_str()),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0);
+        if committed_pointer.as_deref() != Some(activation.incarnation_id.as_str()) {
+            return Ok(None);
+        }
         // Takeover may have advanced the predecessor between the pointer read
         // and this transaction. Once the CAS above ends that incarnation it
         // can no longer advance, so this post-commit row is the authoritative
@@ -1592,6 +1683,7 @@ impl MediaSessionStore for HiqliteAuthStore {
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
+        after: Option<MediaSessionTakeoverCursor>,
         limit: usize,
     ) -> Result<Vec<MediaSessionRoute>, StoreError> {
         if now_ms < 0 {
@@ -1603,15 +1695,37 @@ impl MediaSessionStore for HiqliteAuthStore {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let (has_cursor, after_lease_expires_at_ms, after_incarnation_id) = match after {
+            Some(after) => {
+                if after.lease_expires_at_ms < 0 || after.incarnation_id.is_empty() {
+                    return Err(StoreError::Task(
+                        "invalid media-session takeover inventory cursor".to_owned(),
+                    ));
+                }
+                (1_i64, after.lease_expires_at_ms, after.incarnation_id)
+            }
+            None => (0_i64, 0_i64, String::new()),
+        };
         let sql = format!(
             "SELECT {ROUTE_COLS} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
-              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $2"
+                AND ($2 = 0 OR lease_expires_at_ms > $3
+                  OR (lease_expires_at_ms = $3 AND incarnation_id > $4))
+              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $5"
         );
         validate_sql(&sql)?;
         Ok(self
             .client()
-            .query_consistent_map::<RouteRow, _>(sql, params!(now_ms, limit))
+            .query_consistent_map::<RouteRow, _>(
+                sql,
+                params!(
+                    now_ms,
+                    has_cursor,
+                    after_lease_expires_at_ms,
+                    after_incarnation_id,
+                    limit
+                ),
+            )
             .await?
             .into_iter()
             .map(|row| row.0)
@@ -2243,6 +2357,57 @@ mod tests {
         assert!(
             source.contains("Ok(route_by(self, \"incarnation_id\", &route.incarnation_id)"),
             "the returned route must be re-read after the transaction commits"
+        );
+    }
+
+    /// Reproduce the ordering which the backend-neutral sequential contract
+    /// cannot force: caller A reads the predecessor pointer, caller B commits
+    /// the exact activation and renews it, then caller A finally enters its
+    /// replicated transaction with the stale activation lease.
+    ///
+    /// The transaction must observe B's current pointer and affect zero rows.
+    /// In particular it may not rewrite the renewed session/job lease, the
+    /// pointer timestamp, or the resolved request. The all-zero result is only
+    /// accepted after exact route and current-pointer reads outside the
+    /// transaction, so an ordinary precondition failure cannot masquerade as
+    /// a replay.
+    #[test]
+    fn activation_losing_pointer_read_race_is_a_read_only_replay() {
+        let source = method_source("activate_media_session");
+        assert_eq!(
+            source.matches("current_incarnation_id = $8)").count(),
+            2,
+            "both the job-lease insert and conflict update must be suppressed by the transaction-time pointer"
+        );
+        assert!(
+            source.contains(
+                "AND NOT EXISTS (\n                      SELECT 1 FROM media_playback_pointers\n                       WHERE user_id = $3 AND playback_id = $4\n                         AND current_incarnation_id = $1)"
+            ),
+            "the session insert/upsert must be suppressed after the exact activation wins"
+        );
+        assert!(
+            source.contains(
+                "media_playback_pointers.current_incarnation_id\n                        != excluded.current_incarnation_id"
+            ),
+            "an already-current pointer must not rewrite its update timestamp"
+        );
+        assert!(
+            source.contains("AND (state != 'resolved' OR response_json != $1)"),
+            "an exactly resolved request must remain read-only"
+        );
+        assert!(
+            source.contains("changed.iter().all(|affected| *affected == 0)"),
+            "the replicated transaction must recognize the read-only race result"
+        );
+        assert!(
+            source.contains(
+                "committed_pointer.as_deref() != Some(activation.incarnation_id.as_str())"
+            ),
+            "all-zero transactions must prove the exact pointer after commit"
+        );
+        assert!(
+            source.contains(".filter(|route| activation_route_matches(route, activation))"),
+            "all-zero transactions must also prove the immutable activation identity"
         );
     }
 
