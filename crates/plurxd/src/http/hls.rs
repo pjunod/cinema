@@ -75,6 +75,25 @@ const REMOTE_RELEASE_ATTEMPTS: usize = 3;
 const REMOTE_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
 const PREDECESSOR_PROJECTION_FAST_WINDOW: Duration = Duration::from_secs(5);
 const PREDECESSOR_PROJECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+async fn pin_shared_session_for_local_start<F>(
+    deadline: tokio::time::Instant,
+    pin: F,
+) -> Result<bool, ApiError>
+where
+    F: std::future::Future<Output = Result<bool, StoreError>>,
+{
+    super::internal_media_sessions::pin_shared_session_before_deadline(deadline, pin)
+        .await
+        .map_err(|error| {
+            if error == "shared cache pin exceeded the start deadline" {
+                ApiError::ServiceUnavailable(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })
+}
+
 #[derive(Deserialize)]
 pub struct StartQuery {
     /// Target height (e.g. 1080, 720). Omitted means Auto (server-chosen).
@@ -144,7 +163,6 @@ pub struct StartResponse {
 /// leaving an encoder and its durable start claim behind.
 pub(super) struct StartedSessionGuard {
     cleanup: Option<StartedSessionCleanup>,
-    _replacement: Option<ClusterReplacementGuard>,
 }
 
 struct StartedSessionCleanup {
@@ -154,6 +172,13 @@ struct StartedSessionCleanup {
     session_id: String,
     user_id: i64,
     request_id: String,
+    _replacement: Option<ClusterReplacementGuard>,
+    #[cfg(test)]
+    test_settlement: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
 }
 
 impl StartedSessionGuard {
@@ -174,14 +199,28 @@ impl StartedSessionGuard {
                 session_id,
                 user_id,
                 request_id,
+                _replacement: replacement,
+                #[cfg(test)]
+                test_settlement: None,
             }),
-            _replacement: replacement,
         }
     }
 
     pub(super) fn disarm(&mut self) {
         self.cleanup = None;
-        self._replacement = None;
+    }
+
+    #[cfg(test)]
+    fn hold_cleanup_for_test(
+        &mut self,
+        settled: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+        released: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.cleanup
+            .as_mut()
+            .expect("armed guard cleanup")
+            .test_settlement = Some((settled, release, released));
     }
 }
 
@@ -193,24 +232,32 @@ impl Drop for StartedSessionGuard {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let StartedSessionCleanup {
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            _replacement,
+            #[cfg(test)]
+            test_settlement,
+        } = cleanup;
         std::mem::drop(runtime.spawn(async move {
-            abort_started_session(
-                &cleanup.state,
-                &cleanup.owner_node_id,
-                &cleanup.incarnation_id,
-                &cleanup.session_id,
-            )
-            .await;
-            let _ = cleanup
-                .state
+            abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
+            let _ = state
                 .store
-                .fail_media_session_request(
-                    cleanup.user_id,
-                    &cleanup.request_id,
-                    &cleanup.incarnation_id,
-                    unix_ms(),
-                )
+                .fail_media_session_request(user_id, &request_id, &incarnation_id, unix_ms())
                 .await;
+            #[cfg(test)]
+            if let Some((settled, release, released)) = test_settlement {
+                let _ = settled.send(());
+                let _ = release.await;
+                drop(_replacement);
+                let _ = released.send(());
+                return;
+            }
+            drop(_replacement);
         }));
     }
 }
@@ -823,15 +870,16 @@ pub async fn create(
     if owner_node_id == state.node_id {
         let provisional_pin_ms =
             i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
-        if !state
-            .transcode
-            .pin_shared_session(
+        if !pin_shared_session_for_local_start(
+            placement_deadline,
+            state.transcode.pin_shared_session(
                 &info.session_id,
                 &incarnation_id,
                 1,
                 unix_ms().saturating_add(provisional_pin_ms),
-            )
-            .await?
+            ),
+        )
+        .await?
         {
             return Err(ApiError::ServiceUnavailable(
                 "shared cache generation changed before session activation".to_owned(),
@@ -7305,6 +7353,23 @@ mod tests {
         );
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn local_start_pin_timeout_is_retryable_service_unavailable() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let pending = pin_shared_session_for_local_start(
+            deadline,
+            std::future::pending::<Result<bool, StoreError>>(),
+        );
+        tokio::pin!(pending);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(matches!(
+            pending.await,
+            Err(ApiError::ServiceUnavailable(message))
+                if message == "shared cache pin exceeded the start deadline"
+        ));
+    }
+
     #[tokio::test]
     async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
         let dir = crate::test_tempdir().expect("state dir");
@@ -8751,6 +8816,122 @@ mod tests {
                 "test cleanup",
             )
             .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
+        let request = crate::transcode::SessionRequest {
+            file_id: 1,
+            playback_id: "guard-lifetime-player".to_owned(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Live,
+            block_budget_secs: None,
+        };
+        let replacement = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement gate");
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let mut guard = StartedSessionGuard::new(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "guard-lifetime".to_owned(),
+            7,
+            "guard-lifetime-request".to_owned(),
+            Some(replacement),
+        );
+        guard.hold_cleanup_for_test(settled_tx, release_rx, released_tx);
+        drop(guard);
+        settled_rx
+            .await
+            .expect("cleanup reached its settlement seam");
+
+        let blocked = tokio::time::timeout(
+            Duration::from_secs(1),
+            fixture
+                .state
+                .transcode
+                .acquire_cluster_takeover_replacement(
+                    &request,
+                    7,
+                    tokio::time::Instant::now() + Duration::from_secs(10),
+                ),
+        );
+        tokio::pin!(blocked);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            blocked.await.is_err(),
+            "cleanup must retain the replacement gate"
+        );
+
+        release_tx.send(()).expect("cleanup release");
+        released_rx
+            .await
+            .expect("replacement guard was dropped after cleanup settlement");
+        let reacquired = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("cleanup settlement releases the replacement gate");
+        drop(reacquired);
+
+        let replacement = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement gate for disarm");
+        let mut disarmed = StartedSessionGuard::new(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "guard-lifetime".to_owned(),
+            7,
+            "guard-disarm-request".to_owned(),
+            Some(replacement),
+        );
+        disarmed.disarm();
+        let reacquired = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("disarm releases the replacement gate synchronously");
+        drop(reacquired);
     }
 
     // ---- segment delivery, through the real response ------------------------

@@ -50,7 +50,7 @@ impl IntoResponse for RemoteStartError {
 const REMOTE_ABORT_CAPACITY: usize = 128;
 const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 
-async fn pin_shared_session_before_deadline<F>(
+pub(super) async fn pin_shared_session_before_deadline<F>(
     deadline: tokio::time::Instant,
     pin: F,
 ) -> Result<bool, String>

@@ -2459,7 +2459,7 @@ async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
         owner_node_id: "activation-replay-node".to_owned(),
         recipe_json: "{}".to_owned(),
         response_json: "{}".to_owned(),
-        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        publication_ready_at_ms: 0,
         media_origin_ms: 0,
         now_ms: 100,
         lease_expires_at_ms: 300,
