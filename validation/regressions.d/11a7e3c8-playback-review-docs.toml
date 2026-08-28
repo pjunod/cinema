@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["11a7e3c8", "f418c977", "d54f62b9", "c589aec3", "b37d863c"]
+points = []
+checks = []
+reason = "These commits only record adversarial-review findings and implementation handoff/status state; they do not change runtime behavior."
+ignore = true

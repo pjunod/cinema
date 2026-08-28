@@ -1,0 +1,15 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "3433558e",
+  "0400e2bf",
+  "87166e73",
+  "c3244100",
+  "b4750c65",
+  "a725a7f2",
+  "21ecd47f",
+]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "playback-recovery", "resource-bounds"]
+reason = "The current Rust, SQLite, replicated Store, recovery, and resource-bound contracts exercise actor-owned prepublication decisions, exact response and EOF settlement, cancellation-safe child/scratch ownership, bounded relay and abort lifetimes, replacement publication fencing, takeover replay and pagination, renewal-before-adoption, and move-owned cleanup identity. The mapping follows these corrective commits after their rebase changed the hashes that their original exact-head review and source-level regression fixtures named."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["6f458ea0"]
+points = ["playback.pipeline", "persistence.upgrades"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades", "resource-bounds"]
+reason = "The current migration and playback contracts build genuine SQLite v33, v34, and v35 session schemas through the real append-only migration chain and read seeded rows through the importer; they also cover terminal retry serialization, bounded remote-start pin settlement, armed worker cleanup across cancellation, and the exact structural ownership inventory."
