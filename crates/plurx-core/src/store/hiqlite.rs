@@ -95,7 +95,7 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
 const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 3;
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 
 const AUTH_SCHEMA: &str = r#"
@@ -805,9 +805,10 @@ where
 ///
 /// A timed-out consensus request is ambiguous: it may still have committed.
 /// Callers must therefore supply an operation whose repeated execution writes
-/// byte-for-byte equivalent durable state. Three three-second attempts plus
-/// the two short delays stay inside the accepted ten-second leader-election
-/// recovery window without relaxing [`STORE_TIMEOUT`] for any other call.
+/// byte-for-byte equivalent durable state. Five three-second attempts plus
+/// the four short delays stay inside the accepted sixteen-second
+/// leader-election and stream-reconnect recovery window without relaxing
+/// [`STORE_TIMEOUT`] for any other call.
 async fn time_idempotent_write_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
     mut operation: F,
@@ -3771,6 +3772,18 @@ mod tests {
         assert_eq!(
             exhausted_attempts.load(Ordering::Relaxed),
             IDEMPOTENT_WRITE_MAX_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn idempotent_writes_fit_the_end_to_end_leader_recovery_budget() {
+        assert_eq!(STORE_TIMEOUT, Duration::from_secs(3));
+        assert!(
+            STORE_TIMEOUT * IDEMPOTENT_WRITE_MAX_ATTEMPTS as u32
+                + IDEMPOTENT_WRITE_RETRY_DELAY
+                    * ((IDEMPOTENT_WRITE_MAX_ATTEMPTS.saturating_sub(1)) as u32)
+                < crate::cluster::migration::REPLICATED_LEADER_RECOVERY_BUDGET,
+            "the retried exact-state path must retain its sixteen-second outer recovery budget"
         );
     }
 

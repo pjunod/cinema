@@ -63,12 +63,96 @@ pub(crate) enum ClientStreamReq {
     StreamClosed,
     CleanupBuffer,
 
-    // may come from `DbClient` or WebSocket reader
-    LeaderChange((Option<u64>, Option<Node>)),
+    // The embedded dashboard still reports a local ForwardToLeader through
+    // the shared AppState queue. Retried Client operations use the dedicated
+    // priority control channel below.
+    #[cfg(feature = "dashboard")]
+    LeaderChange(
+        (Option<u64>, Option<Node>),
+        Option<oneshot::Sender<()>>,
+    ),
     /// Advance only within the caller-configured proxy pool. The stream
     /// manager acknowledges after closing the old stream and failing every
     /// in-flight request without replay.
     RotateProxy(oneshot::Sender<()>),
+}
+
+/// Priority control message consumed even while the manager is opening its
+/// current WebSocket. Keeping leader handoff off the one-slot request queue
+/// prevents application traffic or a slow obsolete handshake from consuming
+/// the bounded recovery window.
+#[derive(Debug)]
+pub(crate) struct ClientLeaderChange {
+    pub(crate) leader_id: NodeId,
+    pub(crate) node: Node,
+    pub(crate) ready: Option<oneshot::Sender<()>>,
+}
+
+#[derive(Default)]
+struct PendingLeaderReady {
+    target: Option<(NodeId, String)>,
+    waiters: Vec<oneshot::Sender<()>>,
+}
+
+impl PendingLeaderReady {
+    fn register(
+        &mut self,
+        target: (NodeId, String),
+        ready: Option<oneshot::Sender<()>>,
+    ) -> bool {
+        self.prune_closed();
+        if ready.as_ref().is_some_and(oneshot::Sender::is_closed) {
+            // Its bounded caller expired while this control message waited to
+            // be received. It no longer has authority to redirect the stream.
+            return false;
+        }
+        if self.target.as_ref() != Some(&target) {
+            // Dropping superseded senders makes the old recovery generation
+            // fail instead of acknowledging it on a stream to another node.
+            self.waiters.clear();
+            self.target = Some(target);
+        }
+        if let Some(ready) = ready {
+            self.waiters.push(ready);
+        }
+        true
+    }
+
+    fn prune_closed(&mut self) {
+        self.waiters.retain(|ready| !ready.is_closed());
+        if self.waiters.is_empty() {
+            self.target = None;
+        }
+    }
+
+    fn resolve_connected_target(&mut self, connected: &(NodeId, String)) {
+        self.prune_closed();
+        if self.target.as_ref().is_some_and(|target| target != connected) {
+            // The requested target failed and authenticated discovery selected
+            // another live leader. Fail the obsolete handoff rather than
+            // dropping the valid stream forever or falsely acknowledging it.
+            self.waiters.clear();
+            self.target = None;
+        }
+    }
+
+    fn acknowledge(&mut self, connected: &(NodeId, String)) -> bool {
+        if self.target.as_ref() != Some(connected) {
+            return false;
+        }
+        for ready in self.waiters.drain(..) {
+            let _ = ready.send(());
+        }
+        self.target = None;
+        true
+    }
+}
+
+fn leader_handoff_restarts_connection(
+    connecting: &(NodeId, String),
+    incoming: &(NodeId, String),
+) -> bool {
+    connecting != incoming
 }
 
 impl ClientStreamReq {
@@ -115,8 +199,9 @@ impl ClientStreamReq {
             | Self::StreamResponse(_)
             | Self::StreamClosed
             | Self::CleanupBuffer
-            | Self::LeaderChange(_)
             | Self::RotateProxy(_) => {}
+            #[cfg(feature = "dashboard")]
+            Self::LeaderChange(_, _) => {}
         }
     }
 }
@@ -190,6 +275,7 @@ impl Client {
         secret: Vec<u8>,
         leader: Arc<RwLock<(NodeId, String)>>,
         rx_client_stream: flume::Receiver<ClientStreamReq>,
+        rx_leader_change: flume::Receiver<ClientLeaderChange>,
         raft_type: RaftType,
     ) {
         let handle = task::spawn(Box::pin(client_stream(
@@ -197,6 +283,7 @@ impl Client {
             secret,
             leader,
             rx_client_stream,
+            rx_leader_change,
             raft_type,
             self.inner.stream_shutdown.subscribe(),
         )));
@@ -215,6 +302,7 @@ async fn client_stream(
     secret: Vec<u8>,
     leader: Arc<RwLock<(NodeId, String)>>,
     rx_req: flume::Receiver<ClientStreamReq>,
+    rx_leader: flume::Receiver<ClientLeaderChange>,
     raft_type: RaftType,
     mut stream_shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
@@ -226,31 +314,56 @@ async fn client_stream(
     > = HashMap::new();
 
     let mut shutdown = false;
+    let mut pending_leader_ready = PendingLeaderReady::default();
     // DB and cache managers each own their cursor. An index, rather than an
     // address lookup, keeps duplicate configured endpoints from pinning a
     // stream forever.
     let mut proxy_index = 0;
 
-    loop {
-        let connection = select! {
-            _ = stream_shutdown.changed() => {
-                fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
-                return;
-            }
-            connection = try_connect(
+    'manager: loop {
+        pending_leader_ready.prune_closed();
+        let connecting_target = leader.read().await.clone();
+        let connection = try_connect(
                 &leader,
                 &raft_type,
                 client.inner.tls_config.clone(),
                 &secret,
-            ) => connection,
+            );
+        tokio::pin!(connection);
+        let connection = loop {
+            select! {
+                _ = stream_shutdown.changed() => {
+                    fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
+                    return;
+                }
+                change = rx_leader.recv_async() => {
+                    let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
+                        fail_client_stream_shutdown(&mut in_flight, &mut in_flight_buf, &rx_req);
+                        return;
+                    };
+                    let target = (leader_id, node.addr_api.clone());
+                    if !pending_leader_ready.register(target.clone(), ready) {
+                        continue;
+                    }
+                    if !leader_handoff_restarts_connection(&connecting_target, &target) {
+                        // A duplicate for the stream already being opened
+                        // shares that handshake instead of resetting its
+                        // five-second attempt near the deadline.
+                        continue;
+                    }
+                    update_leader(&leader, Some(leader_id), Some(node)).await;
+                    continue 'manager;
+                }
+                connection = &mut connection => break connection,
+            }
         };
-        let ws = match connection {
-            Ok(ws) => {
+        let (ws, connected_leader) = match connection {
+            Ok((ws, connected_leader)) => {
                 info!(
                     "Client API WebSocket to {} opened successfully",
-                    leader.read().await.1
+                    connected_leader.1
                 );
-                ws
+                (ws, connected_leader)
             }
             Err(err) => {
                 if client.inner.proxy_mode {
@@ -291,6 +404,8 @@ async fn client_stream(
             }
         };
 
+        pending_leader_ready.resolve_connected_target(&connected_leader);
+
         let (tx_write, rx_write) = flume::bounded(1);
         let (tx_read, rx_read) = flume::bounded(1);
 
@@ -301,6 +416,8 @@ async fn client_stream(
 
         let handle_read = task::spawn(stream_reader(read, tx_read.clone()));
         let handle_write = task::spawn(stream_writer(write, rx_write));
+
+        pending_leader_ready.acknowledge(&connected_leader);
 
         let handle_buf = cleanup_buffer_timeout(tx_read, 10);
         let mut awaiting_timeout = true;
@@ -314,6 +431,31 @@ async fn client_stream(
                 }
                 res = rx_read.recv_async() => Some(res),
                 res = rx_req.recv_async() => Some(res),
+                change = rx_leader.recv_async() => {
+                    let Ok(ClientLeaderChange { leader_id, node, ready }) = change else {
+                        let _ = tx_write.try_send(WritePayload::Close);
+                        shutdown = true;
+                        break;
+                    };
+                    let target = (leader_id, node.addr_api.clone());
+                    if target == connected_leader {
+                        if let Some(ready) = ready {
+                            let _ = ready.send(());
+                        }
+                        continue;
+                    }
+                    if !pending_leader_ready.register(target, ready) {
+                        continue;
+                    }
+                    let _ = tx_write.try_send(WritePayload::Close);
+                    update_leader(&leader, Some(leader_id), Some(node)).await;
+                    for (_, ack) in in_flight.drain() {
+                        let _ = ack.send(Err(Error::LeaderChange(
+                            "Action not allowed, Raft leader has changed".into(),
+                        )));
+                    }
+                    break;
+                }
             };
             let Some(res) = res else {
                 let _ = tx_write.try_send(WritePayload::Close);
@@ -539,13 +681,30 @@ async fn client_stream(
                     ))
                 }
 
-                ClientStreamReq::LeaderChange((node_id, node)) => {
+                #[cfg(feature = "dashboard")]
+                ClientStreamReq::LeaderChange((node_id, node), ready) => {
+                    if leader_change_matches_connection(&connected_leader, node_id, node.as_ref()) {
+                        // A detached recovery from an earlier timed-out request
+                        // may finish after this stream already reached the same
+                        // leader. Closing it would fail unrelated in-flight
+                        // work and turn successful recovery into LeaderChange.
+                        if let Some(ready) = ready {
+                            let _ = ready.send(());
+                        }
+                        continue;
+                    }
                     // ignore result just in case the writer has already exited anyway
                     let _ = tx_write.try_send(WritePayload::Close);
 
                     // If we don't receive a value here, we expect the lock to
                     // have been updated already somewhere else
+                    let ready_target = node_id
+                        .zip(node.as_ref())
+                        .map(|(node_id, node)| (node_id, node.addr_api.clone()));
                     update_leader(&leader, node_id, node).await;
+                    if let (Some(target), Some(ready)) = (ready_target, ready) {
+                        let _ = pending_leader_ready.register(target, Some(ready));
+                    }
 
                     // in case of a leader change, we should not use the in flight buffer
                     // since no modifying write after this error will be Ok(_) anyway.
@@ -703,8 +862,15 @@ async fn client_stream(
                 ClientStreamReq::Shutdown => {
                     unreachable!("we should never receive ClientStreamReq::Shutdown from WS reader")
                 }
-                ClientStreamReq::LeaderChange((node_id, node)) => {
+                #[cfg(feature = "dashboard")]
+                ClientStreamReq::LeaderChange((node_id, node), ready) => {
+                    let ready_target = node_id
+                        .zip(node.as_ref())
+                        .map(|(node_id, node)| (node_id, node.addr_api.clone()));
                     update_leader(&leader, node_id, node).await;
+                    if let (Some(target), Some(ready)) = (ready_target, ready) {
+                        let _ = pending_leader_ready.register(target, Some(ready));
+                    }
                 }
                 ClientStreamReq::RotateProxy(_) => {
                     unreachable!("we should never receive RotateProxy from WS reader")
@@ -915,17 +1081,92 @@ async fn try_connect(
     raft_type: &RaftType,
     tls_config: Option<Arc<rustls::ClientConfig>>,
     secret: &[u8],
-) -> Result<WebSocket<TokioIo<Upgraded>>, Error> {
+) -> Result<(WebSocket<TokioIo<Upgraded>>, (NodeId, String)), Error> {
     let (node_id, addr) = {
         let lock = leader.read().await;
         (lock.0, lock.1.clone())
     };
-    web_socket_connect::try_connect(node_id, &addr, raft_type, tls_config, secret).await
+    let socket = web_socket_connect::try_connect(node_id, &addr, raft_type, tls_config, secret).await?;
+    Ok((socket, (node_id, addr)))
+}
+
+#[cfg(any(feature = "dashboard", test))]
+fn leader_change_matches_connection(
+    connected: &(NodeId, String),
+    node_id: Option<NodeId>,
+    node: Option<&Node>,
+) -> bool {
+    node_id == Some(connected.0)
+        && node.is_some_and(|node| node.addr_api == connected.1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn duplicate_near_deadline_shares_the_connecting_target() {
+        let target = (9, "node-nine:21000".to_owned());
+        let mut pending = PendingLeaderReady::default();
+        let (first_tx, first_rx) = oneshot::channel();
+        pending.register(target.clone(), Some(first_tx));
+
+        time::advance(Duration::from_millis(4_900)).await;
+        let (duplicate_tx, duplicate_rx) = oneshot::channel();
+        assert!(!leader_handoff_restarts_connection(&target, &target));
+        pending.register(target.clone(), Some(duplicate_tx));
+
+        assert!(pending.acknowledge(&target));
+        first_rx.await.expect("first same-target waiter");
+        duplicate_rx.await.expect("duplicate same-target waiter");
+    }
+
+    #[tokio::test]
+    async fn a_new_target_fails_superseded_waiters_and_acks_only_itself() {
+        let target_b = (2, "node-two:21000".to_owned());
+        let target_c = (3, "node-three:21000".to_owned());
+        let mut pending = PendingLeaderReady::default();
+        let (b_tx, b_rx) = oneshot::channel();
+        pending.register(target_b.clone(), Some(b_tx));
+        let (c_tx, c_rx) = oneshot::channel();
+        assert!(leader_handoff_restarts_connection(&target_b, &target_c));
+        pending.register(target_c.clone(), Some(c_tx));
+
+        assert!(b_rx.await.is_err(), "B must fail when C supersedes it");
+        assert!(!pending.acknowledge(&target_b));
+        assert!(pending.acknowledge(&target_c));
+        c_rx.await.expect("C waiter");
+    }
+
+    #[tokio::test]
+    async fn failed_target_yields_to_the_leader_selected_by_discovery() {
+        let target_c = (3, "node-three:21000".to_owned());
+        let discovered_b = (2, "node-two:21000".to_owned());
+        let mut pending = PendingLeaderReady::default();
+        let (c_tx, c_rx) = oneshot::channel();
+        pending.register(target_c, Some(c_tx));
+
+        pending.resolve_connected_target(&discovered_b);
+        assert!(
+            pending.target.is_none(),
+            "obsolete C must not make the manager reject B forever"
+        );
+        assert!(c_rx.await.is_err(), "C handoff must fail on discovered B");
+        assert!(!pending.acknowledge(&discovered_b));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_handoff_expired_before_receipt_cannot_redirect_the_manager() {
+        let stale_target = (3, "node-three:21000".to_owned());
+        let mut pending = PendingLeaderReady::default();
+        let (stale_tx, stale_rx) = oneshot::channel();
+
+        time::advance(crate::LEADER_STREAM_HANDOFF_TIMEOUT).await;
+        drop(stale_rx);
+        assert!(!pending.register(stale_target, Some(stale_tx)));
+        assert!(pending.target.is_none());
+        assert!(pending.waiters.is_empty());
+    }
 
     #[test]
     fn proxy_failover_cycles_only_through_configured_endpoints() {
@@ -970,5 +1211,31 @@ mod tests {
         );
         let mut empty_index = 0;
         assert_eq!(next_configured_proxy(&[], &mut empty_index), None);
+    }
+
+    #[test]
+    fn stale_recovery_for_the_connected_leader_does_not_require_reconnect() {
+        let connected = (7, "node-seven:21000".to_owned());
+        let same = Node {
+            id: 7,
+            addr_raft: "node-seven:21001".to_owned(),
+            addr_api: "node-seven:21000".to_owned(),
+        };
+        assert!(leader_change_matches_connection(
+            &connected,
+            Some(7),
+            Some(&same)
+        ));
+
+        let replacement = Node {
+            id: 8,
+            addr_raft: "node-eight:21001".to_owned(),
+            addr_api: "node-eight:21000".to_owned(),
+        };
+        assert!(!leader_change_matches_connection(
+            &connected,
+            Some(8),
+            Some(&replacement)
+        ));
     }
 }

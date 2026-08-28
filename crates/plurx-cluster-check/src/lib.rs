@@ -133,6 +133,11 @@ const LEARNER_START_TIMEOUT: Duration = Duration::from_secs(120);
 /// gives up on the protocol stream at the same instant.
 const START_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// The no-quorum write exercises the production exact-state retry envelope:
+/// five three-second attempts with four 100 ms gaps. Give the voter enough
+/// time to return its own bounded failure instead of severing the harness
+/// response stream first; ordinary requests retain [`REQUEST_TIMEOUT`].
+const WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(17);
 const COMPACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
 /// The interface every harness listener binds. hiqlite composes each listener
 /// from this and the port half of the node's own `addr_raft`/`addr_api`
@@ -7003,6 +7008,7 @@ impl Request {
     fn response_timeout(&self) -> Duration {
         match self {
             Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
+            Self::WriteWithoutQuorum => WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
             | Self::RemoveNode { .. }
             | Self::PromoteLearner { .. }
@@ -12152,6 +12158,10 @@ mod tests {
         };
         assert!(request.response_timeout() > Duration::from_secs(60));
         assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);
+        assert_eq!(
+            Request::WriteWithoutQuorum.response_timeout(),
+            WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT
+        );
     }
 
     fn test_launch(root: &Path, read_pool_size: usize) -> NodeLaunch {

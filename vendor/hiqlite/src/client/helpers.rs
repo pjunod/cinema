@@ -1,6 +1,9 @@
 use crate::app_state::AppState;
-use crate::client::stream::ClientStreamReq;
-use crate::{Client, Error, Node, NodeId};
+use crate::client::LeaderRecovery;
+use crate::client::stream::{ClientLeaderChange, ClientStreamReq};
+use crate::{
+    Client, Error, LEADER_DISCOVERY_TIMEOUT, LEADER_STREAM_HANDOFF_TIMEOUT, Node, NodeId,
+};
 use openraft::RaftMetrics;
 use std::clone::Clone;
 use std::sync::Arc;
@@ -11,7 +14,7 @@ use tokio::task::JoinSet;
 use tokio::time;
 use tracing::{debug, error, warn};
 
-const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(2);
+const PROXY_ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
 
 async fn first_some<T: Send + 'static>(mut probes: JoinSet<Option<T>>) -> Option<T> {
     while let Some(result) = probes.join_next().await {
@@ -20,6 +23,30 @@ async fn first_some<T: Send + 'static>(mut probes: JoinSet<Option<T>>) -> Option
         }
     }
     None
+}
+
+async fn change_leader_and_wait(
+    tx: &flume::Sender<ClientLeaderChange>,
+    leader_id: NodeId,
+    node: Node,
+) -> bool {
+    let (ready, reopened) = tokio::sync::oneshot::channel();
+    time::timeout(LEADER_STREAM_HANDOFF_TIMEOUT, async {
+        if tx
+            .send_async(ClientLeaderChange {
+                leader_id,
+                node,
+                ready: Some(ready),
+            })
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        reopened.await.is_ok()
+    })
+        .await
+        .unwrap_or(false)
 }
 
 impl Client {
@@ -258,6 +285,36 @@ impl Client {
         }
     }
 
+    fn leader_recovery(
+        &self,
+        leader: &Arc<RwLock<(NodeId, String)>>,
+    ) -> Option<Arc<LeaderRecovery>> {
+        #[cfg(feature = "sqlite")]
+        if Arc::ptr_eq(leader, &self.inner.leader_db) {
+            return Some(Arc::clone(&self.inner.leader_recovery_db));
+        }
+        #[cfg(feature = "cache")]
+        if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+            return Some(Arc::clone(&self.inner.leader_recovery_cache));
+        }
+        None
+    }
+
+    fn leader_change_sender(
+        &self,
+        leader: &Arc<RwLock<(NodeId, String)>>,
+    ) -> Option<flume::Sender<ClientLeaderChange>> {
+        #[cfg(feature = "sqlite")]
+        if Arc::ptr_eq(leader, &self.inner.leader_db) {
+            return Some(self.inner.tx_leader_db.clone());
+        }
+        #[cfg(feature = "cache")]
+        if Arc::ptr_eq(leader, &self.inner.leader_cache) {
+            return Some(self.inner.tx_leader_cache.clone());
+        }
+        None
+    }
+
     /// Check if this instance is the current Raft cluster leader for the database.
     #[cfg(feature = "sqlite")]
     pub async fn is_leader_db(&self) -> bool {
@@ -335,7 +392,7 @@ impl Client {
             // authenticated roster directly) would silently escape the
             // caller's network and trust boundary.
             let (ack, rotated) = tokio::sync::oneshot::channel();
-            return time::timeout(LEADER_RETRY_RECOVERY_TIMEOUT, async {
+            return time::timeout(PROXY_ROTATION_TIMEOUT, async {
                 if tx
                     .send_async(ClientStreamReq::RotateProxy(ack))
                     .await
@@ -349,19 +406,13 @@ impl Client {
             .unwrap_or(false);
         }
 
+        let Some(leader_tx) = self.leader_change_sender(lock) else {
+            return false;
+        };
         if let (Some(leader_id), Some(node)) = (leader_id, node.clone()) {
-            let api_addr = node.addr_api.clone();
-            {
-                let mut lock = lock.write().await;
-                // we check additionally to prevent race conditions and multiple
-                // re-connect triggers
-                if lock.0 != leader_id {
-                    *lock = (leader_id, api_addr.clone());
-                }
+            if !change_leader_and_wait(&leader_tx, leader_id, node).await {
+                return false;
             }
-            tx.send_async(ClientStreamReq::LeaderChange((Some(leader_id), Some(node))))
-                .await
-                .expect("the Client API WebSocket Manager to always be running");
         } else {
             // A resumed follower can reject a write before it has learned the
             // new leader, yielding ForwardToLeader(None, None). That response
@@ -370,23 +421,31 @@ impl Client {
             // hang forever and cancellation by a higher-level timeout cannot
             // interrupt recovery. Discovery is side-effect-free; only the
             // stream manager atomically applies the authenticated result.
-            let client = self.clone();
-            let leader = Arc::clone(lock);
-            let tx = tx.clone();
-            let recovered = tokio::spawn(async move {
-                time::timeout(LEADER_RETRY_RECOVERY_TIMEOUT, async move {
-                    let (leader_id, node) = client.discover_active_leader(&leader).await?;
-                    tx.send_async(ClientStreamReq::LeaderChange((Some(leader_id), Some(node))))
-                        .await
-                        .expect("the Client API WebSocket Manager to always be running");
-                    Ok::<(), Error>(())
-                })
-                .await
-                .is_ok_and(|result| result.is_ok())
-            })
-            .await
-            .unwrap_or(false);
-            if !recovered {
+            let Some(recovery) = self.leader_recovery(lock) else {
+                return false;
+            };
+            let (generation, receiver, starter) = recovery.join_or_begin().await;
+            if let Some(sender) = starter {
+                let client = self.clone();
+                let recovery = Arc::clone(&recovery);
+                let leader = Arc::clone(lock);
+                let tx = leader_tx.clone();
+                tokio::spawn(async move {
+                    let succeeded = match time::timeout(
+                        LEADER_DISCOVERY_TIMEOUT,
+                        client.discover_active_leader(&leader),
+                    )
+                    .await
+                    {
+                        Ok(Ok((leader_id, node))) => {
+                            change_leader_and_wait(&tx, leader_id, node).await
+                        }
+                        Ok(Err(_)) | Err(_) => false,
+                    };
+                    recovery.complete(generation, sender, succeeded).await;
+                });
+            }
+            if !LeaderRecovery::wait(receiver).await {
                 return false;
             }
         }
@@ -410,5 +469,129 @@ mod tests {
             .await
             .expect("a later healthy peer must not wait for the first peer");
         assert_eq!(result, Some(42));
+    }
+
+    #[test]
+    fn direct_leader_recovery_and_proxy_rotation_keep_distinct_bounds() {
+        assert_eq!(LEADER_DISCOVERY_TIMEOUT, Duration::from_secs(8));
+        assert_eq!(
+            crate::LEADER_STREAM_CONNECT_TIMEOUT,
+            Duration::from_secs(5)
+        );
+        assert_eq!(LEADER_STREAM_HANDOFF_TIMEOUT, Duration::from_secs(6));
+        assert_eq!(
+            crate::LEADER_RETRY_RECOVERY_TIMEOUT,
+            Duration::from_secs(14)
+        );
+        assert_eq!(PROXY_ROTATION_TIMEOUT, Duration::from_secs(2));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timed_out_attempt_and_later_retry_share_one_detached_recovery() {
+        let recovery = Arc::new(LeaderRecovery::default());
+        let (generation, first_receiver, starter) = recovery.join_or_begin().await;
+        let sender = starter.expect("the first caller starts recovery");
+
+        let first_waiter = tokio::spawn(async move {
+            time::timeout(
+                Duration::from_secs(3),
+                LeaderRecovery::wait(first_receiver),
+            )
+            .await
+        });
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_secs(3)).await;
+        assert!(first_waiter.await.expect("first waiter").is_err());
+
+        let (retry_generation, retry_receiver, retry_starter) = recovery.join_or_begin().await;
+        assert_eq!(retry_generation, generation);
+        assert!(
+            retry_starter.is_none(),
+            "a later Store attempt must not fan out another leader probe"
+        );
+
+        recovery.complete(generation, sender, true).await;
+        assert!(LeaderRecovery::wait(retry_receiver).await);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn recovery_completes_only_after_the_replacement_stream_is_ready() {
+        let (tx, rx) = flume::bounded(1);
+        let node = Node {
+            id: 9,
+            addr_raft: "node-nine:21001".to_owned(),
+            addr_api: "node-nine:21000".to_owned(),
+        };
+        let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
+        let request = rx.recv_async().await.expect("leader change request");
+        let Some(ready) = request.ready else {
+            panic!("expected an acknowledged leader change");
+        };
+        assert_eq!(request.leader_id, 9);
+
+        time::advance(Duration::from_secs(4)).await;
+        assert!(
+            !recovery.is_finished(),
+            "discovering a target is not recovery until its stream is open"
+        );
+        ready.send(()).expect("replacement stream acknowledgement");
+        assert!(recovery.await.expect("recovery task"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn full_control_channel_is_inside_the_handoff_deadline() {
+        let (tx, _rx) = flume::bounded(1);
+        tx.send_async(ClientLeaderChange {
+            leader_id: 1,
+            node: Node {
+                id: 1,
+                addr_raft: "queued:21001".to_owned(),
+                addr_api: "queued:21000".to_owned(),
+            },
+            ready: None,
+        })
+        .await
+        .expect("fill control channel");
+        let node = Node {
+            id: 9,
+            addr_raft: "node-nine:21001".to_owned(),
+            addr_api: "node-nine:21000".to_owned(),
+        };
+        let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
+        tokio::task::yield_now().await;
+        time::advance(LEADER_STREAM_HANDOFF_TIMEOUT).await;
+        assert!(!recovery.await.expect("bounded handoff"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn queued_handoff_allows_a_near_boundary_successful_connect() {
+        let (tx, rx) = flume::bounded(1);
+        tx.send_async(ClientLeaderChange {
+            leader_id: 1,
+            node: Node {
+                id: 1,
+                addr_raft: "queued:21001".to_owned(),
+                addr_api: "queued:21000".to_owned(),
+            },
+            ready: None,
+        })
+        .await
+        .expect("fill control channel");
+        let node = Node {
+            id: 9,
+            addr_raft: "node-nine:21001".to_owned(),
+            addr_api: "node-nine:21000".to_owned(),
+        };
+        let recovery = tokio::spawn(async move { change_leader_and_wait(&tx, 9, node).await });
+        tokio::task::yield_now().await;
+        time::advance(Duration::from_millis(500)).await;
+        let _queued = rx.recv_async().await.expect("drain queued control message");
+        let request = rx.recv_async().await.expect("receive leader handoff");
+        let Some(ready) = request.ready else {
+            panic!("expected handoff acknowledgement");
+        };
+        time::advance(Duration::from_millis(4_900)).await;
+        ready.send(()).expect("near-boundary stream acknowledgement");
+        assert!(recovery.await.expect("successful handoff"));
     }
 }

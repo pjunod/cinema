@@ -1,5 +1,5 @@
 use crate::app_state::{AppState, RaftType};
-use crate::client::DbClient;
+use crate::client::{DbClient, LeaderRecovery};
 use crate::config::RateLimitConfig;
 use crate::http_client::build_http_client;
 use crate::{Client, Error, tls};
@@ -37,11 +37,19 @@ impl Client {
 
         #[cfg(feature = "cache")]
         let leader_cache = Arc::new(RwLock::new((leader_id, leader_addr.clone())));
+        #[cfg(feature = "cache")]
+        let leader_recovery_cache = Arc::new(LeaderRecovery::default());
         #[cfg(feature = "sqlite")]
         let leader_db = Arc::new(RwLock::new((leader_id, leader_addr)));
+        #[cfg(feature = "sqlite")]
+        let leader_recovery_db = Arc::new(LeaderRecovery::default());
 
         #[cfg(feature = "cache")]
         let (tx_client_cache, rx_client_cache) = flume::bounded(1);
+        #[cfg(feature = "cache")]
+        let (tx_leader_cache, rx_leader_cache) = flume::bounded(1);
+        #[cfg(feature = "sqlite")]
+        let (tx_leader_db, rx_leader_db) = flume::bounded(1);
 
         #[allow(unused_variables)]
         let (rate_limit_cache_await, rx_cache_await) =
@@ -53,8 +61,12 @@ impl Client {
             state: Some(state),
             #[cfg(feature = "cache")]
             leader_cache,
+            #[cfg(feature = "cache")]
+            leader_recovery_cache,
             #[cfg(feature = "sqlite")]
             leader_db,
+            #[cfg(feature = "sqlite")]
+            leader_recovery_db,
             // Retain the authenticated roster for bounded recovery from a
             // resumed follower whose local metrics do not know the leader yet.
             nodes,
@@ -62,8 +74,12 @@ impl Client {
             client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
+            #[cfg(feature = "cache")]
+            tx_leader_cache,
             #[cfg(feature = "sqlite")]
             tx_client_db,
+            #[cfg(feature = "sqlite")]
+            tx_leader_db,
             tls_config,
             #[cfg(feature = "cache")]
             tls_no_verify,
@@ -97,6 +113,7 @@ impl Client {
             secret.clone(),
             slf.inner.leader_cache.clone(),
             rx_client_cache,
+            rx_leader_cache,
             RaftType::Cache,
         );
         #[cfg(feature = "sqlite")]
@@ -104,6 +121,7 @@ impl Client {
             secret,
             slf.inner.leader_db.clone(),
             rx_client_db,
+            rx_leader_db,
             RaftType::Sqlite,
         );
 
@@ -159,13 +177,21 @@ impl Client {
 
         #[cfg(feature = "cache")]
         let leader_cache = Arc::new(RwLock::new((node_id, node_addr.clone())));
+        #[cfg(feature = "cache")]
+        let leader_recovery_cache = Arc::new(LeaderRecovery::default());
         #[cfg(feature = "sqlite")]
         let leader_db = Arc::new(RwLock::new((node_id, node_addr)));
+        #[cfg(feature = "sqlite")]
+        let leader_recovery_db = Arc::new(LeaderRecovery::default());
 
         #[cfg(feature = "sqlite")]
         let (tx_client_db, rx_client_db) = flume::bounded(1);
+        #[cfg(feature = "sqlite")]
+        let (tx_leader_db, rx_leader_db) = flume::bounded(1);
         #[cfg(feature = "cache")]
         let (tx_client_cache, rx_client_cache) = flume::bounded(1);
+        #[cfg(feature = "cache")]
+        let (tx_leader_cache, rx_leader_cache) = flume::bounded(1);
 
         let stream_shutdown = watch::channel(false).0;
         #[allow(unused_mut)]
@@ -198,15 +224,23 @@ impl Client {
             state: None,
             #[cfg(feature = "sqlite")]
             leader_db,
+            #[cfg(feature = "sqlite")]
+            leader_recovery_db,
             #[cfg(feature = "cache")]
             leader_cache,
+            #[cfg(feature = "cache")]
+            leader_recovery_cache,
             nodes,
             proxy_mode: with_proxy,
             client: Some(build_http_client(tls_no_verify)),
             #[cfg(feature = "cache")]
             tx_client_cache,
+            #[cfg(feature = "cache")]
+            tx_leader_cache,
             #[cfg(feature = "sqlite")]
             tx_client_db,
+            #[cfg(feature = "sqlite")]
+            tx_leader_db,
             tls_config,
             #[cfg(feature = "cache")]
             tls_no_verify,
@@ -244,6 +278,7 @@ impl Client {
             api_secret_bytes.clone(),
             slf.inner.leader_cache.clone(),
             rx_client_cache,
+            rx_leader_cache,
             RaftType::Cache,
         );
         #[cfg(feature = "sqlite")]
@@ -251,6 +286,7 @@ impl Client {
             api_secret_bytes,
             slf.inner.leader_db.clone(),
             rx_client_db,
+            rx_leader_db,
             RaftType::Sqlite,
         );
 
