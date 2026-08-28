@@ -12167,15 +12167,19 @@ mod tests {
 
     #[test]
     fn read_only_repair_repeat_retries_only_stale_or_rerouted_observations() {
-        assert!(repeatable_artwork_observation_succeeded(Response::Flag { value: true }).unwrap());
         assert!(
-            !repeatable_artwork_observation_succeeded(Response::Flag { value: false }).unwrap()
+            repeatable_artwork_observation_succeeded(Response::Flag { value: true })
+                .expect("a successful read-only repeat is classified")
+        );
+        assert!(
+            !repeatable_artwork_observation_succeeded(Response::Flag { value: false })
+                .expect("a stale read-only repeat is classified")
         );
         assert!(
             !repeatable_artwork_observation_succeeded(Response::MembershipLeaderChange {
                 message: "election".to_owned(),
             })
-            .unwrap()
+            .expect("a rerouted read-only repeat is classified")
         );
         assert!(repeatable_artwork_observation_succeeded(Response::Ok).is_err());
     }
