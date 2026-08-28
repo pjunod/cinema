@@ -7,20 +7,24 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`9121db03ebcb74e17ffb0004897a101f04abfe43` (frozen and rejected; combined
-verdict **REQUEST CHANGES**; earlier rejected heads `9809d553`, `bb69eb7e`,
-`31e7d5e2`, and `763c230c`)
+`5a9e19aeeb8c7c69bcb514f1d8475d54e45116a2` (Store and lifecycle approved;
+integration requested changes solely for 17 stale owner-inventory counts;
+earlier rejected heads `9121db03`, `9809d553`, `bb69eb7e`, `31e7d5e2`, and
+`763c230c`)
 **Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
 **Validation-evidence freeze:** `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`
-on branch `codex/playback-control-m4-prepublication`.
+for regression-history evidence; owner-inventory reconciliation
+`31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19` on branch
+`codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact head `9121db03` was reviewed read-only and
-rejected. The repair through `f02bf5b5` closes its premature replacement-gate
-release, unbounded local pin, invalid Hiqlite fixture, and stale-roadmap
-findings. The combined docs-bearing branch tip has not yet received
-immutable-head adversarial approval.
+**Runtime review state:** exact head `5a9e19ae` was reviewed read-only. Store
+and lifecycle reviewers approved it; integration found no runtime defect and
+requested changes only for 17 stale ownership counts. Commit `31a93198`
+reconciles those counts without changing runtime code. The combined
+docs-bearing branch tip has not yet received immutable-head adversarial
+approval.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -440,8 +444,10 @@ replacement guard into the detached cleanup payload through exact worker and
 request settlement, bounds the local pin with a retryable timeout, adds a
 guard-level hold/release ordering regression, and corrects the fixture to
 publication fence `0`. `95cd9a2e` maps that evidence. The immutable PR #636 tip
-containing this handoff must receive exact-head approval before the unit-test
-gate opens.
+containing this handoff was reviewed as `5a9e19ae`: Store and lifecycle
+approved it, while integration found no runtime defect and requested only the
+17 owner-inventory corrections now committed as `31a93198`. The new immutable
+PR tip must receive exact-head approval before the unit-test gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -770,18 +776,20 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`9121db03ebcb74e17ffb0004897a101f04abfe43` is the last formally reviewed head
-and is rejected. Runtime, Store, tests, and owner inventory are frozen in
-`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
-frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`. This status/handoff update
-is the only remaining tracked change. The preserved untracked vendor build
-artifacts remain outside every commit.
+`5a9e19aeeb8c7c69bcb514f1d8475d54e45116a2` is the last formally reviewed
+head: Store and lifecycle approved it, while integration requested only 17
+mechanical owner-inventory corrections. Runtime, Store, and tests are frozen
+in `f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
+frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; and those inventory
+corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`.
+The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Verify this final status-only commit excludes both vendor target trees,
-   push it to PR #636, and record the exact immutable branch head.
-2. Obtain unanimous independent adversarial approval of that PR head. If a
+1. Verify the final docs-bearing candidate excludes both vendor target trees
+   and record its exact immutable branch head without pushing it yet.
+2. Obtain unanimous independent adversarial approval of that local PR
+   candidate. If a
    finding changes behavior, repair it and freeze/review a new exact head.
 3. Run the full local unit suite once. If it fails, fix the cause and rerun
    only failed or directly affected tests, then review the behavioral delta.
@@ -1122,7 +1130,7 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Unanimously review the frozen post-`9121db03` repair candidate, run its
+1. Unanimously review the frozen post-`5a9e19ae` inventory-reconciled candidate, run its
    one full unit suite, satisfy cluster/hosted gates, and merge the production
    decision, prepublication retry, response-admission, relay/VOD ownership,
    and confirmed-reap cut.
