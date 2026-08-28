@@ -7,9 +7,10 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`2bb65af3988fe0bba4b2fcfdedf9c47484f94903` (assertion/scanner repair
-unanimously approved by Store, lifecycle, and integration reviewers after runtime head
-`841e695f` passed its broad review and all 190 owner rows matched;
+`13283a5b011a69ed2375e04d1d1e7fd608df5908` (historical-schema completion
+assertions unanimously approved by Store, lifecycle, and integration reviewers
+after the fixture reconstruction, compile/Clippy, assertion/scanner, and
+runtime heads passed their respective reviews;
 earlier rejected heads `9121db03`, `9809d553`, `bb69eb7e`, `31e7d5e2`, and
 `763c230c`)
 **Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
@@ -19,18 +20,18 @@ for regression-history evidence; owner-inventory reconciliation
 `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`; compile repair
 `ef74b41e57bc26eff06a156024b02029c2c2e768`; its mapping
 `b1fe8151d566b54a5958a19911743195769aaa86`; assertion/scanner repairs through
-`53c823cacc411de41f9d80c06b15f9cce8631ef8`; and their mappings
-`fd08622144c64ae9b17d049bcd54cec8b1dacd91` through `53c823ca` on branch
+`53c823cacc411de41f9d80c06b15f9cce8631ef8`; compile/Clippy and obsolete-seam
+cleanup through `40b06404c2a`; historical-schema fixture and completion proof
+`043e33e5` through `13283a5b`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact runtime head `841e695f` and compile-repair head
-`f0c2297c` were unanimously approved read-only. The directly affected rerun
-then compiled successfully and ran 641 tests: 606 passed, 30 hit sandbox
-local-bind denials, and five found stale inventories/high-water expectations.
-Assertion/scanner repairs through `53c823ca` received targeted exact-head
-approval in `2bb65af3`. All five deterministic failures then passed by exact
-name, and all 30 socket fixtures passed by exact name with loopback access.
+**Runtime review state:** exact runtime head `841e695f`, assertion/scanner head
+`2bb65af3`, compile/Clippy heads through `40b06404`, and historical-schema head
+`13283a5b` received unanimous read-only approval. The directly affected rerun
+compiled successfully and ran 641 tests: 606 passed initially, all five
+deterministic failures passed after exact repairs, and all 30 socket fixtures
+passed by exact name with loopback access.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -45,16 +46,16 @@ abort/join-before-stop provisional ownership and a confirmed bootstrap renewal
 before durable-ID adoption and seed/publication.
 The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
-**Validation state:** `cargo fmt`, static diff inspection, and static ownership
-recounts passed. `make unit` ran exactly once at unanimously approved
-`841e695f`; compilation failed before tests on 11 Store errors. After the
-approved compile repair, the directly affected `plurx-core` library and Store
-contracts compiled and ran 641 tests: 606 passed initially, all five
-deterministic failures passed after repair, and all 30 socket fixtures passed
-with unrestricted loopback binds. All 641 targeted tests are now accounted
-green without a second full-suite run. PR #626's merged baseline
-was green in focused Rust 85/85, ownership 7/7, `make check`,
-`make cluster-check`, and hosted run `33129200705`.
+**Validation state:** `make unit` ran exactly once at unanimously approved
+`841e695f`; compilation failed before tests on 11 Store errors. After approved
+repairs, all 641 directly affected tests are accounted green without a second
+full-suite run. The aggregate cluster gate's two stale historical-fixture
+failures pass by exact name after `043e33e5`/`13283a5b`; every already-passing
+vendor WAL and Store case, the full cluster harness, seven activation tests,
+and two Activity tests are also accounted green. Formatting, workspace Clippy,
+validation catalog, history, 122 operations contracts, and 52 benchmark checks
+pass. Only final metadata review, push, hosted checks, and merge remain for
+PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -791,24 +792,26 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`2bb65af3988fe0bba4b2fcfdedf9c47484f94903` is the last formally reviewed
-head and received unanimous targeted approval after runtime head `841e695f`.
+`13283a5b011a69ed2375e04d1d1e7fd608df5908` is the last formally reviewed
+source head and received unanimous targeted approval after the historical
+fixture, compile/Clippy, assertion/scanner, and runtime rounds.
 Runtime behavior is frozen in
 `f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
 frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; owner-inventory
 corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`;
 the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`; and
 the assertion/scanner repairs plus mappings are frozen through `53c823ca`.
+Compile/Clippy cleanup is frozen through `40b06404`; exact historical fixture
+construction and completion assertions are frozen in `043e33e5` and
+`13283a5b`.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Verify the final docs-bearing candidate excludes both vendor target trees
-   and record its exact immutable branch head without pushing it yet.
-2. Run required non-unit static, compiler, and cluster/integration validation.
-   The one full local unit invocation has already been consumed and all 35
-   exact failed names now pass.
-3. Push the approved and locally green candidate to PR #636,
+1. Catalog the final historical-schema and documentation commits, verify both
+   vendor target trees remain excluded, and obtain exact-head carry-forward
+   review without pushing yet.
+2. Push the approved and locally green candidate to PR #636,
    require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.
 
@@ -1145,9 +1148,9 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Satisfy non-unit cluster/hosted gates and merge the production
-   decision, prepublication retry, response-admission, relay/VOD ownership,
-   and confirmed-reap cut.
+1. Push the locally green production decision, prepublication retry,
+   response-admission, relay/VOD ownership, and confirmed-reap cut; satisfy
+   hosted gates and merge it.
 2. Move published-lifetime stall classification and recovery behind the actor
    without overlapping the retained compatibility watcher.
 3. Convert copy startup/exit classification and fallback to actor decisions.

@@ -5,30 +5,25 @@
 **Current work:** first actor-owned prepublication recovery cut in
 [#636](https://github.com/pjunod/plurx/pull/636) on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`. Exact assertion/scanner head
-`2bb65af3988fe0bba4b2fcfdedf9c47484f94903` received unanimous targeted
-approval after the earlier runtime head `841e695f` passed all three broad
-reviews and all 190 ownership rows matched. The directly affected rerun then
-compiled successfully and executed 641 tests: 606 passed, 30 socket-fixture
-tests were denied local binds by the sandbox, and five deterministic inventory
-or high-water assertions were stale. All five deterministic failures now pass
-by exact name, and all 30 socket fixtures pass by exact name with unrestricted
-loopback binds, accounting for all 641 tests without a second full-suite run.
-Runtime behavior remains frozen in
-`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; compile repair
-`ef74b41e57bc26eff06a156024b02029c2c2e768` replaces four nonexistent Hiqlite
-helper calls, imports the four schema constants used by the direct-upgrade
-test, and returns the owned SQLite route after its mutable update. Test repairs
-through `53c823cacc411de41f9d80c06b15f9cce8631ef8` name all 240 Store methods and
-46 production SQLite transactions, pin schema v35, retain media sequence 7
-across lower renewals, and expose the top-level test boundary to the production
-transaction scanner;
-regression-history evidence is frozen in
-`95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`, owner-inventory reconciliation
-in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`, compile-repair evidence in
-`b1fe8151d566b54a5958a19911743195769aaa86`, and inventory-repair evidence in
-`fd08622144c64ae9b17d049bcd54cec8b1dacd91` through
-`53c823cacc411de41f9d80c06b15f9cce8631ef8`.
+`/private/tmp/plurx-playback-control-clone`. Exact source head
+`13283a5b011a69ed2375e04d1d1e7fd608df5908` received unanimous Store,
+lifecycle, and integration approval. It follows the unanimously approved
+runtime, assertion/scanner, compile/Clippy, obsolete-seam deletion, and
+historical-schema fixture rounds through `40b06404c2a`; production behavior
+remains frozen in `f02bf5b5a2ed820f99308ad69720bb449bdf3109`.
+
+The one allowed full local unit invocation was consumed before tests while
+compiling Store code. The directly affected rerun then executed 641 tests:
+606 passed initially, five deterministic inventory/high-water failures passed
+after exact repairs, and all 30 socket fixtures passed by exact name with
+unrestricted loopback binds. The aggregate cluster gate found two stale
+historical migration fixtures; `043e33e5` reconstructs their exact v10-v12
+schemas and `13283a5b` proves the v14 acknowledgement objects and v16/v17
+columns at every completed upgrade. Both failed names pass by exact name.
+All vendor WAL tests, the full cluster harness, seven activation tests, and two
+Activity tests pass, so every local test and cluster result is accounted green
+without a second full-suite run. Formatting, Clippy, validation catalog,
+history, 122 operations contracts, and 52 benchmark checks also pass.
 The current review candidate is the PR tip containing this status file; the PR
 body pins its exact full object ID, avoiding an impossible self-reference from
 a commit to its own hash.
@@ -90,21 +85,12 @@ shared publication boundary:
   after the public Body accepts that chunk; the relay pump retains two and all
   public bodies discard queued bytes after a terminal or absolute deadline.
 
-This is still a repair candidate, not a dynamically validated implementation.
-Exact head `841e695f` received unanimous broad approval; exact compile-repair
-head `f0c2297c` then received unanimous targeted approval. Its directly
-affected `plurx-core` rerun compiled successfully. Of 641 executed tests, 606
-passed, 30 failed only because the sandbox refused local socket binds, and
-five exposed stale exact inventories or high-water assertions. Repairs through
-`53c823ca` correct those expectations and the scanner boundary without changing
-runtime behavior. Exact head `2bb65af3` received unanimous targeted approval;
-the five deterministic names then passed in the normal sandbox and all 30
-socket names passed with loopback-bind permission.
-GitHub's earlier automatic scope lane ran no tests or builds: its static
-`history-check` stopped on hashes rewritten by the rebase, and `5bea1ec7` plus
-`95cd9a2e` add their append-only evidence mappings. The one allowed full local
-unit invocation has been consumed. Every failed name has now passed; no broad
-unit target will run again. PR #626's runtime commits
+This is a locally validated merge candidate. Exact runtime head `841e695f`,
+assertion/scanner head `2bb65af3`, compile/Clippy heads through `40b06404`, and
+historical-schema head `13283a5b` each received unanimous adversarial approval.
+The one allowed full local unit invocation has been consumed; every failed or
+directly affected name now passes, and no broad unit target will run again.
+PR #626's runtime commits
 `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
 command, and one bounded passive executor inbox/task. Root static review
@@ -161,7 +147,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the frozen candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Run non-unit and cluster gates, satisfy hosted checks, and merge; later cuts remove published-lifetime and copy compatibility owners |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; locally green PR #636 assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Push PR #636, satisfy hosted checks, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -319,8 +305,8 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Run the required non-unit and cluster gates, make hosted checks green,
-   merge the active prepublication cut, migrate
+1. Push the locally green prepublication cut, make hosted checks green,
+   merge it, migrate
    published-lifetime and copy recovery, and prove the old server watchdog/
    replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
