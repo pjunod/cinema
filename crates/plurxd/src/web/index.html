@@ -10004,7 +10004,7 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
 // A dedicated operator workspace backed by the replicated request and index-
 // job rows. It keeps live work, failures and recent history in one model, then
 // provides smaller projections to Activity and Settings.
-let ANALYSIS_BUSY=0, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
+let ANALYSIS_BUSY=null, ANALYSIS_PENDING=false, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
 let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
 async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
   if(!ME||!ME.is_admin){ location.hash="#/activity"; return; }
@@ -10024,17 +10024,19 @@ function analysisPageUrl(){
   return `/analysis/jobs?${params}`;
 }
 async function renderAnalysis(generation=PAGE_RENDER_GENERATION,force=false){
-  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden"||ANALYSIS_BUSY===generation) return;
-  ANALYSIS_BUSY=generation;
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden") return;
+  const requestKey=analysisPageUrl();
+  if(ANALYSIS_BUSY){ if(force||ANALYSIS_BUSY.requestKey!==requestKey) ANALYSIS_PENDING=true; return; }
+  const run={generation,requestKey}; ANALYSIS_BUSY=run; ANALYSIS_PENDING=false;
   try{
     const [snapshot,summary]=await Promise.all([
-      api(analysisPageUrl()),
+      api(requestKey),
       api("/analysis/summary").catch(()=>({available:false,enabled:false})),
     ]);
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING=true; return; }
     if(!snapshot.rows.length&&snapshot.filtered_total>0&&ANALYSIS_VIEW.page>1){
-      ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; ANALYSIS_BUSY=0;
-      return renderAnalysis(generation,true);
+      ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; ANALYSIS_PENDING=true; return;
     }
     ANALYSIS_VIEW.cursors[ANALYSIS_VIEW.page]=snapshot.next_cursor||null;
     ANALYSIS_VIEW.cursors.length=ANALYSIS_VIEW.page+1;
@@ -10043,6 +10045,7 @@ async function renderAnalysis(generation=PAGE_RENDER_GENERATION,force=false){
   }catch(error){
     if(error&&error.status===401) return;
     if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING=true; return; }
     const main=document.getElementById("main");
     if(main&&ANALYSIS_SNAPSHOT){
       let stale=document.getElementById("analysis-stale");
@@ -10050,7 +10053,12 @@ async function renderAnalysis(generation=PAGE_RENDER_GENERATION,force=false){
       stale.textContent=`Showing the last update — refresh failed: ${error.message}`;
     }else if(main) main.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="renderAnalysis()">Retry</button></div></div>`;
     setPageFailure("#/analysis",generation,"render_error"); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
-  }finally{ if(ANALYSIS_BUSY===generation) ANALYSIS_BUSY=0; }
+  }finally{
+    if(ANALYSIS_BUSY===run) ANALYSIS_BUSY=null;
+    if(ANALYSIS_PENDING&&generation===PAGE_RENDER_GENERATION&&location.hash==="#/analysis"&&document.visibilityState!=="hidden"){
+      ANALYSIS_PENDING=false; Promise.resolve().then(()=>renderAnalysis(generation,true));
+    }
+  }
 }
 function analysisStateLabel(state){
   return ({queued:"Queued",running:"Running",submitted:"Publishing",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
@@ -10140,7 +10148,14 @@ function analysisDisposition(row){
   return "attention";
 }
 function analysisErrors(row){ return [row.request_error_code?{stage:"Request",code:row.request_error_code}:null,row.job_error_code?{stage:"Index build",code:row.job_error_code}:null].filter(Boolean); }
-function analysisCanRetry(row){ return analysisDisposition(row)==="attention"; }
+function analysisAction(row){
+  if(row.action) return row.action;
+  const code=row.job_error_code||row.request_error_code||"";
+  if(code==="source_superseded") return "analyze_current";
+  if(row.state==="ready") return "rebuild";
+  return analysisDisposition(row)==="attention"?"retry":"none";
+}
+function analysisCanRetry(row){ return ["retry","analyze_current"].includes(analysisAction(row)); }
 function resetAnalysisPage(){ ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; }
 function setAnalysisFilter(filter){ ANALYSIS_VIEW.filter=filter; resetAnalysisPage(); renderAnalysis(PAGE_RENDER_GENERATION,true); }
 function setAnalysisQuery(query){
@@ -10214,10 +10229,11 @@ function paintAnalysis(snapshot){
     const owner=row.owner_node_id||row.target_node_id||"—";
     const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
     const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
-    const canRebuild=row.state==="ready"||analysisCanRetry(row);
-    const title=row.item_id?`<a href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
+    const key=analysisRowKey(row), action=analysisAction(row);
+    const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
+    const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
     const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
-    const key=analysisRowKey(row), details=[
+    const details=[
       ["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",row.target_node_id],["Owner",owner!=="—"?owner:null],
       ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
@@ -10229,12 +10245,12 @@ function paintAnalysis(snapshot){
     return `<tr>
       <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · ${esc(trigger)}${pipeline}</div></td>
       <td><span class="analysis-state ${esc(row.state)}">${esc(analysisStateLabel(row.state))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
-        <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary>Technical details</summary><div class="analysis-diag-grid">
+        <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
         </div></details></td>
       <td><span class="clid">${esc(owner)}</span><div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
-      <td style="text-align:right"><div class="analysis-actions">${canRebuild?`<button class="ghost sm" data-analysis-focus="retry:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${row.state==="ready"?"Rebuild":"Retry"}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
+      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
   }).join("");
   const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
   const filterButton=(id,label,count)=>`<button class="${ANALYSIS_VIEW.filter===id?'on':''}" data-analysis-focus="filter:${id}" aria-pressed="${ANALYSIS_VIEW.filter===id}" onclick="setAnalysisFilter('${id}')">${label} <b>${count}</b></button>`;
@@ -10244,8 +10260,8 @@ function paintAnalysis(snapshot){
   main.innerHTML=`<div class="analysis-head"><div><h1>Content analysis</h1><p>Everything that determines whether a file can use fixed-timeline VOD HLS: source verification, index builds, failures, and recent published results.</p></div>
       <div class="analysis-actions"><span class="analysis-live ${ANALYSIS_VIEW.auto?'':'paused'}" role="status" aria-live="polite">${ANALYSIS_VIEW.auto?'Auto-refreshing':'Auto-refresh paused'}</span><button class="ghost sm" data-analysis-focus="auto" aria-pressed="${ANALYSIS_VIEW.auto}" onclick="toggleAnalysisAuto()">${ANALYSIS_VIEW.auto?'Pause':'Resume'}</button><button class="ghost sm" data-analysis-focus="refresh" onclick="refreshAnalysisNow(this)">Refresh</button><button class="ghost sm" data-analysis-focus="settings" onclick="openAnalysisSettings()">Settings</button></div></div>
     ${summaryWarning}
-    ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
-    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Needs attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Expected outcomes</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Total</span></div></div>
+    ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
+    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Needs attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Expected outcomes</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Retained total</span></div></div>
     <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
       <div class="analysis-filters">${filterButton("all","All",counts.total||0)}${filterButton("working","Working",working)}${filterButton("attention","Attention",attention)}${filterButton("expected","Expected",expected)}${filterButton("ready","Ready",counts.ready||0)}</div>
       ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>

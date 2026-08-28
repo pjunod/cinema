@@ -661,6 +661,7 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
      ${shippedSource("analysisRowKey")}
      ${shippedSource("analysisDisposition")}
      ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAction")}
      ${shippedSource("analysisCanRetry")}
      ${shippedSource("analysisPageUrl")}
      ${shippedSource("paintAnalysis")}
@@ -678,7 +679,7 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
     state:"ready",request_state:"",job_state:"ready",disposition:"ready",
     updated_at_ms:100-index,attempts:1,owner_node_id:"node-a",
     target_node_id:"",pipeline_version:"0123456789ab",source_size:123,
-    request_error_code:"",job_error_code:"",
+    request_error_code:"",job_error_code:"",action:"rebuild",
   }));
   const summary={available:true,enabled:true,total:26,active:0,attention:0,expected:0,ready:26};
   harness.paint({enabled:true,now_ms:200,filtered_total:26,next_cursor:"5|76|job:job-24",rows,summary});
@@ -691,14 +692,16 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
     harness.url({filter:"attention",query:"mount offline",page:2,pageSize:50,cursors:["","3|20|request:r1"]}),
     "/analysis/jobs?limit=50&filter=attention&q=mount+offline&cursor=3%7C20%7Crequest%3Ar1",
   );
-  const unsupported={state:"failed",request_error_code:"unsupported",job_error_code:""};
-  const deleted={state:"cancelled",request_error_code:"source_deleted",job_error_code:""};
-  const failed={state:"failed",request_error_code:"source_unavailable",job_error_code:""};
+  const unsupported={state:"failed",request_error_code:"unsupported",job_error_code:"",action:"none"};
+  const deleted={state:"cancelled",request_error_code:"source_deleted",job_error_code:"",action:"none"};
+  const failed={state:"failed",request_error_code:"source_unavailable",job_error_code:"",action:"retry"};
+  const superseded={state:"cancelled",request_error_code:"source_superseded",job_error_code:"",action:"analyze_current"};
   assert.equal(harness.disposition(unsupported),"unsupported");
   assert.equal(harness.disposition(deleted),"expected");
   assert.equal(harness.retry(unsupported),false);
   assert.equal(harness.retry(deleted),false);
   assert.equal(harness.retry(failed),true);
+  assert.equal(harness.retry(superseded),true);
   harness.page(1,{enabled:true,now_ms:200,filtered_total:0,next_cursor:null,rows:[],summary:{...summary,total:0,ready:0}});
   assert.match(harness.html(),/Showing 0–0 of 0/);
   assert.doesNotMatch(harness.html(),/Showing 0–-1/);
@@ -721,6 +724,99 @@ test("Analysis refresh preserves stale data, focus, and accessible state", () =>
   assert.match(paint,/setSelectionRange/);
   assert.match(paint,/aria-pressed=/);
   assert.match(paint,/role="status" aria-live="polite"/);
+});
+
+test("Analysis refresh queues changed views and never paints an obsolete response", async () => {
+  const jobReads=[];
+  const api=(url)=>{
+    if(url==="/analysis/summary") return Promise.resolve({available:true,enabled:true});
+    return new Promise(resolve=>jobReads.push({url,resolve}));
+  };
+  const main={innerHTML:"",prepend:()=>{}};
+  const document={
+    visibilityState:"visible",activeElement:null,body:{contains:()=>true},
+    getElementById:(id)=>id==="main"?main:null,createElement:()=>({setAttribute:()=>{}}),
+  };
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=false;
+     let ANALYSIS_SNAPSHOT=null,ANALYSIS_SUMMARY=null;
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     const painted=[];
+     const paintAnalysis=(snapshot)=>painted.push(snapshot.marker);
+     const setPageFailure=()=>{},setPagePhase=()=>{},esc=String;
+     ${shippedSource("analysisPageUrl")}
+     ${shippedSource("renderAnalysis")}
+     return {
+       start:()=>renderAnalysis(1),
+       change:()=>{ANALYSIS_VIEW.filter="attention";return renderAnalysis(1,true);},
+       painted,
+     };`,
+  )(api,document,{hash:"#/analysis"});
+
+  const first=harness.start();
+  assert.match(jobReads[0].url,/filter=all/);
+  await harness.change();
+  jobReads[0].resolve({marker:"obsolete",rows:[],filtered_total:0,next_cursor:null});
+  await first;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(jobReads.length,2,"the changed filter is fetched after the active read settles");
+  assert.match(jobReads[1].url,/filter=attention/);
+  assert.deepEqual(harness.painted,[],"the old filter response is never painted");
+  jobReads[1].resolve({marker:"current",rows:[],filtered_total:0,next_cursor:null});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(harness.painted,["current"]);
+});
+
+test("Analysis repaint restores row-link and disclosure focus with stable keys", () => {
+  let focusKey="item:job:one",focused=[];
+  const target={dataset:{analysisFocus:focusKey},focus:()=>focused.push(focusKey)};
+  const openDetail={dataset:{analysisKey:"job:one"}};
+  const main={
+    innerHTML:"",
+    querySelectorAll:(selector)=>selector.startsWith("details")?[openDetail]:[target],
+  };
+  const active={dataset:{analysisFocus:focusKey}};
+  const document={activeElement:active,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
+  const harness=new Function(
+    "document","esc","fmtAgo","fmtBytes",
+    `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     ${shippedSource("analysisStateLabel")}
+     ${shippedSource("analysisPhase")}
+     ${shippedSource("analysisErrorInfo")}
+     ${shippedSource("analysisErrorHtml")}
+     ${shippedSource("analysisRows")}
+     ${shippedSource("analysisCounts")}
+     ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisDisposition")}
+     ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAction")}
+     ${shippedSource("analysisCanRetry")}
+     ${shippedSource("paintAnalysis")}
+     return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
+  )(document,String,()=>"just now",value=>`${value} B`);
+  const row={
+    row_key:"job:one",request_id:"",job_id:"one",file_id:"1",item_id:"2",title:"Movie",
+    state:"ready",request_state:"",job_state:"ready",disposition:"ready",action:"rebuild",
+    updated_at_ms:100,attempts:1,owner_node_id:"node-a",target_node_id:"",
+    pipeline_version:"0123456789ab",source_size:123,request_error_code:"",job_error_code:"",
+  };
+  const snapshot={enabled:false,now_ms:200,filtered_total:1,next_cursor:null,rows:[row],summary:{available:true,total:1,ready:1}};
+  harness(snapshot);
+  assert.deepEqual(focused,["item:job:one"]);
+  assert.match(main.innerHTML,/data-analysis-focus="item:job:one"/);
+  assert.match(main.innerHTML,/data-analysis-focus="details:job:one"/);
+  assert.match(main.innerHTML,/data-analysis-focus="paused-settings"/);
+  assert.match(main.innerHTML,/data-analysis-key="job:one" open/);
+
+  focusKey="details:job:one";
+  active.dataset.analysisFocus=focusKey;
+  target.dataset.analysisFocus=focusKey;
+  harness(snapshot);
+  assert.deepEqual(focused,["item:job:one","details:job:one"]);
 });
 
 test("Settings drops a node-local scan error superseded by replicated success", () => {
