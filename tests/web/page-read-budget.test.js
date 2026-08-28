@@ -619,6 +619,7 @@ test("Settings loads only the active tab manifest", () => {
     libraries: { required: ["settings", "libs", "status"], secondary: [] },
     metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
     playback: { required: ["settings"], secondary: [] },
+    analysis: { required: ["settings", "analysis"], secondary: [] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
     cluster: { required: ["cluster"], secondary: [] },
@@ -638,10 +639,52 @@ test("Settings loads only the active tab manifest", () => {
   assert.match(loadTab, /patchSettingsSecondary/);
   assert.match(loadTab, /settingsCurrent\(generation,tab\)/);
   assert.match(loadTab, /patchSettingsSecondaryError/);
-  for (const endpoint of ["/libraries", "/settings", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
+  for (const endpoint of ["/libraries", "/settings", "/analysis/jobs", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
     assert.match(SHIPPED_UI, new RegExp(`api\\(${JSON.stringify(endpoint).replace("/", "\\/")}`),
       `Settings endpoint map includes ${endpoint}`);
   }
+});
+
+test("Analysis workspace paginates recent work and explains actionable failures", () => {
+  const main={innerHTML:"",querySelectorAll:()=>[]};
+  const document={activeElement:null,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
+  const harness=new Function(
+    "document","esc","fmtAgo","fmtBytes",
+    `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true};
+     ${shippedSource("analysisStateLabel")}
+     ${shippedSource("analysisPhase")}
+     ${shippedSource("analysisErrorInfo")}
+     ${shippedSource("analysisErrorHtml")}
+     ${shippedSource("analysisRows")}
+     ${shippedSource("analysisCounts")}
+     ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisMatches")}
+     ${shippedSource("setAnalysisFilter")}
+     ${shippedSource("setAnalysisPage")}
+     ${shippedSource("paintAnalysis")}
+     return {
+       paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
+       page:setAnalysisPage,filter:setAnalysisFilter,
+       error:analysisErrorInfo,html:()=>document.getElementById("main").innerHTML,
+     };`,
+  )(document,(value)=>String(value??""),()=>"just now",(value)=>`${value} B`);
+  const jobs=Array.from({length:26},(_,index)=>({
+    job_id:`job-${index}`,file_id:String(index+1),state:"ready",updated_at_ms:100-index,
+    attempts:1,owner_node_id:"node-a",pipeline_version:"0123456789ab",source_size:123,
+  }));
+  harness.paint({enabled:true,now_ms:200,history_limit:500,jobs,requests:[],files:[]});
+  assert.match(harness.html(),/Showing 1–25 of 26/);
+  assert.match(harness.html(),/Page 1 of 2/);
+  harness.page(2);
+  assert.match(harness.html(),/Showing 26–26 of 26/);
+  assert.match(harness.html(),/Page 2 of 2/);
+  const sourceFailure=harness.error("source_unavailable");
+  assert.equal(sourceFailure.title,"Source file is unavailable");
+  assert.match(sourceFailure.next,/mount is online/);
+  const unknown=harness.error("future_failure_code");
+  assert.match(unknown.detail,/unrecognized error code/);
+  assert.match(unknown.next,/Copy the diagnostics/);
 });
 
 test("Settings drops a node-local scan error superseded by replicated success", () => {
@@ -683,6 +726,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     libraries:{required:["/settings","/libraries","/scan/status"],secondary:[]},
     metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
+    analysis:{required:["/settings","/analysis/jobs"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
