@@ -17,6 +17,8 @@ fn summary_value(
     serde_json::json!({
         "available": true,
         "enabled": enabled,
+        "scope": "active_and_recent_terminal",
+        "terminal_window": 8192,
         "total": summary.total,
         "active": summary.working,
         "working": summary.working,

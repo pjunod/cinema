@@ -269,9 +269,21 @@ pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
    WHERE state IN ('queued', 'running')
   UNION
   SELECT cache_key FROM (
-    SELECT cache_key FROM cluster_fragment_index_jobs
-     WHERE state IN ('ready', 'failed', 'cancelled')
-     ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'ready'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    UNION ALL
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'failed'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    UNION ALL
+    SELECT cache_key, updated_at_ms FROM (
+      SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+       WHERE state = 'cancelled'
+       ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+    ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
 ), summary_jobs AS (
   SELECT job.* FROM cluster_fragment_index_jobs job
   JOIN summary_job_keys keys ON keys.cache_key = job.cache_key

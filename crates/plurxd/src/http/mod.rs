@@ -7980,6 +7980,8 @@ mod tests {
         assert_eq!(summary["queued"], 1);
         assert_eq!(summary["active"], 1);
         assert_eq!(summary["total"], 1);
+        assert_eq!(summary["scope"], "active_and_recent_terminal");
+        assert_eq!(summary["terminal_window"], 8192);
         assert_eq!(
             call(
                 &app,

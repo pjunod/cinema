@@ -2946,5 +2946,39 @@ mod tests {
                 "missing v33 schema object {object}"
             );
         }
+        let mut plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN
+                 SELECT cache_key FROM (
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'ready'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   UNION ALL
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'failed'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   UNION ALL
+                   SELECT cache_key, updated_at_ms FROM (
+                     SELECT cache_key, updated_at_ms FROM cluster_fragment_index_jobs
+                      WHERE state = 'cancelled'
+                      ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+                   ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)",
+            )
+            .expect("prepare summary terminal-window plan");
+        let details = plan
+            .query_map([], |row| row.get::<_, String>(3))
+            .expect("query summary terminal-window plan")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("summary terminal-window plan rows");
+        assert_eq!(
+            details
+                .iter()
+                .filter(|detail| { detail.contains("cluster_fragment_index_jobs_status_history") })
+                .count(),
+            3,
+            "each terminal state must have its own bounded newest-first index walk: {details:?}"
+        );
     }
 }
