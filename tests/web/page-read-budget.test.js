@@ -687,6 +687,7 @@ test("Analysis workspace uses server pages and separates expected outcomes", () 
   assert.match(harness.html(),/Page 1 of 2/);
   assert.match(harness.html(),/Summary window/);
   assert.match(harness.html(),/All <b>26<\/b>/);
+  assert.match(harness.html(),/<th scope="col">Actions<\/th>/);
   assert.doesNotMatch(harness.html(),/Attention <b>/,
     "sampled summary values are never presented as exact full-history filter counts");
   assert.doesNotMatch(SHIPPED_UI,/Analysis is caught up/);
@@ -733,6 +734,26 @@ test("Analysis refresh preserves stale data, focus, and accessible state", () =>
   assert.match(view,/setPageTimer\(\(\)=>\{ if\(ANALYSIS_VIEW\.auto\) renderAnalysisSummary\(generation\)/,
     "the workspace polls only the compact summary, never the full history query");
   assert.doesNotMatch(view,/setPageTimer\([^\n]*renderAnalysis\(generation\)/);
+});
+
+test("Analysis summary polling refreshes queue state and countdown time", async () => {
+  const api=async()=>({available:true,enabled:false,now_ms:42_000,active:0,total:0});
+  const document={visibilityState:"visible"};
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_SUMMARY_BUSY=null;
+     let ANALYSIS_SUMMARY=null;
+     let ANALYSIS_SNAPSHOT={enabled:true,now_ms:1_000,rows:[],summary:{enabled:true,now_ms:1_000}};
+     const painted=[];
+     const paintAnalysis=(snapshot)=>painted.push({...snapshot});
+     ${shippedSource("renderAnalysisSummary")}
+     return {run:()=>renderAnalysisSummary(1),painted,snapshot:()=>ANALYSIS_SNAPSHOT};`,
+  )(api,document,{hash:"#/analysis"});
+
+  await harness.run();
+  assert.equal(harness.snapshot().enabled,false,"the paused banner follows the compact summary");
+  assert.equal(harness.snapshot().now_ms,42_000,"lease and retry countdowns advance with the summary clock");
+  assert.equal(harness.painted.length,1);
 });
 
 test("Analysis refresh queues changed views and never paints an obsolete response", async () => {
