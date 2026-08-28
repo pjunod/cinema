@@ -255,6 +255,13 @@ class OperationsContractCase(unittest.TestCase):
         deploy_readme = read("deploy/README.md")
         self.assertIn("There is no direct-install step for the fleet", deploy_readme)
 
+    def test_ship_has_no_obsolete_nuc4_port_exception(self):
+        ship = read("scripts/ship")
+        self.assertNotIn(
+            "nuc4's port is held by Plex; that is accepted, not a failure",
+            ship,
+        )
+
     def test_ship_selects_mobile_tags_and_optional_vars_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             environment = os.environ.copy()
