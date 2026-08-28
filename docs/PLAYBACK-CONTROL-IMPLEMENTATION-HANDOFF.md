@@ -1,7 +1,7 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-28
-**Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
+**Merged baseline:** `origin/main` at `bab72ce5` (through PR #635)
 **Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
@@ -9,13 +9,13 @@
 **Last formally reviewed head:**
 `bb69eb7ef43909965ea81f8081ea8a77b46504c2` (frozen and rejected; combined
 verdict **REQUEST CHANGES**; earlier rejected heads `31e7d5e2` and `763c230c`)
-**Implementation freeze:** `f28691203286f56a7ba8df1f7d684e6c7e0acec4`
+**Implementation freeze:** `21ecd47fa463936e9103022d03e7674fe23b92b3`
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`. It is
 based on rejected head `bb69eb7e` on branch
 `codex/playback-control-m4-prepublication`; this documentation update will
 become the next exact review head.
 **Runtime review state:** exact heads `763c230c`, `31e7d5e2`, and `bb69eb7e`
-were reviewed read-only and rejected. The repair through `f2869120` closes the
+were reviewed read-only and rejected. The repair through `21ecd47f` closes the
 latest Store replay, takeover inventory, copy prepublication, renewal/adoption,
 move-owned identity, and lifecycle-coverage findings. The combined docs-bearing
 branch head has not yet received immutable-head adversarial approval.
@@ -388,7 +388,7 @@ that freeze too:
   renewal ambiguity, cache-generation rejection, supervisor unwind, or exact
   creation abort/join ordering.
 
-Implementation commit `f2869120` closes that third ledger. Hiqlite suppresses
+Implementation commit `21ecd47f` closes that third ledger. Hiqlite suppresses
 every exact-current activation write inside the Raft transaction, accepts only
 the fresh-write shape or an all-zero replay, and then proves both immutable
 route identity and the current pointer; a contract-only pause forces the real
@@ -409,7 +409,7 @@ bootstrap renewal, cache rejection, cancellation, panic, and child
 abort-then-join-before-worker-stop. No dynamic test has run.
 
 These changes have source-level and backend contract regressions, but none has
-run. Implementation commit `f2869120` has not been compiled, built, or tested.
+run. Implementation commit `21ecd47f` has not been compiled, built, or tested.
 The immutable PR #636 head containing this handoff must receive the required
 exact-head adversarial approval before the unit-test gate opens.
 
@@ -742,7 +742,7 @@ runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
 `bb69eb7ef43909965ea81f8081ea8a77b46504c2` is the last formally reviewed head
 and is rejected. The runtime, Store, tests, and owner inventory are frozen in
-`f28691203286f56a7ba8df1f7d684e6c7e0acec4`; this status/handoff update is the
+`21ecd47fa463936e9103022d03e7674fe23b92b3`; this status/handoff update is the
 only remaining tracked change. The preserved untracked vendor build artifacts
 remain outside every commit.
 
