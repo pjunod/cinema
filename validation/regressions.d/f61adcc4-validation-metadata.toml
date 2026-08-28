@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["f61adcc4"]
+reason = "This commit only records the retained leader-reconnect runtime evidence in regressions.d; it does not change cluster behavior."
+ignore = true

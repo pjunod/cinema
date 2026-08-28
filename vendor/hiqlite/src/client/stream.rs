@@ -269,6 +269,19 @@ enum WritePayload {
     Close,
 }
 
+const CLIENT_STREAM_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+fn reconnect_delay(
+    previous_leader: &(NodeId, String),
+    current_leader: &(NodeId, String),
+) -> Duration {
+    if previous_leader == current_leader {
+        CLIENT_STREAM_RETRY_DELAY
+    } else {
+        Duration::ZERO
+    }
+}
+
 impl Client {
     pub(crate) fn open_stream(
         &self,
@@ -366,6 +379,8 @@ async fn client_stream(
                 (ws, connected_leader)
             }
             Err(err) => {
+                let previous_leader = leader.read().await.clone();
+                let mut retry_delay = CLIENT_STREAM_RETRY_DELAY;
                 if client.inner.proxy_mode {
                     // No request was dispatched, so every handshake/TLS/API
                     // error is safe to recover at the next configured proxy.
@@ -382,18 +397,22 @@ async fn client_stream(
                         }
                         () = client.find_set_active_leader() => {}
                     }
+                    let current_leader = leader.read().await.clone();
+                    retry_delay = reconnect_delay(&previous_leader, &current_leader);
                 }
 
-                select! {
-                    _ = stream_shutdown.changed() => {
-                        fail_client_stream_shutdown(
-                            &mut in_flight,
-                            &mut in_flight_buf,
-                            &rx_req,
-                        );
-                        return;
+                if !retry_delay.is_zero() {
+                    select! {
+                        _ = stream_shutdown.changed() => {
+                            fail_client_stream_shutdown(
+                                &mut in_flight,
+                                &mut in_flight_buf,
+                                &rx_req,
+                            );
+                            return;
+                        }
+                        () = time::sleep(retry_delay) => {}
                     }
-                    () = time::sleep(Duration::from_millis(1000)) => {}
                 }
                 error!(
                     "Could not connect Client API WebSocket to {}: {}",
@@ -1237,5 +1256,17 @@ mod tests {
             Some(8),
             Some(&replacement)
         ));
+    }
+
+    #[test]
+    fn a_discovered_leader_reconnects_without_the_failure_backoff() {
+        let previous = (1, "node-1".to_owned());
+        let replacement = (2, "node-2".to_owned());
+
+        assert_eq!(reconnect_delay(&previous, &replacement), Duration::ZERO);
+        assert_eq!(
+            reconnect_delay(&replacement, &replacement),
+            CLIENT_STREAM_RETRY_DELAY
+        );
     }
 }
