@@ -291,9 +291,9 @@ pub fn hevc_copy_bsf_for_client(
 ///
 /// These Matroska files carry VPS/SPS/PPS only in-band. Removing NAL types
 /// 32–34 before the fragmented-MP4 muxer sees them makes ffmpeg emit an empty
-/// (zero-byte) hvcC box, which neither our fragment reader nor a player can
-/// initialize from. The GOP-aware copy paths retain the first sample's sets
-/// and promote them into the served init instead.
+/// hvcC record, which neither our fragment reader nor a player can initialize
+/// from. The copy path converts those packets through Annex B so ffmpeg's
+/// `extract_extradata` filter can rebuild a complete hvcC before muxing.
 pub fn hevc_parameter_set_promotion_required(source: &MediaFile, probe_json: Option<&str>) -> bool {
     if !matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         return false;
@@ -1263,34 +1263,37 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
         // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
         // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
         // first fragment. Some WEB-DL Matroska files carry a minimal, empty
-        // hvcC and repeat those parameter sets only in-band. Stripping them
-        // here made an initialization record with no decoder configuration;
-        // tvOS rejected it with CoreMedia -15517. Leave the parameter sets in
-        // the pipe so the GOP-aware segmenter can promote them into hvcC from
-        // the first sample. Compatible Profile 8 and ordinary HEVC keep the
-        // existing hvc1 normalization.
+        // hvcC and repeat those parameter sets only in-band. Merely retaining
+        // the sets is insufficient: FFmpeg's MOV muxer consumes them while
+        // still emitting the source's 23-byte hvcC. Convert the packets to
+        // Annex B and extract their parameter sets first, which gives the
+        // muxer complete codec extradata and keeps the served `hvc1`/`dvh1`
+        // promise honest.
         let promote_profile5_parameter_sets = source.hdr.as_deref() == Some("dolby_vision")
             && options.preserve_dolby_vision
             && !dolby_vision_has_compatible_base(source.hdr_format.as_deref());
-        let promote_parameter_sets =
-            promote_profile5_parameter_sets || options.promote_hevc_parameter_sets;
-        if !promote_parameter_sets {
+        if options.promote_hevc_parameter_sets {
+            let mut filters = Vec::new();
+            if source.hdr.as_deref() == Some("dolby_vision")
+                && !options.preserve_dolby_vision
+                && options.have_dovi_bsf
+            {
+                filters.push("dovi_rpu=strip=1");
+            }
+            filters.push("hevc_mp4toannexb");
+            filters.push("extract_extradata");
+            if source.hdr.as_deref() == Some("dolby_vision") && !options.preserve_dolby_vision {
+                filters.push("filter_units=remove_types=62-63");
+            }
+            args.push("-bsf:v".into());
+            args.push(filters.join(","));
+        } else if !promote_profile5_parameter_sets {
             args.push("-bsf:v".into());
             args.push(hevc_copy_bsf_for_client(
                 source.hdr.as_deref(),
                 options.have_dovi_bsf,
                 options.preserve_dolby_vision,
             ));
-        } else if source.hdr.as_deref() == Some("dolby_vision") && !options.preserve_dolby_vision {
-            // Retain VPS/SPS/PPS for init promotion while still removing the
-            // Dolby Vision enhancement/RPU payload and, where supported, its
-            // container side data.
-            args.push("-bsf:v".into());
-            args.push(if options.have_dovi_bsf {
-                "dovi_rpu=strip=1,filter_units=remove_types=62-63".into()
-            } else {
-                "filter_units=remove_types=62-63".into()
-            });
         }
     }
     args
@@ -3423,7 +3426,7 @@ mod index_pipe_tests {
     }
 
     #[test]
-    fn minimal_hevc_configuration_retains_parameter_sets_for_init_promotion() {
+    fn minimal_hevc_configuration_rebuilds_complete_muxer_extradata() {
         let mut file = hevc_dv();
         file.hdr = Some("hdr10".into());
         file.hdr_format = Some("HDR10".into());
@@ -3447,9 +3450,12 @@ mod index_pipe_tests {
             "ordinary HEVC must retain the hvc1 boundary-stutter fix"
         );
         assert!(
-            !promoted.iter().any(|arg| arg == "-bsf:v"),
-            "the only VPS/SPS/PPS copy must reach the GOP-aware segmenter"
+            promoted
+                .join(" ")
+                .contains("-bsf:v hevc_mp4toannexb,extract_extradata"),
+            "the in-band VPS/SPS/PPS must become muxer extradata: {promoted:?}"
         );
+        assert!(!promoted.join(" ").contains("32-34"), "{promoted:?}");
         assert_ne!(
             crate::segplan::argv_fingerprint(&ordinary),
             crate::segplan::argv_fingerprint(&promoted),
@@ -3463,8 +3469,11 @@ mod index_pipe_tests {
         )
         .join(" ");
         assert!(
-            stripped_dv.contains("dovi_rpu=strip=1,filter_units=remove_types=62-63"),
-            "DV metadata is still stripped while VPS/SPS/PPS reach promotion: {stripped_dv}"
+            stripped_dv.contains(
+                "dovi_rpu=strip=1,hevc_mp4toannexb,extract_extradata,\
+                 filter_units=remove_types=62-63"
+            ),
+            "DV metadata is still stripped while hvcC is rebuilt: {stripped_dv}"
         );
         assert!(!stripped_dv.contains("32-34"), "{stripped_dv}");
     }
