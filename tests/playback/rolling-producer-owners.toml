@@ -108,7 +108,7 @@ replacement = "typed producer facts entering the actor; only its prepublication 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 21
+expected_occurrences = 22
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -122,7 +122,7 @@ replacement = "retained behind exact actor attempt/revision authorization and ac
 [[symbols]]
 id = "child-termination"
 pattern = "child\\.kill\\(\\)\\.await"
-expected_occurrences = 13
+expected_occurrences = 12
 kind = "process_action"
 replacement = "the awaited compatibility supervisor command path; prepublication replyless termination is inventoried separately"
 
@@ -143,7 +143,7 @@ replacement = "the cleanup owner waits on the supervisor's shared terminal proof
 [[symbols]]
 id = "raw-child-wait"
 pattern = "child\\.wait\\(\\)\\.await"
-expected_occurrences = 8
+expected_occurrences = 6
 kind = "process_action"
 replacement = "the sole supervisor reap path; rejected candidates use the same cleanup registry"
 
@@ -178,7 +178,7 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 85
+expected_occurrences = 87
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; the bounded EOF settlement and CAS-elected cache invalidation/retirement tasks own their work after request cancellation, while producer recovery moves only to the actor executor"
 
@@ -227,7 +227,7 @@ replacement = "one session executor acquires process capacity and cleanup regist
 [[symbols]]
 id = "prepublication-start-cancellation-settlement"
 pattern = "PrepublicationStartSettlement"
-expected_occurrences = 4
+expected_occurrences = 6
 kind = "resource_owner"
 replacement = "retained until manager publication so cancellation reaps the child, clears scratch, ends the actor, and releases admissions"
 
@@ -473,7 +473,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-start-cancellation-settlement"
 pattern = "PrepublicationStartSettlement"
-expected_occurrences = 4
+expected_occurrences = 6
 
 [[module_symbols]]
 id = "m4-first-media-lifetime-handoff"
@@ -758,32 +758,32 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-release-adoption-token"
 pattern = "SessionAdoptionToken"
-expected_occurrences = 11
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-takeover-settlement-owner"
 pattern = "PendingTakeoverSettlement"
-expected_occurrences = 7
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-takeover-worker-cleanup-owner"
 pattern = "TakeoverWorkerGuard"
-expected_occurrences = 13
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-takeover-creation-child-owner"
 pattern = "TakeoverCreationOwner"
-expected_occurrences = 4
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "m4-takeover-settlement-io-seam"
 pattern = "TakeoverSettlementIo"
-expected_occurrences = 4
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "m4-takeover-worker-lifecycle-seam"
 pattern = "TakeoverWorkerLifecycle"
-expected_occurrences = 5
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-takeover-bootstrap-renewal"
@@ -926,7 +926,7 @@ expected_occurrences = 9
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 341
+expected_occurrences = 349
 
 [[module_structures]]
 id = "method-spawn"
@@ -941,7 +941,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 477
+expected_occurrences = 478
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -964,7 +964,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 171
+expected_occurrences = 174
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -984,7 +984,7 @@ expected_occurrences = 306
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
-expected_occurrences = 31
+expected_occurrences = 32
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -994,7 +994,7 @@ expected_occurrences = 34
 [[module_structures]]
 id = "rolling-supervisor-construction"
 pattern = "AttemptChild::new\\s*\\("
-expected_occurrences = 21
+expected_occurrences = 22
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
