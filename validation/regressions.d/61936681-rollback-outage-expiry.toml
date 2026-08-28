@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["61936681"]
+points = ["cluster.membership", "cluster.operations"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "operations-contract", "history-regressions"]
+reason = "A replicated cluster_nodes heartbeat trigger makes planned-outage lease expiry independent of the running binary version. The previous-release heartbeat fixture proves a fully rolled-back cluster clears an expired claim and can resume lifecycle writes, while the Rust, cluster, security, operations, and history gates retain the recovery contract."

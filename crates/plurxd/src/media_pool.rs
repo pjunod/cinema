@@ -994,6 +994,12 @@ pub(crate) async fn local_offer(state: &AppState, request: &MediaOfferRequest) -
             ..base()
         };
     }
+    if state.membership.local_maintenance_active() {
+        return MediaOffer {
+            refusal_code: Some("node_maintenance".to_owned()),
+            ..base()
+        };
+    }
     let file = match state.store.get_file(request.file_id).await {
         Ok(Some(file)) => file,
         _ => {

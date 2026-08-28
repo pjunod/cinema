@@ -125,6 +125,11 @@ pub fn router(state: AppState) -> Router {
             "/cluster/nodes/{node_id}/promote",
             post(cluster::promote_node),
         )
+        .route(
+            "/cluster/nodes/{node_id}/maintenance",
+            post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
+        )
+        .route("/cluster/election", post(cluster::force_election))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         .route(
@@ -426,6 +431,93 @@ pub fn router(state: AppState) -> Router {
 
 const LEARNER_ROUTE_INELIGIBLE_JSON: &str = r#"{"code":"learner_route_ineligible","message":"this non-voting learner serves only bounded catalogue reads and declared node-local media routes"}"#;
 const NODE_REMOVAL_FENCED_JSON: &str = r#"{"code":"node_removal_fenced","message":"this cluster node is draining or has been removed"}"#;
+const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"this cluster node is in maintenance mode and is not accepting new work"}"#;
+
+/// Maintenance keeps enough surface alive to administer the node and drain
+/// already-issued media capabilities. Everything that can begin fresh work is
+/// refused, including catalogue browsing that may lead a client to select this
+/// ingress for a new stream.
+fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
+    if method == Method::GET
+        && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
+            || path.starts_with("/assets/")
+            || path.starts_with("/icons/")
+            || matches!(path, "/manifest.webmanifest" | "/connect.svg")
+            || matches!(
+                path,
+                "/api/v1/me"
+                    | "/api/v1/auth/login"
+                    | "/api/v1/auth/logout"
+                    | "/api/v1/activity"
+                    | "/api/v1/activity/detail"
+                    | "/api/v1/system/logs"
+            ))
+    {
+        return true;
+    }
+    if method == Method::GET
+        && matches!(
+            path,
+            "/api/v1/cluster/nodes"
+                | "/api/v1/cluster/status"
+                | "/api/v1/cluster/support-bundle"
+                | "/api/v1/cluster/media"
+                | "/api/v1/cluster/ingress"
+                | cluster_operations::INTERNAL_PATH
+        )
+    {
+        return true;
+    }
+    if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
+        return true;
+    }
+    if method == Method::POST && path == "/api/v1/cluster/election" {
+        return true;
+    }
+    if matches!(method, &Method::POST | &Method::DELETE)
+        && path.starts_with("/api/v1/cluster/nodes/")
+        && path.ends_with("/maintenance")
+    {
+        return true;
+    }
+    if method == Method::DELETE
+        && path.starts_with("/api/v1/cluster/nodes/")
+        && path.ends_with("/restart-preparation")
+    {
+        return true;
+    }
+    if method == Method::POST
+        && matches!(
+            path,
+            crate::media_sessions::ABORT_PATH
+                | crate::media_sessions::RELAY_PATH
+                | crate::media_sessions::CONTROL_PATH
+        )
+    {
+        return true;
+    }
+    let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let existing_media_read = method == Method::GET
+        && (matches!(
+            segments.as_slice(),
+            ["api", "v1", "hls", _, _]
+                | ["api", "v1", "hls", _, "subs", _, _]
+                | ["api", "v1", "publication", _, _]
+                | ["api", "v1", "stream", _, "status"]
+                | ["api", "v1", "offline", "packages", _]
+                | ["api", "v1", "offline", "media", _, _]
+                | ["api", "v1", "offline", "media", _, _, _]
+                | ["api", "v1", "offline", "media", _, "subs", _, _]
+        ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
+    let existing_media_control = (method == Method::POST
+        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        || (method == Method::DELETE
+            && matches!(
+                segments.as_slice(),
+                ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+            ));
+    existing_media_read || existing_media_control
+}
 
 /// One published route matrix for the non-voting capacity role.
 ///
@@ -558,6 +650,17 @@ async fn cluster_capacity_gate(
 ) -> Response {
     let path = request.uri().path();
     let method = request.method();
+    if state.membership.local_maintenance_active() && !maintenance_route_eligible(method, path) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::RETRY_AFTER, "1"),
+            ],
+            NODE_MAINTENANCE_JSON,
+        )
+            .into_response();
+    }
     match state.membership.local_serving_role().await {
         Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
         Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
@@ -628,6 +731,7 @@ async fn healthz() -> &'static str {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ReadinessFailure {
+    Maintenance,
     QuorumUnavailable,
     StoreUnavailable,
 }
@@ -644,6 +748,15 @@ pub(crate) struct ReadinessEvaluation {
 /// Replicated nodes use only the passive serving fence. A local SQLite node
 /// retains its existing bounded Store ping because it has no quorum proof.
 pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
+    if state.membership.local_maintenance_active() {
+        return ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::Maintenance),
+        };
+    }
+    // A fresh quorum watermark is already a recent replicated-store proof.
+    // Do not turn readiness into another multi-second Store request exactly
+    // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
         return if state.serving.is_ready() {
             ReadinessEvaluation {
@@ -676,6 +789,10 @@ pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
     match evaluate_readiness(&state).await {
         ReadinessEvaluation { ready: true, .. } => (StatusCode::OK, "ready\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::Maintenance),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "maintenance\n"),
         ReadinessEvaluation {
             reason: Some(ReadinessFailure::QuorumUnavailable),
             ..
@@ -800,6 +917,48 @@ mod tests {
             (Method::POST, crate::media_sessions::CONTROL_PATH),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
+        }
+    }
+
+    #[test]
+    fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_work() {
+        for (method, path) in [
+            (Method::GET, "/healthz"),
+            (Method::GET, "/readyz"),
+            (Method::GET, "/api/v1/cluster/nodes"),
+            (Method::GET, "/api/v1/cluster/status"),
+            (Method::GET, "/api/v1/cluster/support-bundle"),
+            (Method::GET, cluster_operations::INTERNAL_PATH),
+            (Method::POST, "/api/v1/auth/login"),
+            (Method::POST, "/api/v1/auth/logout"),
+            (Method::POST, "/api/v1/cluster/election"),
+            (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
+            (
+                Method::DELETE,
+                "/api/v1/cluster/nodes/node-b/restart-preparation",
+            ),
+            (Method::GET, "/api/v1/hls/session/index.m3u8"),
+            (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
+            (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, crate::media_sessions::ABORT_PATH),
+            (Method::POST, crate::media_sessions::CONTROL_PATH),
+        ] {
+            assert!(maintenance_route_eligible(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::GET, "/api/v1/libraries"),
+            (Method::GET, "/api/v1/files/8/decision"),
+            (Method::GET, "/api/v1/files/8/direct"),
+            (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, "/api/v1/cluster/join-tokens"),
+            (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
+            (Method::POST, "/api/v1/libraries"),
+        ] {
+            assert!(
+                !maintenance_route_eligible(&method, path),
+                "{method} {path}"
+            );
         }
     }
 
@@ -3460,6 +3619,23 @@ mod tests {
             assert_eq!(status, StatusCode::CONFLICT, "{route}: {body}");
             assert_eq!(body["code"], "membership_unavailable", "{route}");
         }
+
+        for route in [
+            "/api/v1/cluster/election",
+            "/api/v1/cluster/nodes/node-b/maintenance",
+        ] {
+            let (status, _) = call(&app, post(route, None, json!({}))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}");
+            let (status, body) = call(&app, post(route, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}: {body}");
+            assert_eq!(body["code"], "membership_unavailable", "{route}");
+        }
+        let maintenance = "/api/v1/cluster/nodes/node-b/maintenance";
+        let (status, _) = call(&app, delete(maintenance, None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(&app, delete(maintenance, Some(&admin))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "membership_unavailable");
 
         let (status, _) = call(
             &app,

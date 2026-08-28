@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e865a74d"]
+points = ["cluster.membership", "cluster.operations", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract", "history-regressions"]
+reason = "The correction separates immediate rollout readiness from reversible maintenance readiness. Direct target verdicts retain healthy voter, Raft, WAL, protocol, lifecycle, and post-target quorum proofs while permitting the current leader to reach its bounded handoff, a busy follower to fence new admissions before its owned work drains, and a caught-up learner to enter without subtracting a vote. Rust tests exercise all three entry variants and the handoff-before-commit ordering, web-membership proves the shipped UI enables each only on its direct backend, the cluster and security checks retain authority boundaries, operations-contract retains the documented fence-and-drain workflow, and history-regressions binds the correction to this evidence."

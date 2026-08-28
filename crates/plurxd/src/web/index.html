@@ -652,6 +652,7 @@
      which left the sticky header narrower than the body. minmax(0,…) lets the
      track shrink so the table scrolls inside its card instead. */
   .adminwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;max-width:960px}
+  .adminwrap.clusterwrap{max-width:1240px}
   /* Keep action cells in the table formatting context. Applying `.row`
      directly to a <td> changes it to display:flex, so its height and bottom
      rule stop following a taller multi-line row. The flex row belongs inside
@@ -876,6 +877,57 @@
   .clrefusal{border:1px solid var(--warn,#fbbf24);border-radius:8px;background:var(--panel2);
     padding:11px 14px;margin-top:12px;font-size:13px;line-height:1.55}
   .clrefusal b{display:block;margin-bottom:3px;color:var(--text)}
+  .cluster-dashboard{display:grid;gap:16px}
+  .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
+  .cluster-health>.clstate{margin:0}
+  .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
+  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
+  .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
+  .cluster-main{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(290px,.8fr);gap:16px;align-items:start}
+  .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
+  .cluster-card h3{font-size:15px;margin:0 0 5px}
+  .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
+  .clnodes{display:grid;gap:10px;margin-top:12px}
+  .clnode{border:1px solid var(--line);border-radius:10px;padding:13px;background:var(--panel)}
+  .clnode.maintenance{border-color:var(--warn,#fbbf24);background:color-mix(in srgb,var(--warn) 5%,var(--panel))}
+  .clnode.stale{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+  .clnodehead,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .clnodemeta{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:7px;margin-top:12px}
+  .clnodemeta div{border-top:1px solid var(--line);padding-top:8px;font-size:12px;color:var(--text)}
+  .clnodemeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
+  .clnodefoot{align-items:center;margin-top:12px}
+  .clnodefoot .hint{margin:0;max-width:450px}
+  .clactions{display:grid;gap:9px;margin-top:14px}
+  .claction{border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:var(--panel)}
+  .claction .row{margin-top:9px}
+  .clsteps{display:grid;gap:7px;margin:12px 0 0;padding:0;list-style:none}
+  .clsteps li{position:relative;padding-left:25px;color:var(--muted);font-size:12px;line-height:1.4}
+  .clsteps li::before{content:"";position:absolute;left:1px;top:1px;width:15px;height:15px;border:1px solid var(--line);border-radius:50%}
+  .clsteps li.done{color:var(--text)}
+  .clsteps li.done::before{content:"✓";display:grid;place-items:center;color:var(--good);border-color:var(--good);font-size:10px;font-weight:800}
+  .clrecovery{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 5%,var(--panel2))}
+  .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
+  .clvoters{display:grid;gap:6px;margin:12px 0}
+  .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
+  .cldanger{margin-top:0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:0 14px}
+  .cldanger>summary{cursor:pointer;padding:13px 0;font-weight:650;font-size:13px}
+  .cldangerbody{padding:0 0 14px}
+  .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
+  .cldialog::backdrop{background:#0009}
+  .cldialogbody{padding:20px}
+  .cldialogbody h3{margin:0 0 7px}
+  .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
+  .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+  @media(max-width:900px){
+    .cluster-health{grid-template-columns:repeat(3,1fr)}
+    .cluster-health>.clstate{grid-column:1/-1}
+    .cluster-main{grid-template-columns:1fr}
+  }
+  @media(max-width:620px){
+    .cluster-health{grid-template-columns:1fr}
+    .cluster-health>.clstate{grid-column:auto}
+    .clnodemeta{grid-template-columns:repeat(2,1fr)}
+  }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}
   .syncnow{padding:6px 10px 2px;font-size:13px;font-weight:600}
@@ -10629,7 +10681,7 @@ function settingsTabsHtml(tab){
   return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
 }
 function settingsShell(tab){
-  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
 }
 function patchSettingsSecondary(tab,key){
   if(tab==="metadata"&&key==="libs"){
@@ -10641,8 +10693,7 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
-    const mount=document.getElementById("cluster-operations");
-    if(mount) mount.innerHTML=clusterOperationsCard(SETTINGS_DATA.clusterOps);
+    renderSettings();
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
@@ -11354,6 +11405,24 @@ function membershipRefusalText(code,message){
       "This learner has not yet published a fresh zero-lag apply proof. Leave it running until its Read worker badge says ready, then retry promotion.",
     voter_storage_preflight_failed:
       "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
+    maintenance_conflict:
+      "Maintenance and membership changes are mutually exclusive. Let the active operation settle, refresh the roster, and retry this action.",
+    cluster_operation_pending:
+      "Another node already owns the cluster's planned-outage lease. Finish or cancel that restart preparation or maintenance operation, then refresh and retry.",
+    maintenance_would_lose_quorum:
+      "Restarting this voter would leave fewer reachable voters than quorum requires. Restore the missing voter or add capacity before retrying maintenance.",
+    maintenance_resume_unsafe:
+      "The target process has not yet proved its maintenance acknowledgement, catch-up, and complete local workload drain. Open that node directly, let it settle, and retry there.",
+    maintenance_node_mismatch:
+      "Open the target node directly. Only that running process can fence and drain its own work or clear its durable maintenance fence.",
+    maintenance_preflight_unsafe:
+      "Direct cluster observations do not currently prove this node safe to maintain. Keep every available voter running and clear the Operations blockers first.",
+    election_quorum_unavailable:
+      "Raft cannot elect a leader without a reachable voter majority. Restore an original voter instead of repeatedly forcing elections.",
+    election_candidate_unavailable:
+      "No reachable follower has published a fresh zero-lag apply proof. Restore or catch up a follower, then retry the election.",
+    election_lifecycle_pending:
+      "A maintenance, promotion, join, or removal operation is still pending. Let it settle before changing leadership.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
   return message?`The server refused this cluster operation: ${message}`
@@ -11361,7 +11430,30 @@ function membershipRefusalText(code,message){
 }
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
-function clusterNodeRow(n,localNodeId){
+function clusterDirectMaintenanceStatus(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  const row=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
+  return row&&row.observation==="answered"&&row.status?row.status:null;
+}
+function clusterMaintenanceEntryVerdict(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
+}
+function clusterMaintenanceReady(n,ops){
+  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
+  return Boolean(n.maintenance_ready&&direct&&direct.process&&direct.process.live&&
+    direct.serving&&direct.serving.reason==="maintenance"&&direct.media&&
+    direct.media.drained&&Number(direct.media.admissions_in_flight||0)===0);
+}
+function clusterMaintenanceResumeReady(n,ops){
+  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
+  return Boolean(n.maintenance&&n.maintenance_acknowledged&&n.reachable&&
+    n.apply_lag_entries===0&&Number(n.active_media_sessions||0)===0&&direct&&
+    direct.process&&direct.process.live&&direct.serving&&
+    direct.serving.reason==="maintenance"&&direct.media&&direct.media.drained&&
+    Number(direct.media.admissions_in_flight||0)===0);
+}
+function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const voter=n.is_voter;
   const admittedVoter=n.role==="voter";
   const role=voter
@@ -11376,6 +11468,7 @@ function clusterNodeRow(n,localNodeId){
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
   const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
+  const maintenance=n.maintenance?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Maintenance</span>`:"";
   const worker=!voter&&n.role==="learner"
     ? n.bounded_read_ready
       ? `<span class="pill" style="color:var(--good);border-color:var(--good)">Read worker ready</span>`
@@ -11384,19 +11477,116 @@ function clusterNodeRow(n,localNodeId){
   const hostname=n.hostname||n.node_id;
   const advertised=n.advertised_host
     ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
+  const lifecycleLocked=Boolean(context.lifecycleLocked);
+  const localTarget=n.node_id===localNodeId;
+  const directReady=clusterMaintenanceReady(n,context.operations);
+  const resumeReady=clusterMaintenanceResumeReady(n,context.operations);
   const promote=!voter&&n.role==="learner"
-    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
+    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready&&!lifecycleLocked?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
     : "";
-  const action=n.node_id===localNodeId
-    ? `<span class="muted">Use graceful leave below</span>`
-    : `${promote}<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${worker}</div>
-      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
-    <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
-    <td data-label="Role">${role}</td>
-    <td data-label="Heartbeat">${heartbeat}</td>
-    <td data-label="Last seen" class="muted">${seen}</td>
-    <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
+  const maintenanceAction=n.maintenance
+    ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
+    : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
+  const remove=n.node_id===localNodeId
+    ? `<span class="muted">Use graceful leave in Danger zone</span>`
+    : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
+  const direct=clusterDirectMaintenanceStatus(context.operations,n.node_id);
+  const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
+  const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const note=n.maintenance
+    ? directReady
+      ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
+      : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
+    : "Maintenance is reversible and does not remove this node from membership.";
+  return `<article class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}">
+    <div class="clnodehead"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
+      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div>${role}</div></div>
+    <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
+      <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div>
+    <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div>
+  </article>`;
+}
+function clusterRecoveryState(cluster){
+  if(cluster.recovery) return cluster.recovery;
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const required=Math.floor(voters.length/2)+1;
+  const reachable=voters.filter(n=>n.reachable).length;
+  const leader=voters.some(n=>n.is_leader);
+  return {required:voters.length>1&&(reachable<required||!leader),quorum_available:reachable>=required,
+    reachable_voters:reachable,required_voters:required,leader_elected:leader,
+    permanent_majority_loss_supported:false};
+}
+function clusterRecoveryPanel(cluster,recovery,active,ops){
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const maintenanceActive=Boolean(active);
+  const electionCandidate=voters.some(n=>n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+  const electionReady=recovery.quorum_available&&electionCandidate&&!maintenanceActive;
+  const title=recovery.quorum_available?"Leader election required":"Recovery required";
+  const badge=recovery.quorum_available?"Leader unavailable":"Quorum unavailable";
+  const rows=voters.map(n=>`<div class="clvoter"><span>${esc(n.hostname||n.node_id)}${n.is_leader?" · last known leader":""}</span>
+    <b style="color:${n.reachable?'var(--good)':'var(--bad)'}">${n.reachable?"heartbeat fresh":"unreachable / stale"}</b></div>`).join("");
+  const recoverySummary=recovery.quorum_available
+    ? maintenanceActive
+      ? "A voter majority is reachable, but maintenance is still active. Restore and resume the fenced target before requesting an election."
+      : "A voter majority is reachable, but no leader is currently elected. A bounded election is safe to request."
+    : "The voter majority cannot be proved. Normal cluster mutations are locked.";
+  const maintained=active?`<div class="claction"><b>Restore the maintenance target first: ${esc(active.hostname||active.node_id)}</b><p>Its durable work fence is still active. Start this original node with its existing data and identity, then open it directly to verify catch-up and local drain before resuming service.</p></div>${clusterMaintenanceProgress(active,ops,cluster.local_node_id,true)}`:"";
+  return `<section class="cluster-card clrecovery"><div class="clophead"><div><h3>${title}</h3>
+      <p>${recoverySummary}</p></div><span class="pill" style="color:var(--bad);border-color:var(--bad)">${badge}</span></div>
+    <div class="recovery-count">${recovery.reachable_voters} / ${recovery.required_voters}</div><p>reachable voters needed for quorum</p>
+    <div class="clvoters">${rows}</div>
+    ${maintained}
+    ${recovery.quorum_available?`<div class="claction"><b>Request an election</b><p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p><div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div>${forceElectionDialog(electionReady)}`:
+    `<div class="claction"><b>Recommended recovery</b><p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.</p></div>
+    <div class="claction"><b>Permanent majority loss</b><p>This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
+      <div class="row"><button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+      <button class="ghost sm" onclick="downloadClusterDiagnostics()">Download roster snapshot</button>
+      <button class="ghost sm" onclick="toggleRecoveryChecklist(this)">Preservation checklist</button></div>
+      <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div></div>
+    <button class="ghost sm" disabled title="Raft cannot elect a leader without quorum">Force election unavailable without quorum</button>`}
+  </section>`;
+}
+function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
+  const direct=clusterDirectMaintenanceStatus(ops,active.node_id);
+  const media=direct&&direct.media;
+  const sessions=media?Number(media.local_active_sessions||0):Number(active.active_media_sessions||0);
+  const directReady=clusterMaintenanceReady(active,ops);
+  const resumeReady=clusterMaintenanceResumeReady(active,ops);
+  const localTarget=active.node_id===localNodeId;
+  return `<ol class="clsteps"><li class="${active.maintenance_acknowledged?'done':''}">Target acknowledged the replicated work fence</li>
+    <li class="${!active.is_leader?'done':''}">Leadership is on another voter</li>
+    <li class="${active.reachable&&active.apply_lag_entries===0?'done':''}">Node is reachable and fully caught up</li>
+    <li class="${media&&media.drained&&Number(media.admissions_in_flight||0)===0?'done':''}">Direct process work drained (${sessions} local operation${sessions===1?'':'s'})</li></ol>
+    <div class="claction"><b>${directReady?"Ready to update, reboot, or resume":resumeReady&&active.is_leader?"Ready to hand off leadership and resume":recovering?"Restore this fenced node":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only from the target node after direct process evidence is current; if it became leader during recovery, resume first hands leadership to a caught-up voter.</p>
+      <div class="row"><button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Direct drain proof is required.':'Open the maintenance target directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>`;
+}
+function clusterOperationsPanel(cluster,ops){
+  const recovery=clusterRecoveryState(cluster);
+  const active=(cluster.nodes||[]).find(n=>n.maintenance);
+  if(recovery.required) return clusterRecoveryPanel(cluster,recovery,active,ops);
+  if(active){
+    return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance in progress</h3><p>${esc(active.hostname||active.node_id)}</p></div><span class="pill" style="color:var(--warn);border-color:var(--warn)">Fenced</span></div>
+      ${clusterMaintenanceProgress(active,ops,cluster.local_node_id)}
+    </section>`;
+  }
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+  const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
+  const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance &amp; leadership</h3><p>Planned work without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
+    <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
+      <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
+        <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
+    ${forceElectionDialog(electionReady)}
+  </section>`;
+}
+function forceElectionDialog(enabled){
+  return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
+    <p>This briefly interrupts writes while a caught-up follower campaigns. The current voter majority stays unchanged, and Raft—not this screen—selects the next leader.</p>
+    <ol class="clsteps"><li class="done">A voter quorum is reachable</li><li class="done">A caught-up follower is available</li><li class="done">No maintenance or removal is pending</li></ol>
+    <label class="row" style="margin-top:16px;font-size:13px"><input id="clelectionconfirm" type="checkbox" style="width:auto" onchange="document.getElementById('clelectiongo').disabled=!this.checked"> I understand this may briefly pause writes</label>
+    <div class="cldialogactions"><button class="ghost sm" onclick="this.closest('dialog').close()">Cancel</button><button id="clelectiongo" disabled onclick="forceClusterElection(this)">Force election</button></div>
+  </div></dialog>`;
 }
 function clusterOperationAge(ms){
   if(ms===null||ms===undefined) return "unknown age";
@@ -11533,8 +11723,7 @@ async function refreshClusterOperations(btn){
     const ops=await loadSettingsKey("clusterOps",generation);
     if(settingsCurrent(generation,"cluster")){
       SETTINGS_DATA.clusterOps=ops;
-      const current=document.getElementById("cluster-operations");
-      if(current) current.innerHTML=clusterOperationsCard(ops);
+      renderSettings();
     }
   }catch(error){
     if(settingsCurrent(generation,"cluster")){
@@ -11571,8 +11760,7 @@ async function pollLocalRestart(nodeId,generation){
       const ops=await api("/cluster/status");
       if(!settingsCurrent(generation,"cluster")) return;
       SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-      const mount=document.getElementById("cluster-operations");
-      if(mount) mount.innerHTML=clusterOperationsCard(ops);
+      renderSettings();
       const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
       const media=local&&local.status&&local.status.media;
       if(!media||!media.new_admissions_blocked||media.drained) return;
@@ -11611,34 +11799,98 @@ function clusterPanel(d){
       `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}; `+
       `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
     : "Capacity details unavailable.";
+  const maintenanceActive=nodes.some(node=>node.maintenance);
+  const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
-       <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
+    ? `<div class="clnodes">${nodes.map(node=>{
+        const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
+        return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
+      }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
-  return `${operations}<div class="card"><h2 class="section" style="margin-top:0">Cluster membership</h2>
-    <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
-    ${roster}
-    <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
-      Leader, commit, and apply-lag readings below describe Raft replication health.</div>
-    <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
-      — the same reading as the Server card on the System tab.</div>
-    <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div>
-    ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
+  const recovery=clustered?clusterRecoveryState(cluster):null;
+  const leader=nodes.find(n=>n.is_leader);
+  const reachable=nodes.filter(n=>n.reachable).length;
+  return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recovery&&recovery.required?'warn':state.tone}"><h3>${esc(recovery&&recovery.required?'Recovery required':state.title)}</h3><p>${esc(recovery&&recovery.required?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
+    <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
+    <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
+    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
+    ${operations}
+    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Nodes</h3><p>Heartbeat freshness is committed state, not a direct network probe; the Operations table above contains direct peer observations.</p></div><button class="ghost sm" onclick="retryCluster()">Refresh</button></div>${roster}
+      <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"} — the same reading as the System tab.</div>
+      <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div></section>
+      ${clustered?clusterOperationsPanel(cluster,d.clusterOps):`<section class="cluster-card"><h3>Cluster operations</h3><p>Clustering is not enabled on this server.</p></section>`}</div>
+    ${statusFailure?`<div class="row"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
-    ${clustered?joinPanel()+leavePanel(cluster.local_node_id):""}</div>
-    <div class="card"><h2 class="section" style="margin-top:0">Cluster log</h2>
+    ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details>`:""}
+    <details class="cldanger"><summary>Cluster diagnostics</summary><div class="cldangerbody"><h2 class="section" style="margin-top:0">Cluster log</h2>
       <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
           <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
           <option value="error">Errors</option><option value="debug">Debug+</option></select>
         <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
         <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
       <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
-      <div class="logbox" id="cllogbox">Loading…</div></div>`;
+      <div class="logbox" id="cllogbox">Loading…</div></div></details></div>`;
 }
 function retryCluster(){
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
   viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+async function setNodeMaintenance(nodeId,enter){
+  if(enter&&!confirm(`Enter maintenance on ${nodeId}?\n\nNew work will be fenced and existing streams will drain. If this node is leader, leadership moves before it is marked ready.`)) return;
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  let changed=false;
+  try{
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/maintenance`,{method:enter?"POST":"DELETE",body:enter?{}:undefined});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    SETTINGS_LOADED.delete("clusterOps"); delete SETTINGS_DATA.clusterOps; changed=true;
+    toast(enter?"Maintenance requested":"Node returned to service");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:nodeId,code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")){
+    renderSettings();
+    if(changed) await refreshClusterOperations();
+  }
+}
+function openElectionDialog(){
+  const dialog=document.getElementById("clelection");
+  if(dialog) dialog.showModal();
+}
+async function forceClusterElection(btn){
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  btn.disabled=true; btn.textContent="Electing…";
+  try{
+    const cluster=await api("/cluster/election",{method:"POST",body:{}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    toast("Leader election completed");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:"Cluster",code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+function downloadClusterDiagnostics(){
+  const cluster=SETTINGS_DATA&&SETTINGS_DATA.cluster;
+  if(!cluster) return;
+  const logs=document.getElementById("cllogbox")?.textContent||"Cluster log is not loaded.";
+  const blob=new Blob([JSON.stringify({captured_at:new Date().toISOString(),cluster,logs},null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");
+  a.href=url; a.download=`plurx-cluster-diagnostics-${Date.now()}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),0);
+}
+function toggleRecoveryChecklist(btn){
+  const checklist=document.getElementById("clpreserve");
+  if(!checklist) return;
+  checklist.hidden=!checklist.hidden;
+  btn.textContent=checklist.hidden?"Preservation checklist":"Hide checklist";
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
@@ -11647,7 +11899,7 @@ function clusterRefusalHtml(){
 }
 // Minting is separated from showing because the token exists exactly once: the
 // server hands back the only copy and keeps nothing but its digest.
-function joinPanel(){
+function joinPanel(lifecycleLocked=false){
   if(CLUSTER_TOKEN) return joinTokenHtml(CLUSTER_TOKEN);
   return `<h2 class="section">Add a node</h2>
     <div class="row" style="gap:10px;align-items:center">
@@ -11660,11 +11912,11 @@ function joinPanel(){
         <select id="clrole" style="max-width:150px;font-size:12px;padding:3px 6px">
           <option value="voter" selected>Voting member</option>
           <option value="learner">Read worker</option></select></span>
-      <button onclick="mintJoinToken(this)">Create a join token</button></div>
+      <button ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick="mintJoinToken(this)">Create a join token</button></div>
     <div class="hint">A join token is single-use and short-lived, and it is shown once. Create it when the
       other machine is ready to start, not before.</div>`;
 }
-function leavePanel(localNodeId){
+function leavePanel(localNodeId,lifecycleLocked=false){
   if(CLUSTER_LEAVING) return `<h2 class="section">Remove this node</h2>
     <div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
       Cinema node is draining connections and will shut down.</p></div>`;
@@ -11672,7 +11924,7 @@ function leavePanel(localNodeId){
     <div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
       leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
   return `<h2 class="section">Remove this node</h2>
-    <button class="ghost sm" onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+    <button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
       its owned offline work and coordinates a safe membership change with the surviving quorum. It then
       drains and shuts down. Rejoining this machine requires a fresh data directory and
@@ -11874,6 +12126,24 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
       const mount=document.getElementById("analysis-settings-summary");
       if(mount) mount.innerHTML=analysisSummaryCard(snapshot,"settings");
+    }
+    if(tab==="cluster"){
+      const current=SETTINGS_DATA.cluster;
+      const recovery=current&&!current.unavailable?clusterRecoveryState(current):null;
+      const live=current&&!current.unavailable&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
+      if(live){
+        const snapshot=await api("/cluster/nodes");
+        if(!settingsCurrent(generation,tab)) return;
+        const operational=cluster=>JSON.stringify({
+          recovery:clusterRecoveryState(cluster),
+          nodes:(cluster.nodes||[]).map(n=>({id:n.node_id,leader:n.is_leader,reachable:n.reachable,
+            lag:n.apply_lag_entries,maintenance:n.maintenance,ack:n.maintenance_acknowledged,
+            ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
+        });
+        const changed=operational(current)!==operational(snapshot);
+        SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+        if(changed) renderSettings();
+      }
     }
     await Promise.all(secondary);
   }catch(e){ if(e&&e.status===401) return; }

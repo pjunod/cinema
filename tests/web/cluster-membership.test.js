@@ -49,6 +49,10 @@ const BORROWED = [
   "clusterQuorum",
   "clusterStateView",
   "membershipRefusalText",
+  "clusterDirectMaintenanceStatus",
+  "clusterMaintenanceEntryVerdict",
+  "clusterMaintenanceReady",
+  "clusterMaintenanceResumeReady",
   "clusterNodeRow",
   "clusterOperationAge",
   "clusterOperationReason",
@@ -56,6 +60,11 @@ const BORROWED = [
   "clusterOperationsNodeRow",
   "clusterRestartPreparationHtml",
   "clusterOperationsCard",
+  "clusterRecoveryState",
+  "clusterRecoveryPanel",
+  "clusterMaintenanceProgress",
+  "clusterOperationsPanel",
+  "forceElectionDialog",
   "clusterRefusalHtml",
   "joinPanel",
   "leavePanel",
@@ -135,6 +144,11 @@ function node(id, raftId, role, extra = {}) {
     is_leader: false,
     reachable: true,
     last_seen_at: Date.now(),
+    apply_lag_entries: 0,
+    active_media_sessions: 0,
+    maintenance: false,
+    maintenance_acknowledged: false,
+    maintenance_ready: false,
     ...extra,
   };
 }
@@ -156,6 +170,34 @@ function status(availability, nodes) {
         (entry) => !entry.is_voter && entry.bounded_read_ready,
       ).length,
     },
+    recovery: {
+      required: false,
+      quorum_available: true,
+      reachable_voters: voting_nodes,
+      required_voters: voting_quorum,
+      leader_elected: true,
+      permanent_majority_loss_supported: false,
+    },
+  };
+}
+
+function maintenanceOps(nodeId, { drained = true, admissions = 0 } = {}) {
+  return {
+    nodes: [
+      {
+        observation: "answered",
+        membership: { node_id: nodeId },
+        status: {
+          process: { live: true },
+          serving: { ready: false, reason: "maintenance" },
+          media: {
+            local_active_sessions: drained ? 0 : 1,
+            drained,
+            admissions_in_flight: admissions,
+          },
+        },
+      },
+    ],
   };
 }
 
@@ -233,6 +275,16 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
         : [],
       warnings: [],
     },
+    maintenance: membership.nodes.map((entry) => ({
+      node_id: entry.node_id,
+      safe_to_enter:
+        !unreachable &&
+        (entry.is_voter
+          ? membership.capacity.voting_nodes === 1 ||
+            membership.capacity.voting_nodes >= 3
+          : entry.role === "learner"),
+      blockers: [],
+    })),
   };
 }
 
@@ -270,6 +322,10 @@ test("the two-voter state reaches the rendered panel as those words", () => {
   assert.match(html, /survives no failure/);
   assert.equal(html.includes("clstate warn"), true);
   assertNoRedundancyClaim(html.replace(/<[^>]*>/g, " "), "the two-voter panel");
+  assert.match(
+    html,
+    /disabled title="Direct maintenance preflight has not approved this node/,
+  );
 });
 
 test("three voters may say redundant, and count the loss they survive", () => {
@@ -613,7 +669,7 @@ test("a voter catching up is not rendered as a learner capacity role", () => {
 
 // ---- every refusal is a sentence with a next step -------------------------
 
-// All four exist in crates/plurx-core/src/cluster/membership.rs today.
+// These stable codes exist in crates/plurx-core/src/cluster/membership.rs.
 const REFUSAL_CODES = [
   "removal_would_lose_quorum",
   "node_owns_offline_work",
@@ -625,6 +681,13 @@ const REFUSAL_CODES = [
   "membership_removal_pending",
   "learner_not_ready",
   "voter_storage_preflight_failed",
+  "maintenance_conflict",
+  "cluster_operation_pending",
+  "maintenance_would_lose_quorum",
+  "maintenance_resume_unsafe",
+  "election_quorum_unavailable",
+  "election_candidate_unavailable",
+  "election_lifecycle_pending",
 ];
 
 test("each removal refusal renders as an actionable sentence, not a code", () => {
@@ -763,15 +826,12 @@ test("the current leader is labeled beside its hostname", () => {
   assert.equal(follower.includes(">Leader<"), false);
 });
 
-test("the action flex row stays inside its table cell", () => {
+test("node actions stay inside the node card footer", () => {
   const ui = sandbox();
   const row = ui.clusterNodeRow(node("node-a", 1, "voter"));
-  assert.match(row, /<td class="rowactions"><div class="row"/);
-  assert.equal(
-    /<td[^>]*class="[^"]*\brow\b/.test(row),
-    false,
-    `a table cell was changed into a flex row: ${row}`,
-  );
+  assert.match(row, /<article class="clnode/);
+  assert.match(row, /<div class="clnodefoot">[\s\S]*<div class="row">/);
+  assert.equal(row.includes("<td"), false);
 });
 
 test("a stale node heartbeat says so rather than claiming a network probe", () => {
@@ -804,14 +864,216 @@ test("cluster diagnostics have a separate log surface", () => {
   assert.match(html, /instead of the general System log/);
 });
 
+test("the healthy cluster layout separates health, nodes, operations, and danger", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  assert.match(html, /class="cluster-health"/);
+  assert.match(html, /id="cluster-operations"/);
+  assert.match(html, /<h3>Nodes<\/h3>/);
+  assert.match(html, /<h3>Maintenance &amp; leadership<\/h3>/);
+  assert.match(html, /Enter maintenance/);
+  assert.match(html, /Force election/);
+  assert.match(html, /Danger zone · membership changes/);
+  assert.equal(html.includes("<table"), false);
+});
+
+test("maintenance entry is available directly on a leader, busy follower, and learner", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { active_media_sessions: 2 }),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: true }),
+  ]);
+  const ops = operationStatus(cluster);
+  ops.nodes[1].status.media = { local_active_sessions: 2, drained: false };
+
+  for (const nodeId of ["node-a", "node-b", "node-d"]) {
+    cluster.local_node_id = nodeId;
+    const html = ui.clusterPanel({
+      cluster,
+      clusterOps: ops,
+      sys: { replication: REPLICATION },
+    });
+    const marker = `<div class="clid">Node ID ${nodeId}</div>`;
+    const start = html.lastIndexOf(marker);
+    assert.notEqual(start, -1);
+    const card = html.slice(start, html.indexOf("</article>", start));
+    assert.match(card, /Enter maintenance/);
+    assert.doesNotMatch(card, /disabled[^>]*>Enter maintenance/);
+  }
+});
+
+test("maintenance renders the acknowledged handoff, catch-up, and drain workflow", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", {
+      maintenance: true,
+      maintenance_acknowledged: true,
+      maintenance_ready: false,
+      active_media_sessions: 2,
+    }),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b", { drained: false }));
+  assert.match(html, /Maintenance in progress/);
+  assert.match(html, /Target acknowledged the replicated work fence/);
+  assert.match(html, /Direct process work drained \(1 local operation\)/);
+  assert.match(html, /maintenance fence survives a process restart/i);
+  assert.match(html, /<button class="sm" disabled[^>]*>Resume service/);
+
+  cluster.nodes[1].active_media_sessions = 0;
+  cluster.nodes[1].maintenance_ready = true;
+  cluster.local_node_id = "node-b";
+  const ready = ui.clusterOperationsPanel(cluster, maintenanceOps("node-b"));
+  assert.match(ready, /Ready to update, reboot, or resume/);
+  assert.doesNotMatch(ready, /<button class="sm" disabled[^>]*>Resume service/);
+});
+
+test("maintenance resume requires direct local process evidence", () => {
+  const ui = sandbox();
+  const maintained = node("node-b", 2, "voter", {
+    maintenance: true,
+    maintenance_acknowledged: true,
+    maintenance_ready: true,
+  });
+  const remote = ui.clusterNodeRow(maintained, "node-a", false, {
+    operations: maintenanceOps("node-b"),
+    lifecycleLocked: true,
+  });
+  assert.match(remote, /Open this node directly to resume it/);
+  assert.match(remote, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const local = ui.clusterNodeRow(maintained, "node-b", false, {
+    operations: maintenanceOps("node-b"),
+    lifecycleLocked: true,
+  });
+  assert.doesNotMatch(local, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const admission = ui.clusterNodeRow(maintained, "node-b", false, {
+    operations: maintenanceOps("node-b", { admissions: 1 }),
+    lifecycleLocked: true,
+  });
+  assert.match(admission, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const recoveredLeader = { ...maintained, is_leader: true, maintenance_ready: false };
+  const handoff = ui.clusterOperationsPanel(
+    status("high_availability", [
+      recoveredLeader,
+      node("node-a", 1, "voter"),
+      node("node-c", 3, "voter"),
+    ]),
+    maintenanceOps("node-b"),
+  );
+  assert.match(handoff, /Ready to hand off leadership and resume/);
+  assert.doesNotMatch(handoff, /<button class="sm" disabled[^>]*>Resume service/);
+
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    maintained,
+    node("node-c", 3, "voter"),
+  ]);
+  const panel = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Create a join token/);
+  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
+  assert.match(panel, /disabled[^>]*>Remove permanently/);
+});
+
+test("recovery keeps an active maintenance target visible and blocks elections", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", {
+      reachable: false,
+      maintenance: true,
+      maintenance_acknowledged: true,
+    }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  cluster.recovery = {
+    required: true,
+    quorum_available: false,
+    reachable_voters: 1,
+    required_voters: 2,
+    leader_elected: false,
+    permanent_majority_loss_supported: false,
+  };
+  const html = ui.clusterOperationsPanel(cluster, null);
+  assert.match(html, /Restore the maintenance target first: node-b/);
+  assert.match(html, /durable work fence is still active/i);
+  assert.match(html, /Force election unavailable without quorum/);
+
+  cluster.nodes[2].reachable = true;
+  cluster.recovery = {
+    ...cluster.recovery,
+    quorum_available: true,
+    reachable_voters: 2,
+  };
+  const leaderless = ui.clusterOperationsPanel(cluster, null);
+  assert.match(leaderless, /<button class="ghost sm" disabled[^>]*>Force election/);
+});
+
+test("lost quorum offers restoration and preservation, never force reconfiguration", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter"),
+    node("node-b", 2, "voter", { reachable: false }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  cluster.recovery = {
+    required: true,
+    quorum_available: false,
+    reachable_voters: 1,
+    required_voters: 2,
+    leader_elected: false,
+    permanent_majority_loss_supported: false,
+  };
+  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  assert.match(html, /Recovery required/);
+  assert.match(html, /Restore any missing original voter/);
+  assert.match(html, /does not support force-reconfiguring around lost voters/i);
+  assert.match(html, /Export support bundle/);
+  assert.match(html, /Download roster snapshot/);
+  assert.match(html, /Force election unavailable without quorum/);
+  assert.doesNotMatch(html, /Force reconfigure|Form new cluster|Ignore quorum/i);
+});
+
+test("a leaderless cluster with quorum may request a bounded election", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter"),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  cluster.recovery = {
+    required: true,
+    quorum_available: true,
+    reachable_voters: 3,
+    required_voters: 2,
+    leader_elected: false,
+    permanent_majority_loss_supported: false,
+  };
+  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  assert.match(html, /Leader election required/);
+  assert.match(html, /A voter majority is reachable/);
+  assert.match(html, /onclick="openElectionDialog\(\)"/);
+  assert.match(html, /Raft still requires the reachable majority/);
+});
+
 test("the local row cannot use generic removal", () => {
   const ui = sandbox();
   const local = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
   const peer = ui.clusterNodeRow(node("node-b", 2, "voter"), "node-a");
   assert.match(local, /This node/);
-  assert.match(local, /Use graceful leave below/);
+  assert.match(local, /Use graceful leave in Danger zone/);
   assert.equal(local.includes(">Remove<"), false);
-  assert.match(peer, />Remove</);
+  assert.match(peer, />Remove permanently</);
 });
 
 test("graceful leave binds the POST to the roster's local node", () => {
@@ -932,6 +1194,24 @@ test("learner issuance and promotion are wired to their admin APIs", () => {
   assert.match(promote, /Learner promoted to voter/);
 });
 
+test("maintenance and election controls use their bounded admin APIs", () => {
+  const maintenance = shippedSource("setNodeMaintenance");
+  assert.match(
+    maintenance,
+    /\/cluster\/nodes\/\$\{encodeURIComponent\(nodeId\)\}\/maintenance/,
+  );
+  assert.match(maintenance, /method:enter\?"POST":"DELETE"/);
+  assert.match(maintenance, /New work will be fenced and existing streams will drain/);
+
+  const election = shippedSource("forceClusterElection");
+  assert.match(election, /api\("\/cluster\/election",\{method:"POST"/);
+  assert.match(election, /Leader election completed/);
+  const dialog = sandbox().forceElectionDialog(true);
+  assert.match(dialog, /Raft—not this screen—selects the next leader/);
+  assert.match(dialog, /I understand this may briefly pause writes/);
+  assert.match(dialog, /id="clelectiongo" disabled/);
+});
+
 test("routing away from Settings drops the in-memory join token", () => {
   const render = shippedSource("render");
   assert.match(
@@ -976,7 +1256,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   }
 });
 
-test("this panel calls only the nine cluster endpoints the node API ships", () => {
+test("this panel calls only the eleven cluster endpoints the node API ships", () => {
   const called = new Set();
   const CALL = /api\(\s*([`"'])(\/cluster[^`"']*)\1/g;
   for (const [, , route] of SHIPPED_UI.matchAll(CALL)) {
@@ -987,11 +1267,13 @@ test("this panel calls only the nine cluster endpoints the node API ships", () =
   assert.deepEqual(
     [...called].sort(),
     [
+      "/cluster/election",
       "/cluster/join-tokens",
       "/cluster/learner-join-tokens",
       "/cluster/leave",
       "/cluster/nodes",
       "/cluster/nodes/<id>",
+      "/cluster/nodes/<id>/maintenance",
       "/cluster/nodes/<id>/promote",
       "/cluster/nodes/<id>/restart-preparation",
       "/cluster/status",

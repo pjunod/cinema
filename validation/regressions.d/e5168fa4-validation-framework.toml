@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["e5168fa4"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The history-regressions check retains the rebased evidence identity without claiming that its validation-only commit changed cluster runtime behavior."
