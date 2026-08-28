@@ -78,6 +78,46 @@ const CONTRACT_API_SECRET: &str = "plurx-store-contract-api";
 #[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_INSTANCE_ID: &str = "00000000-0000-4000-8000-000000000090";
 
+/// Exact replicated media-session shape shared by schemas v10 through v15.
+///
+/// Historical migration fixtures start from the current bootstrap and must
+/// replace this table, not merely lower `cluster_meta`: v16 and v17 add
+/// constrained columns whose later `ALTER TABLE` steps intentionally fail on
+/// an inconsistent marker/schema pair.
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA: &str =
+    "CREATE TABLE media_sessions (
+        incarnation_id                TEXT PRIMARY KEY,
+        session_id                    TEXT NOT NULL UNIQUE,
+        user_id                       INTEGER NOT NULL,
+        playback_id                   TEXT NOT NULL,
+        request_fingerprint           TEXT NOT NULL,
+        owner_node_id                 TEXT NOT NULL,
+        owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),
+        lease_expires_at_ms           INTEGER NOT NULL,
+        state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),
+        recipe_json                   TEXT NOT NULL,
+        response_json                 TEXT NOT NULL,
+        produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,
+        fetched_through_ms            INTEGER NOT NULL DEFAULT 0,
+        media_origin_ms               INTEGER NOT NULL DEFAULT 0,
+        media_sequence                INTEGER NOT NULL DEFAULT 0,
+        discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms                 INTEGER NOT NULL
+    ) STRICT";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_OWNER_INDEX: &str = "CREATE INDEX media_sessions_owner
+        ON media_sessions(owner_node_id, state, lease_expires_at_ms)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_USER_INDEX: &str = "CREATE INDEX media_sessions_user
+        ON media_sessions(user_id, state, lease_expires_at_ms)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX: &str = "CREATE INDEX media_sessions_expiry
+        ON media_sessions(state, lease_expires_at_ms, incarnation_id)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX: &str = "CREATE INDEX media_sessions_retention
+        ON media_sessions(state, updated_at_ms, incarnation_id)";
+
 #[cfg(feature = "hiqlite-contract-tests")]
 static HIQLITE_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -6467,7 +6507,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
+async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -6499,6 +6539,73 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_bound_terminal_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_supersede_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX analysis_requests_status", hiqlite::params!()),
+            ("DROP INDEX analysis_requests_due", hiqlite::params!()),
+            ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
+            (
+                "DROP TRIGGER cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_locations_node",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_artifacts_file",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_locations",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_artifacts",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (
+                "DROP TABLE cluster_fragment_index_sources",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "DROP TRIGGER transcode_cache_location_identity_au",
                 hiqlite::params!(),
@@ -6545,7 +6652,7 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
     );
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v10 to v11 migration");
+        .expect("daemon v10 through current migration");
     assert_eq!(
         migrated
             .get_setting("migration.v10.proof")
@@ -6586,7 +6693,7 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v11 shared-cache schema");
+            .expect("inspect migrated current shared-cache schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -6627,6 +6734,14 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     client
         .txn([
             (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -6645,6 +6760,17 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "UPDATE cluster_meta SET schema_version = 12 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -6719,6 +6845,14 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     client
         .txn([
             (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -6737,6 +6871,11 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
             (
                 "DROP TRIGGER cluster_fragment_indexes_cancel_source",
                 hiqlite::params!(),
@@ -6766,6 +6905,12 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                 "DROP TABLE cluster_fragment_index_sources",
                 hiqlite::params!(),
             ),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "UPDATE cluster_meta SET schema_version = 11 WHERE singleton = 1",
                 hiqlite::params!(),
