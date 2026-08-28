@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["5b6722ed", "e8e8ec1e"]
+commits = ["5b6722ed", "e8e8ec1e", "8e190692"]
 points = ["cluster.auth"]
 checks = ["cluster-auth", "rust-gate"]
-reason = "The retained repair-handoff regressions require a mature successor to reprove the same leader term, fresh quorum watermark, complete monotonic lease, and unchanged durable fence/index after any read-only reroute; the generation CAS remains single-dispatch. The separate-process membership lifecycle repeats that evidence after typed forward-to-leader responses, while the full cluster harness proves the handoff cannot advance stale recovery state."
+reason = "The retained repair-handoff regressions require both stable-term rerepair and a mature successor to reprove the same leader term, fresh quorum watermark, complete monotonic lease, and unchanged durable fence/index after any read-only reroute; the generation CAS remains single-dispatch, retries only an explicitly confirmed no-op, and treats a lost mutating acknowledgement as fatal. The separate-process membership lifecycle repeats that evidence after typed forward-to-leader responses, while the full cluster harness proves neither loaded-runner quorum staleness nor a handoff can advance stale recovery state."
