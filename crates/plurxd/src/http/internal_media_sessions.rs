@@ -1,6 +1,6 @@
 //! Exact-auth worker endpoints for cluster-owned HLS sessions.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::State;
@@ -10,8 +10,8 @@ use axum::Json;
 
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
-    unix_ms, RelayRequest, RelayResource, RemoteAbortRequest, RemoteStartRequest,
-    RemoteStartResponse, ABORT_PATH, CONTROL_PATH, RELAY_PATH,
+    unix_ms, DurableRouteResolution, RelayRequest, RelayResource, RemoteAbortRequest,
+    RemoteStartRequest, RemoteStartResponse, ABORT_PATH, CONTROL_PATH, RELAY_PATH,
     REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
@@ -252,14 +252,32 @@ pub(crate) async fn relay(
     if let Err(status) = authorization {
         return status.into_response();
     }
-    let route = match state.media_sessions.route(&request.session_id).await {
-        Ok(Some(route)) => route,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+    let now = Instant::now();
+    let Some(budget) = request.owner_budget_at(unix_ms()) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let request_deadline = now + budget;
+    let route = match state
+        .media_sessions
+        .authoritative_route_resolution_before(
+            &request.session_id,
+            &state.node_id,
+            request_deadline,
+        )
+        .await
+    {
+        Ok(DurableRouteResolution::ActiveLocal(route)) => route,
+        Ok(DurableRouteResolution::Terminal(route))
+            if matches!(&request.resource, RelayResource::Delete)
+                && route.owner_node_id == state.node_id =>
+        {
+            route
+        }
+        Ok(DurableRouteResolution::Terminal(_)) => return StatusCode::GONE.into_response(),
+        Ok(DurableRouteResolution::Absent) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(DurableRouteResolution::ActiveRemote(_)) => return StatusCode::CONFLICT.into_response(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    if route.owner_node_id != state.node_id {
-        return StatusCode::CONFLICT.into_response();
-    }
     if !matches!(&request.resource, RelayResource::Delete)
         && (route.state != "active" || route.lease_expires_at_ms <= unix_ms())
     {

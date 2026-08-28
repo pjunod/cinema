@@ -10,7 +10,7 @@ module_root = "crates/plurxd/src"
 [[symbols]]
 id = "startup-and-lifetime-watchdog"
 pattern = "watch_for_stall_claimed"
-expected_occurrences = 4
+expected_occurrences = 5
 kind = "recovery_owner"
 replacement = "retained only for published-lifetime and copy compatibility; transcode prepublication is RollingControlActor::ProducerProgressDeadline"
 
@@ -101,7 +101,7 @@ replacement = "the actor's exact-attempt exit/classification disposition"
 [[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 20
+expected_occurrences = 21
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only its prepublication failure projects Session::failed"
 
@@ -122,7 +122,7 @@ replacement = "retained behind exact actor attempt/revision authorization and ac
 [[symbols]]
 id = "child-termination"
 pattern = "child\\.kill\\(\\)\\.await"
-expected_occurrences = 12
+expected_occurrences = 13
 kind = "process_action"
 replacement = "the awaited compatibility supervisor command path; prepublication replyless termination is inventoried separately"
 
@@ -143,7 +143,7 @@ replacement = "the cleanup owner waits on the supervisor's shared terminal proof
 [[symbols]]
 id = "raw-child-wait"
 pattern = "child\\.wait\\(\\)\\.await"
-expected_occurrences = 7
+expected_occurrences = 8
 kind = "process_action"
 replacement = "the sole supervisor reap path; rejected candidates use the same cleanup registry"
 
@@ -178,7 +178,7 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 63
+expected_occurrences = 65
 kind = "structural_task_scan"
 replacement = "every detached task requires ownership-catalog review; the bounded EOF settlement and CAS-elected cache invalidation/retirement tasks own their work after request cancellation, while producer recovery moves only to the actor executor"
 
@@ -288,7 +288,7 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 33
+expected_occurrences = 34
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -308,7 +308,7 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "legacy-stall-watch-owner"
 pattern = "watch_for_stall"
-expected_occurrences = 19
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
@@ -363,7 +363,7 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-response-publication-lifecycle-budget"
 pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
-expected_occurrences = 3
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-eof-media-commit-handoff"
@@ -383,7 +383,7 @@ expected_occurrences = 3
 [[module_symbols]]
 id = "m4-attempt-status-admission"
 pattern = "AttemptStatus"
-expected_occurrences = 7
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-vod-resurrection-deadline"
@@ -423,12 +423,12 @@ expected_occurrences = 23
 [[module_symbols]]
 id = "m4-playlist-request-deadline-chain"
 pattern = "playlist_request_deadlines"
-expected_occurrences = 5
+expected_occurrences = 11
 
 [[module_symbols]]
 id = "m4-segment-request-deadline"
 pattern = "segment_request_deadline"
-expected_occurrences = 3
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-bounded-vod-lookup"
@@ -483,12 +483,82 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_transcode"
-expected_occurrences = 16
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-decision-wake"
 pattern = "RollingDecisionWake"
 expected_occurrences = 6
+
+[[module_symbols]]
+id = "m4-response-publication-contract-binding"
+pattern = "BindResponsePublicationContract"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-compatibility-failure-fence"
+pattern = "failure_fence"
+expected_occurrences = 16
+
+[[module_symbols]]
+id = "m4-immutable-prepublication-process-scope"
+pattern = "actor_managed_prepublication_process"
+expected_occurrences = 8
+
+[[module_symbols]]
+id = "m4-first-media-owner-claim-latch"
+pattern = "first_media_handoff_applied"
+expected_occurrences = 12
+
+[[module_symbols]]
+id = "m4-bounded-terminal-command-admission"
+pattern = "RollingTerminalRequestError"
+expected_occurrences = 8
+
+[[module_symbols]]
+id = "m4-durable-route-resolution"
+pattern = "DurableRouteResolution"
+expected_occurrences = 39
+
+[[module_symbols]]
+id = "m4-authoritative-route-reclassification"
+pattern = "authoritative_route_resolution_before"
+expected_occurrences = 6
+
+[[module_symbols]]
+id = "m4-owner-bound-vod-facade"
+pattern = "VodResponsePublication"
+expected_occurrences = 12
+
+[[module_symbols]]
+id = "m4-owner-bound-vod-outcome"
+pattern = "VodPublication"
+expected_occurrences = 22
+
+[[module_symbols]]
+id = "m4-vod-status-owner-admission"
+pattern = "response_status_owner_is_current"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-vod-supersession-transaction"
+pattern = "supersede_before"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-relay-owner-deadline-budget"
+pattern = "owner_budget_at"
+expected_occurrences = 9
+
+[[module_symbols]]
+id = "m4-relay-origin-deadline-budget"
+pattern = "transport_budget_at"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-http-weak-validator"
+pattern = "etag_matches"
+expected_occurrences = 8
 
 # Whole-module structural sentinels use normalized Rust code rather than a
 # list of today's helper names: comments and literals cannot contribute to or
@@ -506,7 +576,7 @@ expected_occurrences = 6
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 285
+expected_occurrences = 290
 
 [[module_structures]]
 id = "method-spawn"
@@ -521,7 +591,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 391
+expected_occurrences = 399
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -544,7 +614,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 163
+expected_occurrences = 164
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -559,7 +629,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 257
+expected_occurrences = 261
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"

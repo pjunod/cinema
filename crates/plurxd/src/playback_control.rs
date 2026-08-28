@@ -769,6 +769,18 @@ pub(crate) enum ControlStateError {
     Unavailable,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RollingTerminalRequestError {
+    AdmissionDeadline,
+    ControlUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RollingCommandAdmissionError {
+    Deadline,
+    ControlUnavailable,
+}
+
 /// Re-read the committed owner tuple immediately at the local mutation gate.
 /// That read is the control operation's authority linearization point: a
 /// terminal transition committed before it is observed; one committed after
@@ -3148,6 +3160,11 @@ enum RollingControlCommand {
             Result<ProducerInstallAuthorization, ProducerAttemptRejection>,
         >,
     },
+    BindResponsePublicationContract {
+        presentation_contract_fingerprint: String,
+        failure_fence: Arc<AtomicBool>,
+        reply: tokio::sync::oneshot::Sender<Result<(), ResponsePublicationRejection>>,
+    },
     AuthorizeResponsePublication {
         publication: RollingResponsePublication,
         handoff: Option<RollingFirstMediaPublicationHandoff>,
@@ -3217,6 +3234,7 @@ impl RollingControlCommand {
             #[cfg(test)]
             Self::InstallProducerDecision { .. } => None,
             Self::AuthorizeProducerInstall { .. } => Some(3),
+            Self::BindResponsePublicationContract { .. } => Some(15),
             Self::AuthorizeResponsePublication { .. } => Some(11),
             Self::AdmitProducerRetry { .. } => Some(12),
             Self::DecisionApplied { .. } => Some(13),
@@ -3703,6 +3721,21 @@ struct PrepublicationProducerControl {
     last_action_failure: Option<&'static str>,
 }
 
+/// Immutable response-admission contract for rolling generations whose
+/// producer recovery remains compatibility-owned. Copy and rolling-cache
+/// sessions do not opt into the prepublication executor, but their HTTP
+/// publication still has to linearize through the actor rather than bypassing
+/// it with process-local atomics.
+struct RollingResponsePublicationContract {
+    presentation_contract_fingerprint: String,
+    /// Monotone producer-failure publication shared with the compatibility
+    /// process owner. A Release failure store ordered before the actor's
+    /// Acquire load rejects publication; if the actor load wins first, that
+    /// exact response authorization is the earlier linearized event.
+    failure_fence: Arc<AtomicBool>,
+    metadata_response_authorized: bool,
+}
+
 impl PrepublicationProducerControl {
     fn new() -> Self {
         Self {
@@ -3749,6 +3782,7 @@ struct RollingControlActor {
     decision_committed_at: Option<Instant>,
     executor_lost: bool,
     prepublication: Option<PrepublicationProducerControl>,
+    response_publication_contract: Option<RollingResponsePublicationContract>,
     next_install_revision: u64,
     authorized_install: Option<ProducerInstallCoordinate>,
     executor_loss_cutoff_pending: bool,
@@ -3841,6 +3875,7 @@ impl RollingControlActor {
             decision_committed_at: None,
             executor_lost: false,
             prepublication: prepublication_transcode.then(PrepublicationProducerControl::new),
+            response_publication_contract: None,
             next_install_revision: 1,
             authorized_install: None,
             executor_loss_cutoff_pending: false,
@@ -3981,9 +4016,18 @@ impl RollingControlActor {
                 .map(|policy| policy.startup_kind.status()),
             presentation_contract_fingerprint: prepublication
                 .and_then(|control| control.initial_policy.as_ref())
-                .map(|policy| policy.presentation_contract_fingerprint.clone()),
+                .map(|policy| policy.presentation_contract_fingerprint.clone())
+                .or_else(|| {
+                    self.response_publication_contract
+                        .as_ref()
+                        .map(|contract| contract.presentation_contract_fingerprint.clone())
+                }),
             metadata_response_authorized: prepublication
-                .is_some_and(|control| control.metadata_response_authorized),
+                .is_some_and(|control| control.metadata_response_authorized)
+                || self
+                    .response_publication_contract
+                    .as_ref()
+                    .is_some_and(|contract| contract.metadata_response_authorized),
             producer_media_published: prepublication
                 .is_some_and(|control| control.producer_media_published),
             retry_state: prepublication.map_or("legacy_compatibility", |control| {
@@ -4964,6 +5008,61 @@ impl RollingControlActor {
         Ok(ProducerInstallAuthorization { coordinate })
     }
 
+    fn bind_response_publication_contract_at(
+        &mut self,
+        presentation_contract_fingerprint: String,
+        failure_fence: Arc<AtomicBool>,
+    ) -> Result<(), ResponsePublicationRejection> {
+        if self.retired {
+            return Err(ResponsePublicationRejection::SessionEnded);
+        }
+        if self.prepublication.is_some() {
+            return Err(ResponsePublicationRejection::InvalidBinding);
+        }
+        match self.response_publication_contract.as_ref() {
+            Some(contract)
+                if contract.presentation_contract_fingerprint
+                    == presentation_contract_fingerprint
+                    && Arc::ptr_eq(&contract.failure_fence, &failure_fence) =>
+            {
+                Ok(())
+            }
+            Some(contract)
+                if contract.presentation_contract_fingerprint
+                    != presentation_contract_fingerprint =>
+            {
+                Err(ResponsePublicationRejection::PresentationContractMismatch)
+            }
+            Some(_) => Err(ResponsePublicationRejection::InvalidBinding),
+            None => {
+                self.response_publication_contract = Some(RollingResponsePublicationContract {
+                    presentation_contract_fingerprint,
+                    failure_fence,
+                    metadata_response_authorized: false,
+                });
+                Ok(())
+            }
+        }
+    }
+
+    fn response_presentation_contract_fingerprint(&self) -> Option<&str> {
+        self.prepublication
+            .as_ref()
+            .and_then(|control| control.initial_policy.as_ref())
+            .map(|policy| policy.presentation_contract_fingerprint.as_str())
+            .or_else(|| {
+                self.response_publication_contract
+                    .as_ref()
+                    .map(|contract| contract.presentation_contract_fingerprint.as_str())
+            })
+    }
+
+    fn response_failure_fenced(&self) -> bool {
+        self.response_publication_contract
+            .as_ref()
+            .is_some_and(|contract| contract.failure_fence.load(Ordering::Acquire))
+    }
+
     fn authorize_response_publication_at(
         &mut self,
         now: Instant,
@@ -4972,10 +5071,12 @@ impl RollingControlActor {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return Err(ResponsePublicationRejection::SessionEnded);
         }
-        let Some(policy) = self
-            .prepublication
-            .as_ref()
-            .and_then(|control| control.initial_policy.as_ref())
+        if self.response_failure_fenced() {
+            return Err(ResponsePublicationRejection::SessionEnded);
+        }
+        let Some(expected_presentation_contract_fingerprint) = self
+            .response_presentation_contract_fingerprint()
+            .map(str::to_owned)
         else {
             return Err(ResponsePublicationRejection::ProducerNotAdmitted);
         };
@@ -4989,13 +5090,14 @@ impl RollingControlActor {
                 if publication.object != RollingResponseObject::MasterPlaylist {
                     return Err(ResponsePublicationRejection::InvalidBinding);
                 }
-                if presentation_contract_fingerprint != policy.presentation_contract_fingerprint {
+                if presentation_contract_fingerprint != expected_presentation_contract_fingerprint {
                     return Err(ResponsePublicationRejection::PresentationContractMismatch);
                 }
-                self.prepublication
-                    .as_mut()
-                    .expect("pre-publication policy was present")
-                    .metadata_response_authorized = true;
+                if let Some(control) = self.prepublication.as_mut() {
+                    control.metadata_response_authorized = true;
+                } else if let Some(contract) = self.response_publication_contract.as_mut() {
+                    contract.metadata_response_authorized = true;
+                }
                 Ok(RollingResponseAuthorization {
                     first_producer_media_publication: false,
                 })
@@ -5035,6 +5137,11 @@ impl RollingControlActor {
                 }
                 if producer_attempt != self.delivery.producer_attempt {
                     return Err(ResponsePublicationRejection::StaleAttempt);
+                }
+                if self.prepublication.is_none() {
+                    return Ok(RollingResponseAuthorization {
+                        first_producer_media_publication: false,
+                    });
                 }
                 if self.pending_decision.is_some() {
                     return Err(ResponsePublicationRejection::DecisionCommitted);
@@ -5293,7 +5400,8 @@ impl RollingControlActor {
         segment_index: Option<i64>,
         segment_end_ms: Option<i64>,
     ) -> bool {
-        if producer_attempt != self.delivery.producer_attempt
+        if self.response_failure_fenced()
+            || producer_attempt != self.delivery.producer_attempt
             || !self.renew_at(now, kind, RollingRenewalSource::Media)
         {
             return false;
@@ -5332,13 +5440,10 @@ impl RollingControlActor {
         kind: &'static str,
     ) -> bool {
         if self.has_terminal_prepublication_failure()
+            || self.response_failure_fenced()
             || self
-                .prepublication
-                .as_ref()
-                .and_then(|control| control.initial_policy.as_ref())
-                .is_none_or(|policy| {
-                    policy.presentation_contract_fingerprint != presentation_contract_fingerprint
-                })
+                .response_presentation_contract_fingerprint()
+                .is_none_or(|expected| expected != presentation_contract_fingerprint)
         {
             return false;
         }
@@ -5560,6 +5665,19 @@ impl RollingControlActor {
                             transition.lease_deadline = self.deadline();
                         }
                         let _ = reply.send(authorized);
+                    }
+                }
+                RollingControlCommand::BindResponsePublicationContract {
+                    presentation_contract_fingerprint,
+                    failure_fence,
+                    reply,
+                } => {
+                    if !reply.is_closed() {
+                        let bound = self.bind_response_publication_contract_at(
+                            presentation_contract_fingerprint,
+                            failure_fence,
+                        );
+                        let _ = reply.send(bound);
                     }
                 }
                 RollingControlCommand::AuthorizeResponsePublication {
@@ -5927,35 +6045,35 @@ impl RollingControlHandle {
         Ok(())
     }
 
-    /// Publish an HTTP response command without allowing mailbox pressure or
-    /// the synchronous producer fence to outlive the request's one absolute
-    /// publication deadline. The actor receives the same deadline and checks
-    /// it again immediately before mutation, closing the cancellation race
-    /// between a timed-out oneshot receiver and later mailbox dispatch.
-    async fn enqueue_response_command_before(
+    /// Publish one command without allowing mailbox pressure or the
+    /// synchronous producer fence to outlive the caller's absolute admission
+    /// deadline. Response commands carry the same deadline into actor dispatch;
+    /// Terminal instead treats successful enqueue as the irreversible handoff
+    /// and waits for settlement without a second deadline.
+    async fn enqueue_command_before(
         &self,
         command: RollingControlCommand,
         deadline: Instant,
-    ) -> Result<(), ()> {
+    ) -> Result<(), RollingCommandAdmissionError> {
         if rolling_now() >= deadline {
-            return Err(());
+            return Err(RollingCommandAdmissionError::Deadline);
         }
         let permit = tokio::time::timeout_at(
             tokio::time::Instant::from_std(deadline),
             self.sender.reserve(),
         )
         .await
-        .map_err(|_| ())?
-        .map_err(|_| ())?;
+        .map_err(|_| RollingCommandAdmissionError::Deadline)?
+        .map_err(|_| RollingCommandAdmissionError::ControlUnavailable)?;
         loop {
             if rolling_now() >= deadline {
-                return Err(());
+                return Err(RollingCommandAdmissionError::Deadline);
             }
             match self.producer_transition.try_lock() {
                 Ok(transition) => {
                     if rolling_now() >= deadline {
                         drop(transition);
-                        return Err(());
+                        return Err(RollingCommandAdmissionError::Deadline);
                     }
                     let envelope = self.producer_events.seal_command(command);
                     permit.send(envelope);
@@ -5966,7 +6084,7 @@ impl RollingControlHandle {
                     let transition = error.into_inner();
                     if rolling_now() >= deadline {
                         drop(transition);
-                        return Err(());
+                        return Err(RollingCommandAdmissionError::Deadline);
                     }
                     let envelope = self.producer_events.seal_command(command);
                     permit.send(envelope);
@@ -6260,6 +6378,28 @@ impl RollingControlHandle {
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
+    /// Bind immutable response facts for a rolling generation whose producer
+    /// remains compatibility-owned. This runs before registry publication, so
+    /// every later master/media/status response can use the same actor path as
+    /// prepublication transcodes without opting copy/cache into retry policy.
+    pub(crate) async fn bind_response_publication_contract(
+        &self,
+        presentation_contract_fingerprint: String,
+        failure_fence: Arc<AtomicBool>,
+    ) -> Result<(), ResponsePublicationRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_command(RollingControlCommand::BindResponsePublicationContract {
+            presentation_contract_fingerprint,
+            failure_fence,
+            reply,
+        })
+        .await
+        .map_err(|_| ResponsePublicationRejection::ControlUnavailable)?;
+        response
+            .await
+            .unwrap_or(Err(ResponsePublicationRejection::ControlUnavailable))
+    }
+
     pub(crate) async fn authorize_response_publication(
         &self,
         publication: RollingResponsePublication,
@@ -6267,7 +6407,7 @@ impl RollingControlHandle {
         deadline: Instant,
     ) -> Result<RollingResponseAuthorization, ResponsePublicationRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
-        self.enqueue_response_command_before(
+        self.enqueue_command_before(
             RollingControlCommand::AuthorizeResponsePublication {
                 publication,
                 handoff,
@@ -6479,7 +6619,7 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_response_command_before(
+            .enqueue_command_before(
                 RollingControlCommand::ObservePublication {
                     observation,
                     deadline: Some(deadline),
@@ -6510,7 +6650,7 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_response_command_before(
+            .enqueue_command_before(
                 RollingControlCommand::CommitMedia {
                     kind,
                     producer_attempt,
@@ -6542,7 +6682,7 @@ impl RollingControlHandle {
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
         if self
-            .enqueue_response_command_before(
+            .enqueue_command_before(
                 RollingControlCommand::CommitGenerationMetadata {
                     presentation_contract_fingerprint: presentation_contract_fingerprint.to_owned(),
                     kind,
@@ -6623,8 +6763,41 @@ impl RollingControlHandle {
         response.await.map_err(|_| ControlStateError::Unavailable)
     }
 
+    /// Admit Terminal only within the caller's absolute deadline. Once the
+    /// envelope is in the mailbox, actor settlement is independently owned and
+    /// cannot be reclassified as a pre-commit deadline merely because dispatch
+    /// or reply delivery crosses that instant.
+    async fn terminate_before(
+        &self,
+        cause: RollingTerminalCause,
+        deadline: Instant,
+    ) -> Result<RollingTerminalOutcome, RollingTerminalRequestError> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_command_before(RollingControlCommand::Terminal { cause, reply }, deadline)
+            .await
+            .map_err(|error| match error {
+                RollingCommandAdmissionError::Deadline => {
+                    RollingTerminalRequestError::AdmissionDeadline
+                }
+                RollingCommandAdmissionError::ControlUnavailable => {
+                    RollingTerminalRequestError::ControlUnavailable
+                }
+            })?;
+        response
+            .await
+            .map_err(|_| RollingTerminalRequestError::ControlUnavailable)
+    }
+
     pub(crate) async fn end(&self) -> Result<RollingTerminalOutcome, ControlStateError> {
         self.terminate(RollingTerminalCause::End).await
+    }
+
+    pub(crate) async fn end_before(
+        &self,
+        deadline: Instant,
+    ) -> Result<RollingTerminalOutcome, RollingTerminalRequestError> {
+        self.terminate_before(RollingTerminalCause::End, deadline)
+            .await
     }
 
     pub(crate) async fn authority_fence(
@@ -6925,7 +7098,7 @@ static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::ne
 static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 15] = [const { AtomicU64::new(0) }; 15];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -7197,6 +7370,7 @@ pub(crate) fn prometheus() -> String {
         "admit_producer_retry",
         "decision_applied",
         "commit_generation_metadata",
+        "bind_response_publication_contract",
     ]
     .iter()
     .enumerate()
@@ -11068,6 +11242,79 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn compatibility_response_contract_orders_failure_with_publication() {
+        let started = Instant::now();
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+            ),
+            Err(ResponsePublicationRejection::ProducerNotAdmitted)
+        );
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(()),
+            "the exact immutable binding is idempotent"
+        );
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "other-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Err(ResponsePublicationRejection::PresentationContractMismatch)
+        );
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding),
+            "the same presentation cannot be rebound to a different failure owner"
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                started + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+            )
+            .is_ok());
+
+        failed.store(true, Ordering::Release);
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started + Duration::from_millis(2),
+                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+            ),
+            Err(ResponsePublicationRejection::SessionEnded),
+            "a compatibility failure ordered first must close actor publication"
+        );
+        assert!(!actor.commit_media_at(
+            started + Duration::from_millis(2),
+            "failed-copy-eof",
+            0,
+            Some(0),
+            Some(4_000),
+        ));
+        assert!(!actor.commit_generation_metadata_at(
+            started + Duration::from_millis(2),
+            "copy-contract",
+            "failed-copy-master-eof",
+        ));
+    }
+
     #[tokio::test]
     async fn exact_deadline_attempt_media_wins_and_ends_actor_recovery_ownership() {
         let started = rolling_now();
@@ -11422,6 +11669,46 @@ mod tests {
             Some(RollingTerminalCause::AuthorityFence)
         );
         assert!(!snapshot.producer_control.producer_media_published);
+    }
+
+    #[tokio::test]
+    async fn terminal_queued_before_deadline_settles_after_deadline_without_reclassification() {
+        let handle = RollingControlHandle::spawn("queued-terminal-deadline");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        handle.pause_producer_attempt_reply(Arc::clone(&pause));
+        let begin = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.begin_producer_attempt().await }
+        });
+        pause.wait().await;
+
+        let deadline = rolling_now() + Duration::from_millis(100);
+        let ending = tokio::spawn({
+            let handle = handle.clone();
+            async move { handle.end_before(deadline).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while handle.sender.capacity() == ROLLING_ACTOR_MAILBOX_CAPACITY {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Terminal must enter the mailbox before its deadline");
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            deadline + Duration::from_millis(20),
+        ))
+        .await;
+        assert!(
+            !ending.is_finished(),
+            "an admitted Terminal waits for actor settlement instead of timing out"
+        );
+
+        pause.wait().await;
+        assert!(begin.await.expect("begin task").is_ok());
+        assert_eq!(
+            ending.await.expect("End task"),
+            Ok(RollingTerminalOutcome::Won(RollingTerminalCause::End))
+        );
     }
 
     #[tokio::test]

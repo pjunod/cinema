@@ -38,7 +38,6 @@ pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_FAST_RECONCILIATION: Duration = Duration::from_secs(3);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
-const RELAY_HEADERS_DEADLINE: Duration = Duration::from_secs(35);
 const LEASE_INTERVAL: Duration = Duration::from_secs(3);
 pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
@@ -59,6 +58,21 @@ const MAX_CONTROL_RATE_ENTRIES: usize = 4_096;
 const CONTROL_RATE_WINDOW: Duration = Duration::from_secs(1);
 const CONTROL_RATE_PER_SESSION: u32 = 8;
 const CONTROL_RATE_GLOBAL: u32 = 512;
+/// Maximum authenticated clock disagreement accepted on a relayed resource
+/// deadline. This is deliberately small: it is only tolerance for wall-clock
+/// conversion between workers, never extra request work minted at the owner.
+const RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE: Duration = Duration::from_secs(2);
+/// The public playlist path reserves 55 seconds for rolling startup and five
+/// seconds for publication. Keep this wire-envelope ceiling synchronized with
+/// that externally visible request lifetime rather than trusting a peer to
+/// choose an arbitrary absolute deadline.
+const RELAY_PLAYLIST_MAX_LIFETIME: Duration = Duration::from_secs(60);
+/// Public status, subtitle-segment, and release requests only perform bounded
+/// response publication/control work.
+const RELAY_SHORT_MAX_LIFETIME: Duration = Duration::from_secs(5);
+/// A media segment can spend 30 seconds in a VOD blocked GET plus the five
+/// second publication fence.
+const RELAY_SEGMENT_MAX_LIFETIME: Duration = Duration::from_secs(35);
 const ROUTE_QUERY_SHARDS: usize = 32;
 const ROUTE_GENERATION_SHARDS: usize = 4_096;
 const ROUTE_QUERY_DEADLINE: Duration = Duration::from_secs(3);
@@ -501,6 +515,22 @@ impl RelayResource {
             Self::Segment { segment } => valid_resource_name(segment),
         }
     }
+
+    fn max_lifetime(&self) -> Duration {
+        match self {
+            Self::Playlist { .. }
+            | Self::Master { .. }
+            | Self::VideoPlaylist
+            | Self::SubtitlePlaylist { .. } => RELAY_PLAYLIST_MAX_LIFETIME,
+            Self::Segment { .. } => RELAY_SEGMENT_MAX_LIFETIME,
+            Self::Status | Self::SubtitleSegment { .. } | Self::Delete => RELAY_SHORT_MAX_LIFETIME,
+        }
+    }
+
+    fn max_inherited_lifetime(&self) -> Duration {
+        self.max_lifetime()
+            .saturating_add(RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE)
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -508,6 +538,9 @@ impl RelayResource {
 pub(crate) struct RelayRequest {
     pub session_id: String,
     pub resource: RelayResource,
+    /// Absolute end-to-end resource deadline inherited from public ingress.
+    /// A relay must consume this budget, never mint a fresh one at each hop.
+    pub deadline_unix_ms: i64,
     #[serde(default)]
     pub headers: RelayHeaders,
 }
@@ -516,7 +549,46 @@ impl RelayRequest {
     pub(crate) fn is_valid(&self) -> bool {
         uuid::Uuid::parse_str(&self.session_id).is_ok()
             && self.resource.is_valid()
+            && self.deadline_unix_ms > 0
+            && self.deadline_is_plausible_at(unix_ms())
             && self.headers.is_valid()
+    }
+
+    fn remaining_at(&self, now_unix_ms: i64) -> Option<Duration> {
+        let remaining_ms = u64::try_from(self.deadline_unix_ms.saturating_sub(now_unix_ms))
+            .ok()
+            .filter(|remaining| *remaining > 0)?;
+        Some(Duration::from_millis(remaining_ms))
+    }
+
+    /// Convert the origin's own wall-clock envelope into its transport
+    /// budget. No skew is spendable here because the sender has the same
+    /// clock that produced the wire deadline.
+    pub(crate) fn transport_budget_at(&self, now_unix_ms: i64) -> Option<Duration> {
+        Some(
+            self.remaining_at(now_unix_ms)?
+                .min(self.resource.max_lifetime()),
+        )
+    }
+
+    /// Convert a peer's wall-clock envelope into an owner-side monotonic
+    /// budget. Validation tolerates bounded clock disagreement, but execution
+    /// subtracts the entire allowance: an owner whose clock is behind cannot
+    /// publish after the ingress transport has already abandoned the request.
+    /// The origin's earlier absolute deadline otherwise remains authoritative;
+    /// reconstructing this later consumes time rather than refreshing it.
+    pub(crate) fn owner_budget_at(&self, now_unix_ms: i64) -> Option<Duration> {
+        let budget = self
+            .remaining_at(now_unix_ms)?
+            .checked_sub(RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE)?
+            .min(self.resource.max_lifetime());
+        (!budget.is_zero()).then_some(budget)
+    }
+
+    fn deadline_is_plausible_at(&self, now_unix_ms: i64) -> bool {
+        let max_ms =
+            i64::try_from(self.resource.max_inherited_lifetime().as_millis()).unwrap_or(i64::MAX);
+        self.deadline_unix_ms <= now_unix_ms.saturating_add(max_ms)
     }
 }
 
@@ -548,6 +620,18 @@ pub(crate) struct MediaSessionCoordinator {
 struct CachedRoute {
     route: Option<MediaSessionRoute>,
     expires_at: tokio::time::Instant,
+}
+
+/// Durable resolution used when HTTP status depends on more than whether a
+/// route can currently authorize bytes. `route` remains the compatibility
+/// active-only facade; publication reclassification must use this raw view so
+/// terminal state and a live remote handoff cannot collapse into a false 404.
+#[derive(Clone, Debug)]
+pub(crate) enum DurableRouteResolution {
+    Absent,
+    ActiveLocal(MediaSessionRoute),
+    ActiveRemote(MediaSessionRoute),
+    Terminal(MediaSessionRoute),
 }
 
 struct ControlRateEntry {
@@ -667,7 +751,82 @@ impl MediaSessionCoordinator {
         &self,
         session_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError> {
-        let deadline = tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE;
+        self.raw_route_before(
+            session_id,
+            tokio::time::Instant::now() + ROUTE_QUERY_DEADLINE,
+        )
+        .await
+        .map(|route| route.filter(authorizing_route))
+    }
+
+    pub(crate) async fn route_resolution_before(
+        &self,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        let now = tokio::time::Instant::now();
+        let remaining = request_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(StoreError::Database(
+                "media-session route admission timed out".to_owned(),
+            ));
+        }
+        let deadline = now + remaining.min(ROUTE_QUERY_DEADLINE);
+        let route = self.raw_route_before(session_id, deadline).await?;
+        Ok(match route {
+            None => DurableRouteResolution::Absent,
+            Some(route) if !authorizing_route(&route) => DurableRouteResolution::Terminal(route),
+            Some(route) if route.owner_node_id == local_node_id => {
+                DurableRouteResolution::ActiveLocal(route)
+            }
+            Some(route) => DurableRouteResolution::ActiveRemote(route),
+        })
+    }
+
+    /// Cache-bypassing durable resolution for a final HTTP status verdict.
+    /// A one-second negative/old-owner cache is safe for ordinary routing but
+    /// cannot prove 404 after exact publication ownership was rejected.
+    pub(crate) async fn authoritative_route_resolution_before(
+        &self,
+        session_id: &str,
+        local_node_id: &str,
+        request_deadline: Instant,
+    ) -> Result<DurableRouteResolution, StoreError> {
+        let now = tokio::time::Instant::now();
+        let remaining = request_deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(StoreError::Database(
+                "media-session route reclassification timed out".to_owned(),
+            ));
+        }
+        let deadline = now + remaining.min(ROUTE_QUERY_DEADLINE);
+        let shard = route_hash(session_id) % self.route_queries.len();
+        let _query = tokio::time::timeout_at(deadline, self.route_queries[shard].lock())
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session route reclassification timed out".to_owned())
+            })?;
+        let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
+            .await
+            .map_err(|_| {
+                StoreError::Database("media-session route reclassification timed out".to_owned())
+            })??;
+        Ok(match route {
+            None => DurableRouteResolution::Absent,
+            Some(route) if !authorizing_route(&route) => DurableRouteResolution::Terminal(route),
+            Some(route) if route.owner_node_id == local_node_id => {
+                DurableRouteResolution::ActiveLocal(route)
+            }
+            Some(route) => DurableRouteResolution::ActiveRemote(route),
+        })
+    }
+
+    async fn raw_route_before(
+        &self,
+        session_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Option<MediaSessionRoute>, StoreError> {
         if let Some(cached) = tokio::time::timeout_at(deadline, self.cached_route(session_id))
             .await
             .map_err(|_| {
@@ -699,8 +858,9 @@ impl MediaSessionCoordinator {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let route = tokio::time::timeout_at(deadline, self.store.media_session_route(session_id))
             .await
-            .map_err(|_| StoreError::Database("media-session route lookup timed out".to_owned()))??
-            .filter(authorizing_route);
+            .map_err(|_| {
+                StoreError::Database("media-session route lookup timed out".to_owned())
+            })??;
         tokio::time::timeout_at(
             deadline,
             self.cache_queried_route_result(session_id, route, observed_generation),
@@ -734,8 +894,7 @@ impl MediaSessionCoordinator {
 
     pub(crate) async fn cache_route(&self, route: MediaSessionRoute) {
         let session_id = route.session_id.clone();
-        let route = authorizing_route(&route).then_some(route);
-        self.cache_route_result(&session_id, route).await;
+        self.cache_route_result(&session_id, Some(route)).await;
     }
 
     pub(crate) async fn cache_miss(&self, session_id: &str) {
@@ -746,7 +905,7 @@ impl MediaSessionCoordinator {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
         let cached = routes.get(session_id)?;
-        if cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route) {
+        if cached.expires_at > now {
             return Some(cached.route.clone());
         }
         routes.remove(session_id);
@@ -756,9 +915,7 @@ impl MediaSessionCoordinator {
     async fn cache_route_result(&self, session_id: &str, route: Option<MediaSessionRoute>) {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
-        routes.retain(|_, cached| {
-            cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
-        });
+        routes.retain(|_, cached| cached.expires_at > now);
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         self.route_generations[generation_shard].fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         insert_cached_route(&mut routes, session_id, route, now);
@@ -776,9 +933,7 @@ impl MediaSessionCoordinator {
     ) -> Option<MediaSessionRoute> {
         let now = tokio::time::Instant::now();
         let mut routes = self.routes.lock().await;
-        routes.retain(|_, cached| {
-            cached.expires_at > now && cached.route.as_ref().is_none_or(authorizing_route)
-        });
+        routes.retain(|_, cached| cached.expires_at > now);
         let generation_shard = route_hash(session_id) % self.route_generations.len();
         if self.route_generations[generation_shard].load(std::sync::atomic::Ordering::Acquire)
             != observed_generation
@@ -895,7 +1050,11 @@ impl MediaSessionCoordinator {
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
             return Err(PeerTransportError::InvalidResponse);
         }
-        let deadline = deadline_after(RELAY_HEADERS_DEADLINE);
+        let now = tokio::time::Instant::now();
+        let budget = request
+            .transport_budget_at(unix_ms())
+            .ok_or(PeerTransportError::TimedOut)?;
+        let deadline = now + budget;
         let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport
@@ -1919,6 +2078,97 @@ mod tests {
         }
     }
 
+    fn relay_request(resource: RelayResource, deadline_unix_ms: i64) -> RelayRequest {
+        RelayRequest {
+            session_id: uuid::Uuid::new_v4().to_string(),
+            resource,
+            deadline_unix_ms,
+            headers: RelayHeaders::default(),
+        }
+    }
+
+    #[test]
+    fn relay_resource_deadlines_are_bounded_by_the_public_request_class() {
+        let now = 1_700_000_000_000_i64;
+        let short = relay_request(RelayResource::Status, now.saturating_add(90_000));
+        assert_eq!(
+            short.transport_budget_at(now),
+            Some(RELAY_SHORT_MAX_LIFETIME),
+            "an authenticated peer cannot turn status into an arbitrary wait"
+        );
+        assert_eq!(short.owner_budget_at(now), Some(RELAY_SHORT_MAX_LIFETIME));
+        assert!(
+            !short.deadline_is_plausible_at(now),
+            "the authenticated envelope rejects a deadline beyond its resource ceiling"
+        );
+
+        let playlist = relay_request(RelayResource::VideoPlaylist, now.saturating_add(90_000));
+        assert_eq!(
+            playlist.owner_budget_at(now),
+            Some(RELAY_PLAYLIST_MAX_LIFETIME)
+        );
+        let segment = relay_request(
+            RelayResource::Segment {
+                segment: "segment-1.m4s".to_owned(),
+            },
+            now.saturating_add(90_000),
+        );
+        assert_eq!(
+            segment.owner_budget_at(now),
+            Some(RELAY_SEGMENT_MAX_LIFETIME)
+        );
+    }
+
+    #[test]
+    fn relay_resource_deadline_preserves_the_earlier_origin_boundary() {
+        let origin_now = 1_700_000_000_000_i64;
+        let origin_deadline = origin_now.saturating_add(4_000);
+        let request = relay_request(RelayResource::Status, origin_deadline);
+        assert_eq!(
+            request.transport_budget_at(origin_now),
+            Some(Duration::from_secs(4))
+        );
+
+        // At 1.25 seconds of real elapsed time, model the maximum accepted
+        // owner clock lag: its wall clock is still 0.75 seconds behind the
+        // origin's send timestamp. Subtracting the allowance reconstructs the
+        // same real absolute deadline as the ingress transport.
+        let owner_now = origin_now.saturating_sub(750);
+        let owner_remaining = request
+            .owner_budget_at(owner_now)
+            .expect("the origin deadline remains live");
+        assert_eq!(owner_remaining, Duration::from_millis(2_750));
+
+        let synchronized_owner_now = origin_now.saturating_add(1_250);
+        assert_eq!(
+            request.owner_budget_at(synchronized_owner_now),
+            Some(Duration::from_millis(750)),
+            "accepted skew is conservatively removed instead of becoming extra owner work"
+        );
+        assert!(
+            request.owner_budget_at(origin_deadline).is_none(),
+            "publication cannot start after ingress abandonment"
+        );
+    }
+
+    #[test]
+    fn relay_request_validation_rejects_a_far_future_authenticated_deadline() {
+        let now = unix_ms();
+        let valid = relay_request(
+            RelayResource::Status,
+            now.saturating_add(
+                i64::try_from(
+                    (RELAY_SHORT_MAX_LIFETIME + RELAY_DEADLINE_CLOCK_SKEW_ALLOWANCE).as_millis(),
+                )
+                .unwrap(),
+            ),
+        );
+        assert!(valid.is_valid());
+
+        let far_future = relay_request(RelayResource::Status, now.saturating_add(60_000));
+        assert!(!far_future.is_valid());
+    }
+
     fn media_route(session_id: &str) -> MediaSessionRoute {
         MediaSessionRoute {
             incarnation_id: format!("incarnation-{session_id}"),
@@ -2588,6 +2838,7 @@ mod tests {
             !coordinator.routes.lock().await.contains_key(session_id),
             "the stale active route must not be republished after fencing"
         );
+        let terminal_owner = route.owner_node_id.clone();
         coordinator.cache_route(route).await;
         assert!(
             coordinator
@@ -2597,6 +2848,17 @@ mod tests {
                 .is_none(),
             "terminal routes must be negative cache entries, never authorizers"
         );
+        assert!(matches!(
+            coordinator
+                .route_resolution_before(
+                    session_id,
+                    &terminal_owner,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .expect("typed terminal route"),
+            DurableRouteResolution::Terminal(_)
+        ));
     }
 
     #[tokio::test]
