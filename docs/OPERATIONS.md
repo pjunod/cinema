@@ -1428,8 +1428,9 @@ curl -fsS "$PLURX_NODE/api/v1/cluster/media" \
 For a rolling restart, remove one voter from new load-balancer traffic without
 removing it from Raft membership. Keep its existing connections draining and
 wait for `local_active_sessions` to reach zero, then restart that same node and
-data directory. Note what that counter is: **transcode and remux sessions on
-this node only.** A direct-play viewer holds no session, so a node serving
+data directory. Note what that counter is: **HLS/transcode sessions,
+progressive remuxes, and active offline preparations on this node only.** A
+direct-play viewer holds no process-owned session, so a node serving
 nothing but direct play reports zero while a dozen people are watching — drain
 those by connection count at the load balancer, not by this number. Re-admit it only after `/readyz` succeeds and the media status
 shows the current protocol. Advance to the next voter only then. The permanent
@@ -1508,9 +1509,277 @@ backup-to-fresh-cluster procedure in this release. A minority cannot safely
 declare itself the new cluster without proving the old majority is dead; doing
 so would create split brain if those machines returned. Preserve every
 surviving data directory and secret, keep the nodes stopped, and recover the
-original majority from host/storage backups. Quorum-aware backup/restore and a
-deterministic one-node disaster-recovery drill remain the explicit M6 work in
-[CLUSTERING-PLAN.md](CLUSTERING-PLAN.md).
+original majority from host/storage backups. The offline WAL commands below
+collect and preserve bounded evidence, but deliberately do not apply a recovery
+plan or turn one surviving voter into a new cluster.
+
+### Cluster operations status and guarded voter restarts
+
+Open **Settings → Cluster → Operations** for the cluster-wide view. The
+roster remains the authority for committed membership; Operations adds a
+direct, authenticated observation from every voter and one conservative
+restart verdict. An ordinary SQLite server continues to show **Not clustered**
+and has no cluster operations card.
+
+The verdict is phrased as **Ready to restart one voter** or **Do not restart
+another voter**. It is an authorization for one rolling-restart step, not a
+general health badge. An unreachable voter stays visible as unreachable and
+never becomes healthy by omission. Expand a node row to see the IDs and
+protocol range that were checked, Raft term and indices, WAL durability and
+recovery observations, recent snapshot outcomes, and media-drain details.
+
+The command-line view uses the same aggregate and verdict. Point it at one
+specific backend, not a load-balancer address, because restart preparation is
+bound to the backend that answered:
+
+```bash
+export PLURX_NODE=https://plurx-a.example.net
+export PLURX_ADMIN_TOKEN_FILE=/run/secrets/plurx-admin-token
+
+plurxd cluster status \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+The token file must be a small, owner-only regular file and must not be a
+symlink. There is no raw-token argument. Use `--json` when another tool needs
+the exact API document.
+
+**How to read it:** every committed voter must have `PROCESS live`, a ready
+serving fence, one agreed leader and term, zero apply lag, a live owned WAL lock,
+and a durable WAL index equal to its last log index. The bottom of the report is
+the decision:
+
+```text
+safe_to_restart_one: true
+candidate_node_id: plurx-a
+```
+
+Any `BLOCKER <code> [<node>]: ...` line makes the answer no. A
+`WARNING mixed_builds` is expected only between steps of a rolling update; it
+does not hide a blocker. Exit status is stable: `0` means one named voter is
+safe, `1` means the complete evidence says no, `2` means configuration or
+authentication is invalid, and `3` means the evidence is incomplete or the
+response is incompatible.
+
+#### Daily cluster check
+
+1. Open **Settings → Cluster → Operations**, press **Refresh**, and read
+   the server verdict before reading individual green cells.
+2. Confirm the committed voter count and quorum, one leader and term, maximum
+   apply lag of zero, and a fresh oldest sample.
+3. Confirm every voter reports an open, locked, error-free WAL whose durable
+   index matches its last log index. Read any recorded unclean start or recovery
+   result; a recovered old event is evidence, while a current WAL error is a
+   blocker.
+4. Confirm recent snapshot build/install outcomes are successful when present.
+   "None observed" is not by itself corruption; pair it with Raft/WAL state and
+   the snapshot counters in `/metrics`.
+5. Confirm active owned media sessions and the proxy's direct-play connection
+   count are understood before maintenance.
+
+Raw checks remain useful when the admin page cannot load:
+
+```bash
+curl -fsS "$PLURX_NODE/healthz"
+curl -fsS "$PLURX_NODE/readyz"
+curl -fsS "$PLURX_NODE/api/v1/cluster/nodes" \
+  -H "Authorization: Bearer $(<"$PLURX_ADMIN_TOKEN_FILE")" | jq .
+curl -fsS "$PLURX_NODE/metrics" | \
+  rg 'plurx_(cluster|db_snapshot|replication|serving)'
+```
+
+`/healthz` proves only that the process answers. `/readyz` proves only this
+backend's serving fence. The roster and metrics do not replace the direct
+all-voter aggregate, so none of these fallbacks authorizes a restart alone.
+
+#### Rolling a code update across voters
+
+Run one voter at a time. Never start a second step merely because the first
+process exited successfully.
+
+**Preflight**
+
+1. Deploy the new image or binary so it is available to the supervisor, but do
+   not restart a voter yet.
+2. Run `plurxd cluster status` against the exact backend. Stop unless it exits
+   `0` and names that backend as `candidate_node_id`.
+3. If the report names another follower, connect directly to that node and run
+   the preflight again. Do not use the leader as a convenient substitute.
+
+**Prepare and drain one voter**
+
+```bash
+plurxd cluster prepare-restart \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+This repeats the preflight, blocks new mutable media admissions on only that
+process, and polls until owned sessions and in-flight admissions reach zero.
+Existing playback/control requests continue while they drain. A new admission
+receives retryable HTTP `503`, code `restart_drain_active`, and `Retry-After: 5`.
+Direct-play connections do not own a Plurx session, so drain them at the proxy
+before using the printed supervisor command.
+
+When the process is drained the CLI prints the exact supported choices, for
+example:
+
+```text
+Run exactly one supervisor command on plurx-a:
+  docker-compose  docker compose up -d --no-deps --force-recreate plurxd
+  systemd          sudo systemctl restart plurxd
+  ansible          ansible-playbook deploy.yml --limit <this-host>
+```
+
+Run the one command matching the installation. Do not run all three. The
+preparation expires after 15 minutes; expiration re-enables admissions rather
+than leaving a forgotten drain behind. If maintenance is abandoned, cancel it
+explicitly:
+
+```bash
+plurxd cluster cancel-restart \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+**Post-check**
+
+Wait for that same backend's `/readyz` to return success, then rerun `cluster
+status`. It must be directly observed on the intended build, at zero lag, with
+its WAL open and durable. The verdict must again name exactly one eligible
+follower before advancing. Stop the rollout on any unreachable/invalid row,
+leader or term disagreement, non-zero/unknown lag, WAL error, snapshot failure,
+protocol incompatibility, pending member removal, or an already-active restart
+preparation.
+
+#### Loss of leader or quorum
+
+Leader loss with a surviving majority should converge to one new leader and
+term. Keep the surviving voters online, stop maintenance, and watch Operations
+or `cluster status`; do not restart another voter while
+`leader_term_disagreement`, `voter_not_ready`, or `raft_sample_stale` is
+present. Preserve a support bundle if agreement does not return within the
+normal election window.
+
+Quorum loss is different: reads and writes that require a fresh serving proof
+are fenced. Restore an original voter with its original data directory,
+`membership.json`, and cluster secrets. Do not delete a lock file, edit Raft
+metadata, restore one node over another, force membership, or wipe/rejoin a node
+while the old majority might return. A permanently lost majority is an
+escalation; this build has no force-reconfigure path.
+
+#### Stalled or failing WAL and snapshots
+
+Start with the online evidence. Expand the voter in Operations and preserve a
+support bundle. `wal_not_healthy` means the live WAL snapshot is absent, not
+open, does not own the real lock, has a current error, or has not made its last
+log index durable. A recent failed snapshot outcome is evidence to retain; it
+does not authorize hand-editing a snapshot or WAL file.
+
+Only after the aggregate says the majority remains healthy may you stop one
+affected follower and use the offline commands against its exact data
+directory:
+
+```bash
+export PLURX_DATA=/var/lib/plurx
+export PLURX_EVIDENCE=/srv/plurx-evidence/plurx-a-$(date -u +%Y%m%dT%H%M%SZ)
+
+plurxd wal status --data-dir "$PLURX_DATA" --json
+plurxd wal verify --data-dir "$PLURX_DATA" --deep
+plurxd wal backup --data-dir "$PLURX_DATA" --output "$PLURX_EVIDENCE"
+plurxd wal recovery-plan --data-dir "$PLURX_DATA" --json
+```
+
+`wal status` probes the actual advisory lock. If a process owns it, the command
+does not walk or fingerprint live WAL files and exits `1`. `verify` reads every
+bounded retained record and checks metadata/header/CRC/index invariants without
+opening the store. `backup` is additive: the output directory must not exist,
+must be outside the source, and receives a checksum manifest. It refuses
+symlinked roots, oversized input, and unproved free space.
+
+`recovery-plan` binds its recommendation to the stable node and Raft IDs, the
+real lock state, and source fingerprints. Possible actions include
+`RESTART_NORMALLY`, `BACKUP_THEN_REMOVE_STALE_UNLOCKED_SENTINEL`,
+`BACKUP_THEN_RUN_EXISTING_INTEGRITY_RECOVERY`,
+`RESTORE_THIS_NODE_FROM_AUTHENTICATED_PEER`, and
+`STOP_AND_ESCALATE_MAJORITY_AT_RISK`. Treat the last two as stop conditions,
+not automated repair.
+
+There is intentionally **no `plurxd wal apply-plan` command in this build**.
+Do not translate a plan into lock deletion, truncation, restore, or membership
+mutation without a separately reviewed recovery procedure. The web UI and
+online API never perform raw WAL mutation.
+
+#### Member loss and replacement
+
+For a temporary loss, bring the same member back with the same stable node ID,
+Raft ID, data directory, and secrets. Readdressing the host or changing its
+container identity does not make it a new member as long as the durable
+identity and storage follow it. Verify its advertised URL, wait for `/readyz`,
+and require zero lag before maintenance continues.
+
+For a permanently lost follower while the original majority is healthy, use
+the normal committed removal flow, preserve the lost member's storage as
+evidence, then join a genuinely fresh member with a fresh token. Never copy a
+survivor's data directory to manufacture that member. A pending removal is a
+restart blocker until it completes or is resolved.
+
+If the lost node is the only surviving copy of anything, or if removing it
+would lose quorum, stop. Restore the original member from host/storage backup
+instead of attempting a replacement through the minority.
+
+#### Single-node recovery
+
+"Single-node recovery" means recovering one failed voter while a healthy
+majority still exists; it does not mean promoting one isolated voter into a new
+cluster.
+
+1. Prove the other voters form a ready majority and agree on leader and term.
+2. Stop the failed voter and preserve an additive WAL backup.
+3. Verify that `membership.json` names the expected node and Raft IDs.
+4. If status and verification say `RESTART_NORMALLY`, restart the same node and
+   storage. If the plan requires existing integrity recovery, peer restore, or
+   escalation, stop and review the captured evidence before any mutation.
+5. Require `/readyz`, direct observation, zero lag, a durable live WAL, and a
+   successful current snapshot path before returning it to the load balancer.
+
+Never run offline diagnostics concurrently with its daemon, and never reuse
+the procedure against two stopped voters at once.
+
+#### Container recreate, readdress, wipe, and rejoin
+
+| Change | Safe treatment |
+|---|---|
+| Recreate the container with the same persistent data mount and secrets | A rolling restart. Use restart preparation, recreate only the service, then perform the post-check. |
+| Change host/IP/DNS while preserving the same data and stable identity | Readdress the same member. Update routing/advertised configuration, preserve storage and secrets, and verify direct reachability. |
+| Replace lost compute while restoring that member's own data backup | Recover the same member. Confirm node/Raft IDs before it contacts the cluster. |
+| Wipe storage after a committed permanent removal | Join a new member with a fresh token. The old tombstoned directory must not return. |
+| Wipe or rejoin to cure an unexplained WAL/snapshot fault | Refused operationally. Preserve evidence and diagnose first; never erase the only path to the original majority. |
+
+#### Escalation artifacts
+
+Create the bounded, redacted online bundle before logs rotate:
+
+```bash
+plurxd cluster support-bundle \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE" \
+  --output "./plurx-cluster-support-$(date -u +%Y%m%dT%H%M%SZ).zip"
+```
+
+The output path must not already exist. The ZIP contains the aggregate status,
+a bounded redacted cluster log, a README, and a manifest of sizes and SHA-256
+hashes. It deliberately drops credential-shaped lines and path-bearing log
+text. Inspect the bundle before sharing it; redaction reduces exposure but does
+not turn operational state into public data.
+
+For a stopped-node WAL incident, attach the additive evidence directory and
+JSON outputs from `wal status`, `verify`, and `recovery-plan`. Also record the
+exact build/image digest, supervisor, topology and voter count, first observed
+time, last known successful rollout step, and whether the original majority can
+still be restored. Never attach admin token files, cluster secrets, raw media
+paths, or a copied live data directory.
 
 **Gracefully remove the node you are connected to.** Settings → Cluster →
 **Leave this cluster** calls the same admin-only operation. It resolves the

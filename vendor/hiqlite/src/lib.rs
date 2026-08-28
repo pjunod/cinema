@@ -16,6 +16,10 @@ compile_error!("features `cast_ints` and `cast_ints_unchecked` are mutually excl
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub use hiqlite_wal::LogSync;
+#[cfg(feature = "sqlite")]
+pub use hiqlite_wal::{
+    BoundedWalError, WalRecoveryObservation, WalRuntimeState, WalStatusHandle, WalStatusSnapshot,
+};
 pub use openraft::SnapshotPolicy;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
@@ -54,8 +58,8 @@ pub use crate::client::{
 };
 #[cfg(feature = "sqlite")]
 pub use crate::snapshot_metrics::{
-    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,
-    LocalDbSnapshotMetrics,
+    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotLastOutcome,
+    DbSnapshotMetricsSnapshot, LocalDbSnapshotMetrics,
 };
 #[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::state_machine::Response;

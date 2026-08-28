@@ -5737,11 +5737,13 @@ pub mod status {
 
     use serde::{Deserialize, Serialize};
 
+    pub use hiqlite::{
+        BoundedWalError, DbSnapshotHistogram, DbSnapshotLastOutcome, DbSnapshotMetricsSnapshot,
+        WalRecoveryObservation, WalRuntimeState, WalStatusSnapshot,
+        DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
+    };
     use hiqlite::{
         Client, DbQuorumWatermark, LocalDbRaftMetrics, LocalDbRaftSnapshot, LocalDbSnapshotMetrics,
-    };
-    pub use hiqlite::{
-        DbSnapshotHistogram, DbSnapshotMetricsSnapshot, DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS,
     };
     use std::sync::{Arc, Mutex};
 
@@ -5821,7 +5823,9 @@ pub mod status {
     /// quorum watermark on a follower.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct PassiveRaftSample {
+        pub node_id: u64,
         pub current_term: u64,
+        pub leader_id: Option<u64>,
         pub last_applied_index: Option<u64>,
         pub leader_known: bool,
         pub is_leader: bool,
@@ -5913,6 +5917,7 @@ pub mod status {
         sequence: AtomicU64,
         published: AtomicBool,
         current_term: AtomicU64,
+        node_id: AtomicU64,
         last_applied_present: AtomicBool,
         last_applied_index: AtomicU64,
         leader_known: AtomicBool,
@@ -6233,7 +6238,9 @@ pub mod status {
                     return PassiveRaftMetricsView {
                         local_source: self.local_source,
                         sample: published.then_some(PassiveRaftSample {
+                            node_id: self.inner.node_id.load(Ordering::Relaxed),
                             current_term,
+                            leader_id: current_leader_present.then_some(current_leader),
                             last_applied_index: last_applied_present.then_some(last_applied_index),
                             leader_known,
                             is_leader,
@@ -6325,6 +6332,7 @@ pub mod status {
             self.inner
                 .current_term
                 .store(source.current_term, Ordering::Relaxed);
+            self.inner.node_id.store(source.node_id, Ordering::Relaxed);
             self.inner
                 .current_leader_present
                 .store(source.current_leader.is_some(), Ordering::Relaxed);
@@ -6608,6 +6616,7 @@ pub mod status {
         backend: ReplicationBackend,
         client: Option<Client>,
         local_metrics: Option<LocalDbRaftMetrics>,
+        wal_status: Option<hiqlite::WalStatusHandle>,
         passive_metrics: PassiveRaftMetrics,
         previous: Arc<Mutex<Option<ReplicationStatus>>>,
     }
@@ -6620,6 +6629,7 @@ pub mod status {
                 backend: ReplicationBackend::Sqlite,
                 client: None,
                 local_metrics: None,
+                wal_status: None,
                 passive_metrics: PassiveRaftMetrics::new(false),
                 previous: Arc::new(Mutex::new(None)),
             }
@@ -6630,12 +6640,14 @@ pub mod status {
         pub fn replicated(client: Client) -> Self {
             let local_metrics = client.local_db_raft_metrics().ok();
             let snapshot_metrics = client.local_db_snapshot_metrics().ok();
+            let wal_status = client.local_db_wal_status().ok();
             let passive_metrics = PassiveRaftMetrics::new(local_metrics.is_some())
                 .with_snapshot_metrics(snapshot_metrics);
             Self {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
                 local_metrics,
+                wal_status,
                 passive_metrics,
                 previous: Arc::new(Mutex::new(None)),
             }
@@ -6652,6 +6664,7 @@ pub mod status {
                 backend: ReplicationBackend::Replicated,
                 client: Some(client),
                 local_metrics: None,
+                wal_status: None,
                 passive_metrics: PassiveRaftMetrics::remote_authority(),
                 previous: Arc::new(Mutex::new(None)),
             }
@@ -6661,6 +6674,14 @@ pub mod status {
         #[must_use]
         pub fn metrics_handle(&self) -> PassiveRaftMetrics {
             self.passive_metrics.clone()
+        }
+
+        /// Copy the process-local live WAL snapshot without filesystem IO.
+        #[must_use]
+        pub fn wal_status_snapshot(&self) -> Option<hiqlite::WalStatusSnapshot> {
+            self.wal_status
+                .as_ref()
+                .map(hiqlite::WalStatusHandle::snapshot)
         }
 
         /// Keep the atomics-only metrics projection fresh from the local Raft

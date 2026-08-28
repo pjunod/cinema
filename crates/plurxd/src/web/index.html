@@ -857,6 +857,15 @@
   .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
   .clleader{color:var(--accent);border-color:var(--accent)}
+  .clopshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clopsfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 14px;margin:12px 0 4px}
+  .clopsfact{border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:9px 11px;font-size:12px;line-height:1.45}
+  .clopsfact b{display:block;font-size:13px;color:var(--text)}
+  .clopsblockers{margin:8px 0 0;padding-left:20px;font-size:13px;line-height:1.5}
+  .clopsdetail{padding:6px 0;color:var(--muted);font-size:12px}
+  .clopsdetail summary{cursor:pointer;color:var(--text);font-weight:600}
+  .clopsdetail .kvgrid{margin-top:8px}
+  .clopscode{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
   /* A join token is a complete cluster credential shown exactly once. It gets
      its own loud box so nobody mistakes it for an id they can leave on screen,
      and `user-select:all` makes copying it one gesture on a machine with no
@@ -10572,6 +10581,7 @@ const SETTINGS_ENDPOINTS={
     if(error&&error.status===401) throw error;
     return {unavailable:true,code:error.code,message:error.message};
   }),
+  clusterOps:()=>api("/cluster/status"),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
@@ -10580,7 +10590,7 @@ const SETTINGS_MANIFEST={
   analysis:{required:["settings","analysis"],secondary:[]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:[]},
+  cluster:{required:["cluster"],secondary:["clusterOps"]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
@@ -10630,6 +10640,10 @@ function patchSettingsSecondary(tab,key){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
+  if(tab==="cluster"&&key==="clusterOps"){
+    const mount=document.getElementById("cluster-operations");
+    if(mount) mount.innerHTML=clusterOperationsCard(SETTINGS_DATA.clusterOps);
+  }
 }
 function patchSettingsSecondaryError(tab,key,error){
   const message=esc(error&&error.message||"request failed");
@@ -10640,6 +10654,10 @@ function patchSettingsSecondaryError(tab,key,error){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
+  }
+  if(tab==="cluster"&&key==="clusterOps"){
+    const mount=document.getElementById("cluster-operations");
+    if(mount) mount.innerHTML=clusterOperationsUnavailable(message);
   }
 }
 async function loadSettingsTab(generation,tab){
@@ -11380,6 +11398,199 @@ function clusterNodeRow(n,localNodeId){
     <td data-label="Last seen" class="muted">${seen}</td>
     <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
 }
+function clusterOperationAge(ms){
+  if(ms===null||ms===undefined) return "unknown age";
+  if(ms<1000) return "now";
+  const seconds=Math.floor(ms/1000);
+  if(seconds<60) return `${seconds}s ago`;
+  const minutes=Math.floor(seconds/60);
+  return minutes<60?`${minutes}m ago`:`${Math.floor(minutes/60)}h ago`;
+}
+function clusterOperationReason(value){
+  return String(value||"unknown").replaceAll("_"," ");
+}
+function clusterOperationsUnavailable(message){
+  return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
+      <p class="muted" style="margin:0">Direct voter observations and the guarded rollout verdict.</p></div>
+      <button class="ghost sm" onclick="refreshClusterOperations(this)">Retry status</button></div>
+    <div class="clstate warn" role="status"><h3>Do not restart another voter</h3>
+      <p>The bounded operations status could not be collected: ${message||"request failed"}. Keep every available voter running and retry; a roster heartbeat is not a substitute for a direct peer observation.</p></div></div>`;
+}
+function clusterOperationsNodeRow(row){
+  const n=row.membership||{};
+  const s=row.status;
+  const answered=row.observation==="answered"&&s;
+  if(!answered){
+    const why=clusterOperationReason(row.error_class||row.observation);
+    return `<tr><td class="libname clidentity"><div class="clhost">${esc(n.hostname||n.node_id||"Unknown node")}</div>
+        <div class="clid">Node ID ${esc(n.node_id||"unknown")}</div></td>
+      <td data-label="Process" style="color:var(--bad)">Not observed · ${esc(why)}</td>
+      <td data-label="Serving">Unknown</td><td data-label="Raft">Unknown</td><td data-label="WAL">Unknown</td>
+      <td data-label="Snapshot">Unknown</td><td data-label="Media">Unknown</td><td data-label="Build">Unknown</td></tr>`;
+  }
+  const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
+  const process=`<span style="color:var(--good)">Live</span> · ${esc(clusterOperationAge(row.sample_age_ms))}`;
+  const serving=s.serving&&s.serving.ready
+    ? `<span style="color:var(--good)">Ready</span>`
+    : `<span style="color:var(--bad)">Fenced: ${esc(clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
+  const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
+  const raftText=raft.sample_valid&&raft.watermark_valid
+    ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
+    : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
+  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  const walText=wal
+    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")} · durable ${wal.last_durable_index===null?"unknown":esc(String(wal.last_durable_index))}`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const snapshotText=snap.available
+    ? snap.last_build_outcome
+      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"}`
+      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const mediaText=`${esc(String(media.local_active_sessions))} session${media.local_active_sessions===1?"":"s"} · ${media.drained?"drained":"draining"}`;
+  const lastError=wal&&wal.last_error?wal.last_error.message:"None";
+  const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
+  const detail=`<tr><td colspan="8"><details class="clopsdetail"><summary>Details for ${esc(n.hostname||n.node_id)}</summary>
+    <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
+      <dt>Protocol range</dt><dd>${esc(String(s.protocol_min))}–${esc(String(s.protocol_max))}</dd>
+      <dt>Applied / commit</dt><dd>${raft.applied_index===null?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null?"unknown":esc(String(raft.commit_index))}</dd>
+      <dt>Raft sample</dt><dd>${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}</dd>
+      <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
+      <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
+      <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
+      <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
+      <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
+      <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details></td></tr>`;
+  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(n.hostname||n.node_id)}</span>${n.is_leader?`<span class="pill clleader">Leader</span>`:""}</div>
+      <div class="clid">Node ID ${esc(n.node_id)}</div></td><td data-label="Process">${process}</td>
+    <td data-label="Serving">${serving}</td><td data-label="Raft">${raftText}</td><td data-label="WAL">${walText}</td>
+    <td data-label="Snapshot">${snapshotText}</td><td data-label="Media">${mediaText}</td><td data-label="Build" class="clopscode">${esc(s.build)}</td></tr>${detail}`;
+}
+function clusterRestartPreparationHtml(localRow){
+  const media=localRow&&localRow.status&&localRow.status.media;
+  if(!media||!media.new_admissions_blocked) return "";
+  const commands=media.restart_commands||[];
+  const expires=media.preparation_expires_at_unix_ms
+    ? `${Math.max(0,Math.ceil((media.preparation_expires_at_unix_ms-Date.now())/1000))}s`
+    : "unknown";
+  const commandHtml=media.drained&&commands.length
+    ? `<p><b>This node is drained.</b> Remove it from new proxy traffic, confirm direct-play connections are zero, then run exactly one command for this host:</p>
+       <dl class="kvgrid">${commands.map(row=>`<dt>${esc(clusterOperationReason(row.supervisor))}</dt><dd><code>${esc(row.command)}</code></dd>`).join("")}</dl>`
+    : `<p>Waiting for ${esc(String(media.local_active_sessions))} owned session${media.local_active_sessions===1?"":"s"} and ${esc(String(media.admissions_in_flight))} admission${media.admissions_in_flight===1?"":"s"} in flight. Existing streams keep serving.</p>`;
+  return `<div class="clstate ${media.drained?"good":"warn"}" role="status"><h3>${media.drained?"Prepared and drained":"Preparing this voter for restart"}</h3>
+    ${commandHtml}<p>Preparation expires in ${esc(expires)}. Direct-play connections are not counted here; drain them at the proxy.</p>
+    <button class="ghost sm" onclick='cancelLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Cancel preparation</button></div>`;
+}
+function clusterOperationsCard(ops){
+  if(!ops) return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
+      <p class="muted" style="margin:0">Collecting direct voter observations and the guarded rollout verdict…</p></div></div></div>`;
+  if(ops.unavailable) return clusterOperationsUnavailable(esc(ops.message||"request failed"));
+  const rows=ops.nodes||[], answered=rows.filter(row=>row.observation==="answered"&&row.status);
+  const voters=rows.filter(row=>row.membership&&row.membership.is_voter);
+  const ready=answered.filter(row=>row.membership.is_voter&&row.status.serving&&row.status.serving.ready).length;
+  const q=clusterQuorum(voters.length);
+  const leader=answered.find(row=>row.status.raft&&row.status.raft.is_leader===true);
+  const terms=[...new Set(answered.map(row=>row.status.raft&&row.status.raft.current_term).filter(value=>value!==null&&value!==undefined))];
+  const builds=[...new Set(answered.map(row=>row.status.build))];
+  const lags=answered.map(row=>row.status.raft&&row.status.raft.apply_lag_entries).filter(value=>value!==null&&value!==undefined);
+  const sessions=answered.reduce((sum,row)=>sum+(row.status.media&&row.status.media.local_active_sessions||0),0);
+  const oldest=rows.reduce((age,row)=>Math.max(age,row.sample_age_ms||0),0);
+  const localRow=rows.find(row=>row.membership&&ops.membership&&row.membership.node_id===ops.membership.local_node_id);
+  const safe=ops.verdict&&ops.verdict.safe_to_restart_one;
+  const title=safe?"Ready to restart one voter":"Do not restart another voter";
+  const blockers=(ops.verdict&&ops.verdict.blockers)||[];
+  const warnings=(ops.verdict&&ops.verdict.warnings)||[];
+  const findings=[...blockers,...warnings];
+  const findingHtml=findings.length?`<ul class="clopsblockers">${findings.map(f=>`<li><b>${esc(clusterOperationReason(f.code))}</b>${f.node_id?` on ${esc(f.node_id)}`:""}: ${esc(f.message)}</li>`).join("")}</ul>`
+    : `<p class="hint">No rollout blockers are present. The candidate is ${esc(ops.verdict.candidate_node_id)}; prepare and drain that exact node before restarting it.</p>`;
+  const canPrepare=safe&&localRow&&ops.verdict.candidate_node_id===localRow.membership.node_id;
+  const prepareAction=canPrepare
+    ? `<button class="ghost sm" onclick='prepareLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Prepare this voter for restart</button>`
+    : safe?`<span class="hint">Open ${esc(ops.verdict.candidate_node_id)} directly to prepare that voter.</span>`:"";
+  return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
+      <p class="muted" style="margin:0">Direct process-local evidence, collected under one bounded deadline.</p></div>
+      <div class="row">${prepareAction}<button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+      <button class="ghost sm" onclick="refreshClusterOperations(this)">Refresh status</button></div></div>
+    <div class="clstate ${safe?"good":"warn"}" role="status"><h3>${esc(title)}</h3>
+      <p>${safe?`The observed voters preserve majority after one restart. Prepare only ${esc(ops.verdict.candidate_node_id)} and re-check before touching another node.`:
+        "At least one direct safety condition is missing or unhealthy. Keep the available voters running until every blocker below clears."}</p>${findingHtml}</div>
+    ${clusterRestartPreparationHtml(localRow)}
+    <div class="clopsfacts"><div class="clopsfact"><span class="muted">Quorum</span><b>${voters.length} voters · majority ${q.majority} · ${ready} ready</b></div>
+      <div class="clopsfact"><span class="muted">Leader and term</span><b>${leader?esc(leader.membership.hostname||leader.membership.node_id):"Unknown"} · ${terms.length===1?`term ${esc(String(terms[0]))}`:"term disagreement"}</b></div>
+      <div class="clopsfact"><span class="muted">Build convergence</span><b>${builds.length===1?esc(builds[0]):`${builds.length} observed builds`}</b></div>
+      <div class="clopsfact"><span class="muted">Commit / apply</span><b>maximum lag ${lags.length?esc(String(Math.max(...lags))):"unknown"}</b></div>
+      <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
+      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(clusterOperationAge(oldest))}</b></div></div>
+    <div style="overflow-x:auto"><table aria-label="Direct cluster operations status"><thead><tr><th>Host</th><th>Process</th><th>Serving</th><th>Raft</th><th>WAL</th><th>Snapshot</th><th>Media</th><th>Build</th></tr></thead>
+      <tbody>${rows.map(clusterOperationsNodeRow).join("")}</tbody></table></div></div>`;
+}
+async function refreshClusterOperations(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn) btn.disabled=true;
+  SETTINGS_LOADED.delete("clusterOps");
+  const mount=document.getElementById("cluster-operations");
+  if(mount) mount.innerHTML=clusterOperationsCard(null);
+  try{
+    const ops=await loadSettingsKey("clusterOps",generation);
+    if(settingsCurrent(generation,"cluster")){
+      SETTINGS_DATA.clusterOps=ops;
+      const current=document.getElementById("cluster-operations");
+      if(current) current.innerHTML=clusterOperationsCard(ops);
+    }
+  }catch(error){
+    if(settingsCurrent(generation,"cluster")){
+      const current=document.getElementById("cluster-operations");
+      if(current) current.innerHTML=clusterOperationsUnavailable(esc(error&&error.message||"request failed"));
+    }
+  }finally{ if(btn) btn.disabled=false; }
+}
+async function prepareLocalRestart(btn,nodeId){
+  if(!confirm(`Prepare ${nodeId} for restart?\n\nThis blocks new mutable-media work on this process for 15 minutes. Existing sessions keep serving; membership does not change and plurxd will not invoke the host supervisor.`)) return;
+  if(btn) btn.disabled=true;
+  try{
+    await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/restart-preparation`,{method:"POST",body:{expires_in_seconds:900}});
+    toast("Restart preparation started");
+    await refreshClusterOperations();
+    pollLocalRestart(nodeId,PAGE_RENDER_GENERATION);
+  }catch(error){ toast(error&&error.message||"Restart preparation was refused"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+async function cancelLocalRestart(btn,nodeId){
+  if(btn) btn.disabled=true;
+  try{
+    await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/restart-preparation`,{method:"DELETE"});
+    toast("Restart preparation canceled");
+    await refreshClusterOperations();
+  }catch(error){ toast(error&&error.message||"Cancellation failed"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+async function pollLocalRestart(nodeId,generation){
+  while(settingsCurrent(generation,"cluster")){
+    await new Promise(resolve=>setTimeout(resolve,2000));
+    if(!settingsCurrent(generation,"cluster")) return;
+    try{
+      const ops=await api("/cluster/status");
+      if(!settingsCurrent(generation,"cluster")) return;
+      SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+      const mount=document.getElementById("cluster-operations");
+      if(mount) mount.innerHTML=clusterOperationsCard(ops);
+      const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
+      const media=local&&local.status&&local.status.media;
+      if(!media||!media.new_admissions_blocked||media.drained) return;
+    }catch(error){ return; }
+  }
+}
+async function downloadClusterSupportBundle(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const response=await api("/cluster/support-bundle",{raw:true});
+    const blob=await response.blob();
+    const url=URL.createObjectURL(blob), link=document.createElement("a");
+    link.href=url; link.download="plurx-cluster-support.zip"; link.style.display="none";
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    toast("Redacted support bundle downloaded");
+  }catch(error){ toast(error&&error.message||"Support bundle failed"); }
+  finally{ if(btn) btn.disabled=false; }
+}
 function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
   // and the endpoints behind this are admin-only on their own account.
@@ -11404,7 +11615,8 @@ function clusterPanel(d){
     ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
        <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
-  return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
+  const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
+  return `${operations}<div class="card"><h2 class="section" style="margin-top:0">Cluster membership</h2>
     <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
     ${roster}
     <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.

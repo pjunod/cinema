@@ -410,6 +410,8 @@ const ACTIVITY_AUTH_WINDOW_MS: i64 = 30_000;
 const ACTIVITY_AUTH_CONTEXT: &[u8] = b"plurx-internal-activity-v1";
 const INTERNAL_PEER_AUTH_CONTEXT: &[u8] = b"plurx-internal-peer-request-v1";
 const MAX_ACTIVITY_PEERS: usize = 64;
+/// The operations page is one bounded fan-out, not a general cluster crawler.
+pub const MAX_OPERATIONS_PEERS: usize = 8;
 const MAX_ACTIVITY_AUTH_CHECKS_PER_SECOND: u8 = 2;
 const MAX_INTERNAL_AUTH_CHECKS_PER_SECOND: u8 = 128;
 // Exact-request proofs are accepted on the public listener. Bound the work
@@ -3873,6 +3875,51 @@ impl MembershipManager {
             .into_iter()
             .filter(|row| voters.contains(&row.raft_id))
             .take(MAX_ACTIVITY_PEERS)
+            .map(|row| ActivityPeer {
+                http_base: row.http_base,
+                node_id: row.node_id,
+                reachable: node_is_reachable(now, row.last_seen_at),
+            })
+            .collect())
+    }
+
+    /// Resolve the directly observable committed members for one bounded
+    /// operations-status refresh.
+    ///
+    /// Unlike media placement this deliberately retains stale/unready rows:
+    /// the aggregator must render silence as unreachable, not quietly omit it.
+    pub async fn operations_peers(&self) -> Result<Vec<ActivityPeer>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(Vec::new());
+        };
+        let now = unix_ms()?;
+        let members = inner
+            .client
+            .metrics_db()
+            .await?
+            .membership_config
+            .nodes()
+            .map(|(raft_id, _)| *raft_id)
+            .take(MAX_OPERATIONS_PEERS.saturating_add(2))
+            .collect::<BTreeSet<_>>();
+        let rows = inner
+            .client
+            .query_map::<ActivityPeerRow, _>(
+                "SELECT node.node_id, node.raft_id, node.last_seen_at, \
+                        http.public_http_url \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_http http ON http.node_id = node.node_id \
+                 WHERE node.node_id != $1 AND node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id) \
+                 ORDER BY node.raft_id LIMIT $2",
+                params!(inner.identity.node_id.as_str(), MAX_OPERATIONS_PEERS as i64),
+            )
+            .await?;
+        Ok(rows
+            .into_iter()
+            .filter(|row| members.contains(&row.raft_id))
+            .take(MAX_OPERATIONS_PEERS)
             .map(|row| ActivityPeer {
                 http_base: row.http_base,
                 node_id: row.node_id,

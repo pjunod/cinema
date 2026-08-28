@@ -340,6 +340,7 @@ pub struct OfflineManager {
     transcode: Arc<TranscodeManager>,
     node_id: String,
     active: tokio::sync::Mutex<HashMap<String, tokio_util::sync::CancellationToken>>,
+    serving: crate::serving_fence::ServingFence,
     metrics: Arc<OfflineMetrics>,
 }
 
@@ -348,14 +349,20 @@ impl OfflineManager {
         store: Arc<dyn Store>,
         transcode: Arc<TranscodeManager>,
         node_id: String,
+        serving: crate::serving_fence::ServingFence,
     ) -> Arc<Self> {
         Arc::new(Self {
             store,
             transcode,
             node_id,
             active: tokio::sync::Mutex::new(HashMap::new()),
+            serving,
             metrics: Arc::new(OfflineMetrics::new()),
         })
+    }
+
+    pub(crate) async fn active_preparations(&self) -> usize {
+        self.active.lock().await.len()
     }
 
     pub(crate) fn record_request(&self, height: i64) {
@@ -451,13 +458,19 @@ impl OfflineManager {
                 tokio::time::sleep(IDLE_POLL).await;
                 continue;
             }
+            let Some(restart_admission) = self.serving.try_restart_admission().await else {
+                tokio::time::sleep(IDLE_POLL).await;
+                continue;
+            };
             let package = match self.store.claim_next_offline_package(&self.node_id).await {
                 Ok(Some(package)) => package,
                 Ok(None) => {
+                    drop(restart_admission);
                     tokio::time::sleep(IDLE_POLL).await;
                     continue;
                 }
                 Err(error) => {
+                    drop(restart_admission);
                     tracing::warn!(%error, "offline queue lookup failed");
                     tokio::time::sleep(IDLE_POLL).await;
                     continue;
@@ -468,6 +481,9 @@ impl OfflineManager {
                 .lock()
                 .await
                 .insert(package.id.clone(), cancelled.clone());
+            // Registration now owns the lifetime sampled by restart status.
+            // Drop the admission only after that handoff is visible.
+            drop(restart_admission);
             self.prepare(package.clone(), &cancelled).await;
             self.active.lock().await.remove(&package.id);
         }
@@ -878,7 +894,15 @@ mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
-        let manager = OfflineManager::new(Arc::clone(&store), transcode, "test-node".into());
+        let manager = OfflineManager::new(
+            Arc::clone(&store),
+            transcode,
+            "test-node".into(),
+            crate::serving_fence::ServingFence::new(
+                plurx_core::cluster::migration::status::ReplicationMonitor::sqlite()
+                    .metrics_handle(),
+            ),
+        );
         Fixture {
             manager,
             store,

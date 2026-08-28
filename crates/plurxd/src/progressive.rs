@@ -183,6 +183,12 @@ impl Streams {
             .map(|s| s.info())
     }
 
+    /// Exact O(1) count for restart drain evidence. The response-body guard
+    /// owns registration, so zero means no progressive remux remains alive.
+    pub(crate) fn active_count(&self) -> usize {
+        self.live.lock().map_or(usize::MAX, |live| live.len())
+    }
+
     /// Remove `id`, but only if it is still the registration `seq` made.
     ///
     /// A seek re-registers under the same id and the superseded guard is

@@ -39,9 +39,11 @@ mod version;
 mod vodgen;
 mod vodserve;
 mod waitpool;
+mod wal_cli;
 mod watched;
 
 use std::future::IntoFuture;
+use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, UdpSocket};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -141,13 +143,98 @@ enum Command {
         #[arg(long)]
         library: Option<i64>,
     },
+    /// Inspect or prepare a running replicated cluster through its admin API.
+    Cluster {
+        #[command(subcommand)]
+        command: ClusterCommand,
+    },
+    /// Inspect or back up a stopped local Raft WAL. No source mutation is implemented.
+    Wal {
+        #[command(subcommand)]
+        command: crate::wal_cli::WalCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ClusterCommand {
+    /// Print the same versioned aggregate and rollout verdict as the Cluster tab.
+    Status {
+        #[arg(long, default_value = "http://127.0.0.1:32400")]
+        server: String,
+        /// Owner-only file containing the admin bearer token.
+        #[arg(long, env = "PLURX_ADMIN_TOKEN_FILE")]
+        token_file: Option<PathBuf>,
+        /// Emit the versioned JSON response instead of the compact table.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Download a bounded, redacted cluster evidence archive.
+    SupportBundle {
+        #[arg(long, default_value = "http://127.0.0.1:32400")]
+        server: String,
+        /// Owner-only file containing the admin bearer token.
+        #[arg(long, env = "PLURX_ADMIN_TOKEN_FILE")]
+        token_file: Option<PathBuf>,
+        /// New archive path. Existing files are never overwritten.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Expireably block new mutable media on one exact safe candidate and wait for drain.
+    PrepareRestart {
+        #[arg(long, default_value = "http://127.0.0.1:32400")]
+        server: String,
+        #[arg(long, env = "PLURX_ADMIN_TOKEN_FILE")]
+        token_file: Option<PathBuf>,
+        /// Must name the backend at --server. Omit to use its local node id.
+        #[arg(long)]
+        node_id: Option<String>,
+    },
+    /// Cancel an unexpired process-local restart preparation.
+    CancelRestart {
+        #[arg(long, default_value = "http://127.0.0.1:32400")]
+        server: String,
+        #[arg(long, env = "PLURX_ADMIN_TOKEN_FILE")]
+        token_file: Option<PathBuf>,
+        /// Must name the backend at --server. Omit to use its local node id.
+        #[arg(long)]
+        node_id: Option<String>,
+    },
+}
+
+#[derive(Debug)]
+struct CliExit {
+    code: i32,
+    message: String,
+}
+
+impl std::fmt::Display for CliExit {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CliExit {}
+
+fn cli_exit(code: i32, message: impl Into<String>) -> anyhow::Error {
+    CliExit {
+        code,
+        message: message.into(),
+    }
+    .into()
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = Config::load(cli.config.as_deref()).context("loading configuration")?;
-    dispatch(cli.command.unwrap_or(Command::Run), config).await
+    if let Err(error) = dispatch(cli.command.unwrap_or(Command::Run), config).await {
+        let code = error
+            .downcast_ref::<CliExit>()
+            .map_or(1, |error| error.code);
+        eprintln!("{error:#}");
+        std::process::exit(code);
+    }
+    Ok(())
 }
 
 /// Route a parsed command, separated from `main` so every subcommand but the
@@ -161,7 +248,10 @@ async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
             canonicalize_configured_dir(&mut config.storage.data_dir, "data")?;
         }
         Command::RefreshMetadata { .. } => {}
-        Command::Healthcheck | Command::Advertise { .. } => {}
+        Command::Healthcheck
+        | Command::Advertise { .. }
+        | Command::Cluster { .. }
+        | Command::Wal { .. } => {}
     }
     match command {
         Command::Run => run(config).await,
@@ -178,7 +268,461 @@ async fn dispatch(command: Command, mut config: Config) -> anyhow::Result<()> {
             reset_password(&config, &username, password).await
         }
         Command::RefreshMetadata { library } => refresh_metadata(&mut config, library).await,
+        Command::Cluster { command } => cluster_command(command).await,
+        Command::Wal { command } => crate::wal_cli::run(command, &config).await,
     }
+}
+
+async fn cluster_command(command: ClusterCommand) -> anyhow::Result<()> {
+    match command {
+        ClusterCommand::Status {
+            server,
+            token_file,
+            json,
+        } => cluster_status_command(&server, token_file.as_deref(), json).await,
+        ClusterCommand::SupportBundle {
+            server,
+            token_file,
+            output,
+        } => cluster_support_bundle_command(&server, token_file.as_deref(), &output).await,
+        ClusterCommand::PrepareRestart {
+            server,
+            token_file,
+            node_id,
+        } => {
+            cluster_prepare_restart_command(&server, token_file.as_deref(), node_id.as_deref())
+                .await
+        }
+        ClusterCommand::CancelRestart {
+            server,
+            token_file,
+            node_id,
+        } => {
+            cluster_cancel_restart_command(&server, token_file.as_deref(), node_id.as_deref()).await
+        }
+    }
+}
+
+async fn cluster_status_command(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let status = fetch_cluster_aggregate(server, token_file).await?;
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&status)
+                .map_err(|_| cli_exit(3, "cluster status could not be encoded"))?
+        );
+    } else {
+        print_cluster_status(&status);
+    }
+    if status.verdict.safe_to_restart_one {
+        return Ok(());
+    }
+    let incomplete = status
+        .nodes
+        .iter()
+        .any(|row| row.observation != crate::http::cluster_operations::ObservationState::Answered);
+    Err(cli_exit(
+        if incomplete { 3 } else { 1 },
+        if incomplete {
+            "cluster status is incomplete because one or more required peers were not observed"
+        } else {
+            "cluster status was collected, but restarting a voter is not safe"
+        },
+    ))
+}
+
+async fn fetch_cluster_aggregate(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+) -> anyhow::Result<crate::http::cluster_operations::ClusterOperationsAggregate> {
+    let response = cluster_api_request(server, token_file, "/api/v1/cluster/status").await?;
+    let body = bounded_cli_response(response, 1024 * 1024).await?;
+    serde_json::from_slice(&body).map_err(|_| {
+        cli_exit(
+            3,
+            "cluster status returned an invalid or incompatible response",
+        )
+    })
+}
+
+fn print_cluster_status(status: &crate::http::cluster_operations::ClusterOperationsAggregate) {
+    println!(
+        "{:<20} {:<12} {:<18} {:<23} {:<18} MEDIA",
+        "NODE", "PROCESS", "SERVING", "RAFT", "WAL"
+    );
+    for row in &status.nodes {
+        let node = row.membership.hostname.as_str();
+        if let Some(local) = row.status.as_ref() {
+            let serving = if local.serving.ready {
+                "ready".to_owned()
+            } else {
+                format!("fenced:{:?}", local.serving.reason)
+            };
+            let raft = format!(
+                "term {} lag {}",
+                local
+                    .raft
+                    .current_term
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string()),
+                local
+                    .raft
+                    .apply_lag_entries
+                    .map_or_else(|| "?".to_owned(), |value| value.to_string())
+            );
+            let wal = local.wal.snapshot.as_ref().map_or_else(
+                || "unavailable".to_owned(),
+                |wal| format!("{:?} durable {:?}", wal.state, wal.last_durable_index),
+            );
+            println!(
+                "{:<20} {:<12} {:<18} {:<23} {:<18} {} sessions",
+                truncate_table(node, 20),
+                "live",
+                truncate_table(&serving, 18),
+                truncate_table(&raft, 23),
+                truncate_table(&wal, 18),
+                local.media.local_active_sessions,
+            );
+        } else {
+            println!(
+                "{:<20} {:<12} {:<18} {:<23} {:<18} unknown",
+                truncate_table(node, 20),
+                format!("{:?}", row.observation).to_ascii_lowercase(),
+                "unknown",
+                "unknown",
+                "unknown",
+            );
+        }
+    }
+    println!();
+    println!(
+        "safe_to_restart_one: {}",
+        status.verdict.safe_to_restart_one
+    );
+    if let Some(candidate) = status.verdict.candidate_node_id.as_deref() {
+        println!("candidate_node_id: {candidate}");
+    }
+    for blocker in &status.verdict.blockers {
+        println!(
+            "BLOCKER {}{}: {}",
+            blocker.code,
+            blocker
+                .node_id
+                .as_deref()
+                .map_or_else(String::new, |node| format!(" [{node}]")),
+            blocker.message
+        );
+    }
+    for warning in &status.verdict.warnings {
+        println!("WARNING {}: {}", warning.code, warning.message);
+    }
+}
+
+fn truncate_table(value: &str, width: usize) -> String {
+    let mut text = value.chars().take(width).collect::<String>();
+    if value.chars().count() > width && width > 1 {
+        text.pop();
+        text.push('…');
+    }
+    text
+}
+
+async fn cluster_support_bundle_command(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    output: &std::path::Path,
+) -> anyhow::Result<()> {
+    let response =
+        cluster_api_request(server, token_file, "/api/v1/cluster/support-bundle").await?;
+    let body = bounded_cli_response(response, 2 * 1024 * 1024).await?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(output).map_err(|error| {
+        cli_exit(
+            2,
+            format!(
+                "refusing to overwrite or create support bundle {}: {error}",
+                output.display()
+            ),
+        )
+    })?;
+    file.write_all(&body)
+        .and_then(|()| file.sync_all())
+        .map_err(|error| cli_exit(2, format!("writing {}: {error}", output.display())))?;
+    println!("wrote redacted support bundle {}", output.display());
+    Ok(())
+}
+
+async fn cluster_prepare_restart_command(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    requested_node_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let preflight = fetch_cluster_aggregate(server, token_file).await?;
+    if !preflight.verdict.safe_to_restart_one {
+        print_cluster_status(&preflight);
+        return Err(cli_exit(
+            1,
+            "restart preparation refused because the rollout verdict is unsafe",
+        ));
+    }
+    let local_node_id = preflight.membership.local_node_id.as_str();
+    let node_id = requested_node_id.unwrap_or(local_node_id);
+    if node_id != local_node_id {
+        return Err(cli_exit(
+            2,
+            "--node-id must name the backend at --server; connect directly to the target node",
+        ));
+    }
+    if preflight.verdict.candidate_node_id.as_deref() != Some(node_id) {
+        return Err(cli_exit(
+            1,
+            "this backend is not the current safe restart candidate; connect to the named candidate",
+        ));
+    }
+    let path = format!(
+        "/api/v1/cluster/nodes/{}/restart-preparation",
+        percent_encode_path_segment(node_id)
+    );
+    let response = cluster_api_request_method(
+        server,
+        token_file,
+        &path,
+        reqwest::Method::POST,
+        Some(br#"{"expires_in_seconds":900}"#.to_vec()),
+    )
+    .await?;
+    let body = bounded_cli_response(response, 64 * 1024).await?;
+    let mut preparation = serde_json::from_slice::<
+        crate::http::cluster_operations::RestartPreparationResponse,
+    >(&body)
+    .map_err(|_| cli_exit(3, "restart preparation returned an invalid response"))?;
+    loop {
+        println!(
+            "{}: {} owned sessions, {} admissions in flight, drained={}",
+            node_id,
+            preparation.media.local_active_sessions,
+            preparation.media.admissions_in_flight,
+            preparation.media.drained
+        );
+        if !preparation.media.new_admissions_blocked {
+            return Err(cli_exit(
+                1,
+                "restart preparation expired or was canceled before the node drained",
+            ));
+        }
+        if preparation.media.drained {
+            println!("Direct-play connections remain a proxy-side check.");
+            println!("Run exactly one supervisor command on {node_id}:");
+            for command in &preparation.restart_commands {
+                println!("  {:<16} {}", command.supervisor, command.command);
+            }
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let aggregate = fetch_cluster_aggregate(server, token_file).await?;
+        let Some(local) = aggregate
+            .nodes
+            .iter()
+            .find(|row| row.membership.node_id == node_id)
+            .and_then(|row| row.status.as_ref())
+        else {
+            return Err(cli_exit(3, "the prepared node could no longer be observed"));
+        };
+        preparation.media = local.media.clone();
+        preparation.restart_commands = local.media.restart_commands.clone();
+    }
+}
+
+async fn cluster_cancel_restart_command(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    requested_node_id: Option<&str>,
+) -> anyhow::Result<()> {
+    let status = fetch_cluster_aggregate(server, token_file).await?;
+    let local_node_id = status.membership.local_node_id.as_str();
+    let node_id = requested_node_id.unwrap_or(local_node_id);
+    if node_id != local_node_id {
+        return Err(cli_exit(
+            2,
+            "--node-id must name the backend at --server; connect directly to the target node",
+        ));
+    }
+    let path = format!(
+        "/api/v1/cluster/nodes/{}/restart-preparation",
+        percent_encode_path_segment(node_id)
+    );
+    let response =
+        cluster_api_request_method(server, token_file, &path, reqwest::Method::DELETE, None)
+            .await?;
+    let body = bounded_cli_response(response, 64 * 1024).await?;
+    let canceled = serde_json::from_slice::<
+        crate::http::cluster_operations::RestartPreparationResponse,
+    >(&body)
+    .map_err(|_| cli_exit(3, "restart cancellation returned an invalid response"))?;
+    println!(
+        "restart preparation canceled on {}; new admissions are enabled",
+        canceled.node_id
+    );
+    Ok(())
+}
+
+fn percent_encode_path_segment(value: &str) -> String {
+    value
+        .bytes()
+        .flat_map(|byte| match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                vec![char::from(byte)]
+            }
+            _ => format!("%{byte:02X}").chars().collect(),
+        })
+        .collect()
+}
+
+async fn cluster_api_request(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    path: &str,
+) -> anyhow::Result<reqwest::Response> {
+    cluster_api_request_method(server, token_file, path, reqwest::Method::GET, None).await
+}
+
+async fn cluster_api_request_method(
+    server: &str,
+    token_file: Option<&std::path::Path>,
+    path: &str,
+    method: reqwest::Method,
+    body: Option<Vec<u8>>,
+) -> anyhow::Result<reqwest::Response> {
+    let token = read_owner_only_token(token_file)?;
+    let mut base = reqwest::Url::parse(server)
+        .map_err(|_| cli_exit(2, "--server must be an absolute http(s) origin"))?;
+    if !matches!(base.scheme(), "http" | "https")
+        || base.host_str().is_none()
+        || !base.username().is_empty()
+        || base.password().is_some()
+        || base.query().is_some()
+        || base.fragment().is_some()
+        || !matches!(base.path(), "" | "/")
+    {
+        return Err(cli_exit(2, "--server must be an absolute http(s) origin"));
+    }
+    base.set_path(path);
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| cli_exit(2, "could not initialize the cluster HTTP client"))?;
+    let mut request = client.request(method, base).bearer_auth(token);
+    if let Some(body) = body {
+        request = request
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body);
+    }
+    let response = request.send().await.map_err(|_| {
+        cli_exit(
+            3,
+            "cluster status is incomplete because the server is unreachable",
+        )
+    })?;
+    if response.status().is_success() {
+        return Ok(response);
+    }
+    let status = response.status();
+    Err(cli_exit(
+        if matches!(status.as_u16(), 401 | 403 | 404) {
+            2
+        } else {
+            3
+        },
+        format!("cluster API refused the request with HTTP {status}"),
+    ))
+}
+
+fn read_owner_only_token(token_file: Option<&std::path::Path>) -> anyhow::Result<String> {
+    let path = token_file.ok_or_else(|| {
+        cli_exit(
+            2,
+            "--token-file (or PLURX_ADMIN_TOKEN_FILE) is required; tokens are never accepted on the command line",
+        )
+    })?;
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(path)
+        .map_err(|error| cli_exit(2, format!("reading token file {}: {error}", path.display())))?;
+    let metadata = file.metadata().map_err(|error| {
+        cli_exit(
+            2,
+            format!("inspecting token file {}: {error}", path.display()),
+        )
+    })?;
+    if !metadata.is_file() || metadata.len() > 16 * 1024 {
+        return Err(cli_exit(
+            2,
+            "the token file must be a small regular file, not a symlink",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        if metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != unsafe { libc::geteuid() }
+        {
+            return Err(cli_exit(
+                2,
+                "the token file must be owned by this user and readable only by its owner (mode 0600)",
+            ));
+        }
+    }
+    let mut token = String::new();
+    file.take(16 * 1024 + 1)
+        .read_to_string(&mut token)
+        .map_err(|error| cli_exit(2, format!("reading token file {}: {error}", path.display())))?;
+    if token.len() > 16 * 1024 {
+        return Err(cli_exit(2, "the token file exceeds the 16 KiB bound"));
+    }
+    let token = token.trim();
+    if token.is_empty() || token.chars().any(char::is_whitespace) {
+        return Err(cli_exit(
+            2,
+            "the token file does not contain one valid bearer token",
+        ));
+    }
+    Ok(token.to_owned())
+}
+
+async fn bounded_cli_response(
+    mut response: reqwest::Response,
+    max_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| cli_exit(3, "cluster response ended before it was complete"))?
+    {
+        if body.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(cli_exit(
+                3,
+                "cluster response exceeded the bounded size limit",
+            ));
+        }
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// Resolve a configured relocation symlink once, before any store or cache
@@ -5080,6 +5624,70 @@ mod startup_tests {
             cli.command,
             Some(Command::RefreshMetadata { library: Some(7) })
         ));
+    }
+
+    #[test]
+    fn cluster_and_wal_commands_keep_credentials_and_mutation_out_of_argv() {
+        let cluster = Cli::try_parse_from([
+            "plurxd",
+            "cluster",
+            "status",
+            "--server",
+            "https://node-a.example",
+            "--token-file",
+            "/run/secrets/plurx-admin",
+            "--json",
+        ])
+        .expect("cluster status command");
+        assert!(matches!(
+            cluster.command,
+            Some(Command::Cluster {
+                command: ClusterCommand::Status { json: true, .. }
+            })
+        ));
+        assert!(Cli::try_parse_from(["plurxd", "cluster", "status", "--token", "secret"]).is_err());
+
+        let wal = Cli::try_parse_from([
+            "plurxd",
+            "wal",
+            "recovery-plan",
+            "--data-dir",
+            "/srv/plurx",
+            "--json",
+        ])
+        .expect("WAL recovery plan command");
+        assert!(matches!(wal.command, Some(Command::Wal { .. })));
+        assert!(Cli::try_parse_from(["plurxd", "wal", "apply-plan"]).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cluster_token_reader_requires_the_opened_owner_only_regular_file() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let root = crate::test_tempdir().expect("token fixture");
+        let token = root.path().join("admin-token");
+        std::fs::write(&token, "fixture-token\n").expect("seed token");
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o600))
+            .expect("make token owner-only");
+        assert_eq!(
+            read_owner_only_token(Some(&token)).expect("read owner-only token"),
+            "fixture-token"
+        );
+
+        let link = root.path().join("token-link");
+        symlink(&token, &link).expect("seed symlink");
+        assert!(read_owner_only_token(Some(&link)).is_err());
+
+        std::fs::set_permissions(&token, std::fs::Permissions::from_mode(0o640))
+            .expect("make token group-readable");
+        assert!(read_owner_only_token(Some(&token)).is_err());
+    }
+
+    #[test]
+    fn cluster_node_ids_are_encoded_as_one_path_segment() {
+        assert_eq!(percent_encode_path_segment("node-a"), "node-a");
+        assert_eq!(percent_encode_path_segment("node/a b"), "node%2Fa%20b");
     }
 
     #[test]

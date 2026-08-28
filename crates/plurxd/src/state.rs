@@ -523,8 +523,12 @@ impl AppState {
             credential_key,
             trakt_base,
         ));
-        let offline =
-            OfflineManager::new(Arc::clone(&store), Arc::clone(&transcode), node_id.clone());
+        let offline = OfflineManager::new(
+            Arc::clone(&store),
+            Arc::clone(&transcode),
+            node_id.clone(),
+            serving.clone(),
+        );
         let media_pool = crate::media_pool::MediaPool::new(membership.clone());
         let media_sessions = crate::media_sessions::MediaSessionCoordinator::new(
             membership.clone(),

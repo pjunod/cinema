@@ -1582,8 +1582,8 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 name = "hiqlite"
 version = "0.14.0"
 dependencies = [
- "argon2",
  "arc-swap",
+ "argon2",
  "axum",
  "axum-extra",
  "axum-server",
@@ -1660,8 +1660,6 @@ dependencies = [
 [[package]]
 name = "hiqlite-wal"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "247fc29e082f38fdf25270f6a5d7148284c9710384c3bce21636608dc104fddf"
 dependencies = [
  "bincode",
  "byteorder",

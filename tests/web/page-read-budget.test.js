@@ -622,7 +622,7 @@ test("Settings loads only the active tab manifest", () => {
     analysis: { required: ["settings", "analysis"], secondary: [] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
-    cluster: { required: ["cluster"], secondary: [] },
+    cluster: { required: ["cluster"], secondary: ["clusterOps"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -929,7 +929,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     analysis:{required:["/settings","/analysis/summary"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
-    cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
+    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","cluster-log"]},
   };
   for(const [tab,expected] of Object.entries(cases)){
     const requests=[], phases=[], logReleases=[];

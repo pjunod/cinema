@@ -236,6 +236,7 @@ optional = true
 
 [dependencies.hiqlite-wal]
 version = "0.14"
+path = "../hiqlite-wal"
 
 [dependencies.home]
 version = "0.5.9"

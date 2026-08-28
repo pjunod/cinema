@@ -22,6 +22,7 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 clap = { workspace = true }
 plurx-core = { path = "../plurx-core", features = ["hiqlite-store"] }
+hiqlite-wal = { workspace = true }
 plurx-compat-plex = { path = "../plurx-compat-plex" }
 plurx-pgs = { path = "../plurx-pgs" }
 serde = { workspace = true }

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 
@@ -15,6 +15,37 @@ use crate::media_sessions::{
     REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
+
+pub(crate) enum RemoteStartError {
+    Status(StatusCode),
+    RestartDrain,
+}
+
+impl From<StatusCode> for RemoteStartError {
+    fn from(status: StatusCode) -> Self {
+        Self::Status(status)
+    }
+}
+
+impl IntoResponse for RemoteStartError {
+    fn into_response(self) -> Response {
+        match self {
+            Self::Status(status) => status.into_response(),
+            Self::RestartDrain => {
+                let mut response = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    crate::serving_fence::RESTART_DRAIN_JSON,
+                )
+                    .into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                response
+            }
+        }
+    }
+}
 
 async fn authorize(
     state: &AppState,
@@ -58,15 +89,20 @@ pub(crate) async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<RemoteStartResponse>, StatusCode> {
+) -> Result<Json<RemoteStartResponse>, RemoteStartError> {
     let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
+    let _restart_admission = state
+        .serving
+        .try_restart_admission()
+        .await
+        .ok_or(RemoteStartError::RestartDrain)?;
     let request = serde_json::from_slice::<RemoteStartRequest>(&body)
         .ok()
         .filter(RemoteStartRequest::is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
     if !state.media_pool.remote_placement_ready(&state).await {
-        return Err(StatusCode::SERVICE_UNAVAILABLE);
+        return Err(StatusCode::SERVICE_UNAVAILABLE.into());
     }
     let user = state
         .store
