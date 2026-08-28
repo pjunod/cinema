@@ -105,9 +105,10 @@ jobs:
   ffmpeg8-pacing:
     name: pacing capability contract on ffmpeg 8
     # The container tag is the pin here — `ubuntu:26.04` is where ffmpeg 8 comes
-    # from, and it moves only when this line does. The host VM image is pinned
-    # separately by the runner playbook.
-    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    # from, and it moves only when this line does. The outer VM is deliberately
+    # disposable: job containers run as root, so a persistent self-hosted
+    # workspace would retain root-owned Cargo artifacts after this job exits.
+    runs-on: ubuntu-24.04
     container: ubuntu:26.04
     timeout-minutes: 45
     steps:
