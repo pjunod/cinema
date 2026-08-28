@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["3f848060"]
+points = ["cluster.membership", "cluster.operations", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract", "history-regressions"]
+reason = "Replicated schema triggers reject previous-release join, promotion, and removal lifecycle writes while a planned-outage lease exists, and local restart or maintenance fences are capped at the committed replicated expiry after consensus delay. Functional legacy-write, delayed-expiry, serving-fence, HTTP ordering, full Rust, web, operations, and history checks retain both adversarial-review corrections."
