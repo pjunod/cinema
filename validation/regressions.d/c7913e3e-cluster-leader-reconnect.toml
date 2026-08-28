@@ -5,8 +5,3 @@ commits = ["c7913e3e"]
 points = ["cluster.auth"]
 checks = ["cluster-auth", "rust-gate"]
 reason = "The retained Hiqlite unit test requires a client stream that has authenticated a replacement leader to reconnect immediately while an unchanged or still-unreachable leader keeps the one-second failure backoff. The separate-process leader-loss drill kills the active voter after 32 acknowledged writes and requires the same fixed 64-write workload to finish with zero request errors, all writes preserved, and recovery inside the ten-second election budget; restoring the unconditional post-discovery sleep exhausts Plurx's third bounded idempotent-write attempt and fails that drill."
-
-[[coverage]]
-commits = ["f61adcc4"]
-reason = "This commit only records the retained leader-reconnect runtime evidence in regressions.d; it does not change cluster behavior."
-ignore = true
