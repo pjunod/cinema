@@ -357,14 +357,20 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
+    "arm_media_session_handoff",
+    "complete_media_session_handoff",
+    "arm_media_session_terminal_projection",
+    "complete_media_session_terminal_projection",
     "fail_media_session_request",
     "media_session_route",
     "media_session_route_by_incarnation",
+    "media_session_route_for_playback",
     "record_media_session_terminal_ack",
     "media_session_terminal_ack",
     "renew_media_sessions",
     "expired_media_sessions",
     "claim_media_session_takeover",
+    "end_media_session_if_owner",
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
@@ -1478,7 +1484,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             "{backend}"
         );
         assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
-        assert_eq!(renewed_route.media_sequence, 5, "{backend}");
+        assert_eq!(renewed_route.media_sequence, 7, "{backend}");
 
         // Monotone progress (§8.8). A generation that restarts its local
         // encoder resets its own index and will heartbeat a lower frontier;
@@ -1513,7 +1519,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(held.produced_playable_through_ms, 20_000, "{backend}");
         assert_eq!(held.fetched_through_ms, 10_000, "{backend}");
         assert_eq!(
-            held.media_sequence, 5,
+            held.media_sequence, 7,
             "{backend}: the sequence high-water mark is what a successor \
              starts above; it may never move backwards"
         );

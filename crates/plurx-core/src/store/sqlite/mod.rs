@@ -1186,24 +1186,6 @@ impl SqliteStore {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) fn apply_migrations_for_test(
-        conn: &Connection,
-        through_version: i64,
-    ) -> rusqlite::Result<()> {
-        let through_version = usize::try_from(through_version)
-            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
-        if through_version > MIGRATIONS.len() {
-            return Err(rusqlite::Error::InvalidParameterName(
-                through_version.to_string(),
-            ));
-        }
-        for sql in MIGRATIONS.iter().take(through_version) {
-            conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))?;
-        }
-        conn.pragma_update(None, "user_version", through_version as i64)
-    }
-
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>
     where
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,
@@ -1588,6 +1570,26 @@ impl SettingsStore for SqliteStore {
     }
 }
 
+#[cfg(all(test, feature = "hiqlite-store"))]
+impl SqliteStore {
+    pub(crate) fn apply_migrations_for_test(
+        conn: &Connection,
+        through_version: i64,
+    ) -> rusqlite::Result<()> {
+        let through_version = usize::try_from(through_version)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        if through_version > MIGRATIONS.len() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                through_version.to_string(),
+            ));
+        }
+        for sql in MIGRATIONS.iter().take(through_version) {
+            conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))?;
+        }
+        conn.pragma_update(None, "user_version", through_version as i64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1805,7 +1807,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 33,
+            version, 35,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
