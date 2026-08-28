@@ -721,6 +721,7 @@ class OperationsContractCase(unittest.TestCase):
             "macos-26",
             '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
         )
+        hosted_linux_24 = "    runs-on: ubuntu-24.04"
         hosted_linux = "    runs-on: ubuntu-latest"
 
         for path in (
@@ -759,6 +760,11 @@ class OperationsContractCase(unittest.TestCase):
                 }:
                     expected = android
                 elif (
+                    path == ".github/workflows/validation-nightly.yml"
+                    and name == "ffmpeg8-pacing"
+                ):
+                    expected = hosted_linux_24
+                elif (
                     "uses: ./.github/actions/ffmpeg" in block
                     and "container: ubuntu:26.04" not in block
                 ):
@@ -779,6 +785,21 @@ class OperationsContractCase(unittest.TestCase):
                 block,
                 f"rust-audit:{name} does not provision the pinned Cargo toolchain",
             )
+
+    def test_job_containers_never_use_persistent_self_hosted_workspaces(self):
+        workflow_root = ROOT / ".github/workflows"
+        for path in sorted(workflow_root.glob("*.y*ml")):
+            relative = path.relative_to(ROOT).as_posix()
+            for name, block in workflow_job_blocks(relative).items():
+                if "\n    container:" not in block:
+                    continue
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
+                self.assertNotIn(
+                    "self-hosted",
+                    runs_on.group(0),
+                    f"{relative}:{name} runs a root container on persistent storage",
+                )
 
     def test_ci_runner_mode_has_one_validated_operator_switch(self):
         ci = read(".github/workflows/ci.yml")
