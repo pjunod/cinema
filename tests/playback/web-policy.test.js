@@ -1942,7 +1942,7 @@ function shippedBinding(keyword, name) {
 
 // The detail screen with no browser: format helpers that are not under test are
 // stubbed, everything that decides what a viewer READS is shipped code.
-function detailHarness({ decisions = {} } = {}) {
+function detailHarness({ decisions = {}, admin = false } = {}) {
   const requested = [];
   const build = new Function(
     "document",
@@ -1982,7 +1982,7 @@ function detailHarness({ decisions = {} } = {}) {
       shippedSource("prePlayBurnNeeded"),
       shippedSource("prePlayApplication"),
       shippedSource("prePlayPreview"),
-      "return {specBlock, prePlayPickers, setPrePlay, clearPrePlay," +
+      "return {specBlock, analysisFileControl, prePlayPickers, setPrePlay, clearPrePlay," +
         " prePlaySelection, decisionUrl, prePlayApplication, prePlayBurnNeeded," +
         " preferredLanguageNote};",
     ].join("\n"),
@@ -2003,7 +2003,7 @@ function detailHarness({ decisions = {} } = {}) {
     () => "3.4 GB",
     () => "1h 52m",
     () => "8.1 Mb/s",
-    { is_admin: false },
+    { is_admin: admin },
     (file) => String(file.id),
   );
   return { ...shipped, requested };
@@ -2099,14 +2099,20 @@ test("the detail screen names every subtitle track, its format and its markers",
 
 test("the detail screen names the supported HLS mode before playback", () => {
   const indexed = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "indexed" });
-  assert.match(indexed, /<dt>Supported HLS<\/dt><dd><span class="mode-chip vod">VOD HLS<\/span>/);
+  assert.match(indexed, /<dt>HLS capability<\/dt><dd><span class="mode-chip vod">VOD HLS<\/span>/);
   assert.match(indexed, /Fixed, seekable timeline/);
   const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
-  assert.match(pending, /<span class="mode-chip live">Live HLS<\/span>/);
+  assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
   assert.match(pending, /while VOD analysis is pending/);
+  assert.match(pending, /when live recovery is enabled in Playback settings/);
   const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
-  assert.match(unsupported, /Live HLS only/);
   assert.match(unsupported, /cannot use the VOD indexer/);
+  assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
+  const adminControl=detailHarness({admin:true}).analysisFileControl({
+    ...MOVIE_FILE,available:true,vod_index_status:"unsupported",
+  });
+  assert.match(adminControl,/VOD analysis unsupported/);
+  assert.doesNotMatch(adminControl,/Analyze now/);
 });
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {

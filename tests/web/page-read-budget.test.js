@@ -639,19 +639,19 @@ test("Settings loads only the active tab manifest", () => {
   assert.match(loadTab, /patchSettingsSecondary/);
   assert.match(loadTab, /settingsCurrent\(generation,tab\)/);
   assert.match(loadTab, /patchSettingsSecondaryError/);
-  for (const endpoint of ["/libraries", "/settings", "/analysis/jobs", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
+  for (const endpoint of ["/libraries", "/settings", "/analysis/summary", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
     assert.match(SHIPPED_UI, new RegExp(`api\\(${JSON.stringify(endpoint).replace("/", "\\/")}`),
       `Settings endpoint map includes ${endpoint}`);
   }
 });
 
-test("Analysis workspace paginates recent work and explains actionable failures", () => {
+test("Analysis workspace uses server pages and separates expected outcomes", () => {
   const main={innerHTML:"",querySelectorAll:()=>[]};
   const document={activeElement:null,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
   const harness=new Function(
     "document","esc","fmtAgo","fmtBytes",
     `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
-     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true};
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
      ${shippedSource("analysisStateLabel")}
      ${shippedSource("analysisPhase")}
      ${shippedSource("analysisErrorInfo")}
@@ -659,32 +659,68 @@ test("Analysis workspace paginates recent work and explains actionable failures"
      ${shippedSource("analysisRows")}
      ${shippedSource("analysisCounts")}
      ${shippedSource("analysisRowKey")}
-     ${shippedSource("analysisMatches")}
-     ${shippedSource("setAnalysisFilter")}
-     ${shippedSource("setAnalysisPage")}
+     ${shippedSource("analysisDisposition")}
+     ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisCanRetry")}
+     ${shippedSource("analysisPageUrl")}
      ${shippedSource("paintAnalysis")}
      return {
        paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
-       page:setAnalysisPage,filter:setAnalysisFilter,
+       page:(page,snapshot)=>{ANALYSIS_VIEW.page=page;paintAnalysis(snapshot);},
+       url:(view)=>{Object.assign(ANALYSIS_VIEW,view);return analysisPageUrl();},
+       disposition:analysisDisposition,retry:analysisCanRetry,
        error:analysisErrorInfo,html:()=>document.getElementById("main").innerHTML,
      };`,
   )(document,(value)=>String(value??""),()=>"just now",(value)=>`${value} B`);
-  const jobs=Array.from({length:26},(_,index)=>({
-    job_id:`job-${index}`,file_id:String(index+1),state:"ready",updated_at_ms:100-index,
-    attempts:1,owner_node_id:"node-a",pipeline_version:"0123456789ab",source_size:123,
+  const rows=Array.from({length:25},(_,index)=>({
+    row_key:`job:job-${index}`,request_id:"",job_id:`job-${index}`,
+    file_id:String(index+1),item_id:String(index+100),title:`Movie ${index}`,
+    state:"ready",request_state:"",job_state:"ready",disposition:"ready",
+    updated_at_ms:100-index,attempts:1,owner_node_id:"node-a",
+    target_node_id:"",pipeline_version:"0123456789ab",source_size:123,
+    request_error_code:"",job_error_code:"",
   }));
-  harness.paint({enabled:true,now_ms:200,history_limit:500,jobs,requests:[],files:[]});
+  const summary={available:true,enabled:true,total:26,active:0,attention:0,expected:0,ready:26};
+  harness.paint({enabled:true,now_ms:200,filtered_total:26,next_cursor:"5|76|job:job-24",rows,summary});
   assert.match(harness.html(),/Showing 1–25 of 26/);
   assert.match(harness.html(),/Page 1 of 2/);
-  harness.page(2);
+  harness.page(2,{enabled:true,now_ms:200,filtered_total:26,next_cursor:null,rows:[rows[0]],summary});
   assert.match(harness.html(),/Showing 26–26 of 26/);
   assert.match(harness.html(),/Page 2 of 2/);
+  assert.equal(
+    harness.url({filter:"attention",query:"mount offline",page:2,pageSize:50,cursors:["","3|20|request:r1"]}),
+    "/analysis/jobs?limit=50&filter=attention&q=mount+offline&cursor=3%7C20%7Crequest%3Ar1",
+  );
+  const unsupported={state:"failed",request_error_code:"unsupported",job_error_code:""};
+  const deleted={state:"cancelled",request_error_code:"source_deleted",job_error_code:""};
+  const failed={state:"failed",request_error_code:"source_unavailable",job_error_code:""};
+  assert.equal(harness.disposition(unsupported),"unsupported");
+  assert.equal(harness.disposition(deleted),"expected");
+  assert.equal(harness.retry(unsupported),false);
+  assert.equal(harness.retry(deleted),false);
+  assert.equal(harness.retry(failed),true);
+  harness.page(1,{enabled:true,now_ms:200,filtered_total:0,next_cursor:null,rows:[],summary:{...summary,total:0,ready:0}});
+  assert.match(harness.html(),/Showing 0–0 of 0/);
+  assert.doesNotMatch(harness.html(),/Showing 0–-1/);
   const sourceFailure=harness.error("source_unavailable");
   assert.equal(sourceFailure.title,"Source file is unavailable");
   assert.match(sourceFailure.next,/mount is online/);
   const unknown=harness.error("future_failure_code");
   assert.match(unknown.detail,/unrecognized error code/);
   assert.match(unknown.next,/Copy the diagnostics/);
+});
+
+test("Analysis refresh preserves stale data, focus, and accessible state", () => {
+  const refresh=shippedSource("renderAnalysis");
+  assert.match(refresh,/if\(main&&ANALYSIS_SNAPSHOT\)/);
+  assert.match(refresh,/Showing the last update — refresh failed/);
+  assert.match(refresh,/aria-live","polite"/);
+  const paint=shippedSource("paintAnalysis");
+  assert.match(paint,/dataset\.analysisFocus/);
+  assert.match(paint,/target\.focus\(\)/);
+  assert.match(paint,/setSelectionRange/);
+  assert.match(paint,/aria-pressed=/);
+  assert.match(paint,/role="status" aria-live="polite"/);
 });
 
 test("Settings drops a node-local scan error superseded by replicated success", () => {
@@ -726,7 +762,7 @@ test("Settings executes exact required and secondary waves for every tab", async
     libraries:{required:["/settings","/libraries","/scan/status"],secondary:[]},
     metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
-    analysis:{required:["/settings","/analysis/jobs"],secondary:[]},
+    analysis:{required:["/settings","/analysis/summary"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
     cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
