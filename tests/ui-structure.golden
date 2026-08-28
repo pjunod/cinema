@@ -1,3 +1,34 @@
+# plurx UI structural golden — the portable tier of scripts/ui-baseline.
+#
+#   regenerate   scripts/ui-baseline --self-host --update
+#   verify       make ui-check
+#
+# COMMITTED ON PURPOSE, and pixel-free on purpose. A PNG hash depends on the
+# Chromium build, the rasteriser and the path the fixture library sits at, so a
+# committed pixel manifest is red on every machine but the one that wrote it.
+# Everything below is a fact about the DOM the app builds, and is therefore the
+# same on a Mac, in the sandbox and on a CI runner. Pixel hashes stay in
+# target/ui-baseline/pixels.txt and are compared with --baseline, never here.
+#
+# Format, one fact per line:
+#
+#   <layout>|<route>@<w>x<h>|<kind>|<key>|<value>
+#
+#   layout   dark|light etc. are NOT dimensions here — one theme, every layout.
+#            `*` marks a fact about the registry rather than about a capture.
+#   kind     layout   a registered layout and the surfaces it declares
+#            surface  which surfaceClass() a viewport resolves to
+#            dom      a structural signature `parent > self`, and how many of
+#                     them the route rendered. Tags, ids, sorted classes, role,
+#                     tabindex, ARIA state and a bare `text` flag — never text
+#                     content, inline style, href, src or value.
+#            focus    the Nth tab stop, zero-padded so the order sorts
+#            req      an API call the route made, method + path, and how often
+#
+# Regeneration must be a deliberate act with a diff, never a side effect of a
+# normal run — that is why `--update` exists and why a plain run writes only
+# into target/. If this file changed and you did not mean it to, the app
+# changed.
 *|*|layout|catalog|desktop mobile tv
 *|*|layout|classic|desktop mobile tv
 *|*|layout|theater|desktop mobile tv
@@ -207,7 +238,6 @@ catalog|analysis@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* 
 catalog|analysis@1280x860|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|analysis@1280x860|dom|button.px-tab[type=button] > span[text]|1
 catalog|analysis@1280x860|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|analysis@1280x860|dom|button[aria-pressed=false text] > b[text]|4
 catalog|analysis@1280x860|dom|div > h1[text]|1
 catalog|analysis@1280x860|dom|div > p[text]|1
 catalog|analysis@1280x860|dom|div#app > div#pxshell.px-shell|1
@@ -263,6 +293,7 @@ catalog|analysis@1280x860|dom|main#main > div.analysis-controls|1
 catalog|analysis@1280x860|dom|main#main > div.analysis-head|1
 catalog|analysis@1280x860|dom|main#main > div.analysis-metrics|1
 catalog|analysis@1280x860|dom|main#main > div.analysis-pages|1
+catalog|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 catalog|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 catalog|analysis@1280x860|dom|main#main > div.empty[text]|1
 catalog|analysis@1280x860|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
@@ -286,15 +317,15 @@ catalog|analysis@1280x860|focus|006|button.ghost.sm "Light or dark"
 catalog|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 catalog|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
 catalog|analysis@1280x860|focus|009|button.ghost.sm "Pause"
-catalog|analysis@1280x860|focus|010|button.ghost.sm "Refresh"
+catalog|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
 catalog|analysis@1280x860|focus|011|button.ghost.sm "Settings"
 catalog|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
 catalog|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
 catalog|analysis@1280x860|focus|014|button.on "All 0"
-catalog|analysis@1280x860|focus|015|button "Working 0"
-catalog|analysis@1280x860|focus|016|button "Attention 0"
-catalog|analysis@1280x860|focus|017|button "Expected 0"
-catalog|analysis@1280x860|focus|018|button "Ready 0"
+catalog|analysis@1280x860|focus|015|button "Working"
+catalog|analysis@1280x860|focus|016|button "Attention"
+catalog|analysis@1280x860|focus|017|button "Expected"
+catalog|analysis@1280x860|focus|018|button "Ready"
 catalog|analysis@1280x860|focus|019|select "10 25 50 100"
 catalog|analysis@1280x860|focus|020|<wrap>
 catalog|analysis@1280x860|req|GET /api/v1/activity|2
@@ -325,7 +356,6 @@ catalog|analysis@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* t
 catalog|analysis@390x780|dom|button.px-tab[aria-expanded=false aria-controls=* type=button] > svg.px-ico[aria-hidden=true]|1
 catalog|analysis@390x780|dom|button.px-tab[type=button] > span[text]|1
 catalog|analysis@390x780|dom|button.px-tab[type=button] > svg.px-ico[aria-hidden=true]|1
-catalog|analysis@390x780|dom|button[aria-pressed=false text] > b[text]|4
 catalog|analysis@390x780|dom|div > h1[text]|1
 catalog|analysis@390x780|dom|div > p[text]|1
 catalog|analysis@390x780|dom|div#app > div#pxshell.px-shell|1
@@ -381,6 +411,7 @@ catalog|analysis@390x780|dom|main#main > div.analysis-controls|1
 catalog|analysis@390x780|dom|main#main > div.analysis-head|1
 catalog|analysis@390x780|dom|main#main > div.analysis-metrics|1
 catalog|analysis@390x780|dom|main#main > div.analysis-pages|1
+catalog|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 catalog|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 catalog|analysis@390x780|dom|main#main > div.empty[text]|1
 catalog|analysis@390x780|dom|nav.px-nav[aria-label=*] > a.on[aria-current=page]|1
@@ -401,15 +432,15 @@ catalog|analysis@390x780|focus|003|button.ghost.sm "Light or dark"
 catalog|analysis@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 catalog|analysis@390x780|focus|005|button.ghost.sm.profile "Account"
 catalog|analysis@390x780|focus|006|button.ghost.sm "Pause"
-catalog|analysis@390x780|focus|007|button.ghost.sm "Refresh"
+catalog|analysis@390x780|focus|007|button.ghost.sm "Refresh history"
 catalog|analysis@390x780|focus|008|button.ghost.sm "Settings"
 catalog|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
 catalog|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
 catalog|analysis@390x780|focus|011|button.on "All 0"
-catalog|analysis@390x780|focus|012|button "Working 0"
-catalog|analysis@390x780|focus|013|button "Attention 0"
-catalog|analysis@390x780|focus|014|button "Expected 0"
-catalog|analysis@390x780|focus|015|button "Ready 0"
+catalog|analysis@390x780|focus|012|button "Working"
+catalog|analysis@390x780|focus|013|button "Attention"
+catalog|analysis@390x780|focus|014|button "Expected"
+catalog|analysis@390x780|focus|015|button "Ready"
 catalog|analysis@390x780|focus|016|select "10 25 50 100"
 catalog|analysis@390x780|focus|017|a.px-tab "Home"
 catalog|analysis@390x780|focus|018|button.px-tab "Libraries"
@@ -2570,7 +2601,6 @@ classic|analysis@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|analysis@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|analysis@1280x860|dom|button.ghost.sm > span.tsw|1
 classic|analysis@1280x860|dom|button.on[aria-pressed=true text] > b[text]|1
-classic|analysis@1280x860|dom|button[aria-pressed=false text] > b[text]|4
 classic|analysis@1280x860|dom|div > button.ghost.profile.sm|1
 classic|analysis@1280x860|dom|div > button.ghost.sizebtn.sm|1
 classic|analysis@1280x860|dom|div > button.ghost.sm[text]|1
@@ -2619,6 +2649,7 @@ classic|analysis@1280x860|dom|main#main > div.analysis-controls|1
 classic|analysis@1280x860|dom|main#main > div.analysis-head|1
 classic|analysis@1280x860|dom|main#main > div.analysis-metrics|1
 classic|analysis@1280x860|dom|main#main > div.analysis-pages|1
+classic|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 classic|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 classic|analysis@1280x860|dom|main#main > div.empty[text]|1
 classic|analysis@1280x860|dom|nav > a.active[text]|1
@@ -2635,15 +2666,15 @@ classic|analysis@1280x860|focus|006|button.ghost.sm "Light / dark"
 classic|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
 classic|analysis@1280x860|focus|009|button.ghost.sm "Pause"
-classic|analysis@1280x860|focus|010|button.ghost.sm "Refresh"
+classic|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
 classic|analysis@1280x860|focus|011|button.ghost.sm "Settings"
 classic|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
 classic|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
 classic|analysis@1280x860|focus|014|button.on "All 0"
-classic|analysis@1280x860|focus|015|button "Working 0"
-classic|analysis@1280x860|focus|016|button "Attention 0"
-classic|analysis@1280x860|focus|017|button "Expected 0"
-classic|analysis@1280x860|focus|018|button "Ready 0"
+classic|analysis@1280x860|focus|015|button "Working"
+classic|analysis@1280x860|focus|016|button "Attention"
+classic|analysis@1280x860|focus|017|button "Expected"
+classic|analysis@1280x860|focus|018|button "Ready"
 classic|analysis@1280x860|focus|019|select "10 25 50 100"
 classic|analysis@1280x860|focus|020|<wrap>
 classic|analysis@1280x860|req|GET /api/v1/activity|2
@@ -2659,7 +2690,6 @@ classic|analysis@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 classic|analysis@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 classic|analysis@390x780|dom|button.ghost.sm > span.tsw|1
 classic|analysis@390x780|dom|button.on[aria-pressed=true text] > b[text]|1
-classic|analysis@390x780|dom|button[aria-pressed=false text] > b[text]|4
 classic|analysis@390x780|dom|div > button.ghost.profile.sm|1
 classic|analysis@390x780|dom|div > button.ghost.sizebtn.sm|1
 classic|analysis@390x780|dom|div > button.ghost.sm[text]|1
@@ -2708,6 +2738,7 @@ classic|analysis@390x780|dom|main#main > div.analysis-controls|1
 classic|analysis@390x780|dom|main#main > div.analysis-head|1
 classic|analysis@390x780|dom|main#main > div.analysis-metrics|1
 classic|analysis@390x780|dom|main#main > div.analysis-pages|1
+classic|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 classic|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 classic|analysis@390x780|dom|main#main > div.empty[text]|1
 classic|analysis@390x780|dom|nav > a.active[text]|1
@@ -2724,15 +2755,15 @@ classic|analysis@390x780|focus|006|button.ghost.sm "Light / dark"
 classic|analysis@390x780|focus|007|button.ghost.sm.sizebtn "Icon size"
 classic|analysis@390x780|focus|008|button.ghost.sm.profile "Account"
 classic|analysis@390x780|focus|009|button.ghost.sm "Pause"
-classic|analysis@390x780|focus|010|button.ghost.sm "Refresh"
+classic|analysis@390x780|focus|010|button.ghost.sm "Refresh history"
 classic|analysis@390x780|focus|011|button.ghost.sm "Settings"
 classic|analysis@390x780|focus|012|button.ghost.sm "Analysis settings"
 classic|analysis@390x780|focus|013|input#analysis-search "Search analysis work"
 classic|analysis@390x780|focus|014|button.on "All 0"
-classic|analysis@390x780|focus|015|button "Working 0"
-classic|analysis@390x780|focus|016|button "Attention 0"
-classic|analysis@390x780|focus|017|button "Expected 0"
-classic|analysis@390x780|focus|018|button "Ready 0"
+classic|analysis@390x780|focus|015|button "Working"
+classic|analysis@390x780|focus|016|button "Attention"
+classic|analysis@390x780|focus|017|button "Expected"
+classic|analysis@390x780|focus|018|button "Ready"
 classic|analysis@390x780|focus|019|select "10 25 50 100"
 classic|analysis@390x780|focus|020|<wrap>
 classic|analysis@390x780|req|GET /api/v1/activity|2
@@ -4397,7 +4428,6 @@ theater|analysis@1280x860|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|analysis@1280x860|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|analysis@1280x860|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|analysis@1280x860|dom|button.on[aria-pressed=true text] > b[text]|1
-theater|analysis@1280x860|dom|button[aria-pressed=false text] > b[text]|4
 theater|analysis@1280x860|dom|div > h1[text]|1
 theater|analysis@1280x860|dom|div > p[text]|1
 theater|analysis@1280x860|dom|div#app > header.th-top|1
@@ -4447,6 +4477,7 @@ theater|analysis@1280x860|dom|main#main > div.analysis-controls|1
 theater|analysis@1280x860|dom|main#main > div.analysis-head|1
 theater|analysis@1280x860|dom|main#main > div.analysis-metrics|1
 theater|analysis@1280x860|dom|main#main > div.analysis-pages|1
+theater|analysis@1280x860|dom|main#main > div.analysis-sub[text]|1
 theater|analysis@1280x860|dom|main#main > div.clrefusal[text]|1
 theater|analysis@1280x860|dom|main#main > div.empty[text]|1
 theater|analysis@1280x860|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
@@ -4465,15 +4496,15 @@ theater|analysis@1280x860|focus|006|button.ghost.sm "Light or dark"
 theater|analysis@1280x860|focus|007|button.ghost.sm.sizebtn "Icon size"
 theater|analysis@1280x860|focus|008|button.ghost.sm.profile "Account"
 theater|analysis@1280x860|focus|009|button.ghost.sm "Pause"
-theater|analysis@1280x860|focus|010|button.ghost.sm "Refresh"
+theater|analysis@1280x860|focus|010|button.ghost.sm "Refresh history"
 theater|analysis@1280x860|focus|011|button.ghost.sm "Settings"
 theater|analysis@1280x860|focus|012|button.ghost.sm "Analysis settings"
 theater|analysis@1280x860|focus|013|input#analysis-search "Search analysis work"
 theater|analysis@1280x860|focus|014|button.on "All 0"
-theater|analysis@1280x860|focus|015|button "Working 0"
-theater|analysis@1280x860|focus|016|button "Attention 0"
-theater|analysis@1280x860|focus|017|button "Expected 0"
-theater|analysis@1280x860|focus|018|button "Ready 0"
+theater|analysis@1280x860|focus|015|button "Working"
+theater|analysis@1280x860|focus|016|button "Attention"
+theater|analysis@1280x860|focus|017|button "Expected"
+theater|analysis@1280x860|focus|018|button "Ready"
 theater|analysis@1280x860|focus|019|select "10 25 50 100"
 theater|analysis@1280x860|focus|020|<wrap>
 theater|analysis@1280x860|req|GET /api/v1/activity|2
@@ -4489,7 +4520,6 @@ theater|analysis@390x780|dom|button.ghost.sizebtn.sm > span[text]|1
 theater|analysis@390x780|dom|button.ghost.sizebtn.sm > svg[aria-hidden=true]|1
 theater|analysis@390x780|dom|button.ghost.sm[aria-label=*] > span.tsw|1
 theater|analysis@390x780|dom|button.on[aria-pressed=true text] > b[text]|1
-theater|analysis@390x780|dom|button[aria-pressed=false text] > b[text]|4
 theater|analysis@390x780|dom|div > h1[text]|1
 theater|analysis@390x780|dom|div > p[text]|1
 theater|analysis@390x780|dom|div#app > header.th-top|1
@@ -4539,6 +4569,7 @@ theater|analysis@390x780|dom|main#main > div.analysis-controls|1
 theater|analysis@390x780|dom|main#main > div.analysis-head|1
 theater|analysis@390x780|dom|main#main > div.analysis-metrics|1
 theater|analysis@390x780|dom|main#main > div.analysis-pages|1
+theater|analysis@390x780|dom|main#main > div.analysis-sub[text]|1
 theater|analysis@390x780|dom|main#main > div.clrefusal[text]|1
 theater|analysis@390x780|dom|main#main > div.empty[text]|1
 theater|analysis@390x780|dom|nav.th-nav[aria-label=*] > a.on[aria-current=page text]|1
@@ -4554,15 +4585,15 @@ theater|analysis@390x780|focus|003|button.ghost.sm "Light or dark"
 theater|analysis@390x780|focus|004|button.ghost.sm.sizebtn "Icon size"
 theater|analysis@390x780|focus|005|button.ghost.sm.profile "Account"
 theater|analysis@390x780|focus|006|button.ghost.sm "Pause"
-theater|analysis@390x780|focus|007|button.ghost.sm "Refresh"
+theater|analysis@390x780|focus|007|button.ghost.sm "Refresh history"
 theater|analysis@390x780|focus|008|button.ghost.sm "Settings"
 theater|analysis@390x780|focus|009|button.ghost.sm "Analysis settings"
 theater|analysis@390x780|focus|010|input#analysis-search "Search analysis work"
 theater|analysis@390x780|focus|011|button.on "All 0"
-theater|analysis@390x780|focus|012|button "Working 0"
-theater|analysis@390x780|focus|013|button "Attention 0"
-theater|analysis@390x780|focus|014|button "Expected 0"
-theater|analysis@390x780|focus|015|button "Ready 0"
+theater|analysis@390x780|focus|012|button "Working"
+theater|analysis@390x780|focus|013|button "Attention"
+theater|analysis@390x780|focus|014|button "Expected"
+theater|analysis@390x780|focus|015|button "Ready"
 theater|analysis@390x780|focus|016|select "10 25 50 100"
 theater|analysis@390x780|focus|017|a "Home"
 theater|analysis@390x780|focus|018|a.on "Activity"
