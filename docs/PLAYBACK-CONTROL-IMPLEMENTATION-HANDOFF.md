@@ -18,9 +18,9 @@ in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
 for regression-history evidence; owner-inventory reconciliation
 `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`; compile repair
 `ef74b41e57bc26eff06a156024b02029c2c2e768`; its mapping
-`b1fe8151d566b54a5958a19911743195769aaa86`; assertion repairs through
-`87a587a3e0a7c56bbb296807772651131cca97c9`; and their mappings
-`fd08622144c64ae9b17d049bcd54cec8b1dacd91` and `87a587a3` on branch
+`b1fe8151d566b54a5958a19911743195769aaa86`; assertion/scanner repairs through
+`53c823cacc411de41f9d80c06b15f9cce8631ef8`; and their mappings
+`fd08622144c64ae9b17d049bcd54cec8b1dacd91` through `53c823ca` on branch
 `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
@@ -28,7 +28,7 @@ body pins the exact full object ID because a commit cannot contain its own hash.
 `f0c2297c` were unanimously approved read-only. The directly affected rerun
 then compiled successfully and ran 641 tests: 606 passed, 30 hit sandbox
 local-bind denials, and five found stale inventories/high-water expectations.
-Assertion-only repairs through `87a587a3` now require targeted exact-head
+Assertion/scanner repairs through `53c823ca` now require targeted exact-head
 review before only those failed names rerun.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
@@ -458,7 +458,7 @@ head `841e695f` then received unanimous exact-head approval. Its one full unit
 run stopped during compilation before tests; `ef74b41e` repaired the 11 Store
 errors and `f0c2297c` received unanimous targeted approval. The directly
 affected rerun compiled and executed 641 tests, with 606 passing, 30 sandbox
-bind denials, and five stale assertion failures. Repairs through `87a587a3`
+bind denials, and five stale assertion failures. Repairs through `53c823ca`
 must receive targeted exact-head approval before only those failed names rerun.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
@@ -795,7 +795,7 @@ Runtime behavior is frozen in
 frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; owner-inventory
 corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`;
 the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`; and
-the assertion repairs plus mappings are frozen through `87a587a3`.
+the assertion/scanner repairs plus mappings are frozen through `53c823ca`.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:

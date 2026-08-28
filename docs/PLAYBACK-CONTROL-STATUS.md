@@ -16,15 +16,16 @@ or high-water assertions were stale. Runtime behavior remains frozen in
 `ef74b41e57bc26eff06a156024b02029c2c2e768` replaces four nonexistent Hiqlite
 helper calls, imports the four schema constants used by the direct-upgrade
 test, and returns the owned SQLite route after its mutable update. Test repairs
-through `87a587a3e0a7c56bbb296807772651131cca97c9` name all 240 Store methods and
-46 production SQLite transactions, pin schema v35, and retain media sequence
-7 across lower renewals;
+through `53c823cacc411de41f9d80c06b15f9cce8631ef8` name all 240 Store methods and
+46 production SQLite transactions, pin schema v35, retain media sequence 7
+across lower renewals, and expose the top-level test boundary to the production
+transaction scanner;
 regression-history evidence is frozen in
 `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`, owner-inventory reconciliation
 in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`, compile-repair evidence in
 `b1fe8151d566b54a5958a19911743195769aaa86`, and inventory-repair evidence in
-`fd08622144c64ae9b17d049bcd54cec8b1dacd91` plus
-`87a587a3e0a7c56bbb296807772651131cca97c9`.
+`fd08622144c64ae9b17d049bcd54cec8b1dacd91` through
+`53c823cacc411de41f9d80c06b15f9cce8631ef8`.
 The current review candidate is the PR tip containing this status file; the PR
 body pins its exact full object ID, avoiding an impossible self-reference from
 a commit to its own hash.
@@ -92,8 +93,9 @@ head `f0c2297c` then received unanimous targeted approval. Its directly
 affected `plurx-core` rerun compiled successfully. Of 641 executed tests, 606
 passed, 30 failed only because the sandbox refused local socket binds, and
 five exposed stale exact inventories or high-water assertions. Repairs through
-`87a587a3` correct those expectations without changing runtime behavior and
-now require targeted exact-head review before only failed names rerun.
+`53c823ca` correct those expectations and the scanner boundary without changing
+runtime behavior, and now require targeted exact-head review before only failed
+names rerun.
 GitHub's earlier automatic scope lane ran no tests or builds: its static
 `history-check` stopped on hashes rewritten by the rebase, and `5bea1ec7` plus
 `95cd9a2e` add their append-only evidence mappings. The one allowed full local
@@ -224,9 +226,9 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Implementation frozen in `f02bf5b5`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Runtime head `841e695f` and compile-repair head `f0c2297c` unanimously approved.** Lifecycle approved replacement-gate retention, bounded pinning, takeover cleanup, and cancellation settlement; Store approved schema/import/CAS/replay/publication correctness; integration independently matched all 190 owner rows and the compile repair. The assertion-only repair through `87a587a3` now requires targeted exact-head approval. |
+| Adversarial implementation review | **Runtime head `841e695f` and compile-repair head `f0c2297c` unanimously approved.** Lifecycle approved replacement-gate retention, bounded pinning, takeover cleanup, and cancellation settlement; Store approved schema/import/CAS/replay/publication correctness; integration independently matched all 190 owner rows and the compile repair. The assertion/scanner repair through `53c823ca` now requires targeted exact-head approval. |
 | Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts passed. The directly affected rerun compiled the Store fixes and exposed only stale exact test inventories plus sandbox-denied socket fixtures. |
-| Unit/focused tests | **One full invocation consumed; targeted rerun 606/641 passed.** The full `make unit` invocation at `841e695f` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. Five deterministic assertions are repaired through `87a587a3`; 30 failures are identical sandbox local-bind denials. After targeted review, rerun only those 35 failed names, never the full suite. |
+| Unit/focused tests | **One full invocation consumed; targeted rerun 606/641 passed.** The full `make unit` invocation at `841e695f` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. Five deterministic assertions and their scanner boundary are repaired through `53c823ca`; 30 failures are identical sandbox local-bind denials. After targeted review, rerun only those 35 failed names, never the full suite. |
 | Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
 
 ## Watchdog-removal ledger
