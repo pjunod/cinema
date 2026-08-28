@@ -1570,7 +1570,8 @@ impl SettingsStore for SqliteStore {
     }
 }
 
-#[cfg(all(test, feature = "hiqlite-store"))]
+#[cfg(test)]
+#[cfg(feature = "hiqlite-store")]
 impl SqliteStore {
     pub(crate) fn apply_migrations_for_test(
         conn: &Connection,
