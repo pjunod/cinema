@@ -59,6 +59,12 @@ services:
     image: plurx/plurxd:latest
     container_name: plurxd
     restart: unless-stopped
+    # At the supported 3,600s snapshot-transfer maximum, a recovering voter can
+    # spend 45s becoming healthy, 45s confirming admission, 3,645s catching up,
+    # and 30s draining Hiqlite's writer/Raft tasks. Docker's 10-second default
+    # kills that bounded path midway and leaves crash sentinels behind. The
+    # default covers the full maximum plus margin; ordinary stops exit sooner.
+    stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}
     # Keep the base service on ordinary Docker networking. Host-specific
     # overrides commonly attach plurxd to an external media network, and
     # Compose forbids combining `networks` with `network_mode: host`.

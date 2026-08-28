@@ -586,6 +586,16 @@ impl NetworkConnectionStreaming {
     }
 }
 
+/// AppendEntries performs the durable follower write Raft is waiting for.
+///
+/// OpenRaft already drops the network future at `hard_ttl`; cancelling the
+/// same RPC at its 3/4 soft deadline turns a response that completes inside
+/// the caller's accepted bound into a false outage and resets its stream.
+#[cfg(any(feature = "cache", feature = "sqlite"))]
+fn append_response_ttl(option: &RPCOption) -> Duration {
+    option.hard_ttl()
+}
+
 #[cfg(feature = "sqlite")]
 impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
     #[tracing::instrument(level = "debug", skip_all, err(Debug))]
@@ -596,7 +606,11 @@ impl RaftNetwork<TypeConfigSqlite> for NetworkConnectionStreaming {
     ) -> Result<AppendEntriesResponse<NodeId>, RPCError<NodeId, Node, RaftError<NodeId>>> {
         let (ack, rx) = oneshot::channel();
         match self
-            .send(RaftRequest::AppendDB((ack, req)), rx, option.soft_ttl())
+            .send(
+                RaftRequest::AppendDB((ack, req)),
+                rx,
+                append_response_ttl(&option),
+            )
             .await?
         {
             RaftStreamResponsePayload::AppendDB(resp) => {
@@ -659,7 +673,7 @@ impl RaftNetwork<TypeConfigKV> for NetworkConnectionStreaming {
             .send(
                 RaftRequest::AppendCache((ack, req)),
                 rx,
-                option.soft_ttl(),
+                append_response_ttl(&option),
             )
             .await?
         {
@@ -762,5 +776,13 @@ mod tests {
         drop(guard);
 
         assert!(matches!(receiver.recv_async().await, Ok(RaftRequest::Reset)));
+    }
+
+    #[test]
+    fn append_response_uses_the_callers_whole_accepted_deadline() {
+        let option = RPCOption::new(Duration::from_millis(800));
+
+        assert_eq!(option.soft_ttl(), Duration::from_millis(600));
+        assert_eq!(append_response_ttl(&option), Duration::from_millis(800));
     }
 }
