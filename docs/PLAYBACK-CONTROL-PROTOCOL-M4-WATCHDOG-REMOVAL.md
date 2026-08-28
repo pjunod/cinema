@@ -953,12 +953,15 @@ unit tests run.
 6. Open or update the implementation PR at the frozen cumulative head.
 7. Obtain adversarial review of that exact PR head; fix every finding and
    repeat exact-head review before running unit tests.
-8. Run focused actor and fault-injection tests.
-9. Run `make check`, repair failures, and repeat until green.
-10. Run `make cluster-check` because terminal, owner-fence, and producer action
-   ordering cross cluster ownership.
+8. Run the full local unit suite once on that reviewed merge candidate. If it
+   fails, repair the cause and rerun only the failed or directly affected
+   tests; do not restart the full suite.
+9. Review every behavioral repair and restore exact-head approval.
+10. Run the required non-unit cluster/integration gate because terminal,
+    owner-fence, and producer-action ordering cross cluster ownership.
 11. Require every hosted job to pass and merge only while the reviewed head is
-    unchanged.
+    unchanged. Hosted PR validation remains required and is distinct from the
+    single local full-suite run.
 
 ## 11. Acceptance
 

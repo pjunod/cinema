@@ -1,26 +1,34 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `dba35f98` (PR #624)
-**Active PR:** [#626](https://github.com/pjunod/plurx/pull/626)
-**Active branch:** `codex/playback-control-m4-producer-decision`
-**Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
-(PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `1ead394488df1f3ba6730ec21697ad8e357a31ff`
-(final documentation approval; runtime head `981ebb51` was unanimously
-approved)
-**Current implementation:** behavior-neutral decision transport committed at
-`c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
-repairs at `91486148`, absorbing executor-state/poll-contract repairs at
-`ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
-actor slot, non-consuming actor polling, one move-only bounded executor inbox,
-a passive weak-reference executor, and status projection; post-test inventory,
-enum-warning, and strong lifetime-owner lint repairs are committed through
-`f463d4d4`
-**Test state:** focused Rust playback control passed 85/85 twice without
-warnings; ownership inventory passed 7/7; `make check` and
-`make cluster-check` passed; PR #626 hosted run `33127652859` passed every
-selected job and the aggregate validation gate on reviewed head `1ead3944`
+**Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
+**Active PR:** not opened yet
+**Active branch:** `codex/playback-control-m4-prepublication`
+**Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
+(PR #626; hosted run `33129200705` green; merge `9063bb1e`)
+**Last reviewed committed head:** `43bd459d` (response-publication contract
+correction; four findings fixed, exact delta approved)
+**Runtime implementation head:** `0e80c6ba` (`feat(playback): own transcode
+prepublication recovery`; formal exact-head review pending)
+**Runtime review state:** all three targeted working-tree reviewers approve the
+repaired actor, transcode, and HTTP scopes with no remaining P1/P2/P3 finding;
+formal review of the synchronized exact implementation hash is still required
+**Current implementation:** actor, HTTP response admission, transcode executor,
+frozen rolling presentation, cancellation settlement, synchronous first-media
+handoff, status projection, and checked owner inventory are committed at
+`0e80c6ba`. This is the first
+production-authoritative cut: initial transcode startup uses one actor
+deadline, one validated prepublication retry, exact response publication
+admission, and one cancellation-safe executor. Published-lifetime and copy
+compatibility owners remain later cuts. Working-tree review findings are fixed
+and the targeted delta is approved; the synchronized branch head is awaiting
+formal exact-head review.
+**Test state:** no tests have run on the active branch by design. The user
+requires adversarial implementation review before unit tests and exactly one
+full unit-suite run on the final reviewed merge candidate. If that run fails,
+rerun only the failed or directly affected tests after repairs. PR #626's
+merged baseline was green in focused Rust 85/85, ownership 7/7, `make check`,
+`make cluster-check`, and hosted run `33129200705`.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -40,10 +48,13 @@ commit, exact-head review, test gate, merge, and milestone transition.
 - Use proper commits and PRs. Do not merge around red or skipped required
   evidence.
 - For each PR, obtain adversarial approval of one immutable exact head before
-  running unit tests. If a later correction changes that head, obtain another
-  exact-head approval before merge.
-- Merge only after focused tests, `make check`, `make cluster-check`, and every
-  required hosted check are green, with no unresolved actionable review item.
+  running unit tests. Run the full local unit suite once on that merge
+  candidate. If it fails, rerun only failed or directly affected tests after
+  fixes; review every behavioral fix and obtain exact-head approval before
+  merge.
+- Merge only after that one full unit run, required non-unit cluster/integration
+  gates, and every required hosted check are green, with no unresolved
+  actionable review item.
 - Keep this handoff and `PLAYBACK-CONTROL-STATUS.md` truthful. Foundations and
   inactive state are not complete runtime behavior.
 
@@ -70,19 +81,46 @@ The rewrite is not starting from scratch:
 - PR #624: bounded shared command/producer sequencing and observation-only
   projection, merged as `dba35f98` after unanimous exact-head review, green
   local full/cluster gates, and hosted run `33118301414`.
+- PR #626: immutable decision slot, non-consuming poll contract, and bounded
+  passive executor transport, merged as `9063bb1e` after exact-head review,
+  focused Rust 85/85, ownership 7/7, local full/cluster gates, and hosted run
+  `33129200705`.
 
-The active branch builds on #624 with reusable local evidence: focused
-playback-control tests, the ownership inventory, `make check`, and
-`make cluster-check` are green. Hosted run `33127652859` passed every selected
-job and the aggregate PR validation gate on reviewed head `1ead3944`; only the
-evidence-only status update, its final-head hosted validation, and merge remain
-for PR #626.
-Legacy watchdogs, recovery actions, response admission, and compatibility
-owners remain active; no decision/action cutover has happened.
+The active branch starts from merged #626. Commit `43bd459d` corrected the
+response-publication contract before implementation: frozen generation
+metadata leaves retry available, attempt media closes it atomically, current
+attempt-derived `416` responses are media publication, actor-derived errors
+have explicit non-media fences, and the retry recipe carries the exact
+presentation-contract fingerprint. One adversarial pass found four defects;
+the corrected delta is approved. No active-branch unit test has run yet.
 
-The merged actor is behavior-neutral for recovery. Legacy rolling watchdogs
-and in-place replacement still operate until later M4 slices transfer action
-authority to the actor/executor and then delete the old owners.
+### Active prepublication review ledger
+
+The pre-commit review used three independent scopes and did not build or run
+tests. The repaired working tree now has targeted approval with no remaining
+P1/P2/P3 finding:
+
+- actor review repaired executor-loss cutoff visibility, exact-deadline
+  first-media ownership, synchronous publication projection, cancellation-safe
+  follower blocking, retry-neutral generation metadata, and move-only handoff
+  settlement;
+- transcode review repaired immediate-exit retry replay, HEVC/Dolby Vision
+  first-media classification, registry-lock scope, bounded confirmed reap,
+  abandoned termination replies, cleanup-owner exclusion from global repair,
+  and retirement fencing; and
+- HTTP review repaired false `404` collapse, stale `503` publication,
+  retired-session failure classification, exact streamed EOF settlement,
+  range binding, subtitle typed-error propagation, and exact rolling/VOD owner
+  fencing.
+
+These are working-tree approvals, not the immutable merge-candidate approval.
+Commit the synchronized runtime, inventory, and status documents, then review
+that exact hash before opening the unit-test gate.
+
+Merged `main` remains behavior-neutral for recovery. The active cut transfers
+prepublication transcode startup authority to the actor/executor and removes
+the corresponding detached startup fallback. Published-lifetime and copy
+owners remain named compatibility mechanisms until their later bounded cuts.
 
 ## 3. PR #619 — merged delivery
 
@@ -402,27 +440,71 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-PR #624 is merged as `dba35f98`. The current disposable decision-transport
-slice is PR #626 on `codex/playback-control-m4-producer-decision`; its runtime
-is committed through `f463d4d4`, its reviewed implementation/status head is
-`1ead3944`, and local plus hosted gates are green on that head. The worktree
-contains only the final evidence update as tracked changes; the preserved
-untracked vendor build artifacts remain outside the commit. Continue in this
-order:
+PR #626 is merged as `9063bb1e`. The current disposable branch is
+`codex/playback-control-m4-prepublication`; contract commit `43bd459d` is the
+only committed active-branch change. Actor, HTTP, transcode, status-fixture,
+owner-inventory, and documentation changes are assembled in the worktree. The
+preserved untracked vendor build artifacts remain outside every commit.
+Continue in this order:
 
-1. Commit and push the adversarially reviewed evidence-only update.
-2. Require every hosted PR #626 check to pass on the resulting final head;
-   repair any failure, re-review changed code, and repeat the affected gates.
-3. Merge PR #626.
-4. Immediately begin the first authoritative vertical cut: actor-owned
-   hardware startup retry plus response admission and cleanup, followed by
-   deletion of the corresponding legacy watcher/action owner.
+1. Commit the synchronized status/handoff documents without including either
+   vendor target tree.
+2. Obtain independent adversarial approval of the resulting exact branch head
+   without running unit tests.
+3. If review changes behavior, re-review only the changed behavioral delta and
+   freeze a new exact head; do not run the suite while review is open.
+4. Run the full local unit suite once. If it fails, fix the cause and rerun
+   only failed or directly affected tests, then review the behavioral delta.
+5. Run required non-unit cluster/integration validation, push/open the PR,
+   require every hosted check green on the exact final head, merge, and
+   continue immediately with the published-lifetime watchdog cut.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
-review before local unit tests and full verification before merge.
+review before local unit tests, one full local unit-suite run only, and full
+required verification before merge.
 
-## 5. Current M4 decision-transport slice after command sequencing
+### Active cut boundaries
+
+The active cut owns only transcode prepublication:
+
+- `RollingControlHandle::spawn_prepublication_transcode` returns a handle and
+  one move-only executor registration; registration must commit before the
+  initial producer policy can arm;
+- hardware startup has a 12-second actor budget and at most one immutable,
+  presentation-compatible retry; software-only startup has a 30-second actor
+  budget and no retry;
+- generation-stable master metadata crosses actor admission without consuming
+  retry; video/subtitle playlists, VTT, init/media objects, ranges, `304`, and
+  attempt-derived `416` responses close retry before exposure;
+- the executor uses a weak Session reference, confirms predecessor reap before
+  scratch clear, verifies the clear, admits the exact recipe, installs one
+  successor, and acknowledges the immutable decision; failure never recurses;
+- the first actor-authorized attempt-media response ends prepublication
+  ownership and starts the retained published-lifetime watcher exactly once.
+
+This cut removes the detached hardware first-segment fallback as a production
+decision owner. It deliberately retains `watch_for_stall*`, `SOFTWARE_GRACE`,
+`PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active`, `child_transition`,
+`replacing_child`, copy fallback/classification, and published-lifetime stall
+handling. Those mechanisms must be listed as retained compatibility owners and
+must not overlap the actor-owned prepublication interval.
+
+It also retains `PREPUBLICATION_REAP_RETRY` and
+`PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` solely as lifecycle cleanup bounds. Each
+termination attempt is bounded and the cleanup owner releases the child
+transition before waiting to retry. Neither timer can select a recipe, publish
+a response, declare playback failure, or replace a producer. Exact-EOF
+settlement and bounded HTTP actor/handoff waits likewise remain response and
+network lifecycle bounds rather than recovery watchdogs.
+
+The first review must specifically challenge exact-deadline response ordering,
+stable-master contract freezing, same-ID Session ABA, executor cancellation at
+every retry transaction step, permit transfer/leak behavior, predecessor reap
+before clear, and whether any request or watcher can still make a competing
+prepublication verdict.
+
+## 5. Merged M4 decision-transport slice after command sequencing
 
 The current slice extends the merged passive deadline foundation with one
 immutable decision transport and a passive executor scaffold. It preserves the
