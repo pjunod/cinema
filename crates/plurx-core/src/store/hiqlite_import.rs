@@ -1098,7 +1098,7 @@ impl HiqliteAuthStore {
     /// Schema v14 is the oldest supported clustering source. v14 lacks the
     /// scan-reconciliation tables and the outbox claim deadline; those facts
     /// are imported as empty tables and a zero deadline respectively. Media
-    /// sessions before v33 lack a terminal cause, and those before v34 lack a
+    /// sessions before v34 lack a terminal cause, and those before v35 lack a
     /// replacement-publication fence, so import projects `NULL` and zero for
     /// those fields. v17's playback events are node-local telemetry and
     /// intentionally absent from this mapping.
@@ -1857,12 +1857,12 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 "0".to_owned()
             } else if table.name == "media_sessions"
                 && *column == "terminal_reason"
-                && schema_version < 33
+                && schema_version < 34
             {
                 "NULL".to_owned()
             } else if table.name == "media_sessions"
                 && *column == "publication_ready_at_ms"
-                && schema_version < 34
+                && schema_version < 35
             {
                 "0".to_owned()
             } else if table.name == "items"
@@ -2124,20 +2124,196 @@ mod tests {
         assert!(current.ends_with("storage_id, generation_id"));
     }
 
-    #[test]
-    fn media_session_projection_supplies_fields_missing_from_legacy_schemas() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn media_session_import_reads_real_legacy_schema_boundaries() {
         let table = TABLES
             .iter()
             .find(|table| table.name == "media_sessions")
             .copied()
             .expect("media session table plan");
-        let v32 = value_projection(table, 32, false);
-        let v33 = value_projection(table, 33, false);
-        let v34 = value_projection(table, 34, false);
+        for schema_version in [33_i64, 34, 35] {
+            let data = tempfile::tempdir().expect("source dir");
+            let path = data.path().join("legacy.db");
+            {
+                let conn = Connection::open(&path).expect("raw source open");
+                crate::store::sqlite::SqliteStore::apply_migrations_for_test(&conn, schema_version)
+                    .expect("apply legacy migrations");
+                conn.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![keys::INSTANCE_ID, "legacy-instance", 1_i64],
+                )
+                .expect("seed source instance");
 
-        assert!(v32.contains("state, NULL, 0, recipe_json"));
-        assert!(v33.contains("state, terminal_reason, 0, recipe_json"));
-        assert!(v34.contains("state, terminal_reason, publication_ready_at_ms, recipe_json"));
+                // This is the actual v25 media_sessions shape; v34 and v35
+                // append their columns through the real migration chain.
+                let columns = match schema_version {
+                    33 => {
+                        "incarnation_id, session_id, user_id, playback_id,
+                           request_fingerprint, owner_node_id, owner_epoch,
+                           lease_expires_at_ms, state, recipe_json, response_json,
+                           produced_playable_through_ms, fetched_through_ms,
+                           media_origin_ms, media_sequence, discontinuity_sequence,
+                           updated_at_ms"
+                    }
+                    34 => {
+                        "incarnation_id, session_id, user_id, playback_id,
+                           request_fingerprint, owner_node_id, owner_epoch,
+                           lease_expires_at_ms, state, terminal_reason, recipe_json,
+                           response_json, produced_playable_through_ms,
+                           fetched_through_ms, media_origin_ms, media_sequence,
+                           discontinuity_sequence, updated_at_ms"
+                    }
+                    35 => {
+                        "incarnation_id, session_id, user_id, playback_id,
+                           request_fingerprint, owner_node_id, owner_epoch,
+                           lease_expires_at_ms, state, terminal_reason,
+                           publication_ready_at_ms, recipe_json, response_json,
+                           produced_playable_through_ms, fetched_through_ms,
+                           media_origin_ms, media_sequence, discontinuity_sequence,
+                           updated_at_ms"
+                    }
+                    _ => unreachable!(),
+                };
+                let values = match schema_version {
+                    33 => {
+                        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, ?17"
+                    }
+                    34 => {
+                        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?18"
+                    }
+                    35 => {
+                        "?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11,
+                           ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19"
+                    }
+                    _ => unreachable!(),
+                };
+                let insert_sql =
+                    format!("INSERT INTO media_sessions ({columns}) VALUES ({values})");
+                match schema_version {
+                    33 => conn.execute(
+                        &insert_sql,
+                        rusqlite::params![
+                            "incarnation",
+                            "session",
+                            42_i64,
+                            "playback",
+                            "fingerprint",
+                            "owner",
+                            7_i64,
+                            8_000_i64,
+                            "ended",
+                            "{\"recipe\":true}",
+                            "{\"response\":true}",
+                            1_000_i64,
+                            2_000_i64,
+                            3_000_i64,
+                            4_i64,
+                            5_i64,
+                            9_000_i64,
+                        ],
+                    ),
+                    34 => conn.execute(
+                        &insert_sql,
+                        rusqlite::params![
+                            "incarnation",
+                            "session",
+                            42_i64,
+                            "playback",
+                            "fingerprint",
+                            "owner",
+                            7_i64,
+                            8_000_i64,
+                            "ended",
+                            "superseded",
+                            "{\"recipe\":true}",
+                            "{\"response\":true}",
+                            1_000_i64,
+                            2_000_i64,
+                            3_000_i64,
+                            4_i64,
+                            5_i64,
+                            9_000_i64,
+                        ],
+                    ),
+                    35 => conn.execute(
+                        &insert_sql,
+                        rusqlite::params![
+                            "incarnation",
+                            "session",
+                            42_i64,
+                            "playback",
+                            "fingerprint",
+                            "owner",
+                            7_i64,
+                            8_000_i64,
+                            "ended",
+                            "superseded",
+                            8_765_i64,
+                            "{\"recipe\":true}",
+                            "{\"response\":true}",
+                            1_000_i64,
+                            2_000_i64,
+                            3_000_i64,
+                            4_i64,
+                            5_i64,
+                            9_000_i64,
+                        ],
+                    ),
+                    _ => unreachable!(),
+                }
+                .expect("seed source media session");
+            }
+
+            let expected_sha256 = sha256_file(&path).expect("hash source");
+            let (reader, metadata) = SourceReader::open(&path, &expected_sha256, schema_version)
+                .await
+                .expect("open source reader");
+            assert_eq!(metadata.schema_version, schema_version);
+            assert_eq!(reader.count(table, true).await.expect("count source"), 1);
+            let rows = reader
+                .import_chunk(table, schema_version, SourceChunk::Offset(0))
+                .await
+                .expect("read source import chunk");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].len(), 19, "media session import parameter count");
+            let expected_terminal = if schema_version < 34 {
+                Param::Null
+            } else {
+                Param::Text("superseded".to_owned())
+            };
+            let expected_publication = if schema_version < 35 {
+                Param::Integer(0)
+            } else {
+                Param::Integer(8_765)
+            };
+            assert_eq!(
+                rows[0],
+                vec![
+                    Param::Text("incarnation".to_owned()),
+                    Param::Text("session".to_owned()),
+                    Param::Integer(42),
+                    Param::Text("playback".to_owned()),
+                    Param::Text("fingerprint".to_owned()),
+                    Param::Text("owner".to_owned()),
+                    Param::Integer(7),
+                    Param::Integer(8_000),
+                    Param::Text("ended".to_owned()),
+                    expected_terminal,
+                    expected_publication,
+                    Param::Text("{\"recipe\":true}".to_owned()),
+                    Param::Text("{\"response\":true}".to_owned()),
+                    Param::Integer(1_000),
+                    Param::Integer(2_000),
+                    Param::Integer(3_000),
+                    Param::Integer(4),
+                    Param::Integer(5),
+                    Param::Integer(9_000),
+                ],
+                "schema v{schema_version} import row",
+            );
+        }
     }
 
     #[test]

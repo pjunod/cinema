@@ -142,7 +142,7 @@ pub struct StartResponse {
 /// outcome. Request futures are cancellation points at every store/network
 /// await; tying cleanup to this value prevents a disconnected client from
 /// leaving an encoder and its durable start claim behind.
-struct StartedSessionGuard {
+pub(super) struct StartedSessionGuard {
     cleanup: Option<StartedSessionCleanup>,
     _replacement: Option<ClusterReplacementGuard>,
 }
@@ -157,7 +157,7 @@ struct StartedSessionCleanup {
 }
 
 impl StartedSessionGuard {
-    fn new(
+    pub(super) fn new(
         state: AppState,
         owner_node_id: String,
         incarnation_id: String,
@@ -179,7 +179,7 @@ impl StartedSessionGuard {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.cleanup = None;
         self._replacement = None;
     }

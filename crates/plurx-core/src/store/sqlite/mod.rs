@@ -1186,6 +1186,24 @@ impl SqliteStore {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_migrations_for_test(
+        conn: &Connection,
+        through_version: i64,
+    ) -> rusqlite::Result<()> {
+        let through_version = usize::try_from(through_version)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        if through_version > MIGRATIONS.len() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                through_version.to_string(),
+            ));
+        }
+        for sql in MIGRATIONS.iter().take(through_version) {
+            conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))?;
+        }
+        conn.pragma_update(None, "user_version", through_version as i64)
+    }
+
     async fn with_conn<T, F>(&self, f: F) -> Result<T, StoreError>
     where
         F: FnOnce(&Connection) -> Result<T, StoreError> + Send + 'static,

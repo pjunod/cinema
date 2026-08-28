@@ -50,6 +50,19 @@ impl IntoResponse for RemoteStartError {
 const REMOTE_ABORT_CAPACITY: usize = 128;
 const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 
+async fn pin_shared_session_before_deadline<F>(
+    deadline: tokio::time::Instant,
+    pin: F,
+) -> Result<bool, String>
+where
+    F: std::future::Future<Output = Result<bool, plurx_core::error::StoreError>>,
+{
+    tokio::time::timeout_at(deadline, pin)
+        .await
+        .map_err(|_| "shared cache pin exceeded the start deadline".to_owned())?
+        .map_err(|error| error.to_string())
+}
+
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -127,27 +140,32 @@ pub(crate) async fn start(
                 start_deadline,
             )
             .await?;
+        // Creation publishes the local worker before the shared-cache pin can
+        // complete. Keep the exact worker, request claim, and replacement
+        // gate owned across every cancellation, error, or panic after that
+        // publication point; the confirmation watcher takes this guard below.
+        let guard = super::hls::StartedSessionGuard::new(
+            start_state.clone(),
+            start_state.node_id.clone(),
+            request.incarnation_id.clone(),
+            started.info.session_id.clone(),
+            request.user_id,
+            request.incarnation_id.clone(),
+            Some(started.replacement),
+        );
         let provisional_pin_ms =
             i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
-        if !start_state
-            .transcode
-            .pin_shared_session(
+        let pinned = pin_shared_session_before_deadline(
+            start_deadline,
+            start_state.transcode.pin_shared_session(
                 &started.info.session_id,
                 &request.incarnation_id,
                 1,
                 unix_ms().saturating_add(provisional_pin_ms),
-            )
-            .await
-            .map_err(|error| error.to_string())?
-        {
-            start_state
-                .transcode
-                .stop_session_for_request(
-                    &request.incarnation_id,
-                    &started.info.session_id,
-                    "shared cache pin changed",
-                )
-                .await;
+            ),
+        )
+        .await?;
+        if !pinned {
             return Err("shared cache generation changed before activation".to_owned());
         }
         let response = RemoteStartResponse::from(started.info);
@@ -155,9 +173,9 @@ pub(crate) async fn start(
         let confirmation_incarnation = request.incarnation_id.clone();
         let confirmation_session = response.session_id.clone();
         tokio::spawn(async move {
-            // A second replacement on this worker cannot reap this worker
-            // before its durable activation has been confirmed or refused.
-            let _replacement = started.replacement;
+            // Ownership crosses into this cancellation-independent watcher
+            // before the start task returns its response.
+            let mut guard = guard;
             let deadline = tokio::time::Instant::now() + REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
             loop {
                 match tokio::time::timeout_at(
@@ -179,6 +197,10 @@ pub(crate) async fn start(
                             .media_sessions
                             .seed_owned_lease(&route)
                             .await;
+                        // The watcher now owns cleanup; activation is the
+                        // only point at which the provisional owner may be
+                        // released.
+                        guard.disarm();
                         return;
                     }
                     Ok(Ok(Some(_))) => break,
@@ -190,25 +212,8 @@ pub(crate) async fn start(
                     Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
                 }
             }
-            if !confirmation_state
-                .transcode
-                .stop_session_for_owner(
-                    &confirmation_incarnation,
-                    &confirmation_session,
-                    1,
-                    "cluster activation not confirmed",
-                )
-                .await
-            {
-                confirmation_state
-                    .transcode
-                    .stop_vod_session_for_request(
-                        &confirmation_incarnation,
-                        &confirmation_session,
-                        "cluster activation not confirmed",
-                    )
-                    .await;
-            }
+            // Dropping the armed guard performs exact local cleanup and
+            // releases the replacement gate after an unconfirmed outcome.
         });
         Ok::<RemoteStartResponse, String>(response)
     });
@@ -641,6 +646,66 @@ async fn control_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_start_pin_error_is_returned_to_the_guarded_start() {
+        let result = pin_shared_session_before_deadline(
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            async {
+                Err(plurx_core::error::StoreError::Database(
+                    "injected pin failure".to_owned(),
+                ))
+            },
+        )
+        .await;
+        assert_eq!(
+            result,
+            Err("database error: injected pin failure".to_owned())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_start_pin_timeout_is_bound_to_the_start_deadline() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let pin = std::future::pending::<Result<bool, plurx_core::error::StoreError>>();
+        let pending = pin_shared_session_before_deadline(deadline, pin);
+        tokio::pin!(pending);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert_eq!(
+            pending.await,
+            Err("shared cache pin exceeded the start deadline".to_owned())
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn remote_start_request_cancellation_drops_the_inflight_pin() {
+        struct PinDropProbe(Option<std::sync::Arc<std::sync::atomic::AtomicBool>>);
+
+        impl Drop for PinDropProbe {
+            fn drop(&mut self) {
+                if let Some(dropped) = self.0.take() {
+                    dropped.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+        }
+
+        let dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let probe = PinDropProbe(Some(std::sync::Arc::clone(&dropped)));
+        let task = tokio::spawn(pin_shared_session_before_deadline(
+            tokio::time::Instant::now() + Duration::from_secs(5),
+            async move {
+                let _probe = probe;
+                std::future::pending::<Result<bool, plurx_core::error::StoreError>>().await
+            },
+        ));
+        task.abort();
+        let _ = task.await;
+        assert!(
+            dropped.load(std::sync::atomic::Ordering::Acquire),
+            "request cancellation must drop the in-flight pin operation"
+        );
+    }
 
     #[test]
     fn active_lease_expiring_after_classification_is_transition_not_gone() {

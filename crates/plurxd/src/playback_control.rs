@@ -949,7 +949,7 @@ impl TerminalCommitAttempt {
 impl TerminalCommitRetry {
     fn start_if_needed(&self) {
         let transition = Arc::clone(&self.transition);
-        let mut transition = transition
+        let _transition = transition
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if self.expiry.expired() {

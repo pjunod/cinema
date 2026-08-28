@@ -863,13 +863,15 @@ pub struct MediaSessionActivation {
     pub session_id: String,
     pub user_id: i64,
     pub playback_id: String,
-    /// When a stall reopen names a durable predecessor, activation is a CAS:
-    /// the playback pointer must still name this exact incarnation. Ordinary
-    /// starts leave this unset and replace whichever route is current.
+    /// Activation uses a predecessor CAS when `fence_predecessor` is true:
+    /// `Some` requires the playback pointer to name this exact incarnation,
+    /// while `None` requires the pointer to be absent. Ordinary starts and
+    /// reopen/takeover activations use this same CAS contract; the explicit
+    /// unfenced compatibility path is `None` with `fence_predecessor` false.
     pub expected_predecessor_incarnation_id: Option<String>,
-    /// Distinguishes an unfenced ordinary start from a legacy reopen that
-    /// observed no durable predecessor. When true with no expected id, the
-    /// atomic activation requires the playback pointer to remain absent.
+    /// Enables the predecessor CAS described above. When false, activation is
+    /// explicitly unfenced compatibility behavior and is valid only without
+    /// an expected predecessor id.
     pub fence_predecessor: bool,
     pub request_id: Option<String>,
     pub request_fingerprint: String,
