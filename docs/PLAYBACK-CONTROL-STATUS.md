@@ -5,13 +5,16 @@
 **Current work:** first actor-owned prepublication recovery cut in
 [#636](https://github.com/pjunod/plurx/pull/636) on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`. Exact compile-repair head
-`f0c2297c3ec0a598b233e2a2aca73fbb8d165538` received unanimous targeted
+`/private/tmp/plurx-playback-control-clone`. Exact assertion/scanner head
+`2bb65af3988fe0bba4b2fcfdedf9c47484f94903` received unanimous targeted
 approval after the earlier runtime head `841e695f` passed all three broad
 reviews and all 190 ownership rows matched. The directly affected rerun then
 compiled successfully and executed 641 tests: 606 passed, 30 socket-fixture
 tests were denied local binds by the sandbox, and five deterministic inventory
-or high-water assertions were stale. Runtime behavior remains frozen in
+or high-water assertions were stale. All five deterministic failures now pass
+by exact name, and all 30 socket fixtures pass by exact name with unrestricted
+loopback binds, accounting for all 641 tests without a second full-suite run.
+Runtime behavior remains frozen in
 `f02bf5b5a2ed820f99308ad69720bb449bdf3109`; compile repair
 `ef74b41e57bc26eff06a156024b02029c2c2e768` replaces four nonexistent Hiqlite
 helper calls, imports the four schema constants used by the direct-upgrade
@@ -94,14 +97,14 @@ affected `plurx-core` rerun compiled successfully. Of 641 executed tests, 606
 passed, 30 failed only because the sandbox refused local socket binds, and
 five exposed stale exact inventories or high-water assertions. Repairs through
 `53c823ca` correct those expectations and the scanner boundary without changing
-runtime behavior, and now require targeted exact-head review before only failed
-names rerun.
+runtime behavior. Exact head `2bb65af3` received unanimous targeted approval;
+the five deterministic names then passed in the normal sandbox and all 30
+socket names passed with loopback-bind permission.
 GitHub's earlier automatic scope lane ran no tests or builds: its static
 `history-check` stopped on hashes rewritten by the rebase, and `5bea1ec7` plus
 `95cd9a2e` add their append-only evidence mappings. The one allowed full local
-unit invocation has been consumed. Only failed names may rerun after exact
-repair review; the 30 socket fixtures require an unrestricted local-bind
-environment. PR #626's runtime commits
+unit invocation has been consumed. Every failed name has now passed; no broad
+unit target will run again. PR #626's runtime commits
 `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
 command, and one bounded passive executor inbox/task. Root static review
@@ -158,7 +161,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the frozen candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Approve the inventory-repaired immutable head, rerun only failed test names, satisfy cluster/hosted gates, and merge; later cuts remove published-lifetime and copy compatibility owners |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; the frozen candidate assembles production startup recovery, make-before-break publication fencing, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Run non-unit and cluster gates, satisfy hosted checks, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -226,9 +229,9 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Implementation frozen in `f02bf5b5`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Runtime head `841e695f` and compile-repair head `f0c2297c` unanimously approved.** Lifecycle approved replacement-gate retention, bounded pinning, takeover cleanup, and cancellation settlement; Store approved schema/import/CAS/replay/publication correctness; integration independently matched all 190 owner rows and the compile repair. The assertion/scanner repair through `53c823ca` now requires targeted exact-head approval. |
+| Adversarial implementation review | **Runtime `841e695f`, compile repair `f0c2297c`, and assertion/scanner repair `2bb65af3` unanimously approved.** Lifecycle approved replacement-gate retention, bounded pinning, takeover cleanup, and cancellation settlement; Store approved schema/import/CAS/replay/publication correctness; integration independently matched all 190 owner rows, compiler repairs, five assertion corrections, and scanner cutoff. |
 | Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts passed. The directly affected rerun compiled the Store fixes and exposed only stale exact test inventories plus sandbox-denied socket fixtures. |
-| Unit/focused tests | **One full invocation consumed; targeted rerun 606/641 passed.** The full `make unit` invocation at `841e695f` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. Five deterministic assertions and their scanner boundary are repaired through `53c823ca`; 30 failures are identical sandbox local-bind denials. After targeted review, rerun only those 35 failed names, never the full suite. |
+| Unit/focused tests | **Complete under the one-run/failure-only rule.** The full `make unit` invocation at `841e695f` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. After exact repair approval, the five deterministic failures passed by exact name and the 30 sandbox-denied socket fixtures passed by exact name with loopback access. All 641 targeted tests are accounted green; the full suite did not run again. |
 | Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
 
 ## Watchdog-removal ledger
@@ -316,9 +319,8 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Obtain targeted adversarial approval of the post-`f0c2297c` assertion
-   repairs, rerun only the five deterministic and 30 sandbox-denied names, make cluster/hosted
-   gates green, merge the active prepublication cut, migrate
+1. Run the required non-unit and cluster gates, make hosted checks green,
+   merge the active prepublication cut, migrate
    published-lifetime and copy recovery, and prove the old server watchdog/
    replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
