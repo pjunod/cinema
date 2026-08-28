@@ -5,10 +5,11 @@
 **Current work:** first actor-owned prepublication recovery cut on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
 `/private/tmp/plurx-playback-control-clone`. Exact reviewed head
-`31e7d5e2a0ca3c8db4b8de677d40e6c699c36242` was rejected after the earlier
-`763c230cc5de98adc7b07f4635016e5d9db06f2a` rejection. The current runtime,
+`bb69eb7ef43909965ea81f8081ea8a77b46504c2` was rejected after the earlier
+`31e7d5e2a0ca3c8db4b8de677d40e6c699c36242` and
+`763c230cc5de98adc7b07f4635016e5d9db06f2a` rejections. The current runtime,
 Store, tests, and owner ledger are frozen in
-`52678b96115369650556440ed5b15efdfa5b3896`; this status update will become
+`f28691203286f56a7ba8df1f7d684e6c7e0acec4`; this status update will become
 the next immutable review head.
 
 The post-rejection work is assembled in three tracks:
@@ -31,7 +32,7 @@ The post-rejection work is assembled in three tracks:
   immediate heavyweight terminal-graph compaction, and bounded compact `410`
   replay followed by fail-closed durable eviction.
 
-The implementation frozen through `52678b96` joins those tracks at their
+The implementation frozen through `f2869120` joins those tracks at their
 shared publication boundary:
 
 - replacement is make-before-break: the provisional successor activates by
@@ -198,8 +199,8 @@ Review and test state for M4:
 | Static owner inventory | **Reconciled for source freeze.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. A direct read-only recount matches all 36 source-symbol rows, 132 module-symbol rows, and 22 structural rows. The ownership test itself has not run. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Implementation frozen in `52678b96`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, exact takeover activation/replay/bootstrap renewal, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Exact heads `763c230c` and `31e7d5e2` rejected; `52678b96` moving tree approved.** The second formal review found activation replay regression, an unreachable Live takeover contract, underbounded first renewal, detachable creation cleanup, expired-route stale End, and missing lifecycle coverage. The repair uses read-only activation replay, separate VOD-ingress/Live-takeover validators, abort/join-before-stop creation ownership, exact lease-boundary End CAS, and a confirmed bootstrap renewal before seed/publish. Three focused moving-tree reviews approve those repairs. They are diagnostic evidence, not approval of the final docs-bearing hash. Commit this update and obtain unanimous review of that exact immutable head before tests. |
+| Operational projection | **Implementation frozen in `f2869120`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
+| Adversarial implementation review | **Exact heads `763c230c`, `31e7d5e2`, and `bb69eb7e` rejected; `f2869120` is the repaired runtime freeze.** The latest formal pass found a Hiqlite replay TOCTOU that could shorten a renewed lease, fixed-page takeover starvation, an unowned copy-start child/scratch interval, durable-ID adoption before bootstrap renewal, panic-unsafe cleanup identity movement, and missing failure-matrix coverage. The repair makes an exact concurrent replay transaction read-only and proves the forced ordering against three voters; keyset-pages expired routes; owns copy scratch and child from creation; renews the provisional worker before its durable URL exists; moves its cleanup guard atomically with registry adoption; and covers error, timeout, rejection, cancellation, panic, and abort/join ordering. This code commit is not approval of the final docs-bearing hash. The immutable head containing this update must receive unanimous review before tests. |
 | Format/static inspection | **Performed.** `cargo fmt`, static diff inspection, and static ownership recounts are the only candidate validation so far. No compile or build command has run. |
 | Unit/focused tests | **Gate closed; none run on the repair candidate.** Per user direction there will be one full unit-suite run, on the unanimously reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
 | Full/cluster/hosted gates | **Pending.** The merged #626 baseline is green. Candidate cluster/integration and required hosted PR checks remain required after the review and one-full-suite gate. |
@@ -280,15 +281,16 @@ idempotency bound: it retains one immutable accepted reply and triggers no
 playback, replacement, restart, or failure decision. It is not a watchdog.
 
 Cluster takeover adds one 24-second, one-shot ownership lease. The survivor
-must complete an exact bootstrap renewal after adoption and before
-seed/publication; ordinary renewals then return to the 12-second cluster owner
-lease. This fixed lease and its four-second Store deadline can fence serving
-authority, but they never infer a playback stall, select quality, or restart a
-producer. They are cluster split-brain bounds, not playback watchdogs.
+must complete an exact bootstrap renewal from the provisional worker before
+durable-ID adoption and seed/publication; ordinary renewals then return to the
+12-second cluster owner lease. This fixed lease and its four-second Store
+deadline can fence serving authority, but they never infer a playback stall,
+select quality, or restart a producer. They are cluster split-brain bounds,
+not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Freeze the complete post-`31e7d5e2` repair and reconciled owner ledger as
+1. Freeze the complete post-`bb69eb7e` repair and reconciled owner ledger as
    one immutable docs-bearing head, and obtain unanimous adversarial
    approval before tests. Then run the full local unit suite once, make
    cluster/hosted gates green, merge the active prepublication cut, migrate

@@ -7,18 +7,18 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`31e7d5e2a0ca3c8db4b8de677d40e6c699c36242` (frozen and rejected; combined
-verdict **REQUEST CHANGES**; earlier rejected head `763c230c`)
-**Implementation freeze:** `52678b96115369650556440ed5b15efdfa5b3896`
+`bb69eb7ef43909965ea81f8081ea8a77b46504c2` (frozen and rejected; combined
+verdict **REQUEST CHANGES**; earlier rejected heads `31e7d5e2` and `763c230c`)
+**Implementation freeze:** `f28691203286f56a7ba8df1f7d684e6c7e0acec4`
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`. It is
-based on rejected head `31e7d5e2` on branch
+based on rejected head `bb69eb7e` on branch
 `codex/playback-control-m4-prepublication`; this documentation update will
 become the next exact review head.
-**Runtime review state:** exact heads `763c230c` and `31e7d5e2` were reviewed
-read-only and rejected. The repair through `52678b96` has focused moving-tree
-approval for activation replay, takeover admission/publication/cancellation,
-lease settlement, and lifecycle coverage. The combined docs-bearing branch
-head has not yet received immutable-head adversarial approval.
+**Runtime review state:** exact heads `763c230c`, `31e7d5e2`, and `bb69eb7e`
+were reviewed read-only and rejected. The repair through `f2869120` closes the
+latest Store replay, takeover inventory, copy prepublication, renewal/adoption,
+move-owned identity, and lifecycle-coverage findings. The combined docs-bearing
+branch head has not yet received immutable-head adversarial approval.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -30,7 +30,7 @@ binds bodyless status, typed error, and EOF publication to exact response
 authority. It also actor-fences copy and rolling-cache response publication,
 and gives hard node failure an exact replayable takeover CAS with
 abort/join-before-stop provisional ownership and a confirmed bootstrap renewal
-before seed/publication.
+before durable-ID adoption and seed/publication.
 The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
 **Validation state:** `cargo fmt`, static diff inspection, and static ownership
@@ -349,15 +349,16 @@ Formal review of docs-bearing exact head `31e7d5e2` rejected that first freeze:
 - takeover commit-unknown, Pending, Lost, pin, runway, and adoption paths had
   no test that retained and observed the same move-only worker capabilities.
 
-Implementation commit `52678b96` closes that ledger. Both Stores recognize an
-exact pointer/immutable-identity activation replay before any mutating UPSERT
-and return the durable lease, progress, sequence, and publication state.
+Implementation commit `52678b96` was intended to close that ledger. Both
+Stores added an optimistic exact pointer/immutable-identity replay path that
+returned durable lease, progress, sequence, and publication state when it won
+the pre-transaction read.
 Network worker ingress remains VOD-only, while a separate bounded validator
 admits only persisted Live takeover recipes. `TakeoverCreationOwner` keeps the
-child handle and exact worker owner together through abort and join. An exact
-takeover winner is pinned and adopted, then must complete one bounded renewal
-to a fresh 24-second wall-and-monotonic lease before its renewed route is
-seeded and published; ordinary owner renewal returns to 12 seconds. Ambiguous
+child handle and exact worker owner together through abort and join. At that
+commit, an exact takeover winner was pinned and adopted before its bounded
+renewal to a fresh 24-second wall-and-monotonic lease; ordinary owner renewal
+returned to 12 seconds. Ambiguous
 renewal cleanup retains the settlement through the proposed lease. Stale End
 selection requires fresh runway, an active exact owner/epoch and unchanged
 lease boundary; valid Live/typeless routes are left active for takeover, and
@@ -368,10 +369,50 @@ publication, definitive loss, and runway/pin/adoption failure without a
 second state machine. Three independent moving-tree audits approve these
 repairs. No dynamic test has run.
 
-These changes have source-level regressions and parity assertions, but none
-has run. Implementation commit `52678b96` has not been compiled, built, or
-tested. Commit this handoff/status update, then obtain the required exact-head
-adversarial approval before opening the unit-test gate.
+Formal read-only review of the resulting docs-bearing head `bb69eb7e` rejected
+that freeze too:
+
+- the Hiqlite optimistic pointer read still left a transaction-order race in
+  which an old exact activation replay could overwrite a later renewal and
+  prematurely expire live authority;
+- both expired-route inventories returned only the oldest fixed page, so
+  permanently ineligible legacy or malformed rows could starve every later
+  takeover candidate;
+- copy startup created scratch, and then a child, before any cancellation
+  owner could reap both across capability refusal, origin probe, or aborted
+  registration;
+- the worker was adopted under its durable public ID before bootstrap renewal,
+  and a panic immediately after the registry move could leave cleanup pointing
+  at the now-empty provisional ID; and
+- the lifecycle seam did not exercise claim/replay/read errors and timeouts,
+  renewal ambiguity, cache-generation rejection, supervisor unwind, or exact
+  creation abort/join ordering.
+
+Implementation commit `f2869120` closes that third ledger. Hiqlite suppresses
+every exact-current activation write inside the Raft transaction, accepts only
+the fresh-write shape or an all-zero replay, and then proves both immutable
+route identity and the current pointer; a contract-only pause forces the real
+three-voter ordering of stale pre-read, activation, renewal, and stale
+transaction. Both Stores expose an exclusive `(lease_expires_at_ms,
+incarnation_id)` keyset cursor, while the process retains its scan position
+across ticks so skipped rows cannot monopolize the oldest page. Copy startup's
+prepublication guard owns scratch immediately, takes ownership of an
+`AttemptChild` before the origin probe awaits, transfers it into the Session,
+and settles only after manager registration.
+
+Takeover publication now renews the durable route from the provisional
+worker's frontier before the durable capability exists. Registry adoption
+move-owns `TakeoverWorkerGuard` and updates its cleanup identity synchronously
+with the map rename, before any further await or fallible bookkeeping. The
+generic settlement/creation seams cover initial claim, replay, exact read,
+bootstrap renewal, cache rejection, cancellation, panic, and child
+abort-then-join-before-worker-stop. No dynamic test has run.
+
+These changes have source-level and backend contract regressions, but none has
+run. Implementation commit `f2869120` has not been compiled, built, or tested.
+The immutable docs-bearing head containing this handoff must be pushed to a PR
+and receive the required exact-head adversarial approval before the unit-test
+gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -700,17 +741,17 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`31e7d5e2a0ca3c8db4b8de677d40e6c699c36242` is the last formally reviewed head
+`bb69eb7ef43909965ea81f8081ea8a77b46504c2` is the last formally reviewed head
 and is rejected. The runtime, Store, tests, and owner inventory are frozen in
-`52678b96115369650556440ed5b15efdfa5b3896`; this status/handoff update is the
+`f28691203286f56a7ba8df1f7d684e6c7e0acec4`; this status/handoff update is the
 only remaining tracked change. The preserved untracked vendor build artifacts
 remain outside every commit.
 
 Continue in this order:
 
-1. Commit the status/handoff update without either vendor target tree and
-   record the resulting exact immutable branch head.
-2. Obtain unanimous independent adversarial approval of that exact head. If a
+1. Verify the status/handoff commit excludes both vendor target trees, push the
+   branch, open its PR, and record the exact immutable branch head.
+2. Obtain unanimous independent adversarial approval of that PR head. If a
    finding changes behavior, repair it and freeze/review a new exact head.
 3. Run the full local unit suite once. If it fails, fix the cause and rerun
    only failed or directly affected tests, then review the behavioral delta.
@@ -1051,7 +1092,7 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Freeze and unanimously review the post-`31e7d5e2` repair candidate, run its
+1. Freeze and unanimously review the post-`bb69eb7e` repair candidate, run its
    one full unit suite, satisfy cluster/hosted gates, and merge the production
    decision, prepublication retry, response-admission, relay/VOD ownership,
    and confirmed-reap cut.
