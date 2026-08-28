@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["5587ff08", "0c68f071"]
-points = ["cluster.auth", "cluster.page-reads", "server.api", "web.experience"]
-checks = ["rust-gate", "cluster-auth", "web-static", "web-layout"]
-reason = "The retained SQLite and backend-neutral Store regressions page canonical analysis rows without overlap, attach a mutable cache-key job only to its newest request generation, classify expected outcomes separately, and assert the compact summary; cluster-auth repeats that contract against three replicated voters, the HTTP and shipped-source web suites pin server-side cursor/filter validation, non-retryable unsupported and deleted sources, stale-data and focus preservation, and conditional Live HLS wording, while web-layout sweeps the first-class Activity, Settings, item, and Analysis surfaces across every supported layout and viewport."
+commits = ["5587ff08", "0c68f071", "9204c6f0"]
+points = ["cluster.auth", "cluster.page-reads", "server.api", "web.experience", "validation.framework"]
+checks = ["rust-gate", "cluster-auth", "web-static", "web-layout", "history-regressions"]
+reason = "The retained SQLite and backend-neutral Store regressions page canonical analysis rows without overlap, attach a mutable cache-key job only to its newest request generation, classify expected outcomes separately, and assert the compact summary; cluster-auth repeats that contract against three replicated voters, the HTTP and shipped-source web suites pin server-side cursor/filter validation, non-retryable unsupported and deleted sources, stale-data and focus preservation, and conditional Live HLS wording, web-layout sweeps the first-class Activity, Settings, item, and Analysis surfaces across every supported layout and viewport, and history-regressions requires this evidence mapping to remain attached to the runtime corrections."
