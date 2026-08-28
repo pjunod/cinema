@@ -194,6 +194,7 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
         "job_state": row.job_state,
         "state": row.state,
         "disposition": row.disposition,
+        "action": row.action,
         "owner_node_id": row.owner_node_id,
         "lease_expires_ms": row.lease_expires_ms,
         "attempts": row.attempts,

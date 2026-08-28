@@ -40,7 +40,9 @@ use crate::error::StoreError;
 // storage-keyed shared-cache generations and reader pins; v12 adds the small
 // replicated catalog and fenced queue for content-addressed fragment indexes;
 // v13 adds durable operator analysis requests ahead of content addressing;
-// v14 adds bounded terminal-control acknowledgement replay. Every additive
+// v14 adds bounded terminal-control acknowledgement replay; v15 adds the
+// indexes that keep the analysis operations projection cheap under polling.
+// Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -50,7 +52,8 @@ use crate::error::StoreError;
 const FRAGMENT_INDEX_SCHEMA_VERSION: i64 = 12;
 const ANALYSIS_REQUEST_SCHEMA_VERSION: i64 = 13;
 const TERMINAL_ACK_SCHEMA_VERSION: i64 = 14;
-pub const AUTH_SCHEMA_VERSION: i64 = TERMINAL_ACK_SCHEMA_VERSION;
+const ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION: i64 = 15;
+pub const AUTH_SCHEMA_VERSION: i64 = ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -62,6 +65,7 @@ const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
 const FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = 11;
 const ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE: i64 = FRAGMENT_INDEX_SCHEMA_VERSION;
 const TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_REQUEST_SCHEMA_VERSION;
+const ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_ACK_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1523,6 +1527,29 @@ impl HiqliteAuthStore {
                     self.settle_migration_attempt(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_history_index_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2790,7 +2817,8 @@ fn schema_migration_action(
         | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
         | FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
-        | TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE => {
+        | TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4202,9 +4230,18 @@ mod tests {
             "v13 must advance exactly one step to the terminal-ack schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 9,
+            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE, TERMINAL_ACK_SCHEMA_VERSION,
+            "the analysis-index migration must start from the exact v14 shape"
+        );
+        assert_eq!(
+            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION,
+            "v14 must advance exactly one step to the analysis-index schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 10,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v14 step"
+            "this implementation contains every additive v5→v15 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -4287,6 +4324,14 @@ mod tests {
             )
             .expect("terminal-ack predecessor"),
             SchemaMigrationAction::MigrateFrom(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("analysis-index predecessor"),
+            SchemaMigrationAction::MigrateFrom(ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

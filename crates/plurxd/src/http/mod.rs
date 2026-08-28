@@ -7970,6 +7970,7 @@ mod tests {
         assert_eq!(analysis["rows"][0]["item_id"], s.ep.to_string());
         assert_eq!(analysis["rows"][0]["job_id"], "");
         assert_eq!(analysis["rows"][0]["disposition"], "working");
+        assert_eq!(analysis["rows"][0]["action"], "none");
         assert_eq!(analysis["filtered_total"], 1);
         assert_eq!(analysis["page_size"], 25);
         assert!(analysis["next_cursor"].is_null());

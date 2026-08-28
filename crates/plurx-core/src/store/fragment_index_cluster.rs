@@ -145,6 +145,17 @@ BEGIN
 END;
 "#;
 
+/// v33/v15 query indexes for the paginated operator history and its compact
+/// polling projection. This is a separate migration from the v31/v13 table so
+/// deployed databases receive it instead of only fresh installations.
+pub const ANALYSIS_HISTORY_INDEX_SCHEMA: &str = r#"
+CREATE INDEX IF NOT EXISTS analysis_requests_result_history
+    ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+    WHERE result_cache_key IS NOT NULL AND result_cache_key <> '';
+CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
+    ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 
 /// Portable SQLite/Postgres projection used by both store backends. Retained
@@ -161,6 +172,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          request.request_id AS request_id,
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.cache_key, '') ELSE '' END AS job_id,
          request.file_id AS file_id,
+         CASE WHEN files.id IS NULL THEN 0 ELSE 1 END AS file_available,
          COALESCE(files.item_id, 0) AS item_id,
          COALESCE(items.title, '') AS title,
          request.component AS component,
@@ -193,6 +205,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
   UNION ALL
   SELECT 'job:' || job.cache_key AS row_key,
          '' AS request_id, job.cache_key AS job_id, job.file_id AS file_id,
+         CASE WHEN files.id IS NULL THEN 0 ELSE 1 END AS file_available,
          COALESCE(files.item_id, 0) AS item_id,
          COALESCE(items.title, '') AS title,
          'fragment_index' AS component, 0 AS force_rebuild,
@@ -210,7 +223,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
    WHERE NOT EXISTS (
      SELECT 1 FROM analysis_requests request
       WHERE request.result_cache_key = job.cache_key)
-), classified AS (
+), classified_base AS (
   SELECT canonical.*,
          CASE state WHEN 'running' THEN 0 WHEN 'queued' THEN 1
            WHEN 'submitted' THEN 2 WHEN 'failed' THEN 3
@@ -226,6 +239,76 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
            ELSE 'attention'
          END AS disposition
     FROM canonical
+), classified AS (
+  SELECT classified_base.*,
+         CASE
+           WHEN file_available = 0 THEN 'none'
+           WHEN state = 'ready' THEN 'rebuild'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'source_superseded'
+             THEN 'analyze_current'
+           WHEN disposition = 'attention' THEN 'retry'
+           ELSE 'none'
+         END AS action
+    FROM classified_base
+)"#;
+
+/// Bounded, join-free projection for the frequently polled status cards.
+/// Operator requests already have a hard retained-history cap. Standalone
+/// terminal worker rows are restricted to the newest retained window while
+/// active and request-referenced jobs are always included.
+pub(super) const ANALYSIS_SUMMARY_CTE: &str = r#"WITH request_ranked AS (
+  SELECT request.*, ROW_NUMBER() OVER (
+    PARTITION BY COALESCE(NULLIF(result_cache_key, ''), request_id)
+    ORDER BY updated_at_ms DESC, request_id DESC) AS cache_rank
+    FROM analysis_requests request
+), summary_job_keys AS (
+  SELECT result_cache_key AS cache_key FROM analysis_requests
+   WHERE result_cache_key IS NOT NULL AND result_cache_key <> ''
+  UNION
+  SELECT cache_key FROM cluster_fragment_index_jobs
+   WHERE state IN ('queued', 'running')
+  UNION
+  SELECT cache_key FROM (
+    SELECT cache_key FROM cluster_fragment_index_jobs
+     WHERE state IN ('ready', 'failed', 'cancelled')
+     ORDER BY updated_at_ms DESC, cache_key LIMIT 8192)
+), summary_jobs AS (
+  SELECT job.* FROM cluster_fragment_index_jobs job
+  JOIN summary_job_keys keys ON keys.cache_key = job.cache_key
+), summary_canonical AS (
+  SELECT 'request:' || request.request_id AS row_key,
+         request.file_id AS file_id,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state)
+              ELSE request.state END AS state,
+         COALESCE(request.last_error_code, '') AS request_error_code,
+         CASE WHEN request.cache_rank = 1 THEN COALESCE(job.last_error_code, '') ELSE '' END AS job_error_code,
+         CASE WHEN request.cache_rank = 1 AND COALESCE(job.updated_at_ms, 0) > request.updated_at_ms
+              THEN job.updated_at_ms ELSE request.updated_at_ms END AS updated_at_ms
+    FROM request_ranked request
+    LEFT JOIN summary_jobs job
+      ON request.cache_rank = 1 AND job.cache_key = request.result_cache_key
+  UNION ALL
+  SELECT 'job:' || job.cache_key AS row_key, job.file_id AS file_id,
+         job.state AS state, '' AS request_error_code,
+         COALESCE(job.last_error_code, '') AS job_error_code,
+         job.updated_at_ms AS updated_at_ms
+    FROM summary_jobs job
+   WHERE NOT EXISTS (
+     SELECT 1 FROM analysis_requests request
+      WHERE request.result_cache_key = job.cache_key)
+), summary_classified AS (
+  SELECT summary_canonical.*,
+         CASE
+           WHEN state IN ('queued', 'running', 'submitted')
+             AND COALESCE(NULLIF(job_error_code, ''), request_error_code) <> '' THEN 'automatic'
+           WHEN state IN ('queued', 'running', 'submitted') THEN 'working'
+           WHEN state = 'ready' THEN 'ready'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'unsupported' THEN 'unsupported'
+           WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code)
+             IN ('source_deleted', 'source_superseded') THEN 'expected'
+           ELSE 'attention'
+         END AS disposition
+    FROM summary_canonical
 )"#;
 const BLOB_MAGIC: &[u8; 8] = b"PLRXIDX2";
 const BLOB_FORMAT_VERSION: u16 = 2;
@@ -354,6 +437,7 @@ pub struct AnalysisHistoryRow {
     pub job_state: String,
     pub state: String,
     pub disposition: String,
+    pub action: String,
     pub owner_node_id: String,
     pub lease_expires_ms: i64,
     pub attempts: i64,

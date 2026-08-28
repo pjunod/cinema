@@ -51,9 +51,9 @@ use plurx_core::segplan::{
     SEGPLAN_VERSION,
 };
 use plurx_core::store::{
-    cluster_fragment_index_key, AnalysisHistoryFilter, AnalysisHistoryQuery, ArtworkRepairFence,
-    ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore, MediaStore,
-    NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
+    cluster_fragment_index_key, AnalysisHistoryCursor, AnalysisHistoryFilter, AnalysisHistoryQuery,
+    ArtworkRepairFence, ClusterFragmentIndexArtifact, ClusterFragmentIndexLocation, LibraryStore,
+    MediaStore, NewAnalysisRequest, NewClusterFragmentIndexJob, OutboxEntry, PublicationStore,
     ReconcileOutcome, RootFingerprintStatus, SqliteStore, Store,
 };
 #[cfg(feature = "hiqlite-contract-tests")]
@@ -6179,6 +6179,12 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             3,
         ),
         (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('analysis_requests_result_history', \
+                          'cluster_fragment_index_jobs_status_history')",
+            2,
+        ),
+        (
             "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'trigger' \
              AND name IN ('analysis_requests_cancel_source', \
                           'analysis_requests_supersede_source', \
@@ -9229,8 +9235,26 @@ async fn analysis_history_contract_runs_through_dyn_store() {
             .unwrap_or_else(|| panic!("{backend}: retained new generation"));
         assert!(old.job_id.is_empty(), "backend {backend}: old mutable job");
         assert_eq!(old.state, "ready", "backend {backend}");
+        assert_eq!(old.action, "rebuild", "backend {backend}");
         assert_eq!(new.job_id, cache_key, "backend {backend}");
         assert_eq!(new.state, "queued", "backend {backend}");
+        assert_eq!(new.action, "none", "backend {backend}");
+
+        let past_end = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: Some(AnalysisHistoryCursor {
+                    sort_rank: 6,
+                    updated_at_ms: 0,
+                    row_key: "past-the-retained-tail".to_owned(),
+                }),
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read valid empty tail page: {error}"));
+        assert!(past_end.rows.is_empty(), "backend {backend}");
+        assert_eq!(past_end.filtered_total, 2, "backend {backend}");
 
         let summary = store
             .analysis_status_summary()
