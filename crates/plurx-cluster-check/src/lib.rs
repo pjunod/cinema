@@ -3456,23 +3456,74 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         bail!("failed repair retries wrote inside the active lease");
     }
     tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
-    let old_fence = match cluster
-        .request(
+    let initial_term = u64::try_from(
+        initial_fence
+            .as_ref()
+            .context("initial leader did not return its repair fence")?
+            .leader_term,
+    )
+    .context("initial artwork repair term was negative")?;
+    let stable_claim_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    let old_fence = loop {
+        match cluster.request(leader, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == leader && current_term == initial_term => {}
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                ..
+            } if current_leader == leader && current_term == initial_term => {
+                // The lease has expired, but loaded runners can briefly miss
+                // the production one-second quorum-freshness window. Wait for
+                // a current acknowledgement before attempting the CAS.
+                if Instant::now() >= stable_claim_deadline {
+                    bail!("stable-term artwork re-repair never regained a fresh quorum lease");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            Response::Metrics { .. } => {
+                bail!("artwork repair topology changed during the stable-term lease proof")
+            }
+            response => bail!("unexpected stable-term repair metrics response: {response:?}"),
+        }
+        if let Some(fence) = claim_artwork_repair_fence_once(
+            &mut cluster,
             leader,
-            Request::ClaimArtworkRepairFence {
-                item_id: repair_item,
-                lease_ms: repair_lease_ms,
-                inject_leader_change: false,
-            },
+            repair_item,
+            repair_lease_ms,
+            false,
         )
         .await?
-    {
-        Response::ArtworkRepairFence { fence: Some(fence) } => fence,
-        response => bail!("stable-term artwork re-repair stayed fenced: {response:?}"),
+        {
+            if u64::try_from(fence.leader_term).ok() != Some(initial_term) {
+                bail!("artwork repair term changed during the stable-term generation CAS");
+            }
+            break fence;
+        }
+        // `None` explicitly proves the server reached no generation CAS. A
+        // quorum acknowledgement can age between the preflight and the claim,
+        // so only this confirmed no-op is safe to retry.
+        if Instant::now() >= stable_claim_deadline {
+            bail!("stable-term artwork re-repair stayed fenced after the bounded retry window");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let same_term_after = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
+        Response::Metrics {
+            applied_index,
+            leader: Some(current_leader),
+            current_term,
+            ..
+        } if current_leader == leader && current_term == initial_term => {
             applied_index.context("stable-term repair reuse missing applied index")?
+        }
+        Response::Metrics { .. } => {
+            bail!("artwork repair topology changed during the stable-term generation CAS")
         }
         response => bail!("unexpected stable-term repair metrics: {response:?}"),
     };
@@ -4604,17 +4655,26 @@ async fn claim_artwork_repair_fence_once(
     lease_ms: u64,
     inject_leader_change: bool,
 ) -> Result<Option<ArtworkRepairFence>> {
-    match cluster
-        .request(
-            node_id,
-            Request::ClaimArtworkRepairFence {
-                item_id,
-                lease_ms,
-                inject_leader_change,
-            },
-        )
-        .await?
-    {
+    classify_artwork_repair_claim_response(
+        cluster
+            .request(
+                node_id,
+                Request::ClaimArtworkRepairFence {
+                    item_id,
+                    lease_ms,
+                    inject_leader_change,
+                },
+            )
+            .await?,
+    )
+}
+
+/// Only an explicit no-fence response proves the mutating request reached no
+/// generation CAS and is therefore safe for a bounded caller to retry.
+fn classify_artwork_repair_claim_response(
+    response: Response,
+) -> Result<Option<ArtworkRepairFence>> {
+    match response {
         Response::ArtworkRepairFence { fence } => Ok(fence),
         Response::MembershipLeaderChange { .. } => {
             bail!("mutating artwork repair claim was ambiguous and was not retried")
@@ -12215,6 +12275,55 @@ mod tests {
         assert_eq!(helper.matches(".request(").count(), 1);
         assert!(helper.contains("Response::MembershipLeaderChange"));
         assert!(helper.contains("was ambiguous and was not retried"));
+    }
+
+    #[test]
+    fn mutating_artwork_claim_retries_only_a_confirmed_noop() {
+        let fence = ArtworkRepairFence {
+            item_id: 17,
+            owner_node_id: "node-2".to_owned(),
+            leader_term: 9,
+            generation: 3,
+        };
+        assert_eq!(
+            classify_artwork_repair_claim_response(Response::ArtworkRepairFence {
+                fence: Some(fence.clone()),
+            })
+            .expect("a committed repair claim is classified"),
+            Some(fence)
+        );
+        assert!(
+            classify_artwork_repair_claim_response(Response::ArtworkRepairFence { fence: None })
+                .expect("an explicit no-op repair claim is classified")
+                .is_none()
+        );
+        assert!(
+            classify_artwork_repair_claim_response(Response::MembershipLeaderChange {
+                message: "acknowledgement lost after submission".to_owned(),
+            })
+            .is_err()
+        );
+        assert!(classify_artwork_repair_claim_response(Response::Ok).is_err());
+    }
+
+    #[test]
+    fn stable_term_rerepair_reestablishes_quorum_before_the_cas() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .rsplit_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        let proof = production
+            .split_once("let stable_claim_deadline")
+            .expect("stable-term repair proof")
+            .1
+            .split_once("let same_term_after")
+            .expect("stable-term repair proof boundary")
+            .0;
+        assert!(proof.contains("CONVERGENCE_TIMEOUT"));
+        assert!(proof.contains("quorum_acknowledged: true"));
+        assert!(proof.contains("claim_artwork_repair_fence_once"));
+        assert!(!proof.contains("Request::ClaimArtworkRepairFence"));
     }
 
     #[test]

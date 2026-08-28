@@ -378,15 +378,15 @@ async fn metrics_voters(cluster: &mut ClusterProcesses) -> Vec<u64> {
     }
 }
 
-/// A voter that dies during startup is reported, not waited on.
+/// A voter that fails during startup is reported, not waited on.
 ///
-/// A voter whose data directory cannot be created exits before it can answer
-/// anything, so the harness is left reading a stream that is already closed.
-/// The contract that matters is that it says so promptly instead of blocking
-/// for `START_TIMEOUT`: a controller that hangs here would stall
-/// `make cluster-check` for 45 seconds per voter with no useful message.
+/// A voter whose data directory cannot be created reports the structured
+/// startup error before it exits. The contract that matters is that the
+/// harness preserves that useful root cause promptly instead of blocking for
+/// `START_TIMEOUT`: a controller that hangs here would stall `make
+/// cluster-check` for 45 seconds per voter with no useful message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
+async fn a_voter_that_fails_during_startup_is_reported_not_awaited() {
     let root = tempfile::tempdir().expect("failed-start test root");
     // A regular file, so creating `<root>/node-1` underneath it cannot succeed.
     let blocked = root.path().join("not-a-directory");
@@ -414,18 +414,22 @@ async fn a_voter_that_dies_during_startup_is_reported_not_awaited() {
         "{:#}",
         node.wait_ready()
             .await
-            .expect_err("a voter that cannot bind must not report readiness")
+            .expect_err("a voter that cannot create its data directory must not report readiness")
     );
     let waited = started.elapsed();
 
     assert!(
-        error.contains("closed its protocol stream"),
-        "the failure should name the closed stream, got: {error}"
+        error.contains("voter 1 failed startup") && error.contains("Not a directory"),
+        "the failure should preserve the structured startup root cause, got: {error}"
+    );
+    assert!(
+        !error.contains("timed out"),
+        "the immediate startup failure must not be reported as a timeout: {error}"
     );
     assert!(
         waited < std::time::Duration::from_secs(30),
-        "a dead voter must be detected by its closed stream, not by the 45s \
-         start timeout; waited {waited:?}"
+        "a failed voter must report its startup error before the 45s start \
+         timeout; waited {waited:?}"
     );
     let _ = node.kill().await;
 }
