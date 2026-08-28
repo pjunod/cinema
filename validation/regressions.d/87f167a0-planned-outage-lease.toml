@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["87f167a0"]
+points = ["cluster.membership", "cluster.operations", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract", "history-regressions"]
+reason = "A shared replicated outage lease serializes restart preparation and maintenance entry across nodes; atomic transition, barrier-race, cancellation, failure, and expiry coverage prevents concurrent planned outages."
