@@ -522,6 +522,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
     use std::collections::VecDeque;
     use std::future;
 
@@ -539,6 +540,7 @@ mod tests {
 
     #[test]
     fn direct_leader_recovery_and_proxy_rotation_keep_distinct_bounds() {
+        #[cfg(feature = "sqlite")]
         assert_eq!(LEADER_REQUEST_MAX_ATTEMPTS, 3);
         assert_eq!(LEADER_DISCOVERY_TIMEOUT, Duration::from_secs(8));
         assert_eq!(
@@ -553,6 +555,7 @@ mod tests {
         assert_eq!(PROXY_ROTATION_TIMEOUT, Duration::from_secs(2));
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn two_consecutive_unaccepted_requests_recover_before_the_third_attempt() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -581,6 +584,7 @@ mod tests {
         assert_eq!(recoveries.load(Ordering::Relaxed), 2);
     }
 
+    #[cfg(feature = "sqlite")]
     #[tokio::test]
     async fn leader_retry_stays_bounded_and_does_not_recover_terminal_errors() {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -617,6 +621,27 @@ mod tests {
         .expect_err("a terminal error is returned immediately");
         assert_eq!(terminal_attempts.load(Ordering::Relaxed), 1);
         assert_eq!(terminal_recoveries.load(Ordering::Relaxed), 1);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn every_sqlite_leader_operation_uses_the_successive_redirect_retry() {
+        let operations = [
+            ("transaction", include_str!("transaction.rs")),
+            ("execute", include_str!("execute.rs")),
+            ("batch", include_str!("batch.rs")),
+            ("query", include_str!("query.rs")),
+            ("watermark", include_str!("mgmt.rs")),
+            ("migration", include_str!("migrate.rs")),
+            ("backup", include_str!("backup.rs")),
+        ];
+
+        for (operation, source) in operations {
+            assert!(
+                source.contains("retry_db_after_leader_change"),
+                "{operation} must use the bounded successive-redirect retry"
+            );
+        }
     }
 
     #[tokio::test(start_paused = true)]
