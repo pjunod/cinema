@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9280c696"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "The retained `minimal_hevc_configuration_rebuilds_complete_muxer_extradata` regression requires a 23-byte minimal HEVC configuration to select `hevc_mp4toannexb,extract_extradata`, retain VPS/SPS/PPS for the rebuilt hvcC record, preserve Dolby Vision stripping order, and change the pipeline fingerprint so failed indexes are rebuilt. Reverting the production correction restores an incomplete muxer configuration that `fragindex` rejects as unsupported."
