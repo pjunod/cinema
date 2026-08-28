@@ -151,6 +151,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('user: "${PUID:-1000}:${PGID:-1000}"', compose)
         self.assertIn('PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}', compose)
         self.assertIn(
+            "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
+        )
+        self.assertIn(
             'PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"',
             compose,
         )

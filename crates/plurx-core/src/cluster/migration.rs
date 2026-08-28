@@ -85,6 +85,20 @@ const HIQLITE_READDRESS_BACKUP_DIRNAME: &str = "hiqlite.before-readdress";
 const HIQLITE_READDRESS_MARKER_FILENAME: &str = "hiqlite-readdress.json";
 #[cfg(feature = "hiqlite-store")]
 const HIQLITE_START_TIMEOUT: Duration = Duration::from_secs(45);
+// OpenRaft gives an AppendEntries RPC one heartbeat interval. Once a leader is
+// running this Hiqlite transport it lets that RPC use the whole hard deadline,
+// and this 800 ms window admits the observed 600-700 ms durable crash-recovery
+// responses. OpenRaft's idle heartbeat poll is at most 3/2 of this value
+// (1,200 ms), still below the previous release's 1,500 ms election floor, so
+// cleanly stopped voters remain safe during a rolling update or rollback. A
+// crash-recovering majority needs a coordinated update: an old leader still
+// owns the old 375 ms sender deadline and cannot be fixed by its new follower.
+#[cfg(feature = "hiqlite-store")]
+const HIQLITE_HEARTBEAT_INTERVAL_MS: u64 = 800;
+#[cfg(feature = "hiqlite-store")]
+const HIQLITE_ELECTION_TIMEOUT_MIN_MS: u64 = 2_400;
+#[cfg(feature = "hiqlite-store")]
+const HIQLITE_ELECTION_TIMEOUT_MAX_MS: u64 = 4_800;
 /// Hiqlite Raft WAL segment size used by every plurx voter.
 ///
 /// Hiqlite 0.14 accepts one serialized Raft entry up to `wal_size - 34` bytes:
@@ -1118,7 +1132,9 @@ fn readdress_single_voter_if_needed(config: &Config) -> Result<(), StoreError> {
         // here would eject them. Hiqlite rebuilds this node from the leader.
         tracing::warn!(
             admitted_peers,
-            "recovering from an ungraceful shutdown by catching up from the cluster"
+            "recovering from an ungraceful shutdown by catching up from the cluster; during the \
+             first rollout of this recovery fix, update every voter before restarting a \
+             crash-recovering majority because an old leader retains the old sender deadline"
         );
         return Ok(());
     }
@@ -1404,118 +1420,131 @@ async fn open_active_store_with_key(
         force_loopback,
     )
     .await?;
-    let telemetry = active.join("telemetry.db");
-    let store = open_store_for_role(role, client.clone(), &telemetry).await?;
-    if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
-        marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
-        write_activation_marker(&active, &marker)?;
-        sync_directory(&active)?;
-    }
-    if let Err(error) = verify_store_identity(&store, &marker.cluster_id).await {
-        drop(store);
-        return Err(error);
-    }
-    // Written here rather than beside the rename so a crash in between still
-    // converges: any boot that successfully opens an active target re-asserts
-    // it, and this is the only place that can be reached without one.
-    if let Err(error) = ensure_activated_source_record(&config.storage.data_dir, &marker) {
-        drop(store);
-        return Err(error);
-    }
-    let credential_key = match credential_key {
-        Some(key) => key,
-        None => match open_active_credential_key(config, &store).await {
-            Ok(key) => key,
-            Err(error) => {
-                drop(store);
-                return Err(error);
-            }
-        },
-    };
-    let concrete_store = Arc::new(store);
-    let store: Arc<dyn Store> = concrete_store.clone();
-    let replication = status::ReplicationMonitor::replicated(client.clone());
-    let catalogue = CatalogueReader::replicated(
-        Arc::clone(&store),
-        concrete_store,
-        replication.metrics_handle(),
-        config.cluster.bounded_replica_reads,
-        config.cluster.bounded_replica_max_lag_entries,
-    );
-    let membership_file = match local_membership.take() {
-        Some(mut membership) => {
-            if membership.local != local {
-                membership.local = local.clone();
-                for peer in &mut membership.bootstrap {
-                    if peer.raft_id == local.raft_id {
-                        *peer = local.clone();
-                    }
+    let cleanup_client = client.clone();
+    let result = async move {
+        let telemetry = active.join("telemetry.db");
+        let store = open_store_for_role(role, client.clone(), &telemetry).await?;
+        if marker.replicated_schema_version != AUTH_SCHEMA_VERSION {
+            marker.replicated_schema_version = AUTH_SCHEMA_VERSION;
+            write_activation_marker(&active, &marker)?;
+            sync_directory(&active)?;
+        }
+        if let Err(error) = verify_store_identity(&store, &marker.cluster_id).await {
+            drop(store);
+            return Err(error);
+        }
+        // Written here rather than beside the rename so a crash in between still
+        // converges: any boot that successfully opens an active target re-asserts
+        // it, and this is the only place that can be reached without one.
+        if let Err(error) = ensure_activated_source_record(&config.storage.data_dir, &marker) {
+            drop(store);
+            return Err(error);
+        }
+        let credential_key = match credential_key {
+            Some(key) => key,
+            None => match open_active_credential_key(config, &store).await {
+                Ok(key) => key,
+                Err(error) => {
+                    drop(store);
+                    return Err(error);
                 }
-                write_local_membership(&config.storage.data_dir, &membership)?;
+            },
+        };
+        let concrete_store = Arc::new(store);
+        let store: Arc<dyn Store> = concrete_store.clone();
+        let replication = status::ReplicationMonitor::replicated(client.clone());
+        let catalogue = CatalogueReader::replicated(
+            Arc::clone(&store),
+            concrete_store,
+            replication.metrics_handle(),
+            config.cluster.bounded_replica_reads,
+            config.cluster.bounded_replica_max_lag_entries,
+        );
+        let membership_file = match local_membership.take() {
+            Some(mut membership) => {
+                if membership.local != local {
+                    membership.local = local.clone();
+                    for peer in &mut membership.bootstrap {
+                        if peer.raft_id == local.raft_id {
+                            *peer = local.clone();
+                        }
+                    }
+                    write_local_membership(&config.storage.data_dir, &membership)?;
+                }
+                membership
             }
-            membership
+            None => {
+                let metrics = client.metrics_db().await.map_err(|error| {
+                    StoreError::Database(format!("reading initial cluster membership: {error}"))
+                })?;
+                // A node reaching this branch has no membership record at all, so
+                // it is an initial voter: a learner only ever exists because a
+                // join wrote one. Version 1 keeps this file readable by the
+                // previous release, which is what makes installing this binary
+                // reversible for every node that has not been admitted as a
+                // learner.
+                let membership = LocalMembership {
+                    version: local_membership_version(ClusterRole::Voter),
+                    cluster_id: identity.cluster_id.clone(),
+                    node_id: identity.node_id.clone(),
+                    raft_id: identity.raft_id,
+                    local: local.clone(),
+                    bootstrap: metrics
+                        .membership_config
+                        .nodes()
+                        .map(|(_, node)| ClusterPeer::from(node))
+                        .collect(),
+                    join_token_digest: None,
+                    role: ClusterRole::Voter,
+                };
+                write_local_membership(&config.storage.data_dir, &membership)?;
+                membership
+            }
+        };
+        let credential_key_secret =
+            read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
+        let membership = MembershipManager::replicated(
+            client.clone(),
+            replication.clone(),
+            Arc::clone(&store),
+            identity.clone(),
+            membership_file.local,
+            configured_join_url(config)?,
+            configured_artwork_url(config)?,
+            JoinSecrets {
+                raft: secrets.raft,
+                api: secrets.api,
+                credential_key: credential_key_secret,
+            },
+            load_or_create_activity_signing_key(&config.storage.data_dir)?,
+            marker,
+            role,
+            config.storage.data_dir.clone(),
+        )
+        .await
+        .map_err(|error| StoreError::Database(error.to_string()))?;
+        Ok(SelectedStore {
+            store,
+            identity,
+            credential_key,
+            backend: SelectedBackend::Replicated,
+            membership,
+            replication,
+            catalogue,
+            local_client: Some(client),
+            _daemon_lock: daemon_lock,
+        })
+    }
+    .await;
+    if result.is_err() {
+        if let Err(shutdown_error) = shutdown_voter(&cleanup_client, true).await {
+            tracing::error!(
+                %shutdown_error,
+                "failed to stop Hiqlite after active store initialization failed"
+            );
         }
-        None => {
-            let metrics = client.metrics_db().await.map_err(|error| {
-                StoreError::Database(format!("reading initial cluster membership: {error}"))
-            })?;
-            // A node reaching this branch has no membership record at all, so
-            // it is an initial voter: a learner only ever exists because a
-            // join wrote one. Version 1 keeps this file readable by the
-            // previous release, which is what makes installing this binary
-            // reversible for every node that has not been admitted as a
-            // learner.
-            let membership = LocalMembership {
-                version: local_membership_version(ClusterRole::Voter),
-                cluster_id: identity.cluster_id.clone(),
-                node_id: identity.node_id.clone(),
-                raft_id: identity.raft_id,
-                local: local.clone(),
-                bootstrap: metrics
-                    .membership_config
-                    .nodes()
-                    .map(|(_, node)| ClusterPeer::from(node))
-                    .collect(),
-                join_token_digest: None,
-                role: ClusterRole::Voter,
-            };
-            write_local_membership(&config.storage.data_dir, &membership)?;
-            membership
-        }
-    };
-    let credential_key_secret =
-        read_secret(&config.cluster.credential_key_path(&config.storage.data_dir))?;
-    let membership = MembershipManager::replicated(
-        client.clone(),
-        replication.clone(),
-        Arc::clone(&store),
-        identity.clone(),
-        membership_file.local,
-        configured_join_url(config)?,
-        configured_artwork_url(config)?,
-        JoinSecrets {
-            raft: secrets.raft,
-            api: secrets.api,
-            credential_key: credential_key_secret,
-        },
-        load_or_create_activity_signing_key(&config.storage.data_dir)?,
-        marker,
-        role,
-        config.storage.data_dir.clone(),
-    )
-    .await
-    .map_err(|error| StoreError::Database(error.to_string()))?;
-    Ok(SelectedStore {
-        store,
-        identity,
-        credential_key,
-        backend: SelectedBackend::Replicated,
-        membership,
-        replication,
-        catalogue,
-        local_client: Some(client),
-        _daemon_lock: daemon_lock,
-    })
+    }
+    result
 }
 
 /// Resolve the key against the authoritative replicated rows on every reopen.
@@ -2033,16 +2062,19 @@ async fn start_voter(
 #[cfg(feature = "hiqlite-store")]
 pub fn production_hiqlite_defaults_with_read_pool(read_pool_size: usize) -> NodeConfig {
     let mut raft_config = NodeConfig::default_raft_config(10_000);
+    raft_config.heartbeat_interval = HIQLITE_HEARTBEAT_INTERVAL_MS;
+    raft_config.election_timeout_min = HIQLITE_ELECTION_TIMEOUT_MIN_MS;
+    raft_config.election_timeout_max = HIQLITE_ELECTION_TIMEOUT_MAX_MS;
     raft_config.install_snapshot_timeout =
         install_snapshot_timeout_ms(DEFAULT_INSTALL_SNAPSHOT_TIMEOUT_SECS);
     NodeConfig {
         health_check_delay_secs: 0,
         wal_size: HIQLITE_WAL_SIZE_BYTES,
         read_pool_size,
-        // Snapshot frequency, disaster-recovery retention, WAL sync, heartbeat,
-        // and election settings remain Hiqlite's established production values.
-        // Only the measured transfer deadline is widened for production-sized
-        // state-machine snapshots.
+        // Snapshot frequency, disaster-recovery retention, and WAL sync retain
+        // Hiqlite's established values. The heartbeat/election window above
+        // admits measured durable recovery responses; the snapshot transfer
+        // deadline remains separately widened for production-sized databases.
         raft_config,
         ..Default::default()
     }
@@ -3345,15 +3377,23 @@ mod tests {
 
     #[cfg(feature = "hiqlite-store")]
     #[test]
-    fn read_pool_tuning_leaves_raft_and_wal_safety_defaults_unchanged() {
+    fn production_timing_admits_recovery_after_upgrade_and_clean_rolling_restarts() {
         let mut config = Config::default();
         config.cluster.read_pool_size = 16;
         let defaults = production_hiqlite_defaults(&config);
         assert_eq!(defaults.read_pool_size, 16);
         assert_eq!(defaults.wal_size, HIQLITE_WAL_SIZE_BYTES);
-        assert_eq!(defaults.raft_config.heartbeat_interval, 500);
-        assert_eq!(defaults.raft_config.election_timeout_min, 1_500);
-        assert_eq!(defaults.raft_config.election_timeout_max, 3_000);
+        assert_eq!(defaults.raft_config.heartbeat_interval, 800);
+        assert_eq!(defaults.raft_config.election_timeout_min, 2_400);
+        assert_eq!(defaults.raft_config.election_timeout_max, 4_800);
+        assert!(
+            defaults.raft_config.election_timeout_min
+                >= defaults.raft_config.heartbeat_interval * 3
+        );
+        assert!(
+            defaults.raft_config.heartbeat_interval * 3 / 2 < 1_500,
+            "a new leader must beat the previous release's election floor"
+        );
         assert_eq!(defaults.raft_config.max_in_snapshot_log_to_keep, 1);
         assert_eq!(defaults.raft_config.purge_batch_size, 1);
         assert_eq!(defaults.raft_config.install_snapshot_timeout, 120_000);
@@ -3370,6 +3410,43 @@ mod tests {
         config.cluster.install_snapshot_timeout_secs = 300;
         let tuned = production_hiqlite_defaults(&config);
         assert_eq!(tuned.raft_config.install_snapshot_timeout, 300_000);
+    }
+
+    /// Once the active voter exists, every later initialization error must
+    /// drain it before returning. Otherwise the process exits with Hiqlite's
+    /// state-machine crash sentinel present and the next boot destroys the
+    /// local state machine to rebuild it from peers.
+    #[cfg(feature = "hiqlite-store")]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_post_start_initialization_failure_leaves_no_crash_sentinel() {
+        install_default_crypto_provider();
+
+        let dir = tempfile::tempdir().expect("post-start failure data dir");
+        let config = membership_test_config(dir.path());
+        drop(SqliteStore::open(&dir.path().join(SQLITE_FILENAME)).expect("source SQLite"));
+        write_private_file(
+            &dir.path().join(ACTIVITY_SIGNING_KEY_FILENAME),
+            b"not-hexadecimal\n",
+        )
+        .expect("write invalid activity key");
+
+        let error = select_daemon_store(&config)
+            .await
+            .err()
+            .expect("the invalid post-start key must refuse activation")
+            .to_string();
+        assert!(
+            error.contains(ACTIVITY_SIGNING_KEY_FILENAME) && error.contains("is malformed"),
+            "the refusal must occur after the voter starts: {error}"
+        );
+        assert!(
+            !dir.path()
+                .join(HIQLITE_ACTIVE_DIRNAME)
+                .join("state_machine")
+                .join("lock")
+                .exists(),
+            "a handled initialization error must not look like a process crash"
+        );
     }
 
     #[cfg(feature = "hiqlite-store")]
