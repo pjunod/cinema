@@ -1043,24 +1043,25 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
+        let superseding_activation = MediaSessionActivation {
+            incarnation_id: incarnation_a2.to_owned(),
+            session_id: session_a2.to_owned(),
+            user_id: first_user.id,
+            playback_id: "shared-playback".to_owned(),
+            expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 150,
+            lease_expires_at_ms: 350,
+        };
         let superseding = store
-            .activate_media_session(&MediaSessionActivation {
-                incarnation_id: incarnation_a2.to_owned(),
-                session_id: session_a2.to_owned(),
-                user_id: first_user.id,
-                playback_id: "shared-playback".to_owned(),
-                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
-                fence_predecessor: true,
-                request_id: None,
-                request_fingerprint: fingerprint.clone(),
-                owner_node_id: "node-a".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
-                media_origin_ms: 0,
-                now_ms: 150,
-                lease_expires_at_ms: 350,
-            })
+            .activate_media_session(&superseding_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: supersede session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: superseding activation must win"));
@@ -1204,6 +1205,42 @@ async fn media_session_contract_runs_through_dyn_store() {
             publication_not_before_ms,
             "{backend}"
         );
+        let renewed = store
+            .renew_media_sessions(
+                "node-a",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_a2.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 10_000,
+                    fetched_through_ms: 5_000,
+                    media_sequence: 7,
+                }],
+                155,
+                500,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew successor before replay: {error}"));
+        assert_eq!(renewed, vec![incarnation_a2.to_owned()], "{backend}");
+        let armed_replay = store
+            .activate_media_session(&superseding_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay armed activation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: armed activation replay must resolve"));
+        assert_eq!(
+            armed_replay.route.publication_ready_at_ms, publication_not_before_ms,
+            "{backend}: replay returns the durable armed boundary"
+        );
+        assert_eq!(armed_replay.route.lease_expires_at_ms, 500, "{backend}");
+        assert_eq!(
+            armed_replay.route.produced_playable_through_ms, 10_000,
+            "{backend}: replay preserves produced progress"
+        );
+        assert_eq!(
+            armed_replay.route.fetched_through_ms, 5_000,
+            "{backend}: replay preserves fetched progress"
+        );
+        assert_eq!(armed_replay.route.media_sequence, 7, "{backend}");
+        assert_eq!(armed_replay.route.updated_at_ms, 155, "{backend}");
         assert!(store
             .complete_media_session_handoff(
                 incarnation_a2,
@@ -1233,6 +1270,22 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: complete elapsed handoff: {error}"))
             .unwrap_or_else(|| panic!("{backend}: elapsed handoff must complete"));
         assert_eq!(published.publication_ready_at_ms, 0, "{backend}");
+        let published_replay = store
+            .activate_media_session(&superseding_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay published activation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: published activation replay must resolve"));
+        assert_eq!(
+            published_replay.route.publication_ready_at_ms, 0,
+            "{backend}: replay cannot restore the activation sentinel"
+        );
+        assert_eq!(published_replay.route.lease_expires_at_ms, 500, "{backend}");
+        assert_eq!(
+            published_replay.route.produced_playable_through_ms, 10_000,
+            "{backend}"
+        );
+        assert_eq!(published_replay.route.fetched_through_ms, 5_000, "{backend}");
+        assert_eq!(published_replay.route.media_sequence, 7, "{backend}");
 
         let boundary_incarnation = "00000000-0000-4000-8000-0000000000aa";
         let boundary_session = "00000000-0000-4000-8000-0000000000bb";
@@ -1895,6 +1948,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
                 session_id: session.to_owned(),
                 expected_owner_node_id: "node-old".to_owned(),
                 expected_owner_epoch: 1,
+                expected_lease_expires_at_ms: 2_000,
                 terminal_reason: "replaced".to_owned(),
                 now_ms: 2_500,
             })
@@ -1902,12 +1956,30 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             .unwrap_or_else(|error| panic!("{backend}: stale exact end: {error}"))
             .is_none());
 
+        assert!(
+            store
+                .end_media_session_if_owner(&MediaSessionEnd {
+                    incarnation_id: incarnation.to_owned(),
+                    session_id: session.to_owned(),
+                    expected_owner_node_id: "node-new".to_owned(),
+                    expected_owner_epoch: 2,
+                    expected_lease_expires_at_ms: 13_000,
+                    terminal_reason: "replaced".to_owned(),
+                    now_ms: 2_500,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale lease-boundary end: {error}"))
+                .is_none(),
+            "{backend}: an exact owner read from before renewal cannot end the renewed lease"
+        );
+
         let ended = store
             .end_media_session_if_owner(&MediaSessionEnd {
                 incarnation_id: incarnation.to_owned(),
                 session_id: session.to_owned(),
                 expected_owner_node_id: "node-new".to_owned(),
                 expected_owner_epoch: 2,
+                expected_lease_expires_at_ms: 14_000,
                 terminal_reason: "admin_stop".to_owned(),
                 now_ms: 3_000,
             })

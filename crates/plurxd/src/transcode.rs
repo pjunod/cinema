@@ -6733,6 +6733,10 @@ pub(crate) struct SessionFrontier {
 /// Coordinates selected before an expired incarnation is reproduced locally.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionTakeoverStart {
+    /// Process-local capability chosen by the settlement supervisor before
+    /// creation. Knowing it in advance lets that supervisor reap an exact
+    /// worker even if the creation task panics after manager registration.
+    pub provisional_session_id: String,
     /// The durable incarnation this generation continues. Teardown keys off
     /// the incarnation rather than the process-local request record, because
     /// a successor is not created by any request on this node.
@@ -12110,27 +12114,39 @@ impl TranscodeManager {
         Ok(ClusterSessionStart { info, replacement })
     }
 
-    /// Start a provisional fenced-successor generation. The caller publishes
-    /// ownership only after this method has acquired capacity and produced a
-    /// live local worker; a losing CAS stops the provisional session.
-    pub(crate) async fn create_cluster_takeover_session(
+    /// Acquire the player replacement serialization separately from worker
+    /// creation. The takeover supervisor retains this guard while a child
+    /// task performs cancellation-sensitive creation, so even a panic cannot
+    /// reopen the player key before exact cleanup has been transferred.
+    pub(crate) async fn acquire_cluster_takeover_replacement(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterReplacementGuard, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        self.acquire_cluster_replacement_gate(
+            gate_key,
+            req.previous_session_id.as_deref(),
+            deadline,
+        )
+        .await
+    }
+
+    /// Create the takeover worker while the caller owns the already-acquired
+    /// replacement guard. `takeover.provisional_session_id` is fixed before
+    /// this call so a supervising task can reap an exact late registration.
+    pub(crate) async fn create_cluster_takeover_session_under_guard(
         &self,
         req: &SessionRequest,
         user_id: i64,
         user_name: &str,
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
-    ) -> Result<ClusterSessionStart, String> {
+    ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        let gate_key =
-            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
-        let replacement = self
-            .acquire_cluster_replacement_gate(
-                gate_key,
-                req.previous_session_id.as_deref(),
-                deadline,
-            )
-            .await?;
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -12139,16 +12155,14 @@ impl TranscodeManager {
                 "the takeover start expired while waiting for this player's gate",
             ));
         }
-        let info = self
-            .create_session_inner(
-                req,
-                user_name,
-                &supersession_user,
-                Some(deadline),
-                Some(takeover),
-            )
-            .await?;
-        Ok(ClusterSessionStart { info, replacement })
+        self.create_session_inner(
+            req,
+            user_name,
+            &supersession_user,
+            Some(deadline),
+            Some(takeover),
+        )
+        .await
     }
 
     async fn acquire_cluster_replacement_gate(
@@ -13976,7 +13990,10 @@ impl TranscodeManager {
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
 
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = takeover
+            .as_ref()
+            .map(|takeover| takeover.provisional_session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // The public UUID is a bearer capability. Keep it out of ffmpeg's
         // argv and stderr entirely by giving the scratch directory an
         // independent, process-private name.
@@ -14620,7 +14637,10 @@ impl TranscodeManager {
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
 
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = takeover
+            .as_ref()
+            .map(|takeover| takeover.provisional_session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
@@ -19728,6 +19748,7 @@ impl HlsDeliveryFixture {
             dir,
             session_id,
             Some(SessionTakeoverStart {
+                provisional_session_id: session_id.to_owned(),
                 incarnation_id: incarnation_id.to_owned(),
                 origin_base_ms: 0,
                 frontier_offset_ms: 0,
@@ -21746,6 +21767,7 @@ mod tests {
     async fn a_session_measures_its_offset_from_the_origin_it_reached() {
         let dir = crate::test_tempdir().expect("tempdir");
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 120_000,
             frontier_offset_ms: 600_000,
@@ -21793,6 +21815,7 @@ mod tests {
         ));
         let mut session = test_session(dir.path().join("session"));
         session.takeover = Some(SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 0,
@@ -21839,6 +21862,7 @@ mod tests {
         ));
         let mut session = test_session(dir.path().join("session"));
         session.takeover = Some(SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 0,
@@ -23949,6 +23973,7 @@ mod tests {
                    #EXTINF:2.000,\n\
                    seg00005.m4s\n";
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 8_000,
@@ -23996,6 +24021,7 @@ mod tests {
                    #EXTINF:2.000,\n\
                    seg2000001.m4s\n";
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 8_000,

@@ -353,6 +353,27 @@ fn validate_activation(activation: &MediaSessionActivation) -> Result<(), StoreE
         .ok_or_else(|| StoreError::Task("invalid media-session activation".to_owned()))
 }
 
+/// Exact immutable identity for an activation replay. Lease, progress,
+/// publication, and update coordinates are deliberately absent: those are
+/// monotone durable state which a replay must return, never restore from its
+/// original input.
+fn activation_route_matches(
+    route: &MediaSessionRoute,
+    activation: &MediaSessionActivation,
+) -> bool {
+    route.incarnation_id == activation.incarnation_id
+        && route.session_id == activation.session_id
+        && route.user_id == activation.user_id
+        && route.playback_id == activation.playback_id
+        && route.request_fingerprint == activation.request_fingerprint
+        && route.owner_node_id == activation.owner_node_id
+        && route.owner_epoch == 1
+        && route.state == "active"
+        && route.recipe_json == activation.recipe_json
+        && route.response_json == activation.response_json
+        && route.media_origin_ms == activation.media_origin_ms
+}
+
 fn valid_renewal(renewal: &MediaSessionRenewal) -> bool {
     valid_uuid(&renewal.incarnation_id)
         && renewal.owner_epoch > 0
@@ -656,6 +677,19 @@ impl MediaSessionStore for HiqliteAuthStore {
             .into_iter()
             .next()
             .map(|row| row.0);
+        if current_pointer.as_deref() == Some(activation.incarnation_id.as_str()) {
+            let route = route_by(self, "incarnation_id", &activation.incarnation_id)
+                .await?
+                .filter(|route| activation_route_matches(route, activation));
+            let Some(route) = route else {
+                return Ok(None);
+            };
+            let predecessor = match activation.expected_predecessor_incarnation_id.as_deref() {
+                Some(incarnation_id) => route_by(self, "incarnation_id", incarnation_id).await?,
+                None => None,
+            };
+            return Ok(Some(MediaSessionActivationOutcome { route, predecessor }));
+        }
         if activation.fence_predecessor
             && current_pointer.as_deref()
                 != activation.expected_predecessor_incarnation_id.as_deref()
@@ -930,30 +964,17 @@ impl MediaSessionStore for HiqliteAuthStore {
         {
             return Ok(None);
         }
-        // The pointer CAS above is the serialized activation verdict. Build
-        // the initial route from the exact values committed in that same
-        // transaction so a separate post-commit read cannot turn success into
-        // a caller-visible failure and abort the already-owned worker.
-        let route = MediaSessionRoute {
-            incarnation_id: activation.incarnation_id.clone(),
-            session_id: activation.session_id.clone(),
-            user_id: activation.user_id,
-            playback_id: activation.playback_id.clone(),
-            request_fingerprint: activation.request_fingerprint.clone(),
-            owner_node_id: activation.owner_node_id.clone(),
-            owner_epoch: 1,
-            lease_expires_at_ms: activation.lease_expires_at_ms,
-            state: "active".to_owned(),
-            terminal_reason: None,
-            publication_ready_at_ms: activation.publication_ready_at_ms,
-            recipe_json: activation.recipe_json.clone(),
-            response_json: activation.response_json.clone(),
-            produced_playable_through_ms: 0,
-            fetched_through_ms: 0,
-            media_origin_ms: activation.media_origin_ms,
-            media_sequence: 0,
-            discontinuity_sequence: 0,
-            updated_at_ms: activation.now_ms,
+        // INSERT conflict is an idempotent replay, not proof that every field
+        // still equals the activation input. Handoff settlement, renewal, or
+        // takeover may already have advanced the durable row. Return an exact
+        // post-commit projection so replay cannot regress a finite/ready fence
+        // or overwrite progress in the route cache. Read failure remains
+        // commit-unknown to the caller's exact activation reconciler.
+        let route = route_by(self, "incarnation_id", &activation.incarnation_id)
+            .await?
+            .filter(|route| activation_route_matches(route, activation));
+        let Some(route) = route else {
+            return Ok(None);
         };
         // Takeover may have advanced the predecessor between the pointer read
         // and this transaction. Once the CAS above ends that incarnation it
@@ -1697,6 +1718,7 @@ impl MediaSessionStore for HiqliteAuthStore {
             || end.expected_owner_node_id.is_empty()
             || end.expected_owner_node_id.len() > 256
             || end.expected_owner_epoch <= 0
+            || end.expected_lease_expires_at_ms <= 0
             || !crate::domain::valid_media_session_terminal_reason(&end.terminal_reason)
             || end.now_ms < 0
         {
@@ -1725,7 +1747,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     "UPDATE media_sessions SET state = 'ended', terminal_reason = $1, lease_expires_at_ms = $2,
                             publication_ready_at_ms = $3, updated_at_ms = $2
                       WHERE incarnation_id = $4 AND session_id = $5
-                        AND owner_node_id = $6 AND owner_epoch = $7 AND state = 'active'",
+                        AND owner_node_id = $6 AND owner_epoch = $7
+                        AND lease_expires_at_ms = $8 AND state = 'active'",
                     params!(
                         end.terminal_reason.as_str(),
                         end.now_ms,
@@ -1733,7 +1756,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                         end.incarnation_id.as_str(),
                         end.session_id.as_str(),
                         end.expected_owner_node_id.as_str(),
-                        end.expected_owner_epoch
+                        end.expected_owner_epoch,
+                        end.expected_lease_expires_at_ms
                     ),
                 ),
                 (

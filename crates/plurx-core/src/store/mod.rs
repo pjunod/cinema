@@ -2183,7 +2183,8 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         takeover: &MediaSessionTakeover,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
-    /// End only the exact incarnation/owner epoch named by `end`.
+    /// End only the exact incarnation/owner epoch/lease boundary named by
+    /// `end`. A same-epoch renewal after the caller's read defeats the CAS.
     ///
     /// This is the lease-loss counterpart to takeover's CAS.  It is
     /// idempotent for an already-ended matching incarnation and returns

@@ -937,6 +937,9 @@ pub struct MediaSessionEnd {
     pub session_id: String,
     pub expected_owner_node_id: String,
     pub expected_owner_epoch: i64,
+    /// Exact lease boundary observed with this ownership generation. A
+    /// same-epoch renewal after the caller's read invalidates stale cleanup.
+    pub expected_lease_expires_at_ms: i64,
     pub terminal_reason: String,
     pub now_ms: i64,
 }

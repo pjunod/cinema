@@ -628,7 +628,7 @@ expected_occurrences = 26
 [[module_symbols]]
 id = "m4-terminal-route-proof-cache"
 pattern = "cache_terminal_route"
-expected_occurrences = 5
+expected_occurrences = 4
 
 [[module_symbols]]
 id = "m4-activation-publication-handoff-fence"
@@ -758,7 +758,72 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-release-adoption-token"
 pattern = "SessionAdoptionToken"
+expected_occurrences = 11
+
+[[module_symbols]]
+id = "m4-takeover-settlement-owner"
+pattern = "PendingTakeoverSettlement"
+expected_occurrences = 7
+
+[[module_symbols]]
+id = "m4-takeover-worker-cleanup-owner"
+pattern = "TakeoverWorkerGuard"
+expected_occurrences = 13
+
+[[module_symbols]]
+id = "m4-takeover-creation-child-owner"
+pattern = "TakeoverCreationOwner"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-takeover-settlement-io-seam"
+pattern = "TakeoverSettlementIo"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-takeover-worker-lifecycle-seam"
+pattern = "TakeoverWorkerLifecycle"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-takeover-bootstrap-renewal"
+pattern = "renew_first"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-takeover-bootstrap-lease"
+pattern = "TAKEOVER_CLAIM_LEASE_TTL_MS"
 expected_occurrences = 6
+
+[[module_symbols]]
+id = "m4-stale-end-lease-boundary"
+pattern = "expected_lease_expires_at_ms"
+expected_occurrences = 1
+
+[[module_symbols]]
+id = "m4-takeover-settlement-capacity"
+pattern = "try_admit_takeover_settlement"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-takeover-reconciliation-bounds"
+pattern = "TAKEOVER_RECONCILIATION_"
+expected_occurrences = 7
+
+[[module_symbols]]
+id = "m4-takeover-fixed-lease-retention"
+pattern = "retain_takeover_settlement_until_expiry"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-generation-conditional-route-cache"
+pattern = "cache_route_if_generation"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-predetermined-takeover-worker-id"
+pattern = "provisional_session_id"
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "m4-vod-final-release-fence"
@@ -861,12 +926,12 @@ expected_occurrences = 9
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 338
+expected_occurrences = 340
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 36
+expected_occurrences = 38
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -876,7 +941,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 470
+expected_occurrences = 475
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -899,7 +964,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 169
+expected_occurrences = 171
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
