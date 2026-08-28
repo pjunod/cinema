@@ -10,70 +10,63 @@ module_root = "crates/plurxd/src"
 [[symbols]]
 id = "startup-and-lifetime-watchdog"
 pattern = "watch_for_stall_claimed"
-expected_occurrences = 3
+expected_occurrences = 4
 kind = "recovery_owner"
-replacement = "RollingControlActor::ProducerProgressDeadline"
-
-[[symbols]]
-id = "hardware-startup-grace"
-pattern = "FIRST_SEGMENT_GRACE"
-expected_occurrences = 6
-kind = "recovery_timer"
-replacement = "ProducerProgressDeadline mode=starting with the admitted hardware policy"
+replacement = "retained only for published-lifetime and copy compatibility; transcode prepublication is RollingControlActor::ProducerProgressDeadline"
 
 [[symbols]]
 id = "software-startup-grace"
 pattern = "SOFTWARE_GRACE"
-expected_occurrences = 8
+expected_occurrences = 5
 kind = "recovery_timer"
-replacement = "ProducerProgressDeadline mode=starting with the admitted software policy"
+replacement = "retained for copy and published compatibility only; transcode startup uses the admitted actor policy"
 
 [[symbols]]
 id = "advancing-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 10
+expected_occurrences = 12
 kind = "recovery_timer"
-replacement = "ProducerProgressDeadline mode=advancing"
+replacement = "actor policy budget plus the retained published-lifetime threshold; it no longer decides transcode prepublication outside the actor"
 
 [[symbols]]
 id = "watchdog-poll-cadence"
 pattern = "WATCHDOG_POLL"
-expected_occurrences = 11
+expected_occurrences = 7
 kind = "recovery_timer"
-replacement = "deleted; actor sleeps directly to its exact monotonic deadline"
+replacement = "retained only for published-lifetime and copy compatibility sampling; the actor sleeps directly to its exact prepublication deadline"
 
 [[symbols]]
 id = "detached-watchdog-launch"
 pattern = "spawn_watch_for_stall"
 expected_occurrences = 4
 kind = "recovery_owner"
-replacement = "RollingControlActor decision wake to the session executor"
+replacement = "retained compatibility launcher; actor first-media admission synchronously claims the separate published-lifetime owner"
 
 [[symbols]]
 id = "watchdog-election-flag"
 pattern = "watchdog_active"
-expected_occurrences = 11
+expected_occurrences = 12
 kind = "recovery_election"
-replacement = "the actor's single optional producer deadline"
+replacement = "retained only to elect one published-lifetime or copy watcher; the actor owns prepublication"
 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 32
+expected_occurrences = 33
 kind = "recovery_election"
-replacement = "exact producer attempt identity and actor disposition"
+replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 14
+expected_occurrences = 15
 kind = "mixed_ownership_lock"
 replacement = "specific actor, attempt, response-admission, resource, or catalog-revision fences"
 
 [[symbols]]
 id = "replacement-transaction"
 pattern = "begin_child_replacement"
-expected_occurrences = 4
+expected_occurrences = 6
 kind = "replacement_owner"
 replacement = "one actor-authorized prepublication retry action"
 
@@ -94,9 +87,9 @@ replacement = "the session executor installing one actor-authorized attempt"
 [[symbols]]
 id = "hardware-downgrade"
 pattern = "downgrade_one_step"
-expected_occurrences = 6
+expected_occurrences = 5
 kind = "replacement_policy"
-replacement = "an immutable ValidatedRetryRecipe consumed once by the actor"
+replacement = "test-only legacy helper; production uses one immutable ValidatedRetryRecipe consumed once by the actor"
 
 [[symbols]]
 id = "request-side-exit-verdict"
@@ -108,7 +101,7 @@ replacement = "the actor's exact-attempt exit/classification disposition"
 [[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 15
+expected_occurrences = 20
 kind = "failure_owner"
 replacement = "typed producer facts entering the actor; only its prepublication failure projects Session::failed"
 
@@ -129,14 +122,14 @@ replacement = "retained behind exact actor attempt/revision authorization and ac
 [[symbols]]
 id = "child-termination"
 pattern = "child\\.kill\\(\\)\\.await"
-expected_occurrences = 13
+expected_occurrences = 12
 kind = "process_action"
 replacement = "the sole supervisor command path, with candidate cleanup registered before spawn"
 
 [[symbols]]
 id = "raw-child-wait"
 pattern = "child\\.wait\\(\\)\\.await"
-expected_occurrences = 8
+expected_occurrences = 7
 kind = "process_action"
 replacement = "the sole supervisor reap path; rejected candidates use the same cleanup registry"
 
@@ -157,21 +150,21 @@ replacement = "retained as response-EOF fetched-frontier evidence, not retry aut
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 55
+expected_occurrences = 59
 kind = "structural_task_scan"
 replacement = "every new detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
 
 [[symbols]]
 id = "all-runtime-owned-async-tasks"
 pattern = "\\.spawn\\(async move"
-expected_occurrences = 1
+expected_occurrences = 2
 kind = "structural_task_scan"
 replacement = "every new runtime-owned detached task requires ownership-catalog review; producer recovery moves only to the actor executor"
 
 [[symbols]]
 id = "all-async-sleeps"
 pattern = "tokio::time::sleep\\("
-expected_occurrences = 43
+expected_occurrences = 42
 kind = "structural_timer_scan"
 replacement = "every new sleep requires classification; producer recovery polls are deleted in favor of exact actor deadlines"
 
@@ -192,7 +185,7 @@ replacement = "the rate-control refresh schedule remains a named lifecycle timer
 [[symbols]]
 id = "all-ffmpeg-process-starts"
 pattern = "\\bspawn_ffmpeg\\("
-expected_occurrences = 7
+expected_occurrences = 8
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling spawn"
 
@@ -203,6 +196,34 @@ expected_occurrences = 2
 kind = "process_start_scan"
 replacement = "one session executor acquires process capacity and cleanup registration before every rolling copy spawn"
 
+[[symbols]]
+id = "prepublication-start-cancellation-settlement"
+pattern = "PrepublicationStartSettlement"
+expected_occurrences = 4
+kind = "resource_owner"
+replacement = "retained until manager publication so cancellation reaps the child, clears scratch, ends the actor, and releases admissions"
+
+[[symbols]]
+id = "first-media-lifetime-handoff"
+pattern = "spawn_published_lifetime_watch_for_stall"
+expected_occurrences = 2
+kind = "recovery_owner"
+replacement = "synchronously claimed by actor response admission after prepublication closes; never decides startup recovery"
+
+[[symbols]]
+id = "prepublication-confirmed-reap-owner"
+pattern = "own_prepublication_failure_cleanup"
+expected_occurrences = 2
+kind = "lifecycle_owner"
+replacement = "retains the exact child and admission resources after terminal failure until one bounded repair attempt confirms physical reap"
+
+[[symbols]]
+id = "prepublication-reap-retry-cadence"
+pattern = "PREPUBLICATION_REAP_RETRY"
+expected_occurrences = 2
+kind = "lifecycle_timer"
+replacement = "bounded physical-cleanup repair only; cannot retry, replace, or make a playback verdict"
+
 # Module-wide sentinel counts cover every Rust playback-server module, not
 # only the compatibility implementation. They intentionally describe today's
 # pre-deletion state. Later M4 slices drive the legacy counts to zero and may
@@ -212,52 +233,52 @@ replacement = "one session executor acquires process capacity and cleanup regist
 [[module_symbols]]
 id = "legacy-first-segment-grace"
 pattern = "FIRST_SEGMENT_GRACE"
-expected_occurrences = 6
+expected_occurrences = 0
 
 [[module_symbols]]
 id = "legacy-software-grace"
 pattern = "SOFTWARE_GRACE"
-expected_occurrences = 8
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "legacy-progress-stall"
 pattern = "PROGRESS_STALL"
-expected_occurrences = 10
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "legacy-watchdog-poll"
 pattern = "WATCHDOG_POLL"
-expected_occurrences = 11
+expected_occurrences = 7
 
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 30
+expected_occurrences = 31
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
 pattern = "watchdog_active"
-expected_occurrences = 11
+expected_occurrences = 12
 
 [[module_symbols]]
 id = "legacy-replacement-mask"
 pattern = "replacing_child"
-expected_occurrences = 32
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
 pattern = "downgrade_one_step"
-expected_occurrences = 6
+expected_occurrences = 5
 
 [[module_symbols]]
 id = "legacy-stall-watch-owner"
 pattern = "watch_for_stall"
-expected_occurrences = 17
+expected_occurrences = 19
 
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
-expected_occurrences = 57
+expected_occurrences = 65
 
 [[module_symbols]]
 id = "m4-producer-decision-poll"
@@ -272,12 +293,57 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-executor-inbox"
 pattern = "RollingSessionExecutorInbox"
-expected_occurrences = 6
+expected_occurrences = 8
 
 [[module_symbols]]
 id = "m4-decision-transport"
 pattern = "RollingDecisionTransport"
-expected_occurrences = 5
+expected_occurrences = 6
+
+[[module_symbols]]
+id = "m4-first-media-publication-handoff"
+pattern = "RollingFirstMediaPublicationHandoff"
+expected_occurrences = 15
+
+[[module_symbols]]
+id = "m4-executor-registration"
+pattern = "RegisterProducerExecutor"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-initial-policy-admission"
+pattern = "BeginInitialProducerAttempt"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-retry-admission"
+pattern = "AdmitProducerRetry"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-decision-applied"
+pattern = "DecisionApplied"
+expected_occurrences = 13
+
+[[module_symbols]]
+id = "m4-generation-metadata-commit"
+pattern = "CommitGenerationMetadata"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-start-cancellation-settlement"
+pattern = "PrepublicationStartSettlement"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-first-media-lifetime-handoff"
+pattern = "spawn_published_lifetime_watch_for_stall"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-prepublication-ownership-projection"
+pattern = "actor_prepublication_transcode"
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -300,17 +366,17 @@ expected_occurrences = 6
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 277
+expected_occurrences = 281
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 32
+expected_occurrences = 33
 
 [[module_structures]]
 id = "bare-task-spawn"
 pattern = "(?<![:.\\w])spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 1
+expected_occurrences = 2
 
 [[module_structures]]
 id = "namespaced-time-constructor"
@@ -353,12 +419,12 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 256
+expected_occurrences = 257
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
 pattern = "(?:(?:[A-Za-z_]\\w*::)+(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe)|(?<![:.\\w])(?:kill|signal|raise|wait|waitpid|waitid|wait3|wait4|exec|execl|execle|execlp|execv|execve|execvp|execvpe))\\s*\\("
-expected_occurrences = 24
+expected_occurrences = 25
 
 [[module_structures]]
 id = "kill-on-drop-construction"
@@ -612,8 +678,8 @@ expected_occurrences = 0
 [[entrypoints]]
 id = "transcode-start"
 anchor = "async fn start_with_audio_offset("
-owns = ["spawn", "initial attempt", "initial install", "startup watcher"]
-replacement = "session executor registers cleanup and process capacity, then moves one supervised attempt into the session"
+owns = ["immutable policy", "executor registration", "initial attempt", "initial install", "cancellation settlement"]
+replacement = "the actor owns startup deadlines and one retry decision; the registered executor owns exact child/resource execution"
 
 [[entrypoints]]
 id = "copy-start"
@@ -624,8 +690,8 @@ replacement = "session executor plus actor-classified copy outcome and one valid
 [[entrypoints]]
 id = "watchdog-verdict"
 anchor = "async fn watch_for_stall_claimed("
-owns = ["startup timeout", "progress timeout", "failure", "replacement"]
-replacement = "one due-first actor ProducerProgressDeadline and immutable ProducerDecision"
+owns = ["published-lifetime progress timeout", "copy compatibility failure", "copy replacement"]
+replacement = "transcode prepublication moved to one due-first actor ProducerProgressDeadline and immutable ProducerDecision"
 
 [[entrypoints]]
 id = "request-verdict"

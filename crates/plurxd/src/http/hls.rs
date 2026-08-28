@@ -1222,7 +1222,9 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             )
             .await
         }
-        RelayResource::VideoPlaylist => video_playlist_local(state, &request.session_id).await,
+        RelayResource::VideoPlaylist => {
+            video_playlist_local(state, &request.session_id, "video.m3u8").await
+        }
         RelayResource::SubtitlePlaylist { index } => {
             subtitle_playlist_local(state, &request.session_id, index).await
         }
@@ -2372,41 +2374,89 @@ fn playlist_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
-/// Finalize liveness for a generated rolling resource only after every
-/// authorization and object-resolution step succeeded. The rolling actor or
-/// immutable registry must still own the capability at this commit point.
-async fn commit_resolved_media(
+/// Linearize one fully prepared response against the exact rolling attempt or
+/// immutable VOD attachment that supplied it. Callers may prepare a buffered
+/// response locally, but must not expose it or construct a streaming reader or
+/// body until this succeeds.
+async fn authorize_response_publication(
     state: &AppState,
     session: &str,
     owner: &crate::transcode::MediaResponseOwner,
-    kind: &'static str,
-    object_name: Option<&str>,
+    publication: crate::transcode::MediaResponsePublication,
+) -> Result<crate::transcode::MediaResponseAuthorization, ApiError> {
+    state
+        .transcode
+        .authorize_response_publication(session, owner, publication)
+        .await
+        .ok_or(ApiError::NotFound("transcode session"))
+}
+
+/// Commit completion using the authorization issued for these exact response
+/// bytes. The opaque token prevents EOF from reconstructing authority from a
+/// reusable session id or an object name after a successor has taken over.
+async fn commit_authorized_media(
+    state: &AppState,
+    authorization: crate::transcode::MediaResponseAuthorization,
     complete_object: bool,
 ) -> Result<(), ApiError> {
     if state
         .transcode
-        .commit_resolved_media(session, owner, kind, object_name, complete_object)
+        .commit_authorized_media(authorization, complete_object)
         .await
     {
-        state
-            .transcode
-            .request_response_flow(session, owner, object_name, complete_object);
         Ok(())
     } else {
         Err(ApiError::NotFound("transcode session"))
     }
 }
 
-async fn response_owner_is_live(
+/// Once storage has produced every advertised byte, completion owns its own
+/// bounded task. The body consumer is allowed to stop polling immediately
+/// after the final chunk; dropping that consumer must not discard an exact
+/// EOF token or cancel it halfway through the actor/registry projection.
+fn settle_streamed_response_completion(
+    manager: Arc<crate::transcode::TranscodeManager>,
+    session: String,
+    authorization: crate::transcode::MediaResponseAuthorization,
+    complete_object: bool,
+) {
+    tokio::spawn(async move {
+        if !manager
+            .commit_authorized_media(authorization, complete_object)
+            .await
+        {
+            tracing::debug!(
+                session = %crate::transcode::session_log_id(&session),
+                "discarded exact response completion after its owner was replaced"
+            );
+        }
+    });
+}
+
+fn segment_publication_kind(segment: &str, requested_range: Option<(u64, u64)>) -> &'static str {
+    if requested_range.is_some() {
+        "segment-range"
+    } else if crate::transcode::is_init_object(segment) {
+        "init-segment"
+    } else {
+        "media-segment"
+    }
+}
+
+/// Publish a response whose complete HTTP body has already been prepared in
+/// memory. Constructing the value is not visibility; returning it is, so the
+/// actor/registry fence and completion commit stay immediately before return.
+async fn complete_buffered_response(
     state: &AppState,
     session: &str,
     owner: &crate::transcode::MediaResponseOwner,
-) -> Result<(), ApiError> {
-    if state.transcode.response_owner_is_live(session, owner).await {
-        Ok(())
-    } else {
-        Err(ApiError::NotFound("transcode session"))
-    }
+    publication: crate::transcode::MediaResponsePublication,
+    complete_object: bool,
+    response: Response,
+) -> Result<Response, ApiError> {
+    let authorization = authorize_response_publication(state, session, owner, publication).await?;
+    commit_authorized_media(state, authorization, complete_object).await?;
+    Ok(response)
 }
 
 async fn session_file(
@@ -2420,23 +2470,11 @@ async fn session_file(
     ),
     ApiError,
 > {
-    let (mut context, owner) = state
+    state
         .transcode
-        .hls_context(session)
+        .hls_presentation(session)
         .await
-        .ok_or(ApiError::NotFound("transcode session"))?;
-    let file = state
-        .store
-        .get_file(context.file_id)
-        .await?
-        .ok_or(ApiError::NotFound("file"))?;
-    context.frame_rate = state
-        .store
-        .get_file_probe_json(context.file_id)
-        .await?
-        .as_deref()
-        .and_then(video_frame_rate);
-    Ok((context, file, owner))
+        .ok_or(ApiError::NotFound("transcode session"))
 }
 
 /// Maximum frame rate from ffprobe's persisted source description.
@@ -2444,6 +2482,7 @@ async fn session_file(
 /// Fractions are kept until the playlist is rendered so NTSC rates retain
 /// their 24000/1001 or 30000/1001 meaning. `avg_frame_rate` is preferred;
 /// `r_frame_rate` is the fallback for older probe output.
+#[cfg(test)]
 fn video_frame_rate(probe_json: &str) -> Option<f64> {
     fn fraction(raw: &str) -> Option<f64> {
         let (numerator, denominator) = raw.split_once('/')?;
@@ -2504,23 +2543,47 @@ async fn playlist_local(
         if query.native == Some(1) {
             let (context, file, owner) = session_file(state, session).await?;
             let context = exact_hls_context(state, session, context).await;
-            commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
-            return Ok(playlist_response(
-                master_playlist(&file, query.subtitle, &context).into_bytes(),
-            ));
+            let response =
+                playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
+            return complete_buffered_response(
+                state,
+                session,
+                &owner,
+                crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+                true,
+                response,
+            )
+            .await;
         }
-        commit_resolved_media(state, session, &playlist_owner, "playlist", None, true).await?;
-        return Ok(playlist_response(bytes));
+        let response = playlist_response(bytes);
+        return complete_buffered_response(
+            state,
+            session,
+            &playlist_owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "playlist",
+                Some("index.m3u8"),
+            ),
+            true,
+            response,
+        )
+        .await;
     }
     if query.native != Some(1) {
-        return video_playlist_local(state, session).await;
+        return video_playlist_local(state, session, "index.m3u8").await;
     }
     let (context, file, owner) = session_file(state, session).await?;
     let context = exact_hls_context(state, session, context).await;
-    commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
-    Ok(playlist_response(
-        master_playlist(&file, query.subtitle, &context).into_bytes(),
-    ))
+    let response = playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
+    complete_buffered_response(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+        true,
+        response,
+    )
+    .await
 }
 
 /// The multivariant playlist used by Apple clients for native subtitles and
@@ -2571,13 +2634,21 @@ async fn master_playlist_response_local(
             codecs = %context.codecs,
             "serving high-tier HEVC through the direct media-playlist envelope"
         );
-        return video_playlist_local(state, session).await;
+        return video_playlist_local(state, session, "master.m3u8").await;
     }
-    commit_resolved_media(state, session, &owner, "master-playlist", None, true).await?;
-    Ok(playlist_response(
+    let response = playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
             .into_bytes(),
-    ))
+    );
+    complete_buffered_response(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+        true,
+        response,
+    )
+    .await
 }
 
 /// Translate a session's own verdict into the response the client acts on.
@@ -2612,6 +2683,34 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
     ApiError::typed(status, err.code(), err.message())
 }
 
+async fn admitted_playlist_error(
+    state: &AppState,
+    session: &str,
+    err: crate::transcode::PlaylistPublicationError,
+) -> Result<ApiError, ()> {
+    if let Some(owner) = err.owner.as_ref() {
+        if !state
+            .transcode
+            .authorize_playlist_error_publication(session, owner, &err.error)
+            .await
+        {
+            return if state
+                .transcode
+                .playlist_error_owner_is_current_incarnation(session, owner)
+                .await
+            {
+                // The same generation changed attempt/publication/decision
+                // state during admission. Re-resolve instead of relabeling a
+                // live producer as an anonymous fatal 404.
+                Err(())
+            } else {
+                Ok(ApiError::NotFound("transcode session"))
+            };
+        }
+    }
+    Ok(playlist_error(session, err.error))
+}
+
 /// The video rendition referenced by the native-subtitle HLS master.
 pub async fn video_playlist(
     State(state): State<AppState>,
@@ -2628,29 +2727,85 @@ pub async fn video_playlist(
     {
         return Ok(response);
     }
-    video_playlist_local(&state, &session).await
+    video_playlist_local(&state, &session, "video.m3u8").await
 }
 
-async fn video_playlist_local(state: &AppState, session: &str) -> Result<Response, ApiError> {
+async fn video_playlist_local(
+    state: &AppState,
+    session: &str,
+    object_name: &'static str,
+) -> Result<Response, ApiError> {
     if let Some(answer) = state.transcode.vod_playlist(session).await {
         let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
-        commit_resolved_media(state, session, &owner, "playlist", None, true).await?;
-        return Ok(playlist_response(bytes));
+        let response = playlist_response(bytes);
+        return complete_buffered_response(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "playlist",
+                Some(object_name),
+            ),
+            true,
+            response,
+        )
+        .await;
     }
-    match state.transcode.playlist(session).await {
-        Ok(bytes) => Ok(playlist_response(bytes)),
-        Err(PlaylistError::SessionGone) if vod_resurrected(state, session).await => {
-            match state.transcode.vod_playlist(session).await {
-                Some(answer) => {
-                    let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
-                    commit_resolved_media(state, session, &owner, "playlist", None, true).await?;
-                    Ok(playlist_response(bytes))
-                }
-                None => Err(playlist_error(session, PlaylistError::SessionGone)),
+    for reclassification in 0..=2 {
+        match state.transcode.playlist_with_owner(session).await {
+            Ok((bytes, owner)) => {
+                let response = playlist_response(bytes);
+                return complete_buffered_response(
+                    state,
+                    session,
+                    &owner,
+                    crate::transcode::MediaResponsePublication::attempt_media(
+                        "playlist",
+                        Some(object_name),
+                    ),
+                    true,
+                    response,
+                )
+                .await;
             }
+            Err(err)
+                if matches!(&err.error, PlaylistError::SessionGone)
+                    && vod_resurrected(state, session).await =>
+            {
+                return match state.transcode.vod_playlist(session).await {
+                    Some(answer) => {
+                        let (bytes, owner) = answer.map_err(|err| vod_error(session, err))?;
+                        let response = playlist_response(bytes);
+                        complete_buffered_response(
+                            state,
+                            session,
+                            &owner,
+                            crate::transcode::MediaResponsePublication::attempt_media(
+                                "playlist",
+                                Some(object_name),
+                            ),
+                            true,
+                            response,
+                        )
+                        .await
+                    }
+                    None => Err(playlist_error(session, PlaylistError::SessionGone)),
+                };
+            }
+            Err(err) => match admitted_playlist_error(state, session, err).await {
+                Ok(error) => return Err(error),
+                Err(()) if reclassification < 2 => continue,
+                Err(()) => {
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "playlist_state_changed",
+                        "the stream changed state while the playlist response was prepared; retry shortly",
+                    ));
+                }
+            },
         }
-        Err(err) => Err(playlist_error(session, err)),
     }
+    unreachable!("bounded playlist reclassification loop returns on every terminal branch")
 }
 
 /// One native WebVTT rendition's media playlist. Its segments mirror the
@@ -2679,7 +2834,41 @@ async fn subtitle_playlist_local(
     session: &str,
     index: i64,
 ) -> Result<Response, ApiError> {
-    let (_, file, _) = session_file(state, session).await?;
+    // Resolve the typed rolling playlist verdict before asking for frozen
+    // subtitle facts. A failed actor is stored before End; consulting the
+    // live-only presentation facade first would erase that still-registered
+    // failure into a 404 and bypass its exact 502 owner fence.
+    let (video, owner) = match state.transcode.vod_playlist(session).await {
+        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
+        None => {
+            let mut resolved = None;
+            for reclassification in 0..=2 {
+                match state.transcode.playlist_with_owner(session).await {
+                    Ok(answer) => {
+                        resolved = Some(answer);
+                        break;
+                    }
+                    Err(err) => match admitted_playlist_error(state, session, err).await {
+                        Ok(error) => return Err(error),
+                        Err(()) if reclassification < 2 => continue,
+                        Err(()) => {
+                            return Err(ApiError::typed(
+                                StatusCode::SERVICE_UNAVAILABLE,
+                                "playlist_state_changed",
+                                "the stream changed state while the subtitle playlist was prepared; retry shortly",
+                            ));
+                        }
+                    },
+                }
+            }
+            resolved.expect("bounded playlist reclassification resolves or returns")
+        }
+    };
+    let (_, file) = state
+        .transcode
+        .hls_presentation_for_owner(session, &owner)
+        .await
+        .ok_or(ApiError::NotFound("transcode session"))?;
     let track = file
         .subtitle_streams
         .get(index as usize)
@@ -2690,15 +2879,7 @@ async fn subtitle_playlist_local(
         ));
     }
     crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-    let (video, owner) = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
-        None => state
-            .transcode
-            .playlist_with_owner(session)
-            .await
-            .map_err(|err| playlist_error(session, err))?,
-    };
-    let response = subtitle_media_playlist(&video).into_bytes();
+    let response = playlist_response(subtitle_media_playlist(&video).into_bytes());
     #[cfg(test)]
     state
         .transcode
@@ -2707,8 +2888,19 @@ async fn subtitle_playlist_local(
     // Carry the owner resolved with the exact video bytes. A rolling wait may
     // span fallback, and a VOD attachment may be replaced under the same id;
     // a fresh lookup here would authorize the wrong incarnation in both cases.
-    commit_resolved_media(state, session, &owner, "subtitle-playlist", None, true).await?;
-    Ok(playlist_response(response))
+    let object_name = format!("subs/{index}/index.m3u8");
+    complete_buffered_response(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "subtitle-playlist",
+            Some(&object_name),
+        ),
+        true,
+        response,
+    )
+    .await
 }
 
 /// Capability-authenticated VTT data for AVPlayer's autonomous child fetch.
@@ -2818,8 +3010,19 @@ async fn subtitle_vtt_local(
         ),
     )
         .into_response();
-    commit_resolved_media(state, session, &owner, "subtitle-segment", None, true).await?;
-    Ok(response)
+    let object_name = format!("subs/{index}/{segment}");
+    complete_buffered_response(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "subtitle-segment",
+            Some(&object_name),
+        ),
+        true,
+        response,
+    )
+    .await
 }
 
 fn quoted(value: &str) -> String {
@@ -3865,16 +4068,7 @@ async fn vod_segment_response(
     let content_type = segment_content_type(seg);
     let etag = format!("\"{}\"", ready.etag);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
-        commit_resolved_media(
-            state,
-            session,
-            &owner,
-            "segment-not-modified",
-            Some(seg),
-            true,
-        )
-        .await?;
-        return Ok((
+        let response = (
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
@@ -3885,12 +4079,24 @@ async fn vod_segment_response(
                 ),
             ],
         )
-            .into_response());
+            .into_response();
+        return complete_buffered_response(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "segment-not-modified",
+                Some(seg),
+            ),
+            true,
+            response,
+        )
+        .await;
     }
     let requested_range = match requested_byte_range(headers.range.as_deref(), ready.len) {
         Ok(range) => range,
         Err(()) => {
-            return Ok((
+            let response = (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [
                     (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
@@ -3898,7 +4104,18 @@ async fn vod_segment_response(
                     (header::ETAG, etag),
                 ],
             )
-                .into_response());
+                .into_response();
+            let _authorization = authorize_response_publication(
+                state,
+                session,
+                &owner,
+                crate::transcode::MediaResponsePublication::attempt_media(
+                    "segment-range-not-satisfiable",
+                    Some(seg),
+                ),
+            )
+            .await?;
+            return Ok(response);
         }
     };
     // Small objects — the init above all — are answered from memory so the
@@ -3955,16 +4172,18 @@ async fn vod_segment_response(
         if let Some(range) = content_range {
             headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
         }
-        commit_resolved_media(
+        return complete_buffered_response(
             state,
             session,
             &owner,
-            "init-segment",
-            Some(seg),
+            crate::transcode::MediaResponsePublication::attempt_media(
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+            ),
             range_covers_object(requested_range, ready.len),
+            response,
         )
-        .await?;
-        return Ok(response);
+        .await;
     }
     let (status, len, content_range) = match requested_range {
         Some((start, end)) => {
@@ -3982,19 +4201,23 @@ async fn vod_segment_response(
         }
         None => (StatusCode::OK, ready.len, None),
     };
-    response_owner_is_live(state, session, &owner).await?;
+    let complete_object = range_covers_object(requested_range, ready.len);
+    let authorization = authorize_response_publication(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            segment_publication_kind(seg, requested_range),
+            Some(seg),
+        ),
+    )
+    .await?;
     let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
     let completion = (
         Arc::clone(&state.transcode),
         session.to_owned(),
-        owner,
-        if crate::transcode::is_init_object(seg) {
-            "init-segment"
-        } else {
-            "media-segment"
-        },
-        seg.to_owned(),
-        range_covers_object(requested_range, ready.len),
+        authorization,
+        complete_object,
     );
     let stream = futures_util::stream::unfold(
         (Some(reader), Some(completion), 0_u64, len),
@@ -4003,36 +4226,27 @@ async fn vod_segment_response(
             match reader.next().await {
                 Some(Ok(bytes)) => {
                     let delivered = delivered.saturating_add(bytes.len() as u64);
+                    let mut completion = completion;
+                    if delivered == expected {
+                        if let Some((manager, session, authorization, complete_object)) =
+                            completion.take()
+                        {
+                            settle_streamed_response_completion(
+                                manager,
+                                session,
+                                authorization,
+                                complete_object,
+                            );
+                        }
+                    }
                     Some((Ok(bytes), (Some(reader), completion, delivered, expected)))
                 }
                 Some(Err(error)) => Some((Err(error), (None, None, delivered, expected))),
                 None => {
-                    if delivered == expected {
-                        if let Some((manager, session, owner, kind, object, complete_object)) =
-                            completion
-                        {
-                            if manager
-                                .commit_resolved_media(
-                                    &session,
-                                    &owner,
-                                    kind,
-                                    Some(&object),
-                                    complete_object,
-                                )
-                                .await
-                            {
-                                manager.request_response_flow(
-                                    &session,
-                                    &owner,
-                                    Some(&object),
-                                    complete_object,
-                                );
-                            }
-                        }
-                    } else {
+                    if delivered != expected {
                         let session = completion
                             .as_ref()
-                            .map(|(_, session, _, _, _, _)| session.as_str())
+                            .map(|(_, session, _, _)| session.as_str())
                             .unwrap_or_default();
                         tracing::warn!(
                             session = %crate::transcode::session_log_id(session),
@@ -4114,22 +4328,7 @@ async fn segment_local(
     let content_type = segment_content_type(seg);
     let etag = segment_etag(session, seg, opened.len);
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
-        if commit_resolved_media(
-            state,
-            session,
-            &response_owner,
-            "segment-not-modified",
-            Some(seg),
-            true,
-        )
-        .await
-        .is_err()
-        {
-            opened.delivery.finish_without_body();
-            return Err(ApiError::NotFound("segment"));
-        }
-        opened.delivery.finish_without_body();
-        return Ok((
+        let response = (
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
@@ -4140,13 +4339,35 @@ async fn segment_local(
                 ),
             ],
         )
-            .into_response());
+            .into_response();
+        let authorization = match authorize_response_publication(
+            state,
+            session,
+            &response_owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "segment-not-modified",
+                Some(seg),
+            ),
+        )
+        .await
+        {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                opened.delivery.finish_without_body();
+                return Err(error);
+            }
+        };
+        if let Err(error) = commit_authorized_media(state, authorization, true).await {
+            opened.delivery.finish_without_body();
+            return Err(error);
+        }
+        opened.delivery.finish_without_body();
+        return Ok(response);
     }
     let requested_range = match requested_byte_range(headers.range.as_deref(), opened.len) {
         Ok(range) => range,
         Err(()) => {
-            opened.delivery.finish_without_body();
-            return Ok((
+            let response = (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 [
                     (header::CONTENT_RANGE, format!("bytes */{}", opened.len)),
@@ -4154,7 +4375,23 @@ async fn segment_local(
                     (header::ETAG, etag),
                 ],
             )
-                .into_response());
+                .into_response();
+            if let Err(error) = authorize_response_publication(
+                state,
+                session,
+                &response_owner,
+                crate::transcode::MediaResponsePublication::attempt_media(
+                    "segment-range-not-satisfiable",
+                    Some(seg),
+                ),
+            )
+            .await
+            {
+                opened.delivery.finish_without_body();
+                return Err(error);
+            }
+            opened.delivery.finish_without_body();
+            return Ok(response);
         }
     };
     if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
@@ -4219,19 +4456,32 @@ async fn segment_local(
         let response = response
             .body(Body::from(body))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
-        if commit_resolved_media(
+        let authorization = match authorize_response_publication(
             state,
             session,
             &response_owner,
-            "init-segment",
-            Some(seg),
+            crate::transcode::MediaResponsePublication::attempt_media(
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+            ),
+        )
+        .await
+        {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                delivery.finish_without_body();
+                return Err(error);
+            }
+        };
+        if let Err(error) = commit_authorized_media(
+            state,
+            authorization,
             range_covers_object(requested_range, opened.len),
         )
         .await
-        .is_err()
         {
             delivery.finish_without_body();
-            return Err(ApiError::NotFound("segment"));
+            return Err(error);
         }
         // The storage inspection reads the complete init so it can normalize
         // codec metadata, but client-delivery accounting follows only the
@@ -4258,37 +4508,42 @@ async fn segment_local(
             return Err(ApiError::Internal(error.to_string()));
         }
     }
-    if response_owner_is_live(state, session, &response_owner)
-        .await
-        .is_err()
-    {
-        opened.delivery.finish_without_body();
-        return Err(ApiError::NotFound("segment"));
-    }
     let opened_len = end.saturating_sub(start).saturating_add(1);
     let total_len = opened.len;
+    let complete_object = range_covers_object(requested_range, opened.len);
+    let authorization = match authorize_response_publication(
+        state,
+        session,
+        &response_owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            segment_publication_kind(seg, requested_range),
+            Some(seg),
+        ),
+    )
+    .await
+    {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            opened.delivery.finish_without_body();
+            return Err(error);
+        }
+    };
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
     let completion = (
         Arc::clone(&state.transcode),
         session.to_owned(),
-        response_owner,
-        if crate::transcode::is_init_object(seg) {
-            "init-segment"
-        } else {
-            "media-segment"
-        },
-        seg.to_owned(),
-        range_covers_object(requested_range, opened.len),
+        authorization,
+        complete_object,
     );
     // The tracker rides the stream state rather than the handler, so it is
     // dropped whether the body completes, errors, or is abandoned mid-flight —
     // an abandoned body is the `response_dropped` case, and it is the only one
     // nothing else observes.
     let stream = futures_util::stream::unfold(
-        (Some(reader), delivery, Some(completion)),
-        |(reader, mut delivery, completion)| async move {
+        (Some(reader), delivery, Some(completion), 0_u64, opened_len),
+        |(reader, mut delivery, completion, delivered, expected)| async move {
             // `None` means a previous poll already reported a storage error.
             // Re-polling a reader that just failed has no defined meaning, so
             // the error is the last thing this body yields.
@@ -4297,35 +4552,32 @@ async fn segment_local(
             match reader.next().await {
                 Some(Ok(bytes)) => {
                     delivery.note_read(bytes.len() as u64, started.elapsed());
-                    Some((Ok(bytes), (Some(reader), delivery, completion)))
+                    let delivered = delivered.saturating_add(bytes.len() as u64);
+                    let mut completion = completion;
+                    if delivered == expected && delivery.finish() {
+                        if let Some((manager, session, authorization, complete_object)) =
+                            completion.take()
+                        {
+                            settle_streamed_response_completion(
+                                manager,
+                                session,
+                                authorization,
+                                complete_object,
+                            );
+                        }
+                    }
+                    Some((
+                        Ok(bytes),
+                        (Some(reader), delivery, completion, delivered, expected),
+                    ))
                 }
                 Some(Err(error)) => {
                     delivery.fail(&error);
-                    Some((Err(error), (None, delivery, None)))
+                    Some((Err(error), (None, delivery, None, delivered, expected)))
                 }
                 None => {
-                    if delivery.finish() {
-                        if let Some((manager, session, owner, kind, object, complete_object)) =
-                            completion
-                        {
-                            if manager
-                                .commit_resolved_media(
-                                    &session,
-                                    &owner,
-                                    kind,
-                                    Some(&object),
-                                    complete_object,
-                                )
-                                .await
-                            {
-                                manager.request_response_flow(
-                                    &session,
-                                    &owner,
-                                    Some(&object),
-                                    complete_object,
-                                );
-                            }
-                        }
+                    if completion.is_some() {
+                        let _ = delivery.finish();
                     }
                     None
                 }
