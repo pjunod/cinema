@@ -60,6 +60,71 @@ pub(crate) struct ServingState {
     pub(crate) loss_generation: u64,
 }
 
+/// Cloneable, read-only view of the synchronous authority projection.
+/// Publication paths use this directly rather than waiting for the teardown
+/// watch consumer to mirror a loss into subsystem-local state.
+#[derive(Clone)]
+pub(crate) struct ServingAuthority {
+    ready: Arc<AtomicBool>,
+    loss_generation: Arc<AtomicU64>,
+    loss_transitions_pending: Arc<AtomicU64>,
+    transition: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl ServingAuthority {
+    pub(crate) fn always_ready() -> Self {
+        Self {
+            ready: Arc::new(AtomicBool::new(true)),
+            loss_generation: Arc::new(AtomicU64::new(0)),
+            loss_transitions_pending: Arc::new(AtomicU64::new(0)),
+            transition: Arc::new(tokio::sync::RwLock::new(())),
+        }
+    }
+
+    pub(crate) fn state(&self) -> ServingState {
+        loop {
+            let before = self.loss_generation.load(Ordering::Acquire);
+            let pending_before = self.loss_transitions_pending.load(Ordering::Acquire);
+            let ready = self.ready.load(Ordering::Acquire);
+            let after = self.loss_generation.load(Ordering::Acquire);
+            let pending_after = self.loss_transitions_pending.load(Ordering::Acquire);
+            if before == after && pending_before == pending_after {
+                return ServingState {
+                    ready: ready && pending_after == 0,
+                    loss_generation: after,
+                };
+            }
+        }
+    }
+
+    pub(crate) fn admit(&self) -> Option<u64> {
+        let state = self.state();
+        state.ready.then_some(state.loss_generation)
+    }
+
+    pub(crate) fn is_current(&self, admitted_generation: u64) -> bool {
+        !self.state().authority_lost_since(admitted_generation)
+    }
+
+    /// Serialize an EOF-side mutation before or after the synchronous quorum
+    /// loss transition. The returned read guard must be held across the exact
+    /// commit; a loss publisher takes the write side before changing either
+    /// atomic, so no commit can straddle the authority boundary.
+    pub(crate) async fn commit_guard_before(
+        &self,
+        admitted_generation: u64,
+        deadline: std::time::Instant,
+    ) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+        let guard = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Arc::clone(&self.transition).read_owned(),
+        )
+        .await
+        .ok()?;
+        self.is_current(admitted_generation).then_some(guard)
+    }
+}
+
 impl ServingState {
     pub(crate) fn authority_lost_since(self, admitted_generation: u64) -> bool {
         !self.ready || self.loss_generation != admitted_generation
@@ -83,6 +148,8 @@ pub(crate) struct ServingFence {
     quorum_managed: Arc<AtomicBool>,
     ready: Arc<AtomicBool>,
     loss_generation: Arc<AtomicU64>,
+    loss_transitions_pending: Arc<AtomicU64>,
+    transition: Arc<tokio::sync::RwLock<()>>,
     state: tokio::sync::watch::Sender<ServingState>,
     restart_drain: Arc<RestartDrain>,
 }
@@ -96,11 +163,14 @@ impl ServingFence {
             loss_generation: 0,
         };
         let (state, _) = tokio::sync::watch::channel(initial);
+        let transition = Arc::new(tokio::sync::RwLock::new(()));
         Self {
             metrics,
             quorum_managed: Arc::new(AtomicBool::new(quorum_managed)),
             ready: Arc::new(AtomicBool::new(ready)),
             loss_generation: Arc::new(AtomicU64::new(0)),
+            loss_transitions_pending: Arc::new(AtomicU64::new(0)),
+            transition,
             state,
             restart_drain: Arc::new(RestartDrain::default()),
         }
@@ -112,10 +182,20 @@ impl ServingFence {
 
     pub(crate) fn is_ready(&self) -> bool {
         self.ready.load(Ordering::Acquire)
+            && self.loss_transitions_pending.load(Ordering::Acquire) == 0
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<ServingState> {
         self.state.subscribe()
+    }
+
+    pub(crate) fn authority(&self) -> ServingAuthority {
+        ServingAuthority {
+            ready: Arc::clone(&self.ready),
+            loss_generation: Arc::clone(&self.loss_generation),
+            loss_transitions_pending: Arc::clone(&self.loss_transitions_pending),
+            transition: Arc::clone(&self.transition),
+        }
     }
 
     pub(crate) fn requires_authority(path: &str) -> bool {
@@ -253,7 +333,19 @@ impl ServingFence {
         }
     }
 
-    fn publish(&self, desired: bool) {
+    async fn publish(&self, desired: bool) {
+        if self.ready.load(Ordering::Acquire) == desired {
+            return;
+        }
+        // Announce authority loss before waiting for an EOF commit that
+        // already owns the transition read side. New admissions fail closed
+        // immediately, while the write lock still serializes the generation
+        // change after every commit admitted before the loss was observed.
+        // Count rather than boolean so overlapping publishers cannot clear
+        // another publisher's pending fence.
+        let _pending_loss = (self.ready.load(Ordering::Acquire) && !desired)
+            .then(|| PendingLossTransition::new(Arc::clone(&self.loss_transitions_pending)));
+        let _transition = self.transition.write().await;
         let previous = self.ready.swap(desired, Ordering::AcqRel);
         if previous == desired {
             return;
@@ -269,7 +361,7 @@ impl ServingFence {
         });
     }
 
-    fn refresh(&self) {
+    async fn refresh(&self) {
         let snapshot = self.metrics.snapshot();
         let authority_is_current = snapshot.watermark_valid
             && snapshot.watermark.is_some_and(|watermark| {
@@ -281,7 +373,7 @@ impl ServingFence {
             });
         let desired = !self.is_quorum_managed() || authority_is_current;
         let previous = self.is_ready();
-        self.publish(desired);
+        self.publish(desired).await;
         if previous != desired {
             if desired {
                 tracing::info!("serving authority recovered from a fresh quorum watermark");
@@ -292,14 +384,14 @@ impl ServingFence {
     }
 
     #[cfg(test)]
-    pub(crate) fn validation_set_ready(&self, ready: bool) {
+    pub(crate) async fn validation_set_ready(&self, ready: bool) {
         self.quorum_managed.store(true, Ordering::Release);
-        self.publish(ready);
+        self.publish(ready).await;
     }
 
     pub(crate) async fn monitor_loop(self, shutdown: tokio_util::sync::CancellationToken) {
         loop {
-            self.refresh();
+            self.refresh().await;
             tokio::select! {
                 () = shutdown.cancelled() => break,
                 () = tokio::time::sleep(SERVING_FENCE_POLL) => {}
@@ -342,6 +434,23 @@ fn unix_ms() -> u64 {
         .unwrap_or_default()
 }
 
+struct PendingLossTransition {
+    pending: Arc<AtomicU64>,
+}
+
+impl PendingLossTransition {
+    fn new(pending: Arc<AtomicU64>) -> Self {
+        pending.fetch_add(1, Ordering::AcqRel);
+        Self { pending }
+    }
+}
+
+impl Drop for PendingLossTransition {
+    fn drop(&mut self) {
+        self.pending.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -354,24 +463,24 @@ mod tests {
         assert!(!fence.is_quorum_managed());
     }
 
-    #[test]
-    fn loss_generation_survives_a_coalesced_recovery() {
+    #[tokio::test]
+    async fn loss_generation_survives_a_coalesced_recovery() {
         let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
         let mut state = fence.subscribe();
         let admitted = state.borrow_and_update().loss_generation;
-        fence.validation_set_ready(false);
-        fence.validation_set_ready(true);
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
 
         let recovered = *state.borrow_and_update();
         assert!(recovered.ready);
         assert!(recovered.authority_lost_since(admitted));
     }
 
-    #[test]
-    fn authority_state_is_retained_before_the_first_subscriber() {
+    #[tokio::test]
+    async fn authority_state_is_retained_before_the_first_subscriber() {
         let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
-        fence.validation_set_ready(false);
-        fence.validation_set_ready(true);
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
 
         let state = *fence.subscribe().borrow();
         assert!(state.ready);
@@ -436,5 +545,32 @@ mod tests {
         let status = fence.restart_drain_status(0).await;
         assert_eq!(status.expires_at_unix_ms, Some(replicated_expiry));
         assert!(!fence.begin_restart_preparation_until(unix_ms()).await);
+    }
+
+    #[tokio::test]
+    async fn pending_loss_blocks_new_admission_before_existing_commit_finishes() {
+        let fence = ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = fence.authority();
+        let admitted = authority.admit().expect("initial authority");
+        let commit = authority
+            .commit_guard_before(admitted, std::time::Instant::now() + Duration::from_secs(1))
+            .await
+            .expect("commit guard");
+
+        let publisher = fence.clone();
+        let loss = tokio::spawn(async move { publisher.validation_set_ready(false).await });
+        for _ in 0..100 {
+            if !fence.is_ready() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!fence.is_ready());
+        assert!(authority.admit().is_none());
+        assert!(!authority.is_current(admitted));
+
+        drop(commit);
+        loss.await.expect("loss publisher");
+        assert_eq!(fence.authority().state().loss_generation, 1);
     }
 }

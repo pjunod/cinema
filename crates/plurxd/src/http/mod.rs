@@ -1277,7 +1277,7 @@ mod tests {
     #[tokio::test]
     async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
         let (app, state) = test_app_with_state();
-        state.serving.validation_set_ready(false);
+        state.serving.validation_set_ready(false).await;
 
         assert_eq!(
             evaluate_readiness(&state).await,

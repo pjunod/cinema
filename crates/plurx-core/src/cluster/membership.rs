@@ -1370,10 +1370,11 @@ const BEGIN_REMOVAL_JOB_FENCE_SQL: &str = "UPDATE job_leases SET \
        SELECT 1 FROM cluster_node_removal_attempts \
        WHERE node_id = $2 AND attempt_id = $3)";
 const BEGIN_REMOVAL_MEDIA_FENCE_SQL: &str = "UPDATE media_sessions SET \
-       state = 'ended', lease_expires_at_ms = $1, updated_at_ms = $1 \
-     WHERE owner_node_id = $2 AND state = 'active' AND EXISTS (\
+       state = 'ended', terminal_reason = COALESCE(terminal_reason, 'replaced'), \
+       lease_expires_at_ms = $1, publication_ready_at_ms = $2, updated_at_ms = $1 \
+     WHERE owner_node_id = $3 AND state = 'active' AND EXISTS (\
        SELECT 1 FROM cluster_node_removal_attempts \
-       WHERE node_id = $2 AND attempt_id = $3)";
+       WHERE node_id = $3 AND attempt_id = $4)";
 const PROTECT_REMOVAL_FENCE_DELETE_SQL: &str =
     "CREATE TRIGGER IF NOT EXISTS cluster_node_removal_attempt_delete_guard \
      BEFORE DELETE ON cluster_node_removals \
@@ -6405,7 +6406,12 @@ impl MembershipManager {
                 statements.len() - 1,
                 (
                     BEGIN_REMOVAL_MEDIA_FENCE_SQL.to_owned(),
-                    params!(now, node_id, attempt_id.as_str()),
+                    params!(
+                        now,
+                        crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        node_id,
+                        attempt_id.as_str()
+                    ),
                 ),
             );
         }
@@ -10694,6 +10700,86 @@ mod tests {
                 )
                 .expect("draining removal binds only the placeholders it emits"),
             1
+        );
+    }
+
+    #[test]
+    fn removal_media_fence_first_writes_replaced_and_blocks_terminal_projection() {
+        let connection = rusqlite::Connection::open_in_memory().expect("in-memory sqlite");
+        connection
+            .execute_batch(
+                "CREATE TABLE cluster_node_removal_attempts (\
+                   node_id TEXT NOT NULL, attempt_id TEXT NOT NULL, \
+                   PRIMARY KEY(node_id, attempt_id)); \
+                 CREATE TABLE media_sessions (\
+                   session_id TEXT PRIMARY KEY, owner_node_id TEXT NOT NULL, state TEXT NOT NULL, \
+                   terminal_reason TEXT, publication_ready_at_ms INTEGER NOT NULL, \
+                   lease_expires_at_ms INTEGER NOT NULL, updated_at_ms INTEGER NOT NULL); \
+                 INSERT INTO cluster_node_removal_attempts VALUES ('node-a', 'attempt-a'); \
+                 INSERT INTO media_sessions VALUES \
+                   ('new-cause', 'node-a', 'active', NULL, 700, 900, 100), \
+                   ('prior-cause', 'node-a', 'active', 'admin_stop', 800, 900, 100), \
+                   ('other-owner', 'node-b', 'active', NULL, 900, 900, 100);",
+            )
+            .expect("seed removal media fence");
+
+        assert_eq!(
+            connection
+                .execute(
+                    BEGIN_REMOVAL_MEDIA_FENCE_SQL,
+                    rusqlite::params![
+                        500,
+                        crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        "node-a",
+                        "attempt-a",
+                    ],
+                )
+                .expect("apply exact removal media fence"),
+            2
+        );
+
+        let route = |session_id: &str| {
+            connection
+                .query_row(
+                    "SELECT state, terminal_reason, publication_ready_at_ms, \
+                            lease_expires_at_ms, updated_at_ms \
+                       FROM media_sessions WHERE session_id = ?1",
+                    [session_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<String>>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                        ))
+                    },
+                )
+                .expect("read fenced media route")
+        };
+        assert_eq!(
+            route("new-cause"),
+            (
+                "ended".to_owned(),
+                Some("replaced".to_owned()),
+                crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                500,
+                500
+            )
+        );
+        assert_eq!(
+            route("prior-cause"),
+            (
+                "ended".to_owned(),
+                Some("admin_stop".to_owned()),
+                crate::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+                500,
+                500,
+            )
+        );
+        assert_eq!(
+            route("other-owner"),
+            ("active".to_owned(), None, 900, 900, 100)
         );
     }
 

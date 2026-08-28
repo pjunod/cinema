@@ -36,12 +36,13 @@ use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
-    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionTakeover, MediaSessionTerminalAck, MetadataPatch,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
-    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
-    TraktAuth,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionEnd,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionTakeover, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem,
+    NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
@@ -962,6 +963,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: r#"{"version":1}"#.to_owned(),
                 response_json: r#"{"session":"a"}"#.to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 12_500,
                 now_ms: 130,
                 lease_expires_at_ms: 330,
@@ -1017,6 +1019,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-b".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 // Write-once at activation. Every generation's frontier is
                 // measured from this zero, so a claim that rewrote it would
                 // silently reinterpret every offset already published.
@@ -1053,6 +1056,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 150,
                 lease_expires_at_ms: 350,
@@ -1081,13 +1085,80 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: inspect predecessor pin: {error}")),
             "{backend}: fencing a predecessor must delete its shared-cache pin"
         );
+        let ended_predecessor = store
+            .media_session_route(session_a)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor route remains durable"));
+        assert_eq!(ended_predecessor.state, "ended", "{backend}");
         assert_eq!(
-            store
-                .media_session_route(session_a)
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
-                .map(|route| route.state),
-            Some("ended".to_owned()),
+            ended_predecessor.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}"
+        );
+        assert_eq!(
+            ended_predecessor.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+        let terminal_projection_not_before_ms =
+            151_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let armed_terminal = store
+            .arm_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                terminal_projection_not_before_ms,
+                151,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm terminal projection: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal projection must arm"));
+        assert_eq!(
+            armed_terminal.publication_ready_at_ms,
+            terminal_projection_not_before_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_projection_not_before_ms,
+                },
+                152,
+            )
+            .await
+            .is_err(),
+            "{backend}: an unelapsed terminal boundary is not proof"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                2,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                152,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong terminal epoch: {error}"))
+            .is_none(),
+            "{backend}: a stale owner epoch cannot clear terminal projection"
+        );
+        let projected_terminal = store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                152,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete terminal projection: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal projection must complete"));
+        assert_eq!(
+            projected_terminal.publication_ready_at_ms, 0,
             "{backend}"
         );
         assert_eq!(
@@ -1097,6 +1168,152 @@ async fn media_session_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: inspect current incarnation: {error}"))
                 .map(|route| route.session_id),
             Some(session_a2.to_owned()),
+            "{backend}"
+        );
+        assert_eq!(
+            superseding.route.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "wrong-owner",
+                1,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                151,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong handoff owner: {error}"))
+            .is_none());
+        let publication_not_before_ms =
+            151_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let armed = store
+            .arm_media_session_handoff(
+                incarnation_a2,
+                "node-a",
+                1,
+                publication_not_before_ms,
+                151,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm exact handoff: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exact handoff must arm"));
+        assert_eq!(
+            armed.publication_ready_at_ms,
+            publication_not_before_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: publication_not_before_ms - 1,
+                },
+                publication_not_before_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong handoff boundary: {error}"))
+            .is_none(),
+            "{backend}: a different armed boundary cannot publish"
+        );
+        let published = store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: publication_not_before_ms,
+                },
+                publication_not_before_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete elapsed handoff: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: elapsed handoff must complete"));
+        assert_eq!(published.publication_ready_at_ms, 0, "{backend}");
+
+        let boundary_incarnation = "00000000-0000-4000-8000-0000000000aa";
+        let boundary_session = "00000000-0000-4000-8000-0000000000bb";
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: boundary_incarnation.to_owned(),
+                session_id: boundary_session.to_owned(),
+                user_id: second_user.id,
+                playback_id: "terminal-boundary".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-b".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: 153,
+                lease_expires_at_ms: 353,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate terminal-boundary route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal-boundary activation must win"));
+        let ended_boundary = store
+            .end_media_session(boundary_session, "admin_stop", 154)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end terminal-boundary route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal-boundary route must end"));
+        assert_eq!(
+            ended_boundary.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+        let terminal_boundary_ms =
+            155_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let armed_boundary = store
+            .arm_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                terminal_boundary_ms,
+                155,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm terminal fallback: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal fallback must arm"));
+        assert_eq!(
+            armed_boundary.publication_ready_at_ms, terminal_boundary_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_boundary_ms - 1,
+                },
+                terminal_boundary_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong terminal boundary: {error}"))
+            .is_none(),
+            "{backend}: a different terminal boundary cannot complete projection"
+        );
+        let completed_boundary = store
+            .complete_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_boundary_ms,
+                },
+                terminal_boundary_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete terminal fallback: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal fallback must complete"));
+        assert_eq!(
+            completed_boundary.publication_ready_at_ms, 0,
             "{backend}"
         );
 
@@ -1113,6 +1330,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 160,
                 lease_expires_at_ms: 360,
@@ -1136,6 +1354,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms: 161,
                 lease_expires_at_ms: 361,
@@ -1341,7 +1560,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .is_empty());
 
         let ended = store
-            .end_media_session(session_a2, 410)
+            .end_media_session(session_a2, "deleted", 410)
             .await
             .unwrap_or_else(|error| panic!("{backend}: end current session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: ended route exists"));
@@ -1427,6 +1646,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms: 440,
                 lease_expires_at_ms: 640,
@@ -1520,6 +1740,7 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
                 owner_node_id: "node-terminal".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms: 1_000,
                 lease_expires_at_ms: 10_000,
@@ -1644,6 +1865,7 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
                 owner_node_id: "node-old".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 4_000,
                 now_ms: 1_000,
                 lease_expires_at_ms: 2_000,
@@ -1667,16 +1889,41 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         assert_eq!(taken.owner_node_id, "node-new", "{backend}");
         assert_eq!(taken.owner_epoch, 2, "{backend}");
 
-        let ended = store
-            .end_media_session(session, 3_000)
+        assert!(store
+            .end_media_session_if_owner(&MediaSessionEnd {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                expected_owner_node_id: "node-old".to_owned(),
+                expected_owner_epoch: 1,
+                terminal_reason: "replaced".to_owned(),
+                now_ms: 2_500,
+            })
             .await
-            .unwrap_or_else(|error| panic!("{backend}: end: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: ending a live session returns its route"));
+            .unwrap_or_else(|error| panic!("{backend}: stale exact end: {error}"))
+            .is_none());
+
+        let ended = store
+            .end_media_session_if_owner(&MediaSessionEnd {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                expected_owner_node_id: "node-new".to_owned(),
+                expected_owner_epoch: 2,
+                terminal_reason: "admin_stop".to_owned(),
+                now_ms: 3_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exact current-owner end returns its route"));
         assert_eq!(
             ended.owner_node_id, "node-new",
             "{backend}: the end must name the owner it is actually stopping"
         );
         assert_eq!(ended.owner_epoch, 2, "{backend}");
+        assert_eq!(
+            ended.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}: the first terminal decision is returned"
+        );
 
         let route = store
             .media_session_route(session)
@@ -1684,6 +1931,11 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             .unwrap_or_else(|error| panic!("{backend}: read ended route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ended row is retained"));
         assert_eq!(route.state, "ended", "{backend}");
+        assert_eq!(
+            route.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}"
+        );
         assert!(
             route.lease_expires_at_ms <= 3_000,
             "{backend}: an ended incarnation keeps no live lease"
@@ -1717,11 +1969,16 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
 
         // Idempotent, and still reporting the same owner.
         let again = store
-            .end_media_session(session, 3_100)
+            .end_media_session(session, "deleted", 3_100)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
             .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
         assert_eq!(again.owner_node_id, "node-new", "{backend}");
+        assert_eq!(
+            again.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}: an idempotent later End cannot relabel the first writer"
+        );
 
         // §7.2: a delete racing a takeover resolves to ended. Once ended, no
         // survivor may claim the incarnation back into life.
@@ -1779,6 +2036,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                     owner_node_id: "cap-node".to_owned(),
                     recipe_json: "{}".to_owned(),
                     response_json: "{}".to_owned(),
+                    publication_ready_at_ms: 0,
                     media_origin_ms: 0,
                     now_ms: 100,
                     lease_expires_at_ms: 10_000,
@@ -1850,6 +2108,7 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
                 owner_node_id: "cap-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 1_003,
                 lease_expires_at_ms: 10_000,
@@ -1940,6 +2199,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            publication_ready_at_ms: 0,
             media_origin_ms: 0,
             now_ms: 120,
             lease_expires_at_ms: 320,
@@ -2006,6 +2266,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            publication_ready_at_ms: 0,
             media_origin_ms: 0,
             now_ms: 150,
             lease_expires_at_ms: 350,

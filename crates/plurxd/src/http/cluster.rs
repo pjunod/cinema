@@ -541,6 +541,7 @@ mod tests {
                 owner_node_id: "test-node".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms,
                 lease_expires_at_ms: now_ms.saturating_add(12_000),

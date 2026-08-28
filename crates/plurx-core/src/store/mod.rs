@@ -86,14 +86,15 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
     CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
-    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
-    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
-    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
-    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
-    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
-    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
-    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
+    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
+    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
+    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
+    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
+    User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -2068,6 +2069,53 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
 
+    /// Replace the durable unobserved sentinel with one full, freshly minted
+    /// not-before boundary. Exact ownership changes and terminal state fail
+    /// closed. A concurrent acknowledgement may return an already-ready row.
+    async fn arm_media_session_handoff(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        publication_ready_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Clear one successor's durable publication fence with an exact
+    /// acknowledgement or exact armed-boundary proof. Ownership changes,
+    /// terminal state, and unrelated incarnations fail closed.
+    async fn complete_media_session_handoff(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        proof: MediaSessionProjectionCompletion,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Arm the replay-visible fallback for an exact terminal owner after a
+    /// definitive post-End observation. Ended routes reuse the publication
+    /// column as terminal-projection state because they can no longer serve.
+    async fn arm_media_session_terminal_projection(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        projection_safe_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Persist exact owner acknowledgement or an exact armed-boundary proof
+    /// so a later idempotent release does not restart its safety interval.
+    async fn complete_media_session_terminal_projection(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        proof: MediaSessionProjectionCompletion,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     async fn fail_media_session_request(
         &self,
         user_id: i64,
@@ -2084,6 +2132,15 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     async fn media_session_route_by_incarnation(
         &self,
         incarnation_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Resolve the exact route currently named by one player's durable
+    /// pointer. Activation uses this read as the predecessor half of its CAS
+    /// so commit-unknown reconciliation retains the identity it must fence.
+    async fn media_session_route_for_playback(
+        &self,
+        user_id: i64,
+        playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     /// Atomically store the first exact terminal-control acknowledgement and
@@ -2126,9 +2183,20 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         takeover: &MediaSessionTakeover,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    /// End only the exact incarnation/owner epoch named by `end`.
+    ///
+    /// This is the lease-loss counterpart to takeover's CAS.  It is
+    /// idempotent for an already-ended matching incarnation and returns
+    /// `None` when ownership advanced before cleanup reached the Store.
+    async fn end_media_session_if_owner(
+        &self,
+        end: &crate::domain::MediaSessionEnd,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     async fn end_media_session(
         &self,
         session_id: &str,
+        terminal_reason: &str,
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 

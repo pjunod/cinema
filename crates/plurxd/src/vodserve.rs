@@ -38,6 +38,7 @@ use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use futures_util::StreamExt;
 use plurx_core::domain::MediaFile;
 use plurx_core::fmp4::{segment_name, CutPolicy, FragmentReader, Init, Unit};
 use plurx_core::segplan::{
@@ -50,7 +51,7 @@ use plurx_core::transcode::{
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::sync::{Mutex, Notify, Semaphore};
 
 use crate::copyseg::sanitize_stale_dolby_brand;
 use crate::ffmpeg::ffmpeg_bin;
@@ -74,6 +75,31 @@ const SESSION_IDLE_TTL: Duration = Duration::from_secs(300);
 /// un-admitted one is purged. Admitted renditions are the completed cache and
 /// are never purged here — cache retention is `cachekeep`'s job, not a TTL's.
 const DORMANT_RENDITION_TTL: Duration = Duration::from_secs(1800);
+
+/// Compact terminal owners remain available long enough for a lost 410 or
+/// terminal-control acknowledgement to be retried exactly. Reader/producer/
+/// media graphs are released by cleanup before this window begins; after the
+/// window maintenance may evict the compact owner only when a fresh durable
+/// read proves the capability is no longer active.
+const TERMINAL_TOMBSTONE_RETENTION: Duration = Duration::from_secs(60);
+const TERMINAL_ROUTE_CONFIRM_TIMEOUT: Duration = Duration::from_secs(3);
+const TERMINAL_ROUTE_CONFIRM_FANOUT: usize = 16;
+/// One maintenance pass confirms at most one fanout wave. The cursor below
+/// advances the window so a persistently unavailable route cannot starve
+/// later tombstones while also preventing an unavailable Store from turning
+/// one maintenance tick into minutes of serial waves.
+const TERMINAL_ROUTE_CONFIRM_BATCH: usize = TERMINAL_ROUTE_CONFIRM_FANOUT;
+
+/// A missing-init cache adoption must not own a per-key build forever merely
+/// because ffmpeg never emits its muxer head. Termination and confirmed reap
+/// are owned separately, so cancellation cannot orphan the child.
+const HEAD_REGENERATION_TIMEOUT: Duration = Duration::from_secs(15);
+/// Missing-init recovery is exceptional and process-heavy. Bound both the
+/// number of ffmpeg heads alive node-wide and the bytes accepted before the
+/// init atom; neither random cache damage nor a malformed muxer may create an
+/// unbounded process or memory fan-out.
+const HEAD_REGENERATION_CAPACITY: usize = 4;
+const HEAD_REGENERATION_MAX_BYTES: usize = 8 * 1024 * 1024;
 
 /// `Retry-After` on a deadline-expired blocking GET (plan §2.3's typed
 /// `segment_pending`). The header stays on the wire even though hls.js reads
@@ -117,6 +143,51 @@ pub enum Terminal {
     Replaced,
 }
 
+impl Terminal {
+    pub(crate) const fn durable_reason(self) -> &'static str {
+        match self {
+            Self::Deleted => "deleted",
+            Self::Superseded => "superseded",
+            Self::AdminStop => "admin_stop",
+            Self::Revoked => "revoked",
+            Self::Replaced => "replaced",
+        }
+    }
+
+    pub(crate) const fn control_reason(self) -> &'static str {
+        match self {
+            Self::Deleted => "released by client",
+            Self::Superseded => "superseded by cluster session",
+            Self::AdminStop => "stopped by admin",
+            Self::Revoked => "credentials revoked",
+            Self::Replaced => "file replaced",
+        }
+    }
+
+    pub(crate) fn from_durable_reason(reason: Option<&str>) -> Option<Self> {
+        match reason {
+            Some("deleted") => Some(Self::Deleted),
+            Some("superseded") => Some(Self::Superseded),
+            Some("admin_stop") => Some(Self::AdminStop),
+            Some("revoked") => Some(Self::Revoked),
+            Some("replaced") => Some(Self::Replaced),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn from_control_reason(reason: &str) -> Option<Self> {
+        [
+            Self::Deleted,
+            Self::Superseded,
+            Self::AdminStop,
+            Self::Revoked,
+            Self::Replaced,
+        ]
+        .into_iter()
+        .find(|terminal| terminal.control_reason() == reason)
+    }
+}
+
 /// The create answer plus the request facts an idempotent replay echoes.
 #[derive(Debug)]
 pub struct RecoveredVod {
@@ -153,7 +224,12 @@ pub struct VodHlsFacts {
 pub(crate) struct ResponseOwner {
     lifecycle: Arc<Mutex<()>>,
     incarnation: Arc<()>,
-    rendition: Arc<Rendition>,
+    /// Present only for a live media owner. Terminal owners deliberately do
+    /// not keep the heavyweight rendition graph alive after reader/commit
+    /// cleanup has finished.
+    rendition: Option<Arc<Rendition>>,
+    rendition_key: String,
+    file: Arc<MediaFile>,
     /// Terminal snapshot at resolution. Status publication compares this
     /// exact value so a live error cannot be admitted after tombstoning and a
     /// tombstone from one incarnation cannot describe its replacement.
@@ -165,7 +241,7 @@ impl std::fmt::Debug for ResponseOwner {
         formatter
             .debug_struct("ResponseOwner")
             .field("incarnation", &Arc::as_ptr(&self.incarnation))
-            .field("rendition_key", &self.rendition.key)
+            .field("rendition_key", &self.rendition_key)
             .field("tombstone", &self.tombstone)
             .finish_non_exhaustive()
     }
@@ -422,6 +498,9 @@ impl Rendition {
 struct TerminalCleanup {
     finished: AtomicBool,
     notify: Notify,
+    completed_at: std::sync::OnceLock<tokio::time::Instant>,
+    #[cfg(test)]
+    wait_enabled_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 impl TerminalCleanup {
@@ -429,10 +508,18 @@ impl TerminalCleanup {
         Self {
             finished: AtomicBool::new(false),
             notify: Notify::new(),
+            completed_at: std::sync::OnceLock::new(),
+            #[cfg(test)]
+            wait_enabled_pause: StdMutex::new(None),
         }
     }
 
     fn complete(&self) {
+        // The late-response window starts only after reader detach, lifecycle
+        // emission, and any terminal commit settlement owned by the cleanup
+        // task have actually finished. Starting it at tombstone creation made
+        // a slow cleanup immediately evictable.
+        let _ = self.completed_at.set(tokio::time::Instant::now());
         self.finished.store(true, Release);
         self.notify.notify_waiters();
     }
@@ -441,9 +528,33 @@ impl TerminalCleanup {
         self.finished.load(Acquire)
     }
 
+    fn retention_expired(&self) -> bool {
+        self.completed_at.get().is_some_and(|completed_at| {
+            tokio::time::Instant::now() >= *completed_at + TERMINAL_TOMBSTONE_RETENTION
+        })
+    }
+
     async fn wait(&self) {
         while !self.is_finished() {
             let notified = self.notify.notified();
+            tokio::pin!(notified);
+            // `notify_waiters` stores no permit for a future that has only
+            // been constructed. Register it before the second state read so
+            // completion can occur on either side of that read without being
+            // lost.
+            notified.as_mut().enable();
+            #[cfg(test)]
+            {
+                let pause = self
+                    .wait_enabled_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(pause) = pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+            }
             if self.is_finished() {
                 return;
             }
@@ -457,6 +568,89 @@ struct TerminalCleanupGuard(Arc<TerminalCleanup>);
 impl Drop for TerminalCleanupGuard {
     fn drop(&mut self) {
         self.0.complete();
+    }
+}
+
+/// One detached ffmpeg whose Drop path still owns SIGKILL plus a confirmed
+/// wait. The reaper task is intentionally independent of the request future:
+/// dropping a resurrection/build cannot drop the only process owner.
+struct HeadChildOwner {
+    child: Option<tokio::process::Child>,
+    #[cfg(test)]
+    reap_pause: Option<Arc<tokio::sync::Barrier>>,
+}
+
+impl HeadChildOwner {
+    fn new(child: tokio::process::Child) -> Self {
+        Self {
+            child: Some(child),
+            #[cfg(test)]
+            reap_pause: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_reap_pause(
+        child: tokio::process::Child,
+        reap_pause: Arc<tokio::sync::Barrier>,
+    ) -> Self {
+        Self {
+            child: Some(child),
+            reap_pause: Some(reap_pause),
+        }
+    }
+
+    fn child_mut(&mut self) -> Option<&mut tokio::process::Child> {
+        self.child.as_mut()
+    }
+
+    fn begin_reap(&mut self) -> Option<tokio::task::JoinHandle<()>> {
+        let mut child = self.child.take()?;
+        let _ = child.start_kill();
+        #[cfg(test)]
+        let reap_pause = self.reap_pause.take();
+        Some(tokio::spawn(async move {
+            #[cfg(test)]
+            if let Some(pause) = reap_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            let _ = child.wait().await;
+        }))
+    }
+
+    async fn terminate_and_reap(&mut self) {
+        if let Some(reaper) = self.begin_reap() {
+            // Cancelling this await only detaches the already-owned reaper.
+            let _ = reaper.await;
+        }
+    }
+}
+
+impl Drop for HeadChildOwner {
+    fn drop(&mut self) {
+        let _ = self.begin_reap();
+    }
+}
+
+#[derive(Debug)]
+enum HeadRegenerationError {
+    Busy,
+    Oversize,
+    Failed(String),
+}
+
+impl std::fmt::Display for HeadRegenerationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => formatter.write_str("head-regeneration capacity is full"),
+            Self::Oversize => write!(
+                formatter,
+                "head regeneration exceeded the {} byte init limit",
+                HEAD_REGENERATION_MAX_BYTES
+            ),
+            Self::Failed(reason) => formatter.write_str(reason),
+        }
     }
 }
 
@@ -524,7 +718,13 @@ fn terminal_reason(cause: Terminal) -> &'static str {
 /// One session handle (plan §2.5): auth attribution, sliding TTL, reader
 /// window, and — once it ends for good — a tombstone.
 struct Session {
-    rendition: Arc<Rendition>,
+    /// Cleared synchronously by the detached terminal cleanup owner before it
+    /// publishes completion. The compact fields below retain exact 410/replay
+    /// identity without retaining manifests, source handles, readers, or the
+    /// producer graph until the next maintenance tick.
+    rendition: Option<Arc<Rendition>>,
+    rendition_key: String,
+    file: Arc<MediaFile>,
     playback_id: String,
     user_name: String,
     item_title: String,
@@ -560,6 +760,97 @@ struct Session {
     tombstone: Option<Terminal>,
 }
 
+impl Session {
+    fn live_rendition(&self) -> Option<&Arc<Rendition>> {
+        self.rendition.as_ref().filter(|_| self.tombstone.is_none())
+    }
+
+    fn response_owner(&self) -> ResponseOwner {
+        ResponseOwner {
+            lifecycle: Arc::clone(&self.lifecycle),
+            incarnation: Arc::clone(&self.incarnation),
+            rendition: self.rendition.as_ref().map(Arc::clone),
+            rendition_key: self.rendition_key.clone(),
+            file: Arc::clone(&self.file),
+            tombstone: self.tombstone,
+        }
+    }
+
+    /// A terminal control response remains part of the exact-owner replay
+    /// contract until its commit receipt expires, even if the independent
+    /// cleanup-retention window has already elapsed.
+    fn terminal_replay_expired(&self) -> bool {
+        self.control_end
+            .as_ref()
+            .and_then(|result| result.terminal_commit.as_ref())
+            .is_none_or(crate::playback_control::TerminalCommitReceipt::is_expired)
+    }
+}
+
+/// A prepared rendition plus the exact per-key build gate. The gate remains
+/// held through the final reader/session registry transaction, so a dormant
+/// purge cannot remove the handle between lookup and attachment. Slow build
+/// ownership is cancellation-independent; if its requester disappears, the
+/// detached owner finishes any child reap and drops this unused guard only at
+/// the transaction boundary.
+struct RenditionAttachment {
+    rendition: Arc<Rendition>,
+    _build_guard: tokio::sync::OwnedMutexGuard<()>,
+}
+
+struct TerminalEvictionCandidate {
+    session_id: String,
+    lifecycle: Arc<Mutex<()>>,
+    incarnation: Arc<()>,
+    cleanup: Arc<TerminalCleanup>,
+}
+
+/// Exact, cancellation-safe marker for a VOD capability whose rendition is
+/// prepared outside the short final attachment transaction. Lease loss must
+/// be able to terminalize this stable capability even before it appears in
+/// `sessions`; otherwise a request admitted just before the loss can attach
+/// after the owner has self-fenced.
+pub(crate) struct VodPreparationGuard {
+    shared: Arc<Shared>,
+    session_id: String,
+}
+
+impl Drop for VodPreparationGuard {
+    fn drop(&mut self) {
+        let mut preparing = self
+            .shared
+            .preparing_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(holders) = preparing.get_mut(&self.session_id) {
+            *holders = holders.saturating_sub(1);
+            if *holders == 0 {
+                preparing.remove(&self.session_id);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum TerminalRouteTestOutcome {
+    Timeout,
+    Error,
+}
+
+fn spawn_cancellation_independent<T, F>(future: F) -> tokio::sync::oneshot::Receiver<T>
+where
+    T: Send + 'static,
+    F: std::future::Future<Output = T> + Send + 'static,
+{
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let result = future.await;
+        let _ = result_tx.send(result);
+    });
+    result_rx
+}
+
 /// Everything the tasks share. `VodServe` is a thin handle over this so the
 /// per-rendition driver and generation tasks can be `'static`.
 struct Shared {
@@ -569,17 +860,27 @@ struct Shared {
     cluster_index_root: Option<PathBuf>,
     cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     sessions: Mutex<HashMap<String, Session>>,
+    /// Bounded by in-flight VOD request admission and cleaned by exact RAII.
+    /// This closes lease loss against a slow resurrection before attachment.
+    preparing_sessions: StdMutex<HashMap<String, usize>>,
     /// Per-session-id transition gates survive the remove/reattach gap via a
     /// weak registry. A reaper holds the strong gate through reader detach;
     /// resurrection upgrades the same gate before it can attach a successor.
     session_lifecycles: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
+    /// Per-rendition single-flight gates. Slow Store/filesystem/ffmpeg build
+    /// work owns only its key; the node-wide rendition registry is held solely
+    /// for short lookup/install/remove transactions.
+    rendition_builds: StdMutex<HashMap<String, Weak<Mutex<()>>>>,
     renditions: Mutex<HashMap<String, Arc<Rendition>>>,
+    head_regeneration_slots: Arc<Semaphore>,
     pool: WaitPool,
     /// Node-wide un-admitted materialized bytes — `prodsched`'s working set.
     working_set: AtomicU64,
     /// Bytes of admitted renditions, moved here from the working set at
     /// completion.
     completed_cache: AtomicU64,
+    /// Fair starting point for the bounded terminal route-confirmation batch.
+    terminal_eviction_cursor: AtomicU64,
     /// Test-only rendezvous immediately before an exact terminal replay joins
     /// the session-owned detach fence.
     #[cfg(test)]
@@ -587,6 +888,16 @@ struct Shared {
     /// Test-only rendezvous immediately before terminal reader detach.
     #[cfg(test)]
     terminal_detach_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after a newly built rendition is installed and
+    /// accounted, while its exact build gate is still held.
+    #[cfg(test)]
+    rendition_install_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after exact dormant map removal has transferred
+    /// every cleanup resource to its detached settlement owner.
+    #[cfg(test)]
+    dormant_purge_pause: StdMutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    terminal_route_test_outcomes: StdMutex<HashMap<String, TerminalRouteTestOutcome>>,
 }
 
 pub struct VodServe {
@@ -648,7 +959,7 @@ impl VodServe {
             key: format!("http-test-{}", uuid::Uuid::new_v4()),
             dir,
             recipe: Recipe {
-                file: file.clone(),
+                file: Arc::new(file.clone()),
                 audio_index: None,
                 aac: true,
                 video: CopyVideoOptions::new(false, false),
@@ -690,7 +1001,7 @@ impl VodServe {
             .lock()
             .await
             .get(session_id)
-            .map(|session| Arc::clone(&session.rendition));
+            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
         if let Some(previous) = previous {
             previous.detach_reader(session_id).await;
         }
@@ -698,7 +1009,9 @@ impl VodServe {
         self.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
-                rendition,
+                rendition: Some(Arc::clone(&rendition)),
+                rendition_key: rendition.key.clone(),
+                file: file.clone(),
                 playback_id: "http-vod-test".to_owned(),
                 user_name: "test".to_owned(),
                 item_title: "HTTP VOD fixture".to_owned(),
@@ -760,15 +1073,25 @@ impl VodServe {
                 cluster_index_root,
                 cluster_membership,
                 sessions: Mutex::new(HashMap::new()),
+                preparing_sessions: StdMutex::new(HashMap::new()),
                 session_lifecycles: StdMutex::new(HashMap::new()),
+                rendition_builds: StdMutex::new(HashMap::new()),
                 renditions: Mutex::new(HashMap::new()),
+                head_regeneration_slots: Arc::new(Semaphore::new(HEAD_REGENERATION_CAPACITY)),
                 pool: WaitPool::new(GLOBAL_WAIT_CAP, PER_SESSION_WAIT_CAP),
                 working_set: AtomicU64::new(0),
                 completed_cache: AtomicU64::new(0),
+                terminal_eviction_cursor: AtomicU64::new(0),
                 #[cfg(test)]
                 terminal_replay_pause: StdMutex::new(None),
                 #[cfg(test)]
                 terminal_detach_pause: StdMutex::new(None),
+                #[cfg(test)]
+                rendition_install_pause: StdMutex::new(None),
+                #[cfg(test)]
+                dormant_purge_pause: StdMutex::new(None),
+                #[cfg(test)]
+                terminal_route_test_outcomes: StdMutex::new(HashMap::new()),
             }),
         })
     }
@@ -917,6 +1240,95 @@ impl VodServe {
         attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
+        self.try_create_with_release_fence(req, file, settings, attribution, session_id, None)
+            .await
+    }
+
+    /// Prepare a resurrection normally, then serialize only its final
+    /// lifecycle/reader/registry attachment against public release. The
+    /// release bit is checked while that exact transition is held, so slow
+    /// Store/index/rendition work never delays a DELETE tombstone.
+    pub(crate) async fn try_create_before_release(
+        &self,
+        req: &SessionRequest,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        release_transition: Arc<tokio::sync::Mutex<()>>,
+        released: &AtomicBool,
+    ) -> Result<VodStart, String> {
+        let _preparing = self.begin_preparing_session(&session_id);
+        self.try_create_with_release_fence(
+            req,
+            file,
+            settings,
+            attribution,
+            session_id,
+            Some((release_transition, released)),
+        )
+        .await
+    }
+
+    pub(crate) fn begin_preparing_session(&self, session_id: &str) -> VodPreparationGuard {
+        *self
+            .shared
+            .preparing_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entry(session_id.to_owned())
+            .or_insert(0) += 1;
+        VodPreparationGuard {
+            shared: Arc::clone(&self.shared),
+            session_id: session_id.to_owned(),
+        }
+    }
+
+    pub(crate) async fn owns_or_preparing(&self, session_id: &str) -> bool {
+        if self
+            .shared
+            .preparing_sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(session_id)
+        {
+            return true;
+        }
+        self.shared.sessions.lock().await.contains_key(session_id)
+    }
+
+    pub(crate) async fn live_or_preparing_session_ids(&self) -> Vec<String> {
+        let mut ids = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .iter()
+            .filter(|(_, session)| session.tombstone.is_none())
+            .map(|(session_id, _)| session_id.clone())
+            .collect::<Vec<_>>();
+        ids.extend(
+            self.shared
+                .preparing_sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .keys()
+                .cloned(),
+        );
+        ids.sort_unstable();
+        ids.dedup();
+        ids
+    }
+
+    async fn try_create_with_release_fence(
+        &self,
+        req: &SessionRequest,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        release_fence: Option<(Arc<tokio::sync::Mutex<()>>, &AtomicBool)>,
+    ) -> Result<VodStart, String> {
         let SessionKind::Copy {
             aac,
             preserve_dolby_vision,
@@ -1026,7 +1438,7 @@ impl VodServe {
             cluster_cache_key,
         };
         let key = rendition_key(&recipe, &identity);
-        let rendition = self
+        let attachment = self
             .shared
             .attach_rendition(&key, &identity, index, recipe, duration_ms, settings)
             .await?
@@ -1036,13 +1448,28 @@ impl VodServe {
                     "the fragment index produced an empty VOD plan",
                 )
             })?;
+        let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
+        let _release_transition = if let Some((transition, released)) = release_fence {
+            let guard = transition.lock_owned().await;
+            if released.load(Acquire) {
+                return Err(crate::transcode::vod_refusal_error(
+                    "vod_session_released",
+                    "the VOD session was released before attachment",
+                ));
+            }
+            Some(guard)
+        } else {
+            None
+        };
         let lifecycle = self.shared.session_lifecycle(&session_id);
         let _lifecycle = lifecycle.lock().await;
         let duration_ms = plan_duration_ms(&rendition.plan);
         let replacement = Session {
-            rendition: Arc::clone(&rendition),
+            rendition: Some(Arc::clone(&rendition)),
+            rendition_key: rendition.key.clone(),
+            file: Arc::new(rendition.recipe.file.clone()),
             playback_id: req.playback_id.clone(),
             user_name: attribution.user_name.to_owned(),
             item_title: attribution.item_title.to_owned(),
@@ -1070,9 +1497,18 @@ impl VodServe {
         // is one synchronous transaction with no partial externally visible
         // state.
         let mut sessions = self.shared.sessions.lock().await;
+        if sessions
+            .get(&session_id)
+            .is_some_and(|session| session.tombstone.is_some())
+        {
+            return Err(crate::transcode::vod_refusal_error(
+                "vod_session_ended",
+                "the VOD session already has a terminal tombstone",
+            ));
+        }
         let previous_rendition = sessions
             .get(&session_id)
-            .map(|session| Arc::clone(&session.rendition));
+            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
         match previous_rendition {
             Some(previous) if !Arc::ptr_eq(&previous, &rendition) => {
                 let mut previous_readers = previous.readers.lock().await;
@@ -1105,13 +1541,6 @@ impl VodServe {
             }
         }
         drop(sessions);
-        rendition.kick();
-        tracing::info!(
-            session = %session_log_id(&session_id),
-            rendition = %rendition.key,
-            file = file.id,
-            "vod session attached (start entry {start_entry})"
-        );
         self.emit_lifecycle(
             &session_id,
             file.id,
@@ -1119,6 +1548,23 @@ impl VodServe {
             req.kind,
             "session_start",
             None,
+        );
+        drop(_lifecycle);
+        // The reader graph and registry are now one committed attachment.
+        // Release does not wait for producer wakeup, tracing or lifecycle
+        // event publication, and can tombstone this exact incarnation before
+        // the caller attempts to acquire a response owner.
+        drop(_release_transition);
+        // Reader graph and registry now own the exact handle. Releasing the
+        // per-key build gate before this point would let a dormant purge
+        // remove it in the lookup/attach gap.
+        drop(attachment);
+        rendition.kick();
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            rendition = %rendition.key,
+            file = file.id,
+            "vod session attached (start entry {start_entry})"
         );
         Ok(VodStart {
             session_id,
@@ -1141,20 +1587,23 @@ impl VodServe {
         let mut infos = sessions
             .iter()
             .filter(|(_, session)| session.tombstone.is_none())
-            .map(|(id, session)| VodDeliveryInfo {
-                id: id.clone(),
-                file_id: session.rendition.recipe.file.id,
-                item_id: session.rendition.recipe.file.item_id,
-                item_title: session.item_title.clone(),
-                user_name: session.user_name.clone(),
-                target_height: session.target_height,
-                started_unix: session.started_unix,
-                idle_seconds: session
-                    .last_touch
-                    .lock()
-                    .expect("touch lock")
-                    .elapsed()
-                    .as_secs(),
+            .filter_map(|(id, session)| {
+                session.live_rendition()?;
+                Some(VodDeliveryInfo {
+                    id: id.clone(),
+                    file_id: session.file.id,
+                    item_id: session.file.item_id,
+                    item_title: session.item_title.clone(),
+                    user_name: session.user_name.clone(),
+                    target_height: session.target_height,
+                    started_unix: session.started_unix,
+                    idle_seconds: session
+                        .last_touch
+                        .lock()
+                        .expect("touch lock")
+                        .elapsed()
+                        .as_secs(),
+                })
             })
             .collect::<Vec<_>>();
         infos.sort_by(|left, right| {
@@ -1200,12 +1649,19 @@ impl VodServe {
             || owner.tombstone.is_some()
             || !Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             || !Arc::ptr_eq(&session.incarnation, &owner.incarnation)
-            || !Arc::ptr_eq(&session.rendition, &owner.rendition)
         {
             return false;
         }
+        let (Some(session_rendition), Some(owner_rendition)) =
+            (session.rendition.as_ref(), owner.rendition.as_ref())
+        else {
+            return false;
+        };
+        if !Arc::ptr_eq(session_rendition, owner_rendition) {
+            return false;
+        }
         let mut readers = if segment_index.is_some() {
-            Some(owner.rendition.readers.lock().await)
+            Some(owner_rendition.readers.lock().await)
         } else {
             None
         };
@@ -1222,7 +1678,7 @@ impl VodServe {
         }
         drop(readers);
         drop(sessions);
-        owner.rendition.kick();
+        owner_rendition.kick();
         true
     }
 
@@ -1239,14 +1695,19 @@ impl VodServe {
             && owner.tombstone.is_none()
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
-            && Arc::ptr_eq(&session.rendition, &owner.rendition)
+            && session.rendition.as_ref().is_some_and(|rendition| {
+                owner
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|owner| Arc::ptr_eq(rendition, owner))
+            })
     }
 
     /// Frozen source facts carried by this exact VOD response owner. HTTP may
     /// prepare a representation from them before final owner admission without
     /// consulting whichever attachment currently reuses the public id.
     pub(crate) fn response_owner_file(&self, owner: &ResponseOwner) -> MediaFile {
-        owner.rendition.recipe.file.clone()
+        owner.file.as_ref().clone()
     }
 
     /// Admit a typed VOD status against the exact live-or-terminal snapshot
@@ -1264,7 +1725,14 @@ impl VodServe {
         session.tombstone == owner.tombstone
             && Arc::ptr_eq(&session.lifecycle, &owner.lifecycle)
             && Arc::ptr_eq(&session.incarnation, &owner.incarnation)
-            && Arc::ptr_eq(&session.rendition, &owner.rendition)
+            && session.rendition_key == owner.rendition_key
+            && (session.tombstone.is_some()
+                || session.rendition.as_ref().is_some_and(|rendition| {
+                    owner
+                        .rendition
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(rendition, owner))
+                }))
     }
 
     /// Immutable playlist bytes: the same bytes for the session's whole life.
@@ -1373,12 +1841,39 @@ impl VodServe {
                 terminal_commit.retry();
                 let _ = terminal_commit.wait().await;
             }
+            // This task owns the exact cleanup identity. Compact before its
+            // guard publishes completion so every waiter observing finished
+            // cleanup also observes that the registry no longer retains the
+            // rendition/media/process graph. A resurrected replacement has a
+            // different cleanup pointer and is left untouched.
+            let mut sessions = serve.shared.sessions.lock().await;
+            if let Some(session) = sessions.get_mut(&session_id) {
+                let exact_cleanup = session
+                    .terminal_cleanup
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &cleanup));
+                let exact_rendition = session
+                    .rendition
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &rendition));
+                if session.tombstone.is_some() && exact_cleanup && exact_rendition {
+                    session.rendition = None;
+                }
+            }
+            drop(sessions);
+            // `TerminalCleanupGuard` publishes completion on drop. Release
+            // the task's own heavyweight captures first so a waiter that
+            // observes completion cannot still race this future's teardown.
+            drop(rendition);
+            drop(serve);
         });
     }
 
     /// End one session for good with a cause; `true` if it was ours.
-    /// Idempotent — the first call writes the tombstone and detaches, every
-    /// later one only confirms ownership.
+    /// Idempotent for authoritative causes. `Replaced` is also the fail-closed
+    /// provisional cause used when lease reconciliation cannot yet read the
+    /// durable winner; a later non-Replaced Store cause may refine only that
+    /// placeholder, never another concrete first writer.
     async fn begin_end(&self, session_id: &str, cause: Terminal) -> Option<Arc<TerminalCleanup>> {
         let (lifecycle, incarnation) = {
             let sessions = self.shared.sessions.lock().await;
@@ -1401,16 +1896,32 @@ impl VodServe {
             {
                 return None;
             }
-            let terminal_cause = *session.tombstone.get_or_insert(cause);
+            let terminal_cause = match session.tombstone {
+                Some(Terminal::Replaced) if cause != Terminal::Replaced => {
+                    tracing::info!(
+                        session = %session_log_id(session_id),
+                        durable_cause = cause.durable_reason(),
+                        "refined provisional VOD terminal cause from durable route"
+                    );
+                    session.tombstone = Some(cause);
+                    cause
+                }
+                Some(existing) => existing,
+                None => {
+                    session.tombstone = Some(cause);
+                    cause
+                }
+            };
             if let Some(cleanup) = session.terminal_cleanup.as_ref() {
                 (Arc::clone(cleanup), None)
             } else {
                 let cleanup = Arc::new(TerminalCleanup::new());
                 session.terminal_cleanup = Some(Arc::clone(&cleanup));
+                let rendition = session.rendition.as_ref().map(Arc::clone)?;
                 let work = (
                     session_id.to_owned(),
-                    Arc::clone(&session.rendition),
-                    session.rendition.recipe.file.id,
+                    rendition,
+                    session.file.id,
                     session.target_height,
                     session.kind,
                     terminal_cause,
@@ -1439,6 +1950,14 @@ impl VodServe {
         };
         cleanup.wait().await;
         true
+    }
+
+    /// Install the exact terminal tombstone and transfer reader/event/commit
+    /// cleanup to its detached owner without waiting for physical settlement.
+    /// Public release uses this before submitting the durable Store End, so a
+    /// slow reader detach cannot keep the replicated route active.
+    pub(crate) async fn begin_end_detached(&self, session_id: &str, cause: Terminal) -> bool {
+        self.begin_end(session_id, cause).await.is_some()
     }
 
     /// Supersession sweep: end every session with this viewer's
@@ -1529,11 +2048,14 @@ impl VodServe {
             session.tombstone = Some(Terminal::Superseded);
             let cleanup = Arc::new(TerminalCleanup::new());
             session.terminal_cleanup = Some(Arc::clone(&cleanup));
+            let Some(rendition) = session.rendition.as_ref().map(Arc::clone) else {
+                continue;
+            };
             work.push((
                 id,
                 cleanup,
-                Arc::clone(&session.rendition),
-                session.rendition.recipe.file.id,
+                rendition,
+                session.file.id,
                 session.target_height,
                 session.kind,
             ));
@@ -1594,7 +2116,7 @@ impl VodServe {
             if session.tombstone.is_some() {
                 return None;
             }
-            Arc::clone(&session.rendition)
+            session.live_rendition().map(Arc::clone)?
         };
         let last_served = {
             let readers = rendition.readers.lock().await;
@@ -1616,13 +2138,29 @@ impl VodServe {
     /// status read, this does not touch the session TTL: looking at a panel is
     /// not an authorized media GET and must not keep an abandoned handle alive.
     pub async fn status(&self, session_id: &str) -> Option<VodSessionInfo> {
-        let (rendition, target_height) = {
+        self.status_publication(session_id)
+            .await
+            .and_then(|publication| publication.result.ok())
+    }
+
+    /// Status plus the exact VOD incarnation that produced it. HTTP performs
+    /// final serving/release admission against this owner, so a reap and
+    /// resurrection using the same public id cannot publish stale telemetry.
+    pub(crate) async fn status_publication(
+        &self,
+        session_id: &str,
+    ) -> Option<VodPublication<VodSessionInfo>> {
+        let (rendition, target_height, owner) = {
             let sessions = self.shared.sessions.lock().await;
             let session = sessions.get(session_id)?;
             if session.tombstone.is_some() {
                 return None;
             }
-            (Arc::clone(&session.rendition), session.target_height)
+            (
+                session.live_rendition().map(Arc::clone)?,
+                session.target_height,
+                session.response_owner(),
+            )
         };
         let last_served = rendition
             .readers
@@ -1692,29 +2230,32 @@ impl VodServe {
             .and_then(|index| rendition.plan.entry(index))
             .map(|entry| ticks_to_ms(entry.end_ticks(), rendition.timescale))
             .unwrap_or(0);
-        Some(VodSessionInfo {
-            id: session_id.to_owned(),
-            file_id: rendition.recipe.file.id,
-            target_height,
-            encoder: "vod",
-            playlist_shape: "vod",
-            producer_state,
-            producer_hold,
-            producer_failed: failed,
-            published_end_ms,
-            fetched_end_ms,
-            fetched_segment: last_served.map(i64::from),
-            ahead_seconds: ready_ahead_end_ms.map(|end| (end - fetched_end_ms).max(0) / 1000),
-            materialized_segments,
-            planned_segments,
-            materialized_bytes,
-            planned_bytes,
-            working_set_bytes: self.shared.working_set.load(Relaxed),
-            working_set_budget_bytes: rendition.working_set_budget,
-            completed_cache_bytes: self.shared.completed_cache.load(Relaxed),
-            admitted,
-            suspended,
-            final_: complete,
+        Some(VodPublication {
+            result: Ok(VodSessionInfo {
+                id: session_id.to_owned(),
+                file_id: rendition.recipe.file.id,
+                target_height,
+                encoder: "vod",
+                playlist_shape: "vod",
+                producer_state,
+                producer_hold,
+                producer_failed: failed,
+                published_end_ms,
+                fetched_end_ms,
+                fetched_segment: last_served.map(i64::from),
+                ahead_seconds: ready_ahead_end_ms.map(|end| (end - fetched_end_ms).max(0) / 1000),
+                materialized_segments,
+                planned_segments,
+                materialized_bytes,
+                planned_bytes,
+                working_set_bytes: self.shared.working_set.load(Relaxed),
+                working_set_budget_bytes: rendition.working_set_budget,
+                completed_cache_bytes: self.shared.completed_cache.load(Relaxed),
+                admitted,
+                suspended,
+                final_: complete,
+            }),
+            owner,
         })
     }
 
@@ -1900,6 +2441,7 @@ impl VodServe {
                 && control.snapshot.demand == crate::playback_control::PlaybackDemand::End
             {
                 let status = ending_status?;
+                let rendition = session.rendition.as_ref().map(Arc::clone)?;
                 let mut result = crate::playback_control::LocalControlResult {
                     disposition,
                     accepted_sequence,
@@ -1924,8 +2466,8 @@ impl VodServe {
                     terminal_commit: terminal_commit.map(Box::new),
                     result,
                     cleanup,
-                    rendition: Arc::clone(&session.rendition),
-                    file_id: session.rendition.recipe.file.id,
+                    rendition,
+                    file_id: session.file.id,
                     height: session.target_height,
                     kind: session.kind,
                 })
@@ -2017,7 +2559,7 @@ impl VodServe {
         Some(ReopenFacts {
             supersession_user: session.supersession_user.clone(),
             playback_id: session.playback_id.clone(),
-            file_id: session.rendition.recipe.file.id,
+            file_id: session.file.id,
         })
     }
 
@@ -2029,7 +2571,8 @@ impl VodServe {
         if session.tombstone.is_some() {
             return None;
         }
-        Some(session.rendition.recipe.file.id)
+        session.live_rendition()?;
+        Some(session.file.id)
     }
 
     /// Exact copy-recipe facts for native HLS wrappers. Lookup alone does not
@@ -2077,7 +2620,7 @@ impl VodServe {
         Some(RecoveredVod {
             start: VodStart {
                 session_id: session_id.to_owned(),
-                duration_ms: plan_duration_ms(&session.rendition.plan),
+                duration_ms: plan_duration_ms(&session.live_rendition()?.plan),
             },
             target_height: session.target_height,
             kind: session.kind,
@@ -2125,6 +2668,90 @@ impl VodServe {
             }
         }
 
+        // A terminal session retains only its compact exact response owner for
+        // the bounded late-410 replay window. After that window, release it
+        // only when a fresh durable read proves this capability cannot be active.
+        // Store I/O stays outside both the per-id lifecycle gate and the
+        // node-wide session registry lock.
+        let mut terminal_eviction_candidates = {
+            let sessions = self.shared.sessions.lock().await;
+            sessions
+                .iter()
+                .filter_map(|(session_id, session)| {
+                    let cleanup = session.terminal_cleanup.as_ref()?;
+                    (session.tombstone.is_some()
+                        && cleanup.is_finished()
+                        && cleanup.retention_expired()
+                        && session.terminal_replay_expired())
+                    .then(|| TerminalEvictionCandidate {
+                        session_id: session_id.clone(),
+                        lifecycle: Arc::clone(&session.lifecycle),
+                        incarnation: Arc::clone(&session.incarnation),
+                        cleanup: Arc::clone(cleanup),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        // Confirm one bounded, fair batch per tick. A Store timeout therefore
+        // costs at most one timeout interval instead of one interval per
+        // fanout wave, while rotating the start prevents a consistently bad
+        // route from pinning every candidate behind it.
+        if !terminal_eviction_candidates.is_empty() {
+            terminal_eviction_candidates
+                .sort_by(|left, right| left.session_id.cmp(&right.session_id));
+            let start = self
+                .shared
+                .terminal_eviction_cursor
+                .fetch_add(TERMINAL_ROUTE_CONFIRM_BATCH as u64, Relaxed)
+                as usize
+                % terminal_eviction_candidates.len();
+            terminal_eviction_candidates.rotate_left(start);
+            terminal_eviction_candidates.truncate(TERMINAL_ROUTE_CONFIRM_BATCH);
+        }
+        let shared = Arc::clone(&self.shared);
+        let terminal_eviction_candidates =
+            futures_util::stream::iter(terminal_eviction_candidates.into_iter().map(|candidate| {
+                let shared = Arc::clone(&shared);
+                async move {
+                    let durable_non_live = shared
+                        .terminal_route_durably_non_live(&candidate.session_id)
+                        .await;
+                    durable_non_live.then_some(candidate)
+                }
+            }))
+            .buffer_unordered(TERMINAL_ROUTE_CONFIRM_FANOUT)
+            .filter_map(std::future::ready)
+            .collect::<Vec<_>>()
+            .await;
+        for candidate in terminal_eviction_candidates {
+            let _lifecycle = candidate.lifecycle.lock().await;
+            let removed = {
+                let mut sessions = self.shared.sessions.lock().await;
+                let exact_terminal = sessions.get(&candidate.session_id).is_some_and(|session| {
+                    Arc::ptr_eq(&session.lifecycle, &candidate.lifecycle)
+                        && Arc::ptr_eq(&session.incarnation, &candidate.incarnation)
+                        && session.tombstone.is_some()
+                        && session.terminal_replay_expired()
+                        && session.terminal_cleanup.as_ref().is_some_and(|cleanup| {
+                            Arc::ptr_eq(cleanup, &candidate.cleanup)
+                                && cleanup.is_finished()
+                                && cleanup.retention_expired()
+                        })
+                });
+                if exact_terminal {
+                    sessions.remove(&candidate.session_id)
+                } else {
+                    None
+                }
+            };
+            if removed.is_some() {
+                tracing::debug!(
+                    session = %session_log_id(&candidate.session_id),
+                    "released an expired VOD terminal response-owner tombstone"
+                );
+            }
+        }
+
         let now = Instant::now();
         // Idle live sessions vanish — tombstone-free, because an idle reap is
         // the one ending a session may come back from (via the durable route
@@ -2152,9 +2779,7 @@ impl VodServe {
                             > SESSION_IDLE_TTL
                 });
                 if still_expired {
-                    sessions
-                        .remove(&id)
-                        .map(|session| Arc::clone(&session.rendition))
+                    sessions.remove(&id).and_then(|session| session.rendition)
                 } else {
                     None
                 }
@@ -2173,9 +2798,8 @@ impl VodServe {
         }
 
         // Purge un-admitted renditions dormant past their TTL. The collection
-        // is only a cheap pre-filter; `purge_if_dormant` re-checks everything
-        // under the renditions lock, because a create can attach between this
-        // scan and the purge committing.
+        // is only a cheap pre-filter; `purge_if_dormant` takes the exact-key
+        // build gate and re-checks everything before its short map commit.
         let dormant: Vec<String> = {
             let renditions = self.shared.renditions.lock().await;
             renditions
@@ -2210,6 +2834,7 @@ impl VodServe {
             rendition.kick();
         }
         self.shared.prune_session_lifecycles();
+        self.shared.prune_rendition_builds();
     }
 
     // ---- serving internals -------------------------------------------------
@@ -2222,17 +2847,14 @@ impl VodServe {
     ) -> Option<VodPublication<(Arc<Rendition>, Duration)>> {
         let sessions = self.shared.sessions.lock().await;
         let session = sessions.get(session_id)?;
-        let rendition = Arc::clone(&session.rendition);
-        let owner = ResponseOwner {
-            lifecycle: Arc::clone(&session.lifecycle),
-            incarnation: Arc::clone(&session.incarnation),
-            rendition,
-            tombstone: session.tombstone,
-        };
+        let owner = session.response_owner();
         Some(VodPublication {
             result: match session.tombstone {
                 Some(cause) => Err(VodError::Gone(cause)),
-                None => Ok((Arc::clone(&owner.rendition), session.block_budget)),
+                None => Ok((
+                    session.live_rendition().map(Arc::clone)?,
+                    session.block_budget,
+                )),
             },
             owner,
         })
@@ -2431,6 +3053,32 @@ impl VodServe {
 }
 
 impl Shared {
+    async fn terminal_route_durably_non_live(&self, session_id: &str) -> bool {
+        #[cfg(test)]
+        if let Some(outcome) = self
+            .terminal_route_test_outcomes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(session_id)
+            .copied()
+        {
+            // Timeout and Store error are both fail-closed retention outcomes;
+            // the distinct variants exist so the regression inventory proves
+            // both paths without depending on SQLite scheduler timing.
+            return match outcome {
+                TerminalRouteTestOutcome::Timeout | TerminalRouteTestOutcome::Error => false,
+            };
+        }
+        tokio::time::timeout(
+            TERMINAL_ROUTE_CONFIRM_TIMEOUT,
+            self.store.media_session_route(session_id),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .is_some_and(|route| route.as_ref().is_none_or(|route| route.state != "active"))
+    }
+
     fn session_lifecycle(&self, session_id: &str) -> Arc<Mutex<()>> {
         let mut lifecycles = self
             .session_lifecycles
@@ -2449,6 +3097,26 @@ impl Shared {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, lifecycle| lifecycle.strong_count() > 0);
+    }
+
+    fn rendition_build_gate(&self, key: &str) -> Arc<Mutex<()>> {
+        let mut builds = self
+            .rendition_builds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(build) = builds.get(key).and_then(Weak::upgrade) {
+            return build;
+        }
+        let build = Arc::new(Mutex::new(()));
+        builds.insert(key.to_owned(), Arc::downgrade(&build));
+        build
+    }
+
+    fn prune_rendition_builds(&self) {
+        self.rendition_builds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .retain(|_, build| build.strong_count() > 0);
     }
 
     /// Arm ruling A3's producer deadline once per demanded plan entry. The
@@ -2543,55 +3211,143 @@ impl Shared {
         recipe: Recipe,
         duration_ms: i64,
         settings: &VodSettings,
-    ) -> Result<Option<Arc<Rendition>>, String> {
-        let mut renditions = self.renditions.lock().await;
-        if let Some(existing) = renditions.get(key) {
-            // A closed rendition is one a purge already committed against —
-            // its driver has exited and its wait keys answer nothing, so a
-            // session pinned to it would pend forever. Rebuild instead.
-            if existing.failure().is_none() && !existing.closed.load(Relaxed) {
-                return Ok(Some(Arc::clone(existing)));
+    ) -> Result<Option<RenditionAttachment>, String> {
+        let build_guard = self.rendition_build_gate(key).lock_owned().await;
+        // Once exact-key admission succeeds, transfer the entire slow
+        // Store/filesystem/head/build transaction to a detached owner before
+        // the caller reaches another cancellation point. The successful
+        // result returns the same guard for the final reader/session attach;
+        // a cancelled caller merely drops the receiver, so the owner still
+        // confirms child reap and then drops the unused attachment guard.
+        let shared = Arc::clone(self);
+        let key = key.to_owned();
+        let identity = identity.clone();
+        let settings = settings.clone();
+        let result_rx = spawn_cancellation_independent(async move {
+            shared
+                .attach_rendition_owned(
+                    key,
+                    identity,
+                    index,
+                    recipe,
+                    duration_ms,
+                    settings,
+                    build_guard,
+                )
+                .await
+        });
+        result_rx
+            .await
+            .unwrap_or_else(|_| Err("the rendition build owner exited unexpectedly".to_owned()))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn attach_rendition_owned(
+        self: &Arc<Shared>,
+        key: String,
+        identity: SourceIdentity,
+        index: FragmentIndex,
+        recipe: Recipe,
+        duration_ms: i64,
+        settings: VodSettings,
+        build_guard: tokio::sync::OwnedMutexGuard<()>,
+    ) -> Result<Option<RenditionAttachment>, String> {
+        let key = key.as_str();
+        // Single-flight only this key. No Store, filesystem, process, manifest,
+        // or reader await below owns the node-wide registry mutex.
+        let existing = {
+            let renditions = self.renditions.lock().await;
+            match renditions.get(key).map(Arc::clone) {
+                Some(existing)
+                    if existing.failure().is_none() && !existing.closed.load(Relaxed) =>
+                {
+                    return Ok(Some(RenditionAttachment {
+                        rendition: existing,
+                        _build_guard: build_guard,
+                    }));
+                }
+                Some(existing) => {
+                    // A failed (or closed) handle cannot answer new readers.
+                    // Publish closed first, but leave the exact handle in the
+                    // map until its accounting facts have been collected. If
+                    // this request is cancelled during that await, the next
+                    // key owner can resume the same removal transaction.
+                    existing.closed.store(true, Relaxed);
+                    existing.gen_epoch.fetch_add(1, Relaxed);
+                    existing.kick();
+                    self.pool.close(key);
+                    Some(existing)
+                }
+                None => None,
             }
-            // A failed (or closed) rendition is replaced by the next create:
-            // close the old handle (its waiters were already answered typed)
-            // and adopt whatever its directory still holds.
-            existing.closed.store(true, Relaxed);
-            existing.gen_epoch.fetch_add(1, Relaxed);
-            existing.kick();
-            self.pool.close(key);
-            let stale = renditions.remove(key).expect("the entry just looked up");
-            // The node-wide counters stop claiming what the detached handle
-            // claimed; the rebuild re-adds exactly what it adopts. Skipping
-            // this double-counts the same bytes forever, and the working-set
-            // budget becomes fiction that stalls every producer on the node.
-            {
+        };
+        if let Some(stale) = existing {
+            let (claimed, admitted) = {
                 let manifest = stale.manifest.lock().await;
-                let claimed = manifest.materialized_bytes();
-                if manifest.is_admitted() {
+                (manifest.materialized_bytes(), manifest.is_admitted())
+            };
+            let removed = {
+                let mut renditions = self.renditions.lock().await;
+                let exact_stale = renditions
+                    .get(key)
+                    .is_some_and(|current| Arc::ptr_eq(current, &stale));
+                if exact_stale {
+                    renditions.remove(key)
+                } else {
+                    None
+                }
+            };
+            if removed.is_some() {
+                if admitted {
                     sub_saturating(&self.completed_cache, claimed);
                 } else {
                     sub_saturating(&self.working_set, claimed);
                 }
+                tracing::info!(rendition = %key, "replacing a failed rendition on create");
             }
-            tracing::info!(rendition = %key, "replacing a failed rendition on create");
         }
 
         let plan = self
-            .stored_plan(key, identity, &index, &recipe, duration_ms)
+            .stored_plan(key, &identity, &index, &recipe, duration_ms)
             .await?;
         if plan.is_empty() {
             return Ok(None);
         }
         let rendition = self
-            .build_rendition(key, index, recipe, plan, settings)
+            .build_rendition(key, index, recipe, plan, &settings)
             .await?;
         let adopted_bytes = rendition.manifest.lock().await.materialized_bytes();
-        if adopted_bytes > 0 {
-            self.working_set.fetch_add(adopted_bytes, Relaxed);
+        let (rendition, installed) = {
+            let mut renditions = self.renditions.lock().await;
+            if let Some(winner) = renditions
+                .get(key)
+                .filter(|winner| winner.failure().is_none() && !winner.closed.load(Relaxed))
+                .map(Arc::clone)
+            {
+                (winner, false)
+            } else {
+                renditions.insert(key.to_string(), Arc::clone(&rendition));
+                (rendition, true)
+            }
+        };
+        if installed {
+            if adopted_bytes > 0 {
+                self.working_set.fetch_add(adopted_bytes, Relaxed);
+            }
+            spawn_driver(Arc::clone(self), Arc::clone(&rendition));
         }
-        renditions.insert(key.to_string(), Arc::clone(&rendition));
-        drop(renditions);
-        spawn_driver(Arc::clone(self), Arc::clone(&rendition));
+        #[cfg(test)]
+        if installed {
+            let pause = self
+                .rendition_install_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
         // From this point cancellation leaves a registered, correctly
         // accounted dormant rendition. Admission may be retried by its driver
         // or maintenance; it can no longer leak counters or an untracked
@@ -2602,7 +3358,10 @@ impl Shared {
                 self.try_admit(&rendition, &mut manifest).await;
             }
         }
-        Ok(Some(rendition))
+        Ok(Some(RenditionAttachment {
+            rendition,
+            _build_guard: build_guard,
+        }))
     }
 
     /// Plan acquisition (put-if-absent): the first plan written under a key
@@ -2703,7 +3462,14 @@ impl Shared {
                         // session's life. Run a HEAD regeneration now — spawn
                         // the generation child, read only to its muxer init,
                         // verify against the stored digests.
-                        match regenerate_init_head(&recipe, &source, &identity).await {
+                        match regenerate_init_head(
+                            &recipe,
+                            &source,
+                            &identity,
+                            &self.head_regeneration_slots,
+                        )
+                        .await
+                        {
                             Ok(served) => {
                                 // Match keeps every surviving segment.
                                 dir.write_init(&served.bytes).await.map_err(|error| {
@@ -2719,7 +3485,19 @@ impl Shared {
                                     from_disk: true,
                                 };
                             }
-                            Err(why) => {
+                            Err(HeadRegenerationError::Busy) => {
+                                return Err(crate::transcode::vod_refusal_error(
+                                    "vod_head_regeneration_busy",
+                                    "missing-init recovery is at its node-wide process limit",
+                                ));
+                            }
+                            Err(HeadRegenerationError::Oversize) => {
+                                return Err(crate::transcode::vod_refusal_error(
+                                    "vod_head_regeneration_oversize",
+                                    "the regenerated muxer head exceeded its strict byte limit",
+                                ));
+                            }
+                            Err(HeadRegenerationError::Failed(why)) => {
                                 // Mismatch (or an unverifiable head): purge to
                                 // planned-only and establish fresh — before
                                 // the counters below, so nothing is adopted.
@@ -2874,74 +3652,114 @@ impl Shared {
     }
 
     /// Give a dormant, un-admitted rendition up whole — but only after
-    /// re-verifying, under the renditions lock, that it is still dormant.
+    /// serializing against creation for this exact key and re-verifying that
+    /// it is still dormant.
     ///
     /// The re-check is the point: maintain's collect-then-purge scan races a
     /// create, and a session attached between the scan and the commit would
     /// be pinned to a closed rendition — its driver exited, its wait keys
-    /// answering nothing, every GET pending forever. `attach_rendition`
-    /// clears `dormant_since` while holding the same lock, so the two cannot
-    /// interleave.
+    /// answering nothing, every GET pending forever. `attach_rendition` keeps
+    /// the same per-key gate through session attach, while maintenance skips
+    /// a key whose build/attach is active; different keys never wait for it.
     async fn purge_if_dormant(self: &Arc<Shared>, key: &str, ttl: Duration) {
-        let rendition = {
-            let mut renditions = self.renditions.lock().await;
-            let Some(rendition) = renditions.get(key).map(Arc::clone) else {
-                return;
-            };
-            if !rendition.readers.lock().await.is_empty() {
-                return;
-            }
-            let dormant = rendition
-                .dormant_since
-                .lock()
-                .expect("dormant lock")
-                .is_some_and(|since| since.elapsed() > ttl);
-            if !dormant {
-                return;
-            }
-            if rendition.manifest.lock().await.is_admitted() {
-                return;
-            }
-            renditions.remove(key);
-            rendition
+        let Ok(build_guard) = self.rendition_build_gate(key).try_lock_owned() else {
+            return;
         };
-        // Committed: from here the map no longer answers this key, so no new
-        // session can attach to the handle being torn down.
-        rendition.closed.store(true, Relaxed);
-        rendition.gen_epoch.fetch_add(1, Relaxed);
-        let _ = rendition
-            .slot
-            .perform(
-                Step::Terminate {
-                    why: Termination::Idle,
-                },
-                || {},
-            )
-            .await;
-        self.pool.close(&rendition.key);
-        {
-            let mut manifest = rendition.manifest.lock().await;
-            let freed = rendition.dir.purge(&mut manifest).await;
-            sub_saturating(&self.working_set, freed.bytes);
-            // Whatever a failing unlink left both on disk and claimed is no
-            // longer managed by anything; keeping it in the counter would
-            // hold budget nothing can ever release.
-            sub_saturating(&self.working_set, manifest.materialized_bytes());
-            if let Some(error) = freed.error {
-                tracing::warn!(
-                    rendition = %rendition.key,
-                    "purging a dormant rendition: {error}"
-                );
-            }
+        let rendition = {
+            let renditions = self.renditions.lock().await;
+            renditions.get(key).map(Arc::clone)
+        };
+        let Some(rendition) = rendition else {
+            return;
+        };
+        if !rendition.readers.lock().await.is_empty() {
+            return;
         }
-        let _ = tokio::fs::remove_file(rendition.identity_path()).await;
-        rendition.kick();
-        // Freed bytes are node-wide news (see `try_admit`).
-        self.kick_all();
-        tracing::info!(
-            rendition = %rendition.key,
-            "purged a dormant un-admitted rendition"
-        );
+        let dormant = rendition
+            .dormant_since
+            .lock()
+            .expect("dormant lock")
+            .is_some_and(|since| since.elapsed() > ttl);
+        if !dormant {
+            return;
+        }
+        // Keep the manifest fence through the short exact map removal. That
+        // makes admission and purge mutually exclusive without ever holding
+        // the node-wide registry while awaiting a rendition-local lock.
+        let manifest = rendition.manifest.lock().await;
+        if manifest.is_admitted() {
+            return;
+        }
+        let removed = {
+            let mut renditions = self.renditions.lock().await;
+            let exact = renditions
+                .get(key)
+                .is_some_and(|current| Arc::ptr_eq(current, &rendition));
+            if exact {
+                rendition.closed.store(true, Relaxed);
+                rendition.gen_epoch.fetch_add(1, Relaxed);
+                renditions.remove(key);
+            }
+            exact
+        };
+        drop(manifest);
+        if !removed {
+            return;
+        }
+        // The removal commit has no following request-owned await. Transfer
+        // exact key authority, child termination, accounting, directory and
+        // identity cleanup to one detached settlement owner first. Awaiting
+        // its handle is only a convenience for maintenance/tests; cancellation
+        // drops the handle, not the transaction or its build gate.
+        let shared = Arc::clone(self);
+        let settlement = tokio::spawn(async move {
+            let _build_guard = build_guard;
+            #[cfg(test)]
+            let pause = shared
+                .dormant_purge_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            let _ = rendition
+                .slot
+                .perform(
+                    Step::Terminate {
+                        why: Termination::Idle,
+                    },
+                    || {},
+                )
+                .await;
+            shared.pool.close(&rendition.key);
+            {
+                let mut manifest = rendition.manifest.lock().await;
+                let freed = rendition.dir.purge(&mut manifest).await;
+                sub_saturating(&shared.working_set, freed.bytes);
+                // Whatever a failing unlink left both on disk and claimed is
+                // no longer managed; subtract its final claim exactly once
+                // while same-key rebuild is still excluded by the gate.
+                sub_saturating(&shared.working_set, manifest.materialized_bytes());
+                if let Some(error) = freed.error {
+                    tracing::warn!(
+                        rendition = %rendition.key,
+                        "purging a dormant rendition: {error}"
+                    );
+                }
+            }
+            let _ = tokio::fs::remove_file(rendition.identity_path()).await;
+            rendition.kick();
+            // Freed bytes are node-wide news (see `try_admit`).
+            shared.kick_all();
+            tracing::info!(
+                rendition = %rendition.key,
+                "purged a dormant un-admitted rendition"
+            );
+        });
+        let _ = settlement.await;
     }
 
     /// Kick EVERY rendition's driver — for events that change the node-wide
@@ -3740,14 +4558,22 @@ async fn regenerate_init_head(
     recipe: &Recipe,
     source: &crate::fragment_index_cluster::SourceFence,
     identity: &InitIdentity,
-) -> Result<Init, String> {
+    slots: &Arc<Semaphore>,
+) -> Result<Init, HeadRegenerationError> {
+    let _permit = Arc::clone(slots)
+        .try_acquire_owned()
+        .map_err(|_| HeadRegenerationError::Busy)?;
     if recipe.cluster_cache_key.is_some()
         && !crate::ffmpeg::fragment_index_engine_is_current().await
     {
-        return Err("the v2 fragment-index engine changed before head regeneration".to_owned());
+        return Err(HeadRegenerationError::Failed(
+            "the v2 fragment-index engine changed before head regeneration".to_owned(),
+        ));
     }
     if !source.unchanged() {
-        return Err("source changed before head regeneration".to_owned());
+        return Err(HeadRegenerationError::Failed(
+            "source changed before head regeneration".to_owned(),
+        ));
     }
     let mut args = copy_pipe_args_with_dolby_vision(
         &recipe.file,
@@ -3787,34 +4613,119 @@ async fn regenerate_init_head(
             });
         }
     }
-    let mut child = command
+    let child = command
         .args(&args)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|error| format!("spawning the head regeneration: {error}"))?;
-    let Some(mut stdout) = child.stdout.take() else {
-        let _ = child.kill().await;
-        return Err("the head regeneration started without a stdout".to_string());
-    };
-    let head = read_muxer_init(&mut stdout).await;
-    // Only the head is wanted; the rest of the pipe is not read.
-    let _ = child.kill().await;
-    let (_consumed, muxer) =
-        head.map_err(|error| format!("reading the head regeneration's init: {error}"))?;
+        .map_err(|error| {
+            HeadRegenerationError::Failed(format!("spawning the head regeneration: {error}"))
+        })?;
+    let muxer = read_regenerated_head_before(
+        child,
+        HEAD_REGENERATION_TIMEOUT,
+        HEAD_REGENERATION_MAX_BYTES,
+    )
+    .await?;
     if !source.unchanged() {
-        return Err("source changed during head regeneration".to_owned());
+        return Err(HeadRegenerationError::Failed(
+            "source changed during head regeneration".to_owned(),
+        ));
     }
     if recipe.cluster_cache_key.is_some()
         && !crate::ffmpeg::fragment_index_engine_is_current().await
     {
-        return Err("the v2 fragment-index engine changed during head regeneration".to_owned());
+        return Err(HeadRegenerationError::Failed(
+            "the v2 fragment-index engine changed during head regeneration".to_owned(),
+        ));
     }
     identity
         .served_init_for(&muxer)
-        .map_err(|refused| refused.to_string())
+        .map_err(|refused| HeadRegenerationError::Failed(refused.to_string()))
+}
+
+/// Read exactly one regeneration child's muxer head within the supplied
+/// budget, then always kill and confirm-reap the child before returning. The
+/// owner also transfers reap to a detached task if this future is cancelled.
+async fn read_regenerated_head_before(
+    child: tokio::process::Child,
+    budget: Duration,
+    max_bytes: usize,
+) -> Result<Init, HeadRegenerationError> {
+    let mut child = HeadChildOwner::new(child);
+    let Some(mut stdout) = child.child_mut().and_then(|child| child.stdout.take()) else {
+        child.terminate_and_reap().await;
+        return Err(HeadRegenerationError::Failed(
+            "the head regeneration started without a stdout".to_string(),
+        ));
+    };
+    let head = tokio::time::timeout(budget, read_muxer_init_bounded(&mut stdout, max_bytes)).await;
+    // Only the head is wanted; the rest of the pipe is not read.
+    drop(stdout);
+    child.terminate_and_reap().await;
+    let (_consumed, muxer) = head
+        .map_err(|_| {
+            HeadRegenerationError::Failed(format!(
+                "head regeneration exceeded its {:.1}s deadline",
+                budget.as_secs_f64()
+            ))
+        })?
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::FileTooLarge {
+                HeadRegenerationError::Oversize
+            } else {
+                HeadRegenerationError::Failed(format!(
+                    "reading the head regeneration's init: {error}"
+                ))
+            }
+        })?;
+    Ok(muxer)
+}
+
+async fn read_muxer_init_bounded<R: AsyncRead + Unpin>(
+    src: &mut R,
+    max_bytes: usize,
+) -> io::Result<(Vec<u8>, Init)> {
+    let mut consumed = Vec::new();
+    let mut reader = FragmentReader::new();
+    let mut buf = vec![0u8; (256 * 1024).min(max_bytes.max(1))];
+    loop {
+        let remaining = max_bytes.saturating_sub(consumed.len());
+        if remaining == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "the pipe did not emit its init within the byte limit",
+            ));
+        }
+        let take = buf.len().min(remaining);
+        let n = src.read(&mut buf[..take]).await?;
+        if n == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "the pipe ended before its moov arrived",
+            ));
+        }
+        consumed.extend_from_slice(&buf[..n]);
+        reader.push(&buf[..n]);
+        loop {
+            match reader.next_unit() {
+                Ok(Some(Unit::Init(mut init))) => {
+                    sanitize_stale_dolby_brand(&mut init);
+                    return Ok((consumed, init));
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => break,
+                Err(error) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("parsing the generation's pipe: {error}"),
+                    ));
+                }
+            }
+        }
+    }
 }
 
 /// Read a generation's pipe up to (and through) its muxer init, keeping every
@@ -4046,12 +4957,13 @@ mod tests {
     async fn activate_control_route(store: &SqliteStore, session_id: &str, generation: &str) {
         let now_ms = crate::media_sessions::unix_ms();
         let fingerprint = "a".repeat(64);
+        let playback_id = format!("vod-control-{session_id}");
         store
             .claim_media_session_request(
                 7,
                 generation,
                 &fingerprint,
-                "vod-control",
+                &playback_id,
                 generation,
                 now_ms,
                 now_ms + 60_000,
@@ -4067,7 +4979,7 @@ mod tests {
                 incarnation_id: generation.to_owned(),
                 session_id: session_id.to_owned(),
                 user_id: 7,
-                playback_id: "vod-control".to_owned(),
+                playback_id,
                 expected_predecessor_incarnation_id: None,
                 fence_predecessor: false,
                 request_id: Some(generation.to_owned()),
@@ -4075,6 +4987,7 @@ mod tests {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms,
                 lease_expires_at_ms: now_ms + 60_000,
@@ -4084,6 +4997,17 @@ mod tests {
             .expect("route accepted");
     }
 
+    async fn activate_ended_route(store: &SqliteStore, session_id: &str, generation: &str) {
+        activate_control_route(store, session_id, generation).await;
+        let ended = store
+            .end_media_session(session_id, "deleted", crate::media_sessions::unix_ms())
+            .await
+            .expect("end durable VOD route")
+            .expect("durable VOD route exists");
+        assert_eq!(ended.state, "ended");
+        assert_eq!(ended.incarnation_id, generation);
+    }
+
     async fn insert_control_session(
         serve: &VodServe,
         session_id: &str,
@@ -4091,10 +5015,14 @@ mod tests {
         touched: Instant,
     ) {
         rendition.attach_reader(session_id, 0).await;
+        let rendition_key = rendition.key.clone();
+        let file = Arc::new(rendition.recipe.file.clone());
         serve.shared.sessions.lock().await.insert(
             session_id.to_owned(),
             Session {
-                rendition,
+                rendition: Some(rendition),
+                rendition_key,
+                file,
                 playback_id: "vod-control".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -4111,6 +5039,41 @@ mod tests {
                 control_end_snapshot: None,
                 terminal_cleanup: None,
                 tombstone: None,
+            },
+        );
+    }
+
+    async fn insert_finished_terminal_session(
+        serve: &VodServe,
+        session_id: &str,
+        rendition: Arc<Rendition>,
+    ) {
+        let cleanup = Arc::new(TerminalCleanup::new());
+        cleanup.complete();
+        let rendition_key = rendition.key.clone();
+        let file = Arc::new(rendition.recipe.file.clone());
+        serve.shared.sessions.lock().await.insert(
+            session_id.to_owned(),
+            Session {
+                rendition: None,
+                rendition_key,
+                file,
+                playback_id: "vod-terminal".into(),
+                user_name: "paul".into(),
+                item_title: "Fixture".into(),
+                started_unix: 1,
+                target_height: 360,
+                kind: request("vod-terminal", 0.0).kind,
+                supersession_user: "[\"user_id\",1]".into(),
+                block_budget: Duration::from_secs(8),
+                lifecycle: serve.shared.session_lifecycle(session_id),
+                incarnation: Arc::new(()),
+                last_touch: StdMutex::new(Instant::now()),
+                control: StdMutex::new(crate::playback_control::ControlState::default()),
+                control_end: None,
+                control_end_snapshot: None,
+                terminal_cleanup: Some(cleanup),
+                tombstone: Some(Terminal::Deleted),
             },
         );
     }
@@ -4270,12 +5233,24 @@ mod tests {
 
     async fn plan_len(serve: &Arc<VodServe>, session: &str) -> usize {
         let sessions = serve.shared.sessions.lock().await;
-        sessions.get(session).expect("session").rendition.plan.len()
+        sessions
+            .get(session)
+            .expect("session")
+            .live_rendition()
+            .expect("live rendition")
+            .plan
+            .len()
     }
 
     async fn rendition_of(serve: &Arc<VodServe>, session: &str) -> Arc<Rendition> {
         let sessions = serve.shared.sessions.lock().await;
-        Arc::clone(&sessions.get(session).expect("session").rendition)
+        Arc::clone(
+            sessions
+                .get(session)
+                .expect("session")
+                .live_rendition()
+                .expect("live rendition"),
+        )
     }
 
     async fn wait_until(what: &str, deadline: Duration, mut check: impl AsyncFnMut() -> bool) {
@@ -4287,6 +5262,640 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("{what} never happened within {deadline:?}");
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_completion_after_wait_registration_is_not_lost() {
+        let cleanup = Arc::new(TerminalCleanup::new());
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *cleanup
+            .wait_enabled_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let waiter = tokio::spawn({
+            let cleanup = Arc::clone(&cleanup);
+            async move { cleanup.wait().await }
+        });
+
+        // `wait` has enabled its Notified future but has not performed the
+        // state re-check. `notify_waiters` in this exact gap used to vanish.
+        pause.wait().await;
+        cleanup.complete();
+        pause.wait().await;
+        tokio::time::timeout(Duration::from_millis(250), waiter)
+            .await
+            .expect("registered terminal waiter must observe completion")
+            .expect("terminal waiter task");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_retention_starts_when_cleanup_completes() {
+        let cleanup = TerminalCleanup::new();
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION + Duration::from_secs(1)).await;
+        assert!(
+            !cleanup.retention_expired(),
+            "creation time must not consume the post-cleanup replay window"
+        );
+
+        cleanup.complete();
+        assert!(!cleanup.retention_expired());
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION - Duration::from_millis(1)).await;
+        assert!(!cleanup.retention_expired());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(cleanup.retention_expired());
+    }
+
+    #[tokio::test]
+    async fn terminal_cleanup_compacts_the_registry_before_publishing_completion() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let rendition = synthetic_rendition(base.path()).await;
+        let weak = Arc::downgrade(&rendition);
+        insert_control_session(&serve, &session_id, Arc::clone(&rendition), Instant::now()).await;
+        drop(rendition);
+
+        assert!(serve.end(&session_id, Terminal::Deleted).await);
+        let sessions = serve.shared.sessions.lock().await;
+        let terminal = sessions.get(&session_id).expect("compact terminal owner");
+        assert!(terminal
+            .terminal_cleanup
+            .as_ref()
+            .is_some_and(|cleanup| cleanup.is_finished()));
+        assert!(
+            terminal.rendition.is_none(),
+            "cleanup completion is not visible before the strong graph is released"
+        );
+        drop(sessions);
+        assert!(
+            weak.upgrade().is_none(),
+            "the compact 410 owner retains no rendition/media/process graph"
+        );
+        assert!(matches!(
+            serve
+                .playlist(&session_id)
+                .await
+                .expect("compact terminal remains addressable")
+                .result,
+            Err(VodError::Gone(Terminal::Deleted))
+        ));
+    }
+
+    #[tokio::test]
+    async fn one_rendition_build_gate_does_not_block_other_keys_or_purge_maintenance() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        let key = rendition.key.clone();
+        *rendition.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(key.clone(), Arc::clone(&rendition));
+
+        let gate = serve.shared.rendition_build_gate(&key);
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel();
+        let paused_build = tokio::spawn(async move {
+            let _guard = gate.lock_owned().await;
+            let _ = held_tx.send(());
+            std::future::pending::<()>().await;
+        });
+        held_rx.await.expect("key A gate held");
+
+        let other = serve.shared.rendition_build_gate("unrelated-key");
+        let other_guard = tokio::time::timeout(Duration::from_millis(250), other.lock_owned())
+            .await
+            .expect("key B must not queue behind key A");
+        drop(other_guard);
+        let registry =
+            tokio::time::timeout(Duration::from_millis(250), serve.shared.renditions.lock())
+                .await
+                .expect("a paused key build must not own the node-wide registry");
+        drop(registry);
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            serve.shared.purge_if_dormant(&key, Duration::ZERO),
+        )
+        .await
+        .expect("maintenance must skip an in-flight key rather than wait");
+        assert!(serve.shared.renditions.lock().await.contains_key(&key));
+
+        paused_build.abort();
+        assert!(paused_build
+            .await
+            .expect_err("paused build is cancelled")
+            .is_cancelled());
+        let released = serve.shared.rendition_build_gate(&key);
+        let released_guard =
+            tokio::time::timeout(Duration::from_millis(250), released.lock_owned())
+                .await
+                .expect("cancellation releases exactly key A");
+        drop(released_guard);
+    }
+
+    #[tokio::test]
+    async fn cancelled_real_attach_is_accounted_reusable_and_purgeable() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let source_path = base.path().join("source.mkv");
+        tokio::fs::write(&source_path, b"x")
+            .await
+            .expect("write source fence fixture");
+
+        let index = synthetic_index(240);
+        let duration_ms = index_video_ms(&index);
+        let identity = SourceIdentity::new(1, 1, "fingerprint");
+        let recipe = Recipe {
+            file: media_file_at(source_path, duration_ms),
+            audio_index: None,
+            aac: true,
+            video: CopyVideoOptions::new(false, false),
+            source_object_version: None,
+            cluster_cache_key: None,
+        };
+        let key = rendition_key(&recipe, &identity);
+        let plan = plurx_core::segplan::plan_copy(
+            &index,
+            &shipped_policy(index.timescale),
+            &track_durations(&index, &recipe, duration_ms),
+        );
+
+        // Plant one verifiable member so the real adoption path publishes a
+        // non-zero working-set claim before the cancellation point.
+        let dir = RenditionDir::new(base.path().join(&key));
+        dir.create().await.expect("create adopted rendition");
+        let mut planted = Manifest::new(plan);
+        dir.materialize(&mut planted, 0, b"adopted-segment", now_ms())
+            .await
+            .expect("plant adopted segment");
+        let adopted_bytes = planted.materialized_bytes();
+        dir.write_init(b"fixture-init")
+            .await
+            .expect("plant adopted init");
+        store_identity(
+            &dir.path().join(IDENTITY_NAME),
+            &InitIdentity {
+                muxer_init: "fixture-muxer".to_owned(),
+                served_init: "fixture-served".to_owned(),
+                promotion: plurx_core::fmp4::PromotionInputs::default(),
+            },
+        )
+        .await
+        .expect("plant adopted identity");
+
+        let install_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .rendition_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&install_pause));
+        let pending = {
+            let shared = Arc::clone(&serve.shared);
+            let key = key.clone();
+            let identity = identity.clone();
+            let index = index.clone();
+            let recipe = recipe.clone();
+            let settings = settings();
+            tokio::spawn(async move {
+                shared
+                    .attach_rendition(&key, &identity, index, recipe, duration_ms, &settings)
+                    .await
+            })
+        };
+        install_pause.wait().await;
+
+        let installed = serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .get(&key)
+            .map(Arc::clone)
+            .expect("real attach installed the rendition");
+        assert_eq!(serve.shared.working_set.load(Relaxed), adopted_bytes);
+        serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+        assert!(
+            serve.shared.renditions.lock().await.contains_key(&key),
+            "purge must skip the exact key while attach still owns its gate"
+        );
+
+        pending.abort();
+        assert!(pending
+            .await
+            .expect_err("attach is cancelled after publication")
+            .is_cancelled());
+        install_pause.wait().await;
+        *serve
+            .shared
+            .rendition_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+
+        let reused = serve
+            .shared
+            .attach_rendition(&key, &identity, index, recipe, duration_ms, &settings())
+            .await
+            .expect("same-key retry")
+            .expect("non-empty rendition");
+        assert!(Arc::ptr_eq(&installed, &reused.rendition));
+        assert_eq!(
+            serve.shared.working_set.load(Relaxed),
+            adopted_bytes,
+            "same-key reuse must not double-count adopted bytes"
+        );
+        drop(reused);
+
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        serve.shared.purge_if_dormant(&key, Duration::ZERO).await;
+        assert!(!serve.shared.renditions.lock().await.contains_key(&key));
+        assert_eq!(
+            serve.shared.working_set.load(Relaxed),
+            0,
+            "purge releases the exact installed rendition's byte claim"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_dormant_purge_keeps_key_and_accounting_owned_until_settlement() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let rendition = synthetic_rendition(base.path()).await;
+        {
+            let mut manifest = rendition.manifest.lock().await;
+            rendition
+                .dir
+                .materialize(&mut manifest, 0, b"owned-dormant-bytes", now_ms())
+                .await
+                .expect("materialize dormant member");
+        }
+        let claimed = rendition.manifest.lock().await.materialized_bytes();
+        serve.shared.working_set.fetch_add(claimed, Relaxed);
+        tokio::fs::write(rendition.identity_path(), b"identity")
+            .await
+            .expect("write dormant identity");
+        *rendition.dormant_since.lock().expect("dormant lock") =
+            Some(Instant::now() - Duration::from_secs(1));
+        let key = rendition.key.clone();
+        serve
+            .shared
+            .renditions
+            .lock()
+            .await
+            .insert(key.clone(), Arc::clone(&rendition));
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *serve
+            .shared
+            .dormant_purge_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let caller = tokio::spawn({
+            let shared = Arc::clone(&serve.shared);
+            let key = key.clone();
+            async move { shared.purge_if_dormant(&key, Duration::ZERO).await }
+        });
+        pause.wait().await;
+        assert!(!serve.shared.renditions.lock().await.contains_key(&key));
+        assert_eq!(
+            serve.shared.working_set.load(Relaxed),
+            claimed,
+            "accounting remains owned while detached cleanup is paused"
+        );
+        caller.abort();
+        assert!(caller
+            .await
+            .expect_err("maintenance caller cancelled")
+            .is_cancelled());
+
+        let retry_gate = serve.shared.rendition_build_gate(&key);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), retry_gate.lock_owned())
+                .await
+                .is_err(),
+            "same-key rebuild cannot overlap removed rendition settlement"
+        );
+        pause.wait().await;
+        wait_until(
+            "detached dormant settlement",
+            Duration::from_secs(2),
+            || {
+                let serve = Arc::clone(&serve);
+                let identity = rendition.identity_path();
+                async move {
+                    serve.shared.working_set.load(Relaxed) == 0
+                        && tokio::fs::metadata(identity).await.is_err()
+                }
+            },
+        )
+        .await;
+        let retry_gate = serve.shared.rendition_build_gate(&key);
+        let retry = tokio::time::timeout(Duration::from_secs(2), retry_gate.lock_owned())
+            .await
+            .expect("same-key rebuild authority releases after exact settlement");
+        drop(retry);
+        *serve
+            .shared
+            .dormant_purge_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_head_regeneration_owner_kills_and_confirms_child_reap() {
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let regeneration = tokio::spawn(async move {
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .kill_on_drop(true)
+                .spawn()
+                .expect("deterministic head-regeneration child");
+            let pid = child.id().expect("child pid");
+            let owner = HeadChildOwner::new(child);
+            let _ = started_tx.send(pid);
+            std::future::pending::<()>().await;
+            drop(owner);
+        });
+        let pid = started_rx.await.expect("child started");
+        regeneration.abort();
+        assert!(regeneration
+            .await
+            .expect_err("head regeneration is cancelled")
+            .is_cancelled());
+
+        wait_until(
+            "cancelled head child confirmed reaped",
+            Duration::from_secs(2),
+            || async {
+                let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+                result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn head_regeneration_admission_and_pre_init_buffer_are_hard_bounded() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let slots = Arc::clone(&serve.shared.head_regeneration_slots);
+        let all = Arc::clone(&slots)
+            .acquire_many_owned(HEAD_REGENERATION_CAPACITY as u32)
+            .await
+            .expect("reserve every head slot");
+        assert!(
+            Arc::clone(&slots).try_acquire_owned().is_err(),
+            "head-regeneration exhaustion is an immediate typed refusal point"
+        );
+        drop(all);
+        let key_a = Arc::clone(&slots)
+            .try_acquire_owned()
+            .expect("key A head slot");
+        let key_b = Arc::clone(&slots)
+            .try_acquire_owned()
+            .expect("key B is not serialized behind key A");
+        drop((key_a, key_b));
+
+        use tokio::io::AsyncWriteExt as _;
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        let write = tokio::spawn(async move {
+            let mut oversized = vec![0_u8; 4096];
+            oversized[..4].copy_from_slice(&8192_u32.to_be_bytes());
+            oversized[4..8].copy_from_slice(b"free");
+            writer
+                .write_all(&oversized)
+                .await
+                .expect("write malformed oversized head");
+        });
+        let error = read_muxer_init_bounded(&mut reader, 4096)
+            .await
+            .expect_err("an init absent at the exact byte ceiling is refused");
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        write.await.expect("bounded head writer");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cancelled_build_waiter_cannot_release_same_key_before_confirmed_head_reap() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let key = "cancelled-head-key";
+        let gate = serve.shared.rendition_build_gate(key);
+        let reap_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let result = spawn_cancellation_independent({
+            let reap_pause = Arc::clone(&reap_pause);
+            async move {
+                let _build_guard = gate.lock_owned().await;
+                let child = tokio::process::Command::new("sleep")
+                    .arg("60")
+                    .kill_on_drop(true)
+                    .spawn()
+                    .expect("deterministic head child");
+                let pid = child.id().expect("head child pid");
+                let mut owner = HeadChildOwner::with_reap_pause(child, reap_pause);
+                let _ = started_tx.send(pid);
+                owner.terminate_and_reap().await;
+            }
+        });
+        let pid = started_rx.await.expect("head child started");
+        drop(result); // the request waiting for the build result is cancelled
+        reap_pause.wait().await;
+
+        let retry_gate = serve.shared.rendition_build_gate(key);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), retry_gate.lock_owned())
+                .await
+                .is_err(),
+            "same-key retry cannot acquire spawn authority while reap is paused"
+        );
+        reap_pause.wait().await;
+        let retry_gate = serve.shared.rendition_build_gate(key);
+        let retry = tokio::time::timeout(Duration::from_secs(2), retry_gate.lock_owned())
+            .await
+            .expect("same-key authority releases after confirmed reap");
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        drop(retry);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn production_head_deadline_reaps_child_and_releases_build_gate() {
+        let base = crate::test_tempdir().expect("base");
+        let serve = bare_serve(base.path());
+        let key = "head-timeout";
+        let gate = serve.shared.rendition_build_gate(key);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let timed = tokio::spawn(async move {
+            let _build_guard = gate.lock_owned().await;
+            let child = tokio::process::Command::new("sleep")
+                .arg("60")
+                .stdout(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()
+                .expect("deterministic head-regeneration child");
+            let pid = child.id().expect("child pid");
+            let _ = started_tx.send(pid);
+            read_regenerated_head_before(child, Duration::from_millis(25), 1024).await
+        });
+        let pid = started_rx
+            .await
+            .expect("head child started under build gate");
+        let error = tokio::time::timeout(Duration::from_secs(2), timed)
+            .await
+            .expect("production head deadline must settle")
+            .expect("head deadline task")
+            .expect_err("a silent child cannot produce an init");
+        assert!(
+            error.to_string().contains("exceeded its 0.0s deadline"),
+            "{error}"
+        );
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH),
+            "deadline return requires confirmed child reap"
+        );
+
+        let released = serve.shared.rendition_build_gate(key);
+        let released_guard =
+            tokio::time::timeout(Duration::from_millis(250), released.lock_owned())
+                .await
+                .expect("head timeout releases the exact build gate");
+        drop(released_guard);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_tombstone_replays_410_for_the_retention_window_then_releases() {
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let rendition = synthetic_rendition(base.path()).await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        activate_ended_route(store.as_ref(), &session_id, &generation).await;
+        insert_finished_terminal_session(&serve, &session_id, rendition).await;
+
+        let publication = serve
+            .playlist(&session_id)
+            .await
+            .expect("terminal owner retained");
+        assert!(matches!(
+            publication.result,
+            Err(VodError::Gone(Terminal::Deleted))
+        ));
+        assert!(
+            serve
+                .response_status_owner_is_current(&session_id, &publication.owner)
+                .await
+        );
+
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION - Duration::from_millis(1)).await;
+        serve.maintain().await;
+        assert!(matches!(
+            serve
+                .playlist(&session_id)
+                .await
+                .expect("410 owner retained through the documented window")
+                .result,
+            Err(VodError::Gone(Terminal::Deleted))
+        ));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        serve.maintain().await;
+        assert!(serve.playlist(&session_id).await.is_none());
+        assert!(
+            !serve
+                .response_status_owner_is_current(&session_id, &publication.owner)
+                .await
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_graphs_compact_immediately_and_route_eviction_is_fair_and_fail_closed() {
+        const ENDED_COUNT: usize = TERMINAL_ROUTE_CONFIRM_BATCH * 2 + 3;
+        let base = crate::test_tempdir().expect("base");
+        let store = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let serve = VodServe::new(base.path().to_path_buf(), store.clone());
+        let rendition = synthetic_rendition(base.path()).await;
+        let mut ended_ids = Vec::new();
+        for _ in 0..ENDED_COUNT {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            activate_ended_route(store.as_ref(), &session_id, &generation).await;
+            insert_finished_terminal_session(&serve, &session_id, Arc::clone(&rendition)).await;
+            ended_ids.push(session_id);
+        }
+
+        let active_id = uuid::Uuid::new_v4().to_string();
+        activate_control_route(
+            store.as_ref(),
+            &active_id,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await;
+        insert_finished_terminal_session(&serve, &active_id, Arc::clone(&rendition)).await;
+
+        let timeout_id = uuid::Uuid::new_v4().to_string();
+        activate_ended_route(
+            store.as_ref(),
+            &timeout_id,
+            &uuid::Uuid::new_v4().to_string(),
+        )
+        .await;
+        let error_id = uuid::Uuid::new_v4().to_string();
+        activate_ended_route(store.as_ref(), &error_id, &uuid::Uuid::new_v4().to_string()).await;
+        insert_finished_terminal_session(&serve, &timeout_id, Arc::clone(&rendition)).await;
+        insert_finished_terminal_session(&serve, &error_id, Arc::clone(&rendition)).await;
+        {
+            let mut outcomes = serve
+                .shared
+                .terminal_route_test_outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            outcomes.insert(timeout_id.clone(), TerminalRouteTestOutcome::Timeout);
+            outcomes.insert(error_id.clone(), TerminalRouteTestOutcome::Error);
+        }
+
+        let total = ENDED_COUNT + 3;
+        let sessions = serve.shared.sessions.lock().await;
+        assert_eq!(sessions.len(), total);
+        assert_eq!(
+            sessions
+                .values()
+                .filter(|session| session.rendition.is_some())
+                .count(),
+            0,
+            "completed terminal cleanup retains no heavyweight graph even before maintenance"
+        );
+        drop(sessions);
+
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION).await;
+        for _ in 0..8 {
+            serve.maintain().await;
+        }
+        let sessions = serve.shared.sessions.lock().await;
+        assert!(ended_ids.iter().all(|id| !sessions.contains_key(id)));
+        assert!(
+            sessions.contains_key(&active_id),
+            "an active durable route is retained"
+        );
+        assert!(
+            sessions.contains_key(&timeout_id),
+            "Store timeout fails closed"
+        );
+        assert!(sessions.contains_key(&error_id), "Store error fails closed");
+        assert_eq!(
+            sessions.len(),
+            3,
+            "bounded rotating batches eventually reach every successful candidate"
+        );
     }
 
     #[tokio::test]
@@ -4554,6 +6163,28 @@ mod tests {
             .any(|event| event.reason.as_deref() == Some("superseded")));
     }
 
+    #[tokio::test]
+    async fn durable_terminal_cause_refines_only_a_provisional_replaced_tombstone() {
+        let base = crate::test_tempdir().expect("base");
+        let (serve, file) = serve_on(base.path()).await;
+        create(&serve, &file, "sess-a", "play-a", &settings()).await;
+
+        assert!(serve.end("sess-a", Terminal::Replaced).await);
+        assert!(serve.end("sess-a", Terminal::AdminStop).await);
+        assert!(matches!(
+            serve.playlist("sess-a").await.expect("still ours").result,
+            Err(VodError::Gone(Terminal::AdminStop))
+        ));
+
+        create(&serve, &file, "sess-b", "play-b", &settings()).await;
+        assert!(serve.end("sess-b", Terminal::Deleted).await);
+        assert!(serve.end("sess-b", Terminal::AdminStop).await);
+        assert!(matches!(
+            serve.playlist("sess-b").await.expect("still ours").result,
+            Err(VodError::Gone(Terminal::Deleted))
+        ));
+    }
+
     /// Drive a whole small fixture to completion through real blocking GETs,
     /// then prove admission and that a second session on the same recipe
     /// rides the admitted rendition with no producer at all.
@@ -4816,7 +6447,9 @@ mod tests {
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
-                rendition: Arc::clone(&rendition),
+                rendition: Some(Arc::clone(&rendition)),
+                rendition_key: rendition.key.clone(),
+                file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -4893,7 +6526,9 @@ mod tests {
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
-                rendition: Arc::clone(&rendition),
+                rendition: Some(Arc::clone(&rendition)),
+                rendition_key: rendition.key.clone(),
+                file: Arc::new(rendition.recipe.file.clone()),
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -4928,10 +6563,14 @@ mod tests {
         );
 
         let replacement_touch = Instant::now() - Duration::from_secs(5);
+        let replacement_key = rendition.key.clone();
+        let replacement_file = Arc::new(rendition.recipe.file.clone());
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
-                rendition,
+                rendition: Some(rendition),
+                rendition_key: replacement_key,
+                file: replacement_file,
                 playback_id: "play-b".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -5161,7 +6800,9 @@ mod tests {
             started: AtomicBool::new(false),
             reader_detached: AtomicBool::new(false),
             attempts: Arc::new(AtomicUsize::new(0)),
-            expires_at_unix_ms: crate::media_sessions::unix_ms().saturating_add(60_000),
+            expires_at_unix_ms: crate::media_sessions::unix_ms().saturating_add(
+                i64::try_from((TERMINAL_TOMBSTONE_RETENTION * 2).as_millis()).unwrap_or(i64::MAX),
+            ),
         });
         let committer_weak = Arc::downgrade(&committer);
         let accepted = serve
@@ -5248,6 +6889,23 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+
+        tokio::time::advance(TERMINAL_TOMBSTONE_RETENTION).await;
+        {
+            let sessions = serve.shared.sessions.lock().await;
+            let terminal = &sessions[&session_id];
+            assert!(
+                terminal
+                    .terminal_cleanup
+                    .as_ref()
+                    .is_some_and(|cleanup| cleanup.retention_expired()),
+                "cleanup retention has elapsed for this interleave"
+            );
+            assert!(
+                !terminal.terminal_replay_expired(),
+                "an unexpired terminal commit receipt independently fences eviction"
+            );
+        }
 
         let terminal_deadline = accepted
             .terminal_commit
@@ -5483,10 +7141,14 @@ mod tests {
             .materialize_budget = Duration::from_millis(25);
         rendition.attach_reader("sess-a", 0).await;
         let touched = Instant::now() - Duration::from_secs(5);
+        let rendition_key = rendition.key.clone();
+        let file = Arc::new(rendition.recipe.file.clone());
         serve.shared.sessions.lock().await.insert(
             "sess-a".into(),
             Session {
-                rendition,
+                rendition: Some(rendition),
+                rendition_key,
+                file,
                 playback_id: "play-a".into(),
                 user_name: "paul".into(),
                 item_title: "Fixture".into(),
@@ -5952,9 +7614,9 @@ mod tests {
         );
     }
 
-    /// Fix 6: the purge re-checks dormancy under the renditions lock, so a
-    /// create that attached between maintain's scan and the purge committing
-    /// keeps its rendition.
+    /// Fix 6: the purge re-checks dormancy while owning the exact build key,
+    /// so a create that attached between maintain's scan and the purge
+    /// committing keeps its rendition.
     #[tokio::test]
     async fn a_purge_never_takes_a_rendition_a_create_just_attached() {
         let base = crate::test_tempdir().expect("base");

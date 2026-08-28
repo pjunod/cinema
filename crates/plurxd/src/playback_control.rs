@@ -10943,6 +10943,7 @@ mod tests {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
                 media_origin_ms: 0,
                 now_ms,
                 lease_expires_at_ms,
@@ -10985,7 +10986,7 @@ mod tests {
         );
 
         store
-            .end_media_session(&session, now + 1)
+            .end_media_session(&session, "deleted", now + 1)
             .await
             .expect("end route")
             .expect("route existed");

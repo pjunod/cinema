@@ -511,6 +511,7 @@ impl AppState {
                 node_id.clone(),
                 Some(membership.clone()),
             )
+            .with_serving_authority(serving.authority())
             .with_shared_cache(Arc::clone(&shared_cache)),
         );
         // PLURX_TRAKT_BASE overrides the API base for tests/mocks.

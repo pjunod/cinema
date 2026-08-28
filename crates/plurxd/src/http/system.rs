@@ -2904,17 +2904,24 @@ pub async fn stop_session(
     let session_id = candidates
         .into_iter()
         .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
-    let stopped = match session_id {
-        Some(session_id) => {
-            state
-                .transcode
-                .stop_session(&session_id, "stopped by admin")
-                .await
-        }
-        None => false,
-    };
-    if !stopped {
+    let Some(session_id) = session_id else {
         return Err(ApiError::NotFound("session"));
+    };
+    let status = super::hls::release_with_terminal(
+        state,
+        session_id,
+        crate::vodserve::Terminal::AdminStop,
+        "stopped by admin",
+    )
+    .await;
+    if status != StatusCode::NO_CONTENT {
+        return Err(if status == StatusCode::SERVICE_UNAVAILABLE {
+            ApiError::ServiceUnavailable(
+                "the session stop is still being durably reconciled; retry shortly".to_owned(),
+            )
+        } else {
+            ApiError::Internal(format!("unexpected session release status {status}"))
+        });
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }

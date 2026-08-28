@@ -47,6 +47,9 @@ impl IntoResponse for RemoteStartError {
     }
 }
 
+const REMOTE_ABORT_CAPACITY: usize = 128;
+const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
+
 async fn authorize(
     state: &AppState,
     headers: &HeaderMap,
@@ -168,6 +171,7 @@ pub(crate) async fn start(
                     Ok(Ok(Some(route)))
                         if route.session_id == confirmation_session
                             && route.owner_node_id == confirmation_state.node_id
+                            && route.owner_epoch == 1
                             && route.state == "active"
                             && route.lease_expires_at_ms > unix_ms() =>
                     {
@@ -186,14 +190,25 @@ pub(crate) async fn start(
                     Ok(Ok(None)) | Ok(Err(_)) | Err(_) => break,
                 }
             }
-            confirmation_state
+            if !confirmation_state
                 .transcode
-                .stop_session_for_request(
+                .stop_session_for_owner(
                     &confirmation_incarnation,
                     &confirmation_session,
+                    1,
                     "cluster activation not confirmed",
                 )
-                .await;
+                .await
+            {
+                confirmation_state
+                    .transcode
+                    .stop_vod_session_for_request(
+                        &confirmation_incarnation,
+                        &confirmation_session,
+                        "cluster activation not confirmed",
+                    )
+                    .await;
+            }
         });
         Ok::<RemoteStartResponse, String>(response)
     });
@@ -220,17 +235,144 @@ pub(crate) async fn abort(
     authorize(&state, &headers, ABORT_PATH, &body).await?;
     let request = serde_json::from_slice::<RemoteAbortRequest>(&body)
         .ok()
-        .filter(RemoteAbortRequest::is_valid)
+        .filter(remote_abort_request_is_valid)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    state
-        .transcode
-        .stop_session_for_request(
-            &request.incarnation_id,
-            &request.session_id,
-            "cluster start aborted",
+    let deadline = tokio::time::Instant::now() + REMOTE_ABORT_WAIT;
+    let permit = tokio::time::timeout_at(deadline, remote_abort_slots().acquire_owned())
+        .await
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
+        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+    let settlement = tokio::spawn(async move {
+        let _permit = permit;
+        settle_remote_abort(state, request).await
+    });
+    match tokio::time::timeout_at(deadline, settlement).await {
+        Ok(Ok(true)) => Ok(StatusCode::NO_CONTENT),
+        Ok(Ok(false)) => Err(StatusCode::SERVICE_UNAVAILABLE),
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "remote exact-abort settlement task failed");
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        }
+        // The exact cleanup and its bounded slot survive transport/request
+        // cancellation; an idempotent retry may join it through the actor.
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
+}
+
+fn remote_abort_request_is_valid(request: &RemoteAbortRequest) -> bool {
+    request.is_valid()
+}
+
+fn remote_abort_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<std::sync::Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    std::sync::Arc::clone(
+        SLOTS.get_or_init(|| {
+            std::sync::Arc::new(tokio::sync::Semaphore::new(REMOTE_ABORT_CAPACITY))
+        }),
+    )
+}
+
+pub(super) async fn settle_remote_abort(state: AppState, request: RemoteAbortRequest) -> bool {
+    let reason = remote_abort_reason(&request);
+    let terminal = crate::vodserve::Terminal::from_control_reason(reason);
+    if let Some(terminal) = terminal {
+        let exact_terminal_owner = state
+            .store
+            .media_session_route_by_incarnation(&request.incarnation_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|route| {
+                route.incarnation_id == request.incarnation_id
+                    && route.session_id == request.session_id
+                    && route.owner_node_id == state.node_id
+                    && route.owner_epoch == request.expected_owner_epoch
+                    && route.state == "ended"
+            });
+        let Some(exact_terminal_owner) = exact_terminal_owner else {
+            return false;
+        };
+        let terminal = crate::vodserve::Terminal::from_durable_reason(
+            exact_terminal_owner.terminal_reason.as_deref(),
         )
-        .await;
-    Ok(StatusCode::NO_CONTENT)
+        .unwrap_or(terminal);
+        let reason = terminal.control_reason();
+        let Some(initial_release) = state
+            .media_sessions
+            .complete_release_with_route(exact_terminal_owner.clone())
+            .await
+        else {
+            return false;
+        };
+        state
+            .transcode
+            .begin_session_terminal(&request.session_id, terminal, reason)
+            .await;
+        let durable_release = if initial_release.terminal_projection_complete() {
+            initial_release
+        } else {
+            let Some(projected) = state
+                .media_sessions
+                .complete_terminal_projection(
+                    &exact_terminal_owner,
+                    plurx_core::domain::MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                )
+                .await
+                .filter(|proof| proof.terminal_projection_complete())
+            else {
+                return false;
+            };
+            projected
+        };
+        state
+            .transcode
+            // The exact owner/epoch Store row was verified terminal above;
+            // fresh requests cannot re-enter through this process-local gate.
+            .complete_session_release_durable(&durable_release);
+        return true;
+    }
+    if request.expected_owner_epoch > 0 {
+        state
+            .transcode
+            .stop_session_for_owner(
+                &request.incarnation_id,
+                &request.session_id,
+                request.expected_owner_epoch,
+                reason,
+            )
+            .await
+            || (request.expected_owner_epoch == 1
+                && state
+                    .transcode
+                    .stop_vod_session_for_request(
+                        &request.incarnation_id,
+                        &request.session_id,
+                        reason,
+                    )
+                    .await)
+    } else {
+        // Wire-legacy peers predate takeover and can only own epoch 1.
+        state
+            .transcode
+            .stop_session_for_request(&request.incarnation_id, &request.session_id, reason)
+            .await
+    }
+}
+
+fn remote_abort_reason(request: &RemoteAbortRequest) -> &'static str {
+    match request.reason.as_deref() {
+        None | Some("cluster start aborted") => "cluster start aborted",
+        Some(reason) if crate::vodserve::Terminal::from_control_reason(reason).is_some() => {
+            crate::vodserve::Terminal::from_control_reason(reason)
+                .expect("guarded terminal control reason")
+                .control_reason()
+        }
+        // Deserialization is filtered through `remote_abort_request_is_valid`
+        // before settlement. Keep this helper total so a future internal caller
+        // still cannot smuggle request-owned text into the actor.
+        Some(_) => "cluster start aborted",
+    }
 }
 
 pub(crate) async fn relay(
@@ -238,7 +380,7 @@ pub(crate) async fn relay(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let Some(request) = serde_json::from_slice::<RelayRequest>(&body)
+    let Some(mut request) = serde_json::from_slice::<RelayRequest>(&body)
         .ok()
         .filter(RelayRequest::is_valid)
     else {
@@ -252,6 +394,11 @@ pub(crate) async fn relay(
     if let Err(status) = authorization {
         return status.into_response();
     }
+    // There is no relay capability/version negotiation yet. A legacy sender
+    // can supply Range without the newer If-Range proof, so the receiver must
+    // independently downgrade every unversioned relay to a full response.
+    // Exact authentication was checked against the original wire body above.
+    request = sanitize_unversioned_relay(request);
     let now = Instant::now();
     let Some(budget) = request.owner_budget_at(unix_ms()) else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
@@ -275,15 +422,45 @@ pub(crate) async fn relay(
         }
         Ok(DurableRouteResolution::Terminal(_)) => return StatusCode::GONE.into_response(),
         Ok(DurableRouteResolution::Absent) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(DurableRouteResolution::OwnerTransition(_)) => {
+            return StatusCode::CONFLICT.into_response()
+        }
         Ok(DurableRouteResolution::ActiveRemote(_)) => return StatusCode::CONFLICT.into_response(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    if !matches!(&request.resource, RelayResource::Delete)
-        && (route.state != "active" || route.lease_expires_at_ms <= unix_ms())
+    if matches!(&request.resource, RelayResource::Delete) && route.state != "active" {
+        state
+            .media_sessions
+            .cache_terminal_route(route.clone())
+            .await;
+    }
+    if let Some(status) = post_classification_route_rejection(&request.resource, &route, unix_ms())
     {
-        return StatusCode::GONE.into_response();
+        return status.into_response();
     }
     super::hls::relay_local(&state, request).await
+}
+
+fn sanitize_unversioned_relay(mut request: RelayRequest) -> RelayRequest {
+    request.headers = request.headers.for_unversioned_peer();
+    request
+}
+
+fn post_classification_route_rejection(
+    resource: &RelayResource,
+    route: &plurx_core::domain::MediaSessionRoute,
+    now_unix_ms: i64,
+) -> Option<StatusCode> {
+    if matches!(resource, RelayResource::Delete) {
+        return None;
+    }
+    if route.state != "active" {
+        return Some(StatusCode::GONE);
+    }
+    // An active row whose lease crossed its boundary after the authoritative
+    // classification is still a takeover/settlement transition, never a
+    // durable terminal fact. 409 makes ingress reclassify.
+    (route.lease_expires_at_ms <= now_unix_ms).then_some(StatusCode::CONFLICT)
 }
 
 /// Exact-write-authenticated control relay. The envelope repeats the durable
@@ -459,4 +636,80 @@ async fn control_inner(
         );
     }
     super::hls::control_local(&state, &route, request.control, request.deadline_unix_ms).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn active_lease_expiring_after_classification_is_transition_not_gone() {
+        let route = plurx_core::domain::MediaSessionRoute {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            user_id: 7,
+            playback_id: "relay-expiry".to_owned(),
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "node-a".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: 10_000,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: 1,
+        };
+        assert_eq!(
+            post_classification_route_rejection(&RelayResource::Status, &route, 10_000),
+            Some(StatusCode::CONFLICT)
+        );
+        let mut ended = route;
+        ended.state = "ended".to_owned();
+        assert_eq!(
+            post_classification_route_rejection(&RelayResource::Status, &ended, 9_999),
+            Some(StatusCode::GONE)
+        );
+    }
+
+    #[test]
+    fn remote_exact_abort_preserves_release_reason_and_legacy_default() {
+        let mut request = RemoteAbortRequest {
+            incarnation_id: uuid::Uuid::new_v4().to_string(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            expected_owner_epoch: 1,
+            reason: Some("released by client".to_owned()),
+        };
+        assert_eq!(remote_abort_reason(&request), "released by client");
+        request.reason = None;
+        assert_eq!(remote_abort_reason(&request), "cluster start aborted");
+    }
+
+    #[test]
+    fn legacy_range_only_relay_is_downgraded_at_the_receiving_endpoint() {
+        let request: RelayRequest = serde_json::from_value(serde_json::json!({
+            "session_id": uuid::Uuid::new_v4().to_string(),
+            "resource": {
+                "resource": "segment",
+                "segment": "seg00001.m4s"
+            },
+            "deadline_unix_ms": unix_ms().saturating_add(1_000),
+            "headers": {
+                "range": "bytes=10-19"
+            }
+        }))
+        .expect("legacy relay envelope");
+        assert_eq!(request.headers.range.as_deref(), Some("bytes=10-19"));
+        assert!(request.headers.if_range.is_none());
+
+        let sanitized = sanitize_unversioned_relay(request);
+        assert!(sanitized.headers.range.is_none());
+        assert!(sanitized.headers.if_range.is_none());
+        assert_eq!(sanitized.headers.if_none_match, None);
+    }
 }

@@ -780,6 +780,16 @@ pub struct MediaSessionRoute {
     pub owner_epoch: i64,
     pub lease_expires_at_ms: i64,
     pub state: String,
+    /// First durable terminal decision for this incarnation. `None` while
+    /// live; immutable once `state` becomes `ended`.
+    #[serde(default)]
+    pub terminal_reason: Option<String>,
+    /// Durable publication state. Zero is publishable. A finite positive value
+    /// is an absolute unix-millisecond not-before boundary. [`i64::MAX`] is a
+    /// committed replacement which has not yet been observed and armed with a
+    /// fresh full response-lifetime boundary. All nonzero states fail closed.
+    #[serde(default)]
+    pub publication_ready_at_ms: i64,
     pub recipe_json: String,
     pub response_json: String,
     pub produced_playable_through_ms: i64,
@@ -846,10 +856,34 @@ pub struct MediaSessionActivation {
     pub owner_node_id: String,
     pub recipe_json: String,
     pub response_json: String,
+    /// Durable publication fence for a replacement. Zero when activation has
+    /// no predecessor; [`MEDIA_SESSION_PUBLICATION_BLOCKED`] otherwise. An
+    /// observer arms a fresh finite boundary only after it proves this
+    /// activation committed, so arbitrarily late replicated commits cannot
+    /// inherit an already-expired safety window.
+    pub publication_ready_at_ms: i64,
     /// Exact source position represented by session-relative zero.
     pub media_origin_ms: i64,
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
+}
+
+/// Persisted sentinel for a committed successor whose safety boundary has not
+/// yet been based on replicated commit observation.
+pub const MEDIA_SESSION_PUBLICATION_BLOCKED: i64 = i64::MAX;
+/// Minimum observation-to-publication interval accepted by the durable Store
+/// contract: 62 seconds of pre-header work, 300 seconds of body lifetime, and
+/// a 10-second scheduling margin.
+pub const MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS: i64 = 372_000;
+
+/// Exact proof authorizing a successor's final blocked-to-ready transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSessionProjectionCompletion {
+    /// The exact predecessor owner accepted terminal control.
+    PredecessorAcknowledged,
+    /// No acknowledgement was available, but the complete safety interval
+    /// armed after commit observation has elapsed.
+    SafetyBoundaryElapsed { expected_not_before_ms: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -889,6 +923,33 @@ pub struct MediaSessionTakeover {
     pub next_owner_node_id: String,
     pub now_ms: i64,
     pub lease_expires_at_ms: i64,
+}
+
+/// Compare-and-swap input for terminalizing one exact ownership generation.
+///
+/// Public capability release deliberately ends whichever owner is current;
+/// lease-loss and stale-owner cleanup must be narrower.  A delayed cleanup
+/// from epoch N may never end a successor that has already claimed epoch
+/// N+1 under the same stable session id.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaSessionEnd {
+    pub incarnation_id: String,
+    pub session_id: String,
+    pub expected_owner_node_id: String,
+    pub expected_owner_epoch: i64,
+    pub terminal_reason: String,
+    pub now_ms: i64,
+}
+
+/// Stable storage vocabulary for the first terminal decision on a media
+/// incarnation. Kept independent of daemon-local event wording so both Store
+/// backends and mixed control paths apply the same validation.
+#[must_use]
+pub fn valid_media_session_terminal_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "deleted" | "superseded" | "admin_stop" | "revoked" | "replaced"
+    )
 }
 
 /// Lean owner inventory used by the liveness loop and removal barrier.

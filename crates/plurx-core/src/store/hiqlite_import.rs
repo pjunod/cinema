@@ -634,6 +634,8 @@ const TABLES: &[TablePlan] = &[
             "owner_epoch",
             "lease_expires_at_ms",
             "state",
+            "terminal_reason",
+            "publication_ready_at_ms",
             "recipe_json",
             "response_json",
             "produced_playable_through_ms",
@@ -1095,9 +1097,11 @@ impl HiqliteAuthStore {
     ///
     /// Schema v14 is the oldest supported clustering source. v14 lacks the
     /// scan-reconciliation tables and the outbox claim deadline; those facts
-    /// are imported as empty tables and a zero deadline respectively. v17's
-    /// playback events are node-local telemetry and intentionally absent from
-    /// this mapping.
+    /// are imported as empty tables and a zero deadline respectively. Media
+    /// sessions before v33 lack a terminal cause, and those before v34 lack a
+    /// replacement-publication fence, so import projects `NULL` and zero for
+    /// those fields. v17's playback events are node-local telemetry and
+    /// intentionally absent from this mapping.
     pub async fn import_sqlite_backup(
         &self,
         backup_path: &Path,
@@ -1851,6 +1855,16 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
         .map(|column| {
             if table.name == "watched_outbox" && *column == "claim_until" && schema_version < 16 {
                 "0".to_owned()
+            } else if table.name == "media_sessions"
+                && *column == "terminal_reason"
+                && schema_version < 33
+            {
+                "NULL".to_owned()
+            } else if table.name == "media_sessions"
+                && *column == "publication_ready_at_ms"
+                && schema_version < 34
+            {
+                "0".to_owned()
             } else if table.name == "items"
                 && matches!(
                     *column,
@@ -2108,6 +2122,22 @@ mod tests {
         let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
         assert!(v25.ends_with("'node:' || node_id || ':cache', relative_dir"));
         assert!(current.ends_with("storage_id, generation_id"));
+    }
+
+    #[test]
+    fn media_session_projection_supplies_fields_missing_from_legacy_schemas() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "media_sessions")
+            .copied()
+            .expect("media session table plan");
+        let v32 = value_projection(table, 32, false);
+        let v33 = value_projection(table, 33, false);
+        let v34 = value_projection(table, 34, false);
+
+        assert!(v32.contains("state, NULL, 0, recipe_json"));
+        assert!(v33.contains("state, terminal_reason, 0, recipe_json"));
+        assert!(v34.contains("state, terminal_reason, publication_ready_at_ms, recipe_json"));
     }
 
     #[test]
