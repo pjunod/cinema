@@ -1,34 +1,31 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-28
-**Merged baseline:** `origin/main` at `bab72ce5` (through PR #635)
+**Merged baseline:** `origin/main` at `253f3200` (through PR #638)
 **Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Last formally reviewed head:**
-`13283a5b011a69ed2375e04d1d1e7fd608df5908` (historical-schema completion
-assertions unanimously approved by Store, lifecycle, and integration reviewers
-after the fixture reconstruction, compile/Clippy, assertion/scanner, and
-runtime heads passed their respective reviews;
-earlier rejected heads `9121db03`, `9809d553`, `bb69eb7e`, `31e7d5e2`, and
-`763c230c`)
-**Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
+**Current exact review candidate:** PR tip after source repair `b8b1dc73` and
+post-rebase history repair `00f84d1d`; Store, lifecycle, and integration
+reviews are active. Rebased head `8964e3b1` was rejected because internal
+remote starts could attach VOD work without current serving authority.
+**Implementation freeze before that repair:** `611d60cf` (rebased from
+`f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
-**Validation-evidence freeze:** `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`
+**Validation-evidence freeze:** `ffd587c9` (rebased from `95cd9a2e`)
 for regression-history evidence; owner-inventory reconciliation
-`31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`; compile repair
-`ef74b41e57bc26eff06a156024b02029c2c2e768`; its mapping
-`b1fe8151d566b54a5958a19911743195769aaa86`; assertion/scanner repairs through
-`53c823cacc411de41f9d80c06b15f9cce8631ef8`; compile/Clippy and obsolete-seam
-cleanup through `40b06404c2a`; historical-schema fixture and completion proof
-`043e33e5` through `13283a5b`; and their append-only mappings on branch
+`8af50d8d`; compile repair `27f88504`; its mapping `03a365ba`;
+assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
+cleanup through `77e292d1`; historical-schema fixture and completion proof
+`411bf818` through `4d38a084`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact runtime head `841e695f`, assertion/scanner head
-`2bb65af3`, compile/Clippy heads through `40b06404`, and historical-schema head
-`13283a5b` received unanimous read-only approval. The directly affected rerun
+**Runtime review state before the serving-fence repair:** exact runtime head
+`b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
+`77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
+approval before the rebase. The directly affected rerun
 compiled successfully and ran 641 tests: 606 passed initially, all five
 deterministic failures passed after exact repairs, and all 30 socket fixtures
 passed by exact name with loopback access.
@@ -46,16 +43,18 @@ abort/join-before-stop provisional ownership and a confirmed bootstrap renewal
 before durable-ID adoption and seed/publication.
 The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
-**Validation state:** `make unit` ran exactly once at unanimously approved
-`841e695f`; compilation failed before tests on 11 Store errors. After approved
+**Validation state:** `make unit` ran exactly once at the pre-rebase commit now
+mapped to `b1eeba78`; compilation failed before tests on 11 Store errors. After approved
 repairs, all 641 directly affected tests are accounted green without a second
 full-suite run. The aggregate cluster gate's two stale historical-fixture
-failures pass by exact name after `043e33e5`/`13283a5b`; every already-passing
+failures pass by exact name after `411bf818`/`4d38a084`; every already-passing
 vendor WAL and Store case, the full cluster harness, seven activation tests,
 and two Activity tests are also accounted green. Formatting, workspace Clippy,
 validation catalog, history, 122 operations contracts, and 52 benchmark checks
-pass. Only final metadata review, push, hosted checks, and merge remain for
-PR #636.
+pass for the unchanged pre-rebase content. The serving-fence repair is
+formatted but deliberately untested until its exact-head review completes.
+After approval, run only directly affected tests and required static,
+cluster, and hosted gates; then merge PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -119,7 +118,8 @@ metadata leaves retry available, attempt media closes it atomically, current
 attempt-derived bodyless responses carry an explicit exact-attempt status
 fence, actor-derived errors have explicit non-media fences, and the retry recipe carries the exact
 presentation-contract fingerprint. One adversarial pass found four defects;
-the corrected delta is approved. The later full unit invocation at `841e695f`
+the corrected delta is approved. The later full unit invocation at the commit
+now mapped to `b1eeba78`
 stopped during Store compilation before executing any active-branch test.
 
 ### Active prepublication review ledger
@@ -446,23 +446,25 @@ rebase and for this repair after GitHub's automatic static preflight stopped at
 that missing evidence. That automatic run executed no unit, focused, cluster,
 build, or compile lane. No dynamic test has run locally or remotely.
 
-Review of `9121db03` then found that the cleanup task did not own the remaining
+Review of pre-rebase `9121db03` then found that the cleanup task did not own the remaining
 replacement guard, the public local cache pin still lacked its placement
 deadline, and the forced three-voter stale-replay fixture used a blocked
-publication sentinel despite having no predecessor. Commit `f02bf5b5` moves the
+publication sentinel despite having no predecessor. Rebased commit `611d60cf`
+moves the
 replacement guard into the detached cleanup payload through exact worker and
 request settlement, bounds the local pin with a retryable timeout, adds a
 guard-level hold/release ordering regression, and corrects the fixture to
-publication fence `0`. `95cd9a2e` maps that evidence. The immutable PR #636 tip
-containing this handoff was reviewed as `5a9e19ae`: Store and lifecycle
+publication fence `0`. Rebased `ffd587c9` maps that evidence. The immutable PR #636 tip
+containing this handoff was reviewed before the rebase as `5a9e19ae`: Store and lifecycle
 approved it, while integration found no runtime defect and requested only the
-17 owner-inventory corrections now committed as `31a93198`. The reconciled
-head `841e695f` then received unanimous exact-head approval. Its one full unit
-run stopped during compilation before tests; `ef74b41e` repaired the 11 Store
-errors and `f0c2297c` received unanimous targeted approval. The directly
+17 owner-inventory corrections now rebased as `8af50d8d`. The reconciled head,
+now `b1eeba78`, then received unanimous exact-head approval. Its one full unit
+run stopped during compilation before tests; rebased commit `27f88504`
+repaired the 11 Store errors and rebased `53afa68c` received unanimous targeted
+approval. The directly
 affected rerun compiled and executed 641 tests, with 606 passing, 30 sandbox
-bind denials, and five stale assertion failures. Repairs through `53c823ca`
-received targeted exact-head approval in `2bb65af3`; all 35 exact failed names
+bind denials, and five stale assertion failures. Repairs through rebased
+`dad2cd5b` received targeted exact-head approval in `2afa1bba`; all 35 exact failed names
 then passed.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
@@ -791,26 +793,25 @@ topology, and daemon-integration contracts.
 PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
-repair head `e40c56d4` are historical commits. Exact head
-`13283a5b011a69ed2375e04d1d1e7fd608df5908` is the last formally reviewed
-source head and received unanimous targeted approval after the historical
-fixture, compile/Clippy, assertion/scanner, and runtime rounds.
-Runtime behavior is frozen in
-`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
-frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; owner-inventory
-corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`;
-the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`; and
-the assertion/scanner repairs plus mappings are frozen through `53c823ca`.
-Compile/Clippy cleanup is frozen through `40b06404`; exact historical fixture
-construction and completion assertions are frozen in `043e33e5` and
-`13283a5b`.
+repair head `e40c56d4` are historical commits. Pre-rebase source content now
+mapped to `4d38a084` received unanimous targeted approval after the historical
+fixture, compile/Clippy, assertion/scanner, and runtime rounds. Fresh review of
+rebased candidate `8964e3b1` found the internal remote-start serving-authority
+bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` are the current
+exact review candidate.
+Runtime behavior before that repair is frozen in `611d60cf`; regression-history
+evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
+`8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
+`03a365ba`; and assertion/scanner repairs plus mappings are frozen through
+`dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
+historical fixture construction and completion assertions are frozen in
+`411bf818` and `4d38a084`.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Catalog the final historical-schema and documentation commits, verify both
-   vendor target trees remain excluded, and obtain exact-head carry-forward
-   review without pushing yet.
+1. Obtain unanimous exact-head review of the serving-authority and history
+   repair, then run only the directly affected tests and required static gates.
 2. Push the approved and locally green candidate to PR #636,
    require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.

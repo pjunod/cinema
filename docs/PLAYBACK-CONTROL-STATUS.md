@@ -1,32 +1,33 @@
 # Playback control rewrite — project status
 
 **Updated:** 2026-08-28
-**Merged baseline:** `origin/main` at `bab72ce5` (through PR #635)
+**Merged baseline:** `origin/main` at `253f3200` (through PR #638)
 **Current work:** first actor-owned prepublication recovery cut in
 [#636](https://github.com/pjunod/plurx/pull/636) on branch
 `codex/playback-control-m4-prepublication` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`. Exact source head
-`13283a5b011a69ed2375e04d1d1e7fd608df5908` received unanimous Store,
-lifecycle, and integration approval. It follows the unanimously approved
-runtime, assertion/scanner, compile/Clippy, obsolete-seam deletion, and
-historical-schema fixture rounds through `40b06404c2a`; production behavior
-remains frozen in `f02bf5b5a2ed820f99308ad69720bb449bdf3109`.
+`/private/tmp/plurx-playback-control-clone`. Rebased candidate `8964e3b1` was
+rejected because internal remote starts could attach VOD work after passive
+serving-authority loss. Source repair `b8b1dc73` now carries the admitted
+generation through creation and serializes final VOD attachment against the
+loss transition; mapping repair `00f84d1d` records the rebased history. Three
+independent exact-head reviews are in progress before any affected test runs.
 
 The one allowed full local unit invocation was consumed before tests while
 compiling Store code. The directly affected rerun then executed 641 tests:
 606 passed initially, five deterministic inventory/high-water failures passed
 after exact repairs, and all 30 socket fixtures passed by exact name with
 unrestricted loopback binds. The aggregate cluster gate found two stale
-historical migration fixtures; `043e33e5` reconstructs their exact v10-v12
-schemas and `13283a5b` proves the v14 acknowledgement objects and v16/v17
+historical migration fixtures; `411bf818` reconstructs their exact v10-v12
+schemas and `4d38a084` proves the v14 acknowledgement objects and v16/v17
 columns at every completed upgrade. Both failed names pass by exact name.
 All vendor WAL tests, the full cluster harness, seven activation tests, and two
 Activity tests pass, so every local test and cluster result is accounted green
 without a second full-suite run. Formatting, Clippy, validation catalog,
 history, 122 operations contracts, and 52 benchmark checks also pass.
-The current review candidate is the PR tip containing this status file; the PR
-body pins its exact full object ID, avoiding an impossible self-reference from
-a commit to its own hash.
+Those results predate the rebase and remain evidence for unchanged content.
+The serving-authority repair has not yet run its affected tests; review comes
+first under the one-full-suite rule. The PR body pins each immutable review
+candidate, avoiding an impossible self-reference from a commit to its own hash.
 
 The post-rejection work is assembled in three tracks:
 
@@ -48,7 +49,8 @@ The post-rejection work is assembled in three tracks:
   immediate heavyweight terminal-graph compaction, and bounded compact `410`
   replay followed by fail-closed durable eviction.
 
-The implementation frozen through `f02bf5b5` joins those tracks at their
+The pre-rebase implementation frozen through rebased commit `611d60cf` joins
+those tracks at their
 shared publication boundary:
 
 - replacement is make-before-break: the provisional successor activates by
@@ -85,9 +87,11 @@ shared publication boundary:
   after the public Body accepts that chunk; the relay pump retains two and all
   public bodies discard queued bytes after a terminal or absolute deadline.
 
-This is a locally validated merge candidate. Exact runtime head `841e695f`,
-assertion/scanner head `2bb65af3`, compile/Clippy heads through `40b06404`, and
-historical-schema head `13283a5b` each received unanimous adversarial approval.
+The unchanged pre-rebase content was locally validated. Rebased runtime head
+`b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
+`77e292d1`, and historical-schema head `4d38a084` retain those earlier
+adversarial approvals; the current serving-authority source repair is under a
+fresh exact-head review.
 The one allowed full local unit invocation has been consumed; every failed or
 directly affected name now passes, and no broad unit target will run again.
 PR #626's runtime commits
@@ -211,14 +215,14 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Reconciled through `9a6a6a6f`.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. Reviewers independently recounted every row; after three stale hosted sentinels were corrected to match removed test wrappers and stronger durable-route validation, the exact failed inventory method passed 1/1 and hosted preflight passed. |
+| Static owner inventory | **Reconciled through `9958901f`.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. Reviewers independently recounted every row; after three stale hosted sentinels were corrected to match removed test wrappers and stronger durable-route validation, the exact failed inventory method passed 1/1 and hosted preflight passed. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Implementation frozen in `f02bf5b5`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. |
-| Adversarial implementation review | **Source `13283a5b` and inventory reconciliation `9a6a6a6f` unanimously approved.** Lifecycle approved replacement-gate retention, bounded pinning, takeover cleanup, cancellation settlement, and retained compatibility-owner boundaries; Store approved schema/import/CAS/replay/publication correctness; integration independently matched all 190 owner rows, compiler repairs, exact assertion and inventory corrections, scanner cutoff, and validation accounting. |
-| Format/static inspection | **Complete.** Formatting, workspace Clippy, validation catalog, history, 122 operations contracts, 52 benchmark checks, static diff inspection, and ownership recounts pass. |
-| Unit/focused tests | **Complete under the one-run/failure-only rule.** The full `make unit` invocation at `841e695f` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. After exact repair approval, the five deterministic failures passed by exact name and the 30 sandbox-denied socket fixtures passed by exact name with loopback access. All 641 targeted tests are accounted green; the full suite did not run again. |
-| Full/cluster/hosted gates | **Local gates complete; hosted result is attached to the exact PR tip.** Vendor WAL, all replicated Store cases after two exact historical-fixture repairs, the full cluster harness, seven activation tests, and two Activity tests are accounted green. Merge remains conditional on every required GitHub check for the immutable final tip; the PR check run is the non-self-referential record of that result. |
+| Operational projection | **Rebased implementation `611d60cf`; serving fence repaired in `b8b1dc73`.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. The newest repair makes remote cluster admission and final VOD registry attachment use one exact serving generation. |
+| Adversarial implementation review | **Fresh review in progress at the PR tip after rejecting `8964e3b1`.** The rejection found the internal `START_PATH` authority bypass and stale post-rebase history mappings. `b8b1dc73` repairs the behavior and adds deterministic loss/attachment/recovery coverage; `00f84d1d` repairs the mappings. Store, lifecycle, and integration reviewers must all approve the immutable final tip before tests. |
+| Format/static inspection | **Historical gates green; repaired tip pending.** Formatting passed for `b8b1dc73`. Workspace Clippy, validation catalog, history, 122 operations contracts, 52 benchmark checks, and ownership recounts passed before the rebase. The post-rebase history mappings are repaired in `00f84d1d`; their gate and the affected compiler/static gates wait for exact-head approval. |
+| Unit/focused tests | **Historical 641-test accounting is green; repaired-tip tests are pending review.** The one full `make unit` invocation at rebased runtime commit `b1eeba78` stopped during compilation. After approved repair, `plurx-core` library plus Store contracts compiled and ran: 575/608 and 31/33 passed. The five deterministic failures and 30 socket fixtures then passed by exact name. No broad unit target will run again; only the serving-authority repair's directly affected names run after exact-head approval. |
+| Full/cluster/hosted gates | **Historical local gates are complete; the repaired rebased tip is pending.** Vendor WAL, all replicated Store cases after two exact historical-fixture repairs, the full cluster harness, seven activation tests, and two Activity tests are accounted green for the unchanged pre-rebase content. After exact-head approval, only directly affected tests and required static/cluster/hosted gates run; merge remains conditional on every required GitHub check for the immutable final tip. |
 
 ## Watchdog-removal ledger
 
