@@ -50,6 +50,7 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
 const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
+const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
 #[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
@@ -127,6 +128,14 @@ pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {
 
 pub(crate) fn is_serving_fence_error(error: &str) -> bool {
     error.starts_with(SERVING_FENCE_PREFIX)
+}
+
+pub(crate) fn start_infrastructure_error(message: impl AsRef<str>) -> String {
+    format!("{START_INFRASTRUCTURE_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_start_infrastructure_error(error: &str) -> bool {
+    error.starts_with(START_INFRASTRUCTURE_PREFIX)
 }
 
 /// Stable classification for a start this ffmpeg build cannot perform at all.
@@ -6455,6 +6464,12 @@ pub struct StartInfo {
 pub(crate) struct ClusterSessionStart {
     pub(crate) info: StartInfo,
     pub(crate) replacement: ClusterReplacementGuard,
+    pub(crate) created: bool,
+}
+
+struct SessionCreation {
+    info: StartInfo,
+    created: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -12108,6 +12123,7 @@ impl TranscodeManager {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
         self.create_session_inner(req, user_name, &supersession_user, None, None, None)
             .await
+            .map(|creation| creation.info)
     }
 
     /// Start a cluster-owned replacement while retaining its process-local
@@ -12141,7 +12157,7 @@ impl TranscodeManager {
             ));
         }
         self.require_cluster_serving_authority(serving_admission)?;
-        let info = self
+        let creation = self
             .create_session_inner(
                 req,
                 user_name,
@@ -12151,7 +12167,11 @@ impl TranscodeManager {
                 Some(serving_admission),
             )
             .await?;
-        Ok(ClusterSessionStart { info, replacement })
+        Ok(ClusterSessionStart {
+            info: creation.info,
+            replacement,
+            created: creation.created,
+        })
     }
 
     fn require_cluster_serving_authority(
@@ -12221,6 +12241,7 @@ impl TranscodeManager {
             None,
         )
         .await
+        .map(|creation| creation.info)
     }
 
     async fn acquire_cluster_replacement_gate(
@@ -12279,7 +12300,7 @@ impl TranscodeManager {
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
         serving_admission: Option<ClusterServingAdmission>,
-    ) -> Result<StartInfo, String> {
+    ) -> Result<SessionCreation, String> {
         if let Some(admission) = serving_admission {
             self.require_cluster_serving_authority(admission)?;
         }
@@ -12302,7 +12323,10 @@ impl TranscodeManager {
                     if let Some(admission) = serving_admission {
                         self.require_cluster_serving_authority(admission)?;
                     }
-                    return Ok(info);
+                    return Ok(SessionCreation {
+                        info,
+                        created: false,
+                    });
                 }
                 Claimed::Mine(claim, normalized) => Some((claim, normalized)),
             },
@@ -12402,7 +12426,10 @@ impl TranscodeManager {
             live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
-        Ok(info)
+        Ok(SessionCreation {
+            info,
+            created: true,
+        })
     }
 
     #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -12411,7 +12438,9 @@ impl TranscodeManager {
             .store
             .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
             .await
-            .map_err(|error| format!("reading live-HLS recovery setting: {error}"))?;
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading live-HLS recovery setting: {error}"))
+            })?;
         // Regression tests opt in explicitly so existing VOD refusal tests
         // continue to exercise the refusal contract. The shipped recovery
         // build is availability-first unless an operator explicitly disables
@@ -12511,7 +12540,9 @@ impl TranscodeManager {
             .store
             .get_file(req.file_id)
             .await
-            .map_err(|error| format!("reading the source file: {error}"))?
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading the source file: {error}"))
+            })?
             .ok_or_else(|| "the file no longer exists".to_owned())?;
         // Cluster activation is make-before-break: the Store pointer CAS and
         // exact post-CAS terminal projection are the only operations allowed
@@ -12550,7 +12581,18 @@ impl TranscodeManager {
                         admission.deadline.into_std(),
                     ),
                 )
-                .await?
+                .await
+                .map_err(|error| {
+                    if vod_refusal(&error).is_some()
+                        || is_serving_fence_error(&error)
+                        || is_retryable_capacity_error(&error)
+                        || unsupported_build_reason(&error).is_some()
+                    {
+                        error
+                    } else {
+                        start_infrastructure_error(error)
+                    }
+                })?
         } else {
             self.vod
                 .try_create(req, &file, &settings, attribution, session_id)
@@ -12588,7 +12630,7 @@ impl TranscodeManager {
                 store
                     .get_setting(key)
                     .await
-                    .map_err(|error| format!("reading {key}: {error}"))
+                    .map_err(|error| start_infrastructure_error(format!("reading {key}: {error}")))
             }
         };
         if read(plurx_core::store::keys::VOD_PRESENTATION)
@@ -16606,6 +16648,28 @@ impl TranscodeManager {
         true
     }
 
+    pub(crate) async fn owns_session_for_owner(
+        &self,
+        incarnation_id: &str,
+        session_id: &str,
+        owner_epoch: i64,
+    ) -> bool {
+        if self
+            .rolling_session_for_owner(incarnation_id, session_id, owner_epoch)
+            .await
+            .is_some()
+        {
+            return true;
+        }
+        owner_epoch == 1
+            && self.requests.lock().is_ok_and(|requests| {
+                requests.get(incarnation_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+            })
+            && self.vod.owns_or_preparing(session_id).await
+    }
+
     pub(crate) async fn stop_session_for_owner(
         &self,
         incarnation_id: &str,
@@ -20252,27 +20316,39 @@ mod tests {
             .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
             .await
             .expect("assign route owner"));
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: generation.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "player-control".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(generation.to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: owner_node_id.to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms,
+            lease_expires_at_ms: now_ms + 60_000,
+        };
         store
-            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
-                incarnation_id: generation.to_owned(),
-                session_id: session_id.to_owned(),
-                user_id: 7,
-                playback_id: "player-control".to_owned(),
-                expected_predecessor_incarnation_id: None,
-                fence_predecessor: false,
-                request_id: Some(generation.to_owned()),
-                request_fingerprint: fingerprint,
-                owner_node_id: owner_node_id.to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                publication_ready_at_ms: 0,
-                media_origin_ms: 0,
-                now_ms,
-                lease_expires_at_ms: now_ms + 60_000,
-            })
+            .activate_media_session(&activation)
             .await
             .expect("activate route")
             .expect("route accepted");
+        store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now_ms,
+            )
+            .await
+            .expect("confirm route")
+            .expect("route confirmed");
     }
 
     #[tokio::test]
@@ -32013,8 +32089,19 @@ mod tests {
             "one request id reused by two players must not collide"
         );
 
-        let first = mgr.create_session(&request, "paul").await.expect("create");
-        let again = mgr.create_session(&request, "paul").await.expect("replay");
+        let supersession_user = serde_json::json!(["username", "paul"]).to_string();
+        let first_creation = mgr
+            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .await
+            .expect("create");
+        assert!(first_creation.created);
+        let again_creation = mgr
+            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .await
+            .expect("replay");
+        assert!(!again_creation.created);
+        let first = first_creation.info;
+        let again = again_creation.info;
         assert_eq!(
             first.session_id, again.session_id,
             "a replayed create must not spawn a second encoder"

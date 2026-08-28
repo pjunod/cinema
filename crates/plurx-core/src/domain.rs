@@ -857,7 +857,7 @@ pub enum MediaSessionRequestClaim {
 }
 
 /// Inputs committed when a selected worker has created the local session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct MediaSessionActivation {
     pub incarnation_id: String,
     pub session_id: String,
@@ -878,11 +878,11 @@ pub struct MediaSessionActivation {
     pub owner_node_id: String,
     pub recipe_json: String,
     pub response_json: String,
-    /// Durable publication fence for a replacement. Zero when activation has
-    /// no predecessor; [`MEDIA_SESSION_PUBLICATION_BLOCKED`] otherwise. An
-    /// observer arms a fresh finite boundary only after it proves this
-    /// activation committed, so arbitrarily late replicated commits cannot
-    /// inherit an already-expired safety window.
+    /// Durable prepublication fence. Every activation begins at
+    /// [`MEDIA_SESSION_PUBLICATION_BLOCKED`]. Only an owner which observes the
+    /// exact commit while retaining serving authority may clear a plain start
+    /// or arm a replacement with a fresh finite boundary. An arbitrarily late
+    /// replicated commit therefore remains unpublishable and non-renewable.
     pub publication_ready_at_ms: i64,
     /// Exact source position represented by session-relative zero.
     pub media_origin_ms: i64,
@@ -912,6 +912,15 @@ pub enum MediaSessionProjectionCompletion {
 pub struct MediaSessionActivationOutcome {
     pub route: MediaSessionRoute,
     pub predecessor: Option<MediaSessionRoute>,
+}
+
+/// Exact second phase for a BLOCKED media-session activation. Confirmation
+/// makes the route renewable and resolves its request in the same transaction;
+/// abandonment fails the request and tombstones any exact provisional route.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaSessionActivationSettlement {
+    Confirm { publication_ready_at_ms: i64 },
+    Abandon,
 }
 
 /// One exact owner/epoch tuple in the two-second session liveness batch.

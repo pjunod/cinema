@@ -5044,27 +5044,39 @@ mod tests {
             .assign_media_session_request_owner(7, generation, generation, "node-a", now_ms,)
             .await
             .expect("assign route owner"));
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: generation.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id,
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(generation.to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms,
+            lease_expires_at_ms: now_ms + 60_000,
+        };
         store
-            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
-                incarnation_id: generation.to_owned(),
-                session_id: session_id.to_owned(),
-                user_id: 7,
-                playback_id,
-                expected_predecessor_incarnation_id: None,
-                fence_predecessor: false,
-                request_id: Some(generation.to_owned()),
-                request_fingerprint: fingerprint,
-                owner_node_id: "node-a".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                publication_ready_at_ms: 0,
-                media_origin_ms: 0,
-                now_ms,
-                lease_expires_at_ms: now_ms + 60_000,
-            })
+            .activate_media_session(&activation)
             .await
             .expect("activate route")
             .expect("route accepted");
+        store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now_ms,
+            )
+            .await
+            .expect("confirm route")
+            .expect("route confirmed");
     }
 
     async fn activate_ended_route(store: &SqliteStore, session_id: &str, generation: &str) {

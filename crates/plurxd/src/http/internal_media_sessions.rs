@@ -11,14 +11,16 @@ use axum::Json;
 use super::peer_transport::exact_auth_from_headers;
 use crate::media_sessions::{
     unix_ms, DurableRouteResolution, RelayRequest, RelayResource, RemoteAbortRequest,
-    RemoteStartRequest, RemoteStartResponse, ABORT_PATH, CONTROL_PATH, RELAY_PATH,
-    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, START_PATH,
+    RemoteActivateRequest, RemoteStartRequest, RemoteStartResponse, ABORT_PATH, ACTIVATE_PATH,
+    CONTROL_PATH, RELAY_PATH, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, REMOTE_START_OWNERSHIP_HEADER,
+    REMOTE_START_OWNERSHIP_V1, START_DEADLINE, START_PATH,
 };
 use crate::state::AppState;
 
 pub(crate) enum RemoteStartError {
     Status(StatusCode),
     RestartDrain,
+    ServingFence,
 }
 
 impl From<StatusCode> for RemoteStartError {
@@ -43,6 +45,18 @@ impl IntoResponse for RemoteStartError {
                     .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
                 response
             }
+            Self::ServingFence => {
+                let mut response = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    crate::serving_fence::SERVING_FENCED_JSON,
+                )
+                    .into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+                response
+            }
         }
     }
 }
@@ -52,10 +66,30 @@ const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 
 fn admit_remote_start_serving_authority(
     state: &AppState,
-) -> Result<(crate::serving_fence::ServingAuthority, u64), StatusCode> {
+) -> Result<(crate::serving_fence::ServingAuthority, u64), RemoteStartError> {
     let authority = state.serving.authority();
-    let generation = authority.admit().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let generation = authority.admit().ok_or(RemoteStartError::ServingFence)?;
     Ok((authority, generation))
+}
+
+fn remote_start_ownership_v1(headers: &HeaderMap) -> bool {
+    headers
+        .get(REMOTE_START_OWNERSHIP_HEADER)
+        .and_then(|value| value.to_str().ok())
+        == Some(REMOTE_START_OWNERSHIP_V1)
+}
+
+fn remote_start_success_status(headers: &HeaderMap, created: bool) -> StatusCode {
+    let ownership_v1 = remote_start_ownership_v1(headers);
+    match (ownership_v1, created) {
+        (true, true) => StatusCode::CREATED,
+        (true, false) => StatusCode::ALREADY_REPORTED,
+        (false, true) => StatusCode::OK,
+        // A legacy ingress cannot distinguish a replay and would arm an
+        // abort against a worker it did not create. Refuse that one response;
+        // its idempotent public retry will recover the durable route instead.
+        (false, false) => StatusCode::CONFLICT,
+    }
 }
 
 pub(super) async fn pin_shared_session_before_deadline<F>(
@@ -67,8 +101,16 @@ where
 {
     tokio::time::timeout_at(deadline, pin)
         .await
-        .map_err(|_| "shared cache pin exceeded the start deadline".to_owned())?
-        .map_err(|error| error.to_string())
+        .map_err(|_| {
+            crate::transcode::start_infrastructure_error(
+                "shared cache pin exceeded the start deadline",
+            )
+        })?
+        .map_err(|error| {
+            crate::transcode::start_infrastructure_error(format!(
+                "pinning the shared cache session: {error}"
+            ))
+        })
 }
 
 async fn authorize(
@@ -113,7 +155,7 @@ pub(crate) async fn start(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<Json<RemoteStartResponse>, RemoteStartError> {
+) -> Result<Response, RemoteStartError> {
     let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
     let _restart_admission = state
@@ -136,6 +178,7 @@ pub(crate) async fn start(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?
         .ok_or(StatusCode::NOT_FOUND)?;
+    let negotiated_ownership = remote_start_ownership_v1(&headers);
     // The worker publication and its activation-confirmation watcher are one
     // owned operation. If the peer disconnects after ffmpeg starts, dropping
     // this HTTP future cannot strand the worker before the watcher is armed.
@@ -155,15 +198,32 @@ pub(crate) async fn start(
         // complete. Keep the exact worker, request claim, and replacement
         // gate owned across every cancellation, error, or panic after that
         // publication point; the confirmation watcher takes this guard below.
-        let guard = super::hls::StartedSessionGuard::new(
-            start_state.clone(),
-            start_state.node_id.clone(),
-            request.incarnation_id.clone(),
-            started.info.session_id.clone(),
-            request.user_id,
-            request.incarnation_id.clone(),
-            Some(started.replacement),
-        );
+        let crate::transcode::ClusterSessionStart {
+            info,
+            replacement,
+            created,
+        } = started;
+        let guard = Some(if created {
+            super::hls::StartedSessionGuard::worker_only(
+                start_state.clone(),
+                start_state.node_id.clone(),
+                request.incarnation_id.clone(),
+                info.session_id.clone(),
+                request.user_id,
+                request.incarnation_id.clone(),
+                Some(replacement),
+            )
+        } else {
+            super::hls::StartedSessionGuard::replayed(
+                start_state.clone(),
+                start_state.node_id.clone(),
+                request.incarnation_id.clone(),
+                info.session_id.clone(),
+                request.user_id,
+                request.incarnation_id.clone(),
+                Some(replacement),
+            )
+        });
         if !serving_authority.is_current(admitted_serving_generation) {
             return Err(crate::transcode::serving_fence_error(
                 "the node lost authority before the remote worker could be pinned",
@@ -174,7 +234,7 @@ pub(crate) async fn start(
         let pinned = pin_shared_session_before_deadline(
             start_deadline,
             start_state.transcode.pin_shared_session(
-                &started.info.session_id,
+                &info.session_id,
                 &request.incarnation_id,
                 1,
                 unix_ms().saturating_add(provisional_pin_ms),
@@ -189,7 +249,10 @@ pub(crate) async fn start(
                 "the node lost authority before remote activation confirmation",
             ));
         }
-        let response = RemoteStartResponse::from(started.info);
+        let mut response = RemoteStartResponse::from(info);
+        if negotiated_ownership {
+            response.activation_generation = Some(admitted_serving_generation);
+        }
         let confirmation_state = start_state.clone();
         let confirmation_incarnation = request.incarnation_id.clone();
         let confirmation_session = response.session_id.clone();
@@ -212,8 +275,13 @@ pub(crate) async fn start(
                             && route.owner_node_id == confirmation_state.node_id
                             && route.owner_epoch == 1
                             && route.state == "active"
+                            && route.publication_ready_at_ms
+                                != plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
                             && route.lease_expires_at_ms > unix_ms() =>
                     {
+                        if !serving_authority.is_current(admitted_serving_generation) {
+                            break;
+                        }
                         confirmation_state
                             .media_sessions
                             .seed_owned_lease(&route)
@@ -221,8 +289,24 @@ pub(crate) async fn start(
                         // The watcher now owns cleanup; activation is the
                         // only point at which the provisional owner may be
                         // released.
-                        guard.disarm();
+                        if let Some(guard) = guard.as_mut() {
+                            guard.disarm();
+                        }
                         return;
+                    }
+                    Ok(Ok(Some(route)))
+                        if route.session_id == confirmation_session
+                            && route.owner_node_id == confirmation_state.node_id
+                            && route.owner_epoch == 1
+                            && route.state == "active"
+                            && route.publication_ready_at_ms
+                                == plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED
+                            && route.lease_expires_at_ms > unix_ms()
+                            && tokio::time::Instant::now() < deadline =>
+                    {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
                     }
                     Ok(Ok(Some(_))) => break,
                     Ok(Ok(None)) | Ok(Err(_)) if tokio::time::Instant::now() < deadline => {
@@ -236,9 +320,9 @@ pub(crate) async fn start(
             // Dropping the armed guard performs exact local cleanup and
             // releases the replacement gate after an unconfirmed outcome.
         });
-        Ok::<RemoteStartResponse, String>(response)
+        Ok::<(RemoteStartResponse, bool), String>((response, created))
     });
-    let response = start_task
+    let (response, created) = start_task
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .map_err(|error| {
@@ -246,13 +330,103 @@ pub(crate) async fn start(
                 StatusCode::CONFLICT
             } else if crate::transcode::is_serving_fence_error(&error) {
                 StatusCode::SERVICE_UNAVAILABLE
+            } else if crate::transcode::is_start_infrastructure_error(&error) {
+                StatusCode::SERVICE_UNAVAILABLE
             } else if crate::transcode::is_retryable_capacity_error(&error) {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY
             }
         })?;
-    Ok(Json(response))
+    let status = remote_start_success_status(&headers, created);
+    Ok((status, Json(response)).into_response())
+}
+
+pub(crate) async fn activate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(status) = authorize(&state, &headers, ACTIVATE_PATH, &body).await {
+        return status.into_response();
+    }
+    let Some(request) = serde_json::from_slice::<RemoteActivateRequest>(&body)
+        .ok()
+        .filter(|request| request.is_valid_for(&state.node_id))
+    else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let authority = state.serving.authority();
+    if authority.admit() != Some(request.target_generation) {
+        return RemoteStartError::ServingFence.into_response();
+    }
+    if !state
+        .transcode
+        .owns_session_for_owner(
+            &request.activation.incarnation_id,
+            &request.activation.session_id,
+            1,
+        )
+        .await
+    {
+        return StatusCode::CONFLICT.into_response();
+    }
+    let predecessor_incarnation = request
+        .activation
+        .expected_predecessor_incarnation_id
+        .clone();
+    let activation = request.activation.clone();
+    let activation_state = state.clone();
+    let mut activation_task = tokio::spawn(super::hls::activate_session_under_authority(
+        activation_state,
+        request.activation,
+        None,
+        predecessor_incarnation,
+        authority,
+        request.target_generation,
+        None,
+    ));
+    match tokio::time::timeout(
+        crate::media_sessions::ACTIVATION_STORE_DEADLINE,
+        &mut activation_task,
+    )
+    .await
+    {
+        Ok(Ok(Ok(_))) => StatusCode::NO_CONTENT.into_response(),
+        Ok(Ok(Err(error))) => {
+            let confirmation_deadline =
+                tokio::time::Instant::now() + crate::media_sessions::ACTIVATION_STORE_DEADLINE;
+            if super::hls::wait_for_confirmed_activation(&state, &activation, confirmation_deadline)
+                .await
+                .is_some()
+            {
+                StatusCode::ACCEPTED.into_response()
+            } else {
+                error.into_response()
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::error!(%error, "target-owned media activation task failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Err(_) => {
+            tokio::spawn(async move {
+                match activation_task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => {
+                        tracing::warn!(
+                            ?error,
+                            "detached target-owned media activation was rejected"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "detached target-owned media activation task failed");
+                    }
+                }
+            });
+            StatusCode::ACCEPTED.into_response()
+        }
+    }
 }
 
 pub(crate) async fn abort(
@@ -651,6 +825,18 @@ async fn control_inner(
             None,
         );
     }
+    if route.publication_ready_at_ms != 0 {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+        return super::hls::control_error(
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the media session publication handoff is not yet ready",
+            Some(route.incarnation_id),
+            owner_epoch,
+            Some(500),
+            None,
+        );
+    }
     if route.lease_expires_at_ms <= unix_ms() {
         crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
         return super::hls::control_error(
@@ -679,8 +865,14 @@ mod tests {
         state.serving.validation_set_ready(false).await;
         assert!(matches!(
             admit_remote_start_serving_authority(&state),
-            Err(StatusCode::SERVICE_UNAVAILABLE)
+            Err(RemoteStartError::ServingFence)
         ));
+        let response = RemoteStartError::ServingFence.into_response();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(header::RETRY_AFTER),
+            Some(&HeaderValue::from_static("1"))
+        );
 
         state.serving.validation_set_ready(true).await;
         let (authority, recovered_generation) =
@@ -703,7 +895,9 @@ mod tests {
         .await;
         assert_eq!(
             result,
-            Err("database error: injected pin failure".to_owned())
+            Err(crate::transcode::start_infrastructure_error(
+                "pinning the shared cache session: database error: injected pin failure"
+            ))
         );
     }
 
@@ -717,7 +911,33 @@ mod tests {
         tokio::time::advance(Duration::from_secs(5)).await;
         assert_eq!(
             pending.await,
-            Err("shared cache pin exceeded the start deadline".to_owned())
+            Err(crate::transcode::start_infrastructure_error(
+                "shared cache pin exceeded the start deadline"
+            ))
+        );
+    }
+
+    #[test]
+    fn remote_start_ownership_status_is_explicit_and_legacy_replays_fail_closed() {
+        let mut negotiated = HeaderMap::new();
+        negotiated.insert(
+            REMOTE_START_OWNERSHIP_HEADER,
+            HeaderValue::from_static(REMOTE_START_OWNERSHIP_V1),
+        );
+        assert_eq!(
+            remote_start_success_status(&negotiated, true),
+            StatusCode::CREATED
+        );
+        assert_eq!(
+            remote_start_success_status(&negotiated, false),
+            StatusCode::ALREADY_REPORTED
+        );
+
+        let legacy = HeaderMap::new();
+        assert_eq!(remote_start_success_status(&legacy, true), StatusCode::OK);
+        assert_eq!(
+            remote_start_success_status(&legacy, false),
+            StatusCode::CONFLICT
         );
     }
 

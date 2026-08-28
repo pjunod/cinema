@@ -13,8 +13,8 @@ use axum::http::{header, HeaderName, Response, StatusCode};
 use futures_util::{future::BoxFuture, stream, StreamExt};
 use plurx_core::cluster::membership::MembershipManager;
 use plurx_core::domain::{
-    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRoute,
-    MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
+    MediaSessionActivation, MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor, OwnedMediaSessionLease,
     MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
@@ -33,16 +33,19 @@ use crate::transcode::{
 };
 
 pub(crate) const START_PATH: &str = "/internal/cluster/media/sessions/start";
+pub(crate) const ACTIVATE_PATH: &str = "/internal/cluster/media/sessions/activate";
 pub(crate) const ABORT_PATH: &str = "/internal/cluster/media/sessions/abort";
 pub(crate) const RELAY_PATH: &str = "/internal/cluster/media/sessions/relay";
 pub(crate) const CONTROL_PATH: &str = "/internal/cluster/media/sessions/control";
 pub(crate) const MAX_CONTROL_REQUEST_BYTES: usize = 96 * 1024;
+pub(crate) const MAX_ACTIVATION_REQUEST_BYTES: usize = 128 * 1024;
+pub(crate) const REMOTE_START_OWNERSHIP_HEADER: &str = "x-plurx-start-ownership";
+pub(crate) const REMOTE_START_OWNERSHIP_V1: &str = "created-v1";
 
 const MAX_START_RESPONSE_BYTES: usize = 128 * 1024;
 pub(crate) const START_DEADLINE: Duration = Duration::from_secs(50);
 pub(crate) const OWNER_ASSIGNMENT_DEADLINE: Duration = Duration::from_secs(3);
 pub(crate) const ACTIVATION_STORE_DEADLINE: Duration = Duration::from_secs(3);
-pub(crate) const ACTIVATION_FAST_RECONCILIATION: Duration = Duration::from_secs(3);
 const ABORT_DEADLINE: Duration = Duration::from_secs(5);
 /// Post-header streaming is deliberately disjoint from the request's
 /// preparation budget. A media lookup may spend almost its whole request
@@ -82,15 +85,14 @@ pub(crate) const LEASE_TTL_MS: i64 = 12_000;
 /// normal 12-second lease. The longer one-shot claim is an ownership fence,
 /// not an inactivity or playback-progress watchdog.
 const TAKEOVER_CLAIM_LEASE_TTL_MS: i64 = 24_000;
-pub(crate) const ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(55);
 /// Begins on the worker before the start response leaves it, so it must
-/// strictly outlive every later ingress phase plus a scheduling margin.
+/// strictly outlive ingress placement, owner assignment, the fixed activation
+/// lease, and a scheduling margin. There is no independent reconciliation or
+/// confirmation watchdog: the activation transaction owns one lease deadline.
 pub(crate) const REMOTE_ACTIVATION_CONFIRMATION_WINDOW: Duration = Duration::from_secs(
     START_DEADLINE.as_secs()
         + OWNER_ASSIGNMENT_DEADLINE.as_secs()
-        + ACTIVATION_STORE_DEADLINE.as_secs()
-        + ACTIVATION_FAST_RECONCILIATION.as_secs()
-        + ACTIVATION_CONFIRMATION_WINDOW.as_secs()
+        + (LEASE_TTL_MS as u64 / 1_000)
         + 10,
 );
 const MAX_MEDIA_MILLIS: i64 = 366 * 24 * 60 * 60 * 1_000;
@@ -1002,6 +1004,78 @@ pub(crate) struct RemoteStartResponse {
     pub grade: OutputGrade,
     pub vod: bool,
     pub control_lease_timeout_ms: u32,
+    /// Serving generation admitted by a negotiated target START. It is
+    /// omitted for legacy callers so their strict response decoder keeps the
+    /// original wire shape.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_generation: Option<u64>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RemoteActivateRequest {
+    pub target_generation: u64,
+    pub activation: MediaSessionActivation,
+}
+
+impl RemoteActivateRequest {
+    pub(crate) fn is_valid_for(&self, target_node_id: &str) -> bool {
+        self.activation.owner_node_id == target_node_id
+            && self.activation.request_id.is_some()
+            && self.activation.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
+            && self.activation.lease_expires_at_ms > self.activation.now_ms
+    }
+}
+
+pub(crate) struct RemoteSessionStart {
+    pub(crate) info: RemoteStartResponse,
+    pub(crate) ownership: RemoteSessionStartOwnership,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RemoteSessionStartOwnership {
+    Created,
+    Recovered,
+    /// A pre-negotiation peer returned the legacy 200 response, which does
+    /// not reveal whether this request created the worker or replayed one.
+    LegacyAmbiguous,
+}
+
+fn decode_remote_start_response(
+    response: crate::http::peer_transport::PeerResponse,
+) -> Result<RemoteSessionStart, PeerTransportError> {
+    if !matches!(
+        response.status,
+        reqwest::StatusCode::OK
+            | reqwest::StatusCode::CREATED
+            | reqwest::StatusCode::ALREADY_REPORTED
+    ) {
+        return Err(if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+            PeerTransportError::TimedOut
+        } else {
+            PeerTransportError::InvalidResponse
+        });
+    }
+    let ownership = match response.status {
+        reqwest::StatusCode::CREATED => RemoteSessionStartOwnership::Created,
+        reqwest::StatusCode::ALREADY_REPORTED => RemoteSessionStartOwnership::Recovered,
+        // A legacy 200 is deliberately not guessed. It may be a replay whose
+        // worker belongs to an earlier request, so arming abort ownership here
+        // could kill that live session. The ingress rejects this placement;
+        // the target's activation-confirmation window cleans up a truly new
+        // worker when no durable activation follows.
+        reqwest::StatusCode::OK => RemoteSessionStartOwnership::LegacyAmbiguous,
+        _ => unreachable!("successful status was checked above"),
+    };
+    serde_json::from_slice::<RemoteStartResponse>(&response.body)
+        .ok()
+        .filter(RemoteStartResponse::is_valid)
+        .filter(|info| {
+            ownership == RemoteSessionStartOwnership::LegacyAmbiguous
+                || info.activation_generation.is_some()
+        })
+        .map(|info| RemoteSessionStart { info, ownership })
+        .ok_or(PeerTransportError::InvalidResponse)
 }
 
 impl From<StartInfo> for RemoteStartResponse {
@@ -1018,6 +1092,7 @@ impl From<StartInfo> for RemoteStartResponse {
             grade: info.grade,
             vod: info.vod,
             control_lease_timeout_ms: info.control_lease_timeout_ms,
+            activation_generation: None,
         }
     }
 }
@@ -2035,6 +2110,15 @@ impl MediaSessionCoordinator {
     /// next store inventory. If the store disappears in that exact window,
     /// the worker still knows the committed expiry and self-fences on time.
     pub(crate) async fn seed_owned_lease(&self, route: &MediaSessionRoute) {
+        if route.state != "active"
+            || route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED
+        {
+            debug_assert!(
+                false,
+                "only confirmed active media-session routes may enter lease accounting"
+            );
+            return;
+        }
         self.lease_seeds.lock().await.insert(
             route.incarnation_id.clone(),
             (
@@ -2070,7 +2154,7 @@ impl MediaSessionCoordinator {
         owner_node_id: &str,
         request: &RemoteStartRequest,
         deadline: tokio::time::Instant,
-    ) -> Result<RemoteStartResponse, PeerTransportError> {
+    ) -> Result<RemoteSessionStart, PeerTransportError> {
         let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
         if body.len() > MAX_CONTROL_REQUEST_BYTES {
             return Err(PeerTransportError::InvalidResponse);
@@ -2081,7 +2165,7 @@ impl MediaSessionCoordinator {
         let base = self.peer_base(owner_node_id, deadline).await?;
         let response = self
             .transport
-            .request(
+            .request_with_static_header(
                 owner_node_id,
                 &base,
                 reqwest::Method::POST,
@@ -2090,19 +2174,46 @@ impl MediaSessionCoordinator {
                 deadline,
                 MAX_START_RESPONSE_BYTES,
                 PeerAuthMode::ExactRequest,
+                (REMOTE_START_OWNERSHIP_HEADER, REMOTE_START_OWNERSHIP_V1),
             )
             .await?;
-        if !response.status.is_success() {
-            return Err(if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
-                PeerTransportError::TimedOut
-            } else {
-                PeerTransportError::InvalidResponse
-            });
+        decode_remote_start_response(response)
+    }
+
+    pub(crate) async fn activate_remote(
+        &self,
+        owner_node_id: &str,
+        request: &RemoteActivateRequest,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), PeerTransportError> {
+        let body = serde_json::to_vec(request).map_err(|_| PeerTransportError::InvalidResponse)?;
+        if body.len() > MAX_ACTIVATION_REQUEST_BYTES || tokio::time::Instant::now() >= deadline {
+            return Err(PeerTransportError::InvalidResponse);
         }
-        serde_json::from_slice::<RemoteStartResponse>(&response.body)
-            .ok()
-            .filter(RemoteStartResponse::is_valid)
-            .ok_or(PeerTransportError::InvalidResponse)
+        let base = self.peer_base(owner_node_id, deadline).await?;
+        let response = self
+            .transport
+            .request(
+                owner_node_id,
+                &base,
+                reqwest::Method::POST,
+                ACTIVATE_PATH,
+                body,
+                deadline,
+                4 * 1024,
+                PeerAuthMode::ExactRequest,
+            )
+            .await?;
+        if matches!(
+            response.status,
+            reqwest::StatusCode::NO_CONTENT | reqwest::StatusCode::ACCEPTED
+        ) {
+            Ok(())
+        } else if response.status == reqwest::StatusCode::REQUEST_TIMEOUT {
+            Err(PeerTransportError::TimedOut)
+        } else {
+            Err(PeerTransportError::InvalidResponse)
+        }
     }
 
     pub(crate) async fn abort_remote(
@@ -4660,7 +4771,75 @@ mod tests {
             grade: OutputGrade::Sdr,
             vod: true,
             control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+            activation_generation: Some(0),
         }
+    }
+
+    #[test]
+    fn remote_start_status_carries_created_ownership_and_legacy_is_conservative() {
+        let body = serde_json::to_vec(&valid_start_response()).expect("start response JSON");
+        let created = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::CREATED,
+            body: body.clone(),
+        })
+        .expect("created response");
+        assert_eq!(
+            created.ownership,
+            RemoteSessionStartOwnership::Created,
+            "201 response carries creation ownership"
+        );
+
+        let recovered = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::ALREADY_REPORTED,
+            body: body.clone(),
+        })
+        .expect("recovered response");
+        assert_eq!(
+            recovered.ownership,
+            RemoteSessionStartOwnership::Recovered,
+            "208 response carries replay/recovery ownership"
+        );
+        assert_eq!(created.info.session_id, recovered.info.session_id);
+
+        let mut legacy_info = valid_start_response();
+        legacy_info.activation_generation = None;
+        let legacy = decode_remote_start_response(crate::http::peer_transport::PeerResponse {
+            status: reqwest::StatusCode::OK,
+            body: serde_json::to_vec(&legacy_info).expect("legacy start response JSON"),
+        })
+        .expect("legacy response");
+        assert_eq!(
+            legacy.ownership,
+            RemoteSessionStartOwnership::LegacyAmbiguous,
+            "legacy success remains explicitly ambiguous"
+        );
+    }
+
+    #[test]
+    fn remote_activation_accepts_initial_generation_and_requires_request_claim() {
+        let mut request = RemoteActivateRequest {
+            target_generation: 0,
+            activation: MediaSessionActivation {
+                incarnation_id: "00000000-0000-4000-8000-0000000000a1".to_owned(),
+                session_id: "00000000-0000-4000-8000-0000000000b1".to_owned(),
+                user_id: 7,
+                playback_id: "player-a".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: Some("request-a".to_owned()),
+                request_fingerprint: "11".repeat(32),
+                owner_node_id: "node-a".to_owned(),
+                lease_expires_at_ms: 20_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: 10_000,
+            },
+        };
+        assert!(request.is_valid_for("node-a"));
+        request.activation.request_id = None;
+        assert!(!request.is_valid_for("node-a"));
     }
 
     fn relay_request(resource: RelayResource, deadline_unix_ms: i64) -> RelayRequest {
@@ -6409,10 +6588,8 @@ mod tests {
             REMOTE_ACTIVATION_CONFIRMATION_WINDOW
                 > START_DEADLINE
                     + OWNER_ASSIGNMENT_DEADLINE
-                    + ACTIVATION_STORE_DEADLINE
-                    + ACTIVATION_FAST_RECONCILIATION
-                    + ACTIVATION_CONFIRMATION_WINDOW,
-            "the worker fallback must begin earlier and end after every ingress phase"
+                    + Duration::from_millis(LEASE_TTL_MS as u64),
+            "the worker fallback must outlive ingress plus the fixed activation lease"
         );
         assert!(
             Duration::from_millis(TAKEOVER_CLAIM_LEASE_TTL_MS as u64)

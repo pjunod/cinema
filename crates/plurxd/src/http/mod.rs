@@ -388,6 +388,12 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            crate::media_sessions::ACTIVATE_PATH,
+            post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ACTIVATION_REQUEST_BYTES,
+            )),
+        )
+        .route(
             crate::media_sessions::ABORT_PATH,
             post(internal_media_sessions::abort).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
@@ -561,6 +567,7 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 crate::media_pool::OFFERS_PATH
                     | crate::shared_cache::CANARY_PATH
                     | crate::media_sessions::START_PATH
+                    | crate::media_sessions::ACTIVATE_PATH
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
                     | crate::media_sessions::CONTROL_PATH
@@ -913,6 +920,7 @@ mod tests {
             (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
             (Method::POST, crate::media_sessions::CONTROL_PATH),
         ] {
@@ -951,6 +959,7 @@ mod tests {
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
             (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, "/api/v1/cluster/join-tokens"),
             (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
             (Method::POST, "/api/v1/libraries"),

@@ -87,14 +87,14 @@ use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
     CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
     Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
-    MediaSessionProjectionCompletion, MediaSessionRenewal, MediaSessionRequestClaim,
-    MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch, NetworkPrior,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome, OfflinePackage,
-    OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport, OwnedMediaSessionLease,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeJob, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingState, ReadingStateWrite, RecentItem, SharedCacheGeneration, TraktAuth,
-    User, WatchRollup, WatchState,
+    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
+    NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
+    NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
+    OfflinePackage, OfflinePackageStats, OfflineRemovalPlanEntry, OfflineRemovalReport,
+    OwnedMediaSessionLease, PlaybackEvent, PlaybackEventQuery, PretranscodeJob,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingState, ReadingStateWrite, RecentItem,
+    SharedCacheGeneration, TraktAuth, User, WatchRollup, WatchState,
 };
 // RecentItem is reused for next-up (episode + show title).
 use crate::error::StoreError;
@@ -2068,6 +2068,13 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
+
+    async fn settle_media_session_activation(
+        &self,
+        activation: &MediaSessionActivation,
+        settlement: MediaSessionActivationSettlement,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     /// Replace the durable unobserved sentinel with one full, freshly minted
     /// not-before boundary. Exact ownership changes and terminal state fail

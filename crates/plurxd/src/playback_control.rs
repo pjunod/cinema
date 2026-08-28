@@ -812,6 +812,9 @@ pub(crate) async fn verify_authority(
     if route.state != "active" {
         return Err(ControlStateError::SessionEnded);
     }
+    if route.publication_ready_at_ms != 0 {
+        return Err(ControlStateError::OwnerTransition);
+    }
     if route.lease_expires_at_ms <= crate::media_sessions::unix_ms() {
         return Err(ControlStateError::OwnerTransition);
     }
@@ -10930,27 +10933,39 @@ mod tests {
             .assign_media_session_request_owner(7, &incarnation, &incarnation, "node-a", now_ms,)
             .await
             .expect("assign owner"));
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: incarnation.clone(),
+            session_id: session.clone(),
+            user_id: 7,
+            playback_id: "player-a".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(incarnation.clone()),
+            request_fingerprint: fingerprint,
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms,
+            lease_expires_at_ms,
+        };
         store
-            .activate_media_session(&plurx_core::domain::MediaSessionActivation {
-                incarnation_id: incarnation.clone(),
-                session_id: session.clone(),
-                user_id: 7,
-                playback_id: "player-a".to_owned(),
-                expected_predecessor_incarnation_id: None,
-                fence_predecessor: false,
-                request_id: Some(incarnation.clone()),
-                request_fingerprint: fingerprint,
-                owner_node_id: "node-a".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                publication_ready_at_ms: 0,
-                media_origin_ms: 0,
-                now_ms,
-                lease_expires_at_ms,
-            })
+            .activate_media_session(&activation)
             .await
             .expect("activate route")
             .expect("activation accepted");
+        store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now_ms,
+            )
+            .await
+            .expect("confirm route")
+            .expect("route confirmed");
         (incarnation, session)
     }
 
