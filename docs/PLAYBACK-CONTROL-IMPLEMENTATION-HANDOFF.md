@@ -7,24 +7,25 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`5a9e19aeeb8c7c69bcb514f1d8475d54e45116a2` (Store and lifecycle approved;
-integration requested changes solely for 17 stale owner-inventory counts;
+`841e695fee6c1ca16ac3591f4d496dea710825a0` (unanimously approved by Store,
+lifecycle, and integration reviewers after all 190 owner rows matched;
 earlier rejected heads `9121db03`, `9809d553`, `bb69eb7e`, `31e7d5e2`, and
 `763c230c`)
 **Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
 **Validation-evidence freeze:** `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`
 for regression-history evidence; owner-inventory reconciliation
-`31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19` on branch
+`31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`; compile repair
+`ef74b41e57bc26eff06a156024b02029c2c2e768`; and its mapping
+`b1fe8151d566b54a5958a19911743195769aaa86` on branch
 `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact head `5a9e19ae` was reviewed read-only. Store
-and lifecycle reviewers approved it; integration found no runtime defect and
-requested changes only for 17 stale ownership counts. Commit `31a93198`
-reconciles those counts without changing runtime code. The combined
-docs-bearing branch tip has not yet received immutable-head adversarial
-approval.
+**Runtime review state:** exact head `841e695f` was unanimously approved
+read-only. Its one full unit invocation stopped at compilation, before any test
+body executed, on 11 Store errors. `ef74b41e` makes the minimal compile-only
+repair and `b1fe8151` maps its evidence. The combined docs-bearing branch tip
+still requires targeted exact-head review before a directly affected rerun.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -40,11 +41,11 @@ before durable-ID adoption and seed/publication.
 The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
 **Validation state:** `cargo fmt`, static diff inspection, and static ownership
-recounts are the only validation performed on the repair candidate. No
-compile, build, focused test, or unit test has run. One full unit-suite run
-remains locked until every required adversarial reviewer approves the same
-immutable exact head. If that run fails, rerun only failed or directly affected
-tests after repairs and review the behavioral delta. PR #626's merged baseline
+recounts passed. `make unit` ran exactly once at unanimously approved
+`841e695f`; compilation failed before tests on four nonexistent Hiqlite helper
+calls, six missing test-constant imports, and one SQLite `Option`/mutable-borrow
+shadow. After targeted approval, rerun only the directly affected
+`plurx-core` library and Store-contract targets. PR #626's merged baseline
 was green in focused Rust 85/85, ownership 7/7, `make check`,
 `make cluster-check`, and hosted run `33129200705`.
 
@@ -110,7 +111,8 @@ metadata leaves retry available, attempt media closes it atomically, current
 attempt-derived bodyless responses carry an explicit exact-attempt status
 fence, actor-derived errors have explicit non-media fences, and the retry recipe carries the exact
 presentation-contract fingerprint. One adversarial pass found four defects;
-the corrected delta is approved. No active-branch unit test has run yet.
+the corrected delta is approved. The later full unit invocation at `841e695f`
+stopped during Store compilation before executing any active-branch test.
 
 ### Active prepublication review ledger
 
@@ -446,8 +448,11 @@ guard-level hold/release ordering regression, and corrects the fixture to
 publication fence `0`. `95cd9a2e` maps that evidence. The immutable PR #636 tip
 containing this handoff was reviewed as `5a9e19ae`: Store and lifecycle
 approved it, while integration found no runtime defect and requested only the
-17 owner-inventory corrections now committed as `31a93198`. The new immutable
-PR tip must receive exact-head approval before the unit-test gate opens.
+17 owner-inventory corrections now committed as `31a93198`. The reconciled
+head `841e695f` then received unanimous exact-head approval. Its one full unit
+run stopped during compilation before tests; `ef74b41e` repairs the 11 Store
+errors and `b1fe8151` maps that evidence. The new immutable PR tip must receive
+targeted exact-head approval before the directly affected rerun.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -776,31 +781,31 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`5a9e19aeeb8c7c69bcb514f1d8475d54e45116a2` is the last formally reviewed
-head: Store and lifecycle approved it, while integration requested only 17
-mechanical owner-inventory corrections. Runtime, Store, and tests are frozen
-in `f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
-frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; and those inventory
-corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`.
+`841e695fee6c1ca16ac3591f4d496dea710825a0` is the last formally reviewed
+head and received unanimous approval. Runtime behavior and tests are frozen in
+`f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
+frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; owner-inventory
+corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`;
+and the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
 1. Verify the final docs-bearing candidate excludes both vendor target trees
    and record its exact immutable branch head without pushing it yet.
-2. Obtain unanimous independent adversarial approval of that local PR
-   candidate. If a
-   finding changes behavior, repair it and freeze/review a new exact head.
-3. Run the full local unit suite once. If it fails, fix the cause and rerun
-   only failed or directly affected tests, then review the behavioral delta.
+2. Obtain targeted independent adversarial approval of the compile-repaired
+   local PR candidate. If a finding changes behavior, repair it and
+   freeze/review a new exact head.
+3. Rerun only the directly affected `plurx-core` library and Store-contract
+   targets. The one full local unit invocation has already been consumed.
 4. Run required non-unit cluster/integration validation, push/open the PR,
    require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
-review before local unit tests, one full local unit-suite run only, and full
-required verification before merge.
+review before local unit tests, one full local unit-suite invocation only, and
+full required verification before merge.
 
 ### Active cut boundaries
 
@@ -1130,8 +1135,8 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Unanimously review the frozen post-`5a9e19ae` inventory-reconciled candidate, run its
-   one full unit suite, satisfy cluster/hosted gates, and merge the production
+1. Review the post-`841e695f` compile repair, rerun only its directly affected
+   targets, satisfy cluster/hosted gates, and merge the production
    decision, prepublication retry, response-admission, relay/VOD ownership,
    and confirmed-reap cut.
 2. Move published-lifetime stall classification and recovery behind the actor
