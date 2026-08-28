@@ -89,6 +89,7 @@ impl AppState {
 pub struct StateRaftDB {
     pub raft: openraft::Raft<TypeConfigSqlite>,
     pub shutdown_handle: hiqlite_wal::ShutdownHandle,
+    pub wal_status: hiqlite_wal::WalStatusHandle,
     pub sql_writer: flume::Sender<WriterRequest>,
     pub read_pool: SqlitePool,
     pub log_statements: bool,

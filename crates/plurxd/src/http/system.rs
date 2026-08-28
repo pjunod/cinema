@@ -3513,7 +3513,9 @@ mod tests {
         let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
             local_source: true,
             sample: Some(PassiveRaftSample {
+                node_id: 1,
                 current_term: 7,
+                leader_id: Some(1),
                 last_applied_index: Some(42),
                 leader_known: true,
                 is_leader: true,
@@ -3541,6 +3543,8 @@ mod tests {
                 build_error: zero_snapshot_histogram,
                 install_ok: zero_snapshot_histogram,
                 install_error: zero_snapshot_histogram,
+                last_build: None,
+                last_install: None,
             }),
         });
 
@@ -3582,7 +3586,9 @@ mod tests {
             ..PassiveRaftMetricsView {
                 local_source: true,
                 sample: Some(PassiveRaftSample {
+                    node_id: 2,
                     current_term: 7,
+                    leader_id: Some(1),
                     last_applied_index: Some(42),
                     leader_known: true,
                     is_leader: false,

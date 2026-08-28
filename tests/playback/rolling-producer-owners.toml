@@ -291,11 +291,16 @@ expected_occurrences = 6
 # process action anywhere under plurxd/src must change a reviewed count.
 # Parenthesized call paths are normalized and aliases are fenced so a renamed
 # or wrapped function cannot bypass the scan.
+# Cluster operations accounts for one joined test-only admission waiter; four
+# bounded timers (the shared peer deadline, its paused-time fixture, the CLI
+# drain poll, and the offline worker idle poll); and three non-process `status`
+# accessors on membership and HTTP responses. It adds no detached production
+# task or child-process owner.
 
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 276
+expected_occurrences = 277
 
 [[module_structures]]
 id = "method-spawn"
@@ -310,7 +315,7 @@ expected_occurrences = 1
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 323
+expected_occurrences = 327
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -330,7 +335,7 @@ expected_occurrences = 59
 [[module_structures]]
 id = "process-capable-launch-method"
 pattern = "\\.(?:spawn|output|status)\\s*\\("
-expected_occurrences = 156
+expected_occurrences = 159
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

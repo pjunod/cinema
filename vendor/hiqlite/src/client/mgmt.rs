@@ -173,6 +173,19 @@ impl Client {
         Ok(crate::LocalDbSnapshotMetrics::new())
     }
 
+    /// Obtain the process-local database WAL status handle.
+    ///
+    /// The handle reads only the live log store's owned locks and never opens
+    /// or walks WAL files. Remote clients fail immediately.
+    #[cfg(feature = "sqlite")]
+    #[must_use]
+    pub fn local_db_wal_status(&self) -> Result<hiqlite_wal::WalStatusHandle, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("local database WAL status requires a local node client".to_owned())
+        })?;
+        Ok(state.raft_db.wal_status.clone())
+    }
+
     /// Obtain a commit watermark after the database leader has confirmed its
     /// current term with a quorum and applied through the returned read index.
     ///

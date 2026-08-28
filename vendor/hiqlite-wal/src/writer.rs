@@ -4,6 +4,7 @@ use crate::log_store_impl::{deserialize, serialize};
 use crate::metadata::Metadata;
 use crate::reader::LogReadMemo;
 use crate::wal::WalFileSet;
+use crate::{WalRuntimeState, WalStatusHandle};
 use openraft::{LeaderId, LogId};
 use std::fmt::{Debug, Formatter};
 use std::sync::{Arc, RwLock};
@@ -89,7 +90,14 @@ pub fn spawn(
     wal_size: u32,
     wal_deep_integrity_check: bool,
     meta: Arc<RwLock<Metadata>>,
-) -> Result<(flume::Sender<Action>, Arc<RwLock<WalFileSet>>), Error> {
+) -> Result<
+    (
+        flume::Sender<Action>,
+        Arc<RwLock<WalFileSet>>,
+        WalStatusHandle,
+    ),
+    Error,
+> {
     let mut set = WalFileSet::read(base_path, wal_size)?;
     // TODO emit a warning log in that case and tell the user how to resolve or "force start" in
     // that case, or should be maybe `auto-heal` as much as possible?
@@ -100,6 +108,17 @@ pub fn spawn(
         set.add_file(wal_size, &mut buf)?;
     }
     let wal_locked = Arc::new(RwLock::new(set.clone_no_map()));
+    let status = WalStatusHandle::new(
+        wal_locked.clone(),
+        meta.clone(),
+        match &sync {
+            LogSync::Immediate => "immediate".to_owned(),
+            LogSync::ImmediateAsync => "immediate_async".to_owned(),
+            LogSync::IntervalMillis(millis) => format!("interval_{millis}"),
+        },
+        u64::from(wal_size),
+        wal_deep_integrity_check,
+    );
 
     // Restore a missing purge boundary from the first retained entry. Snapshot
     // installation can begin a still-numbered-one WAL above index zero, so the
@@ -134,14 +153,30 @@ pub fn spawn(
     let (tx, rx) = flume::bounded::<Action>(1);
     let wal = wal_locked.clone();
     let snc = sync.clone();
-    thread::spawn(move || run(lockfile, meta, wal, set, rx, snc, wal_size));
+    let writer_status = status.clone();
+    thread::spawn(move || {
+        let result = run(
+            lockfile,
+            meta,
+            wal,
+            set,
+            rx,
+            snc,
+            wal_size,
+            writer_status.clone(),
+        );
+        if let Err(error) = &result {
+            writer_status.record_error(error);
+        }
+        result
+    });
 
     if let LogSync::IntervalMillis(millis) = &sync {
         let interval = time::interval(Duration::from_millis(*millis));
         spawn_syncer(tx.clone(), interval);
     }
 
-    Ok((tx, wal_locked))
+    Ok((tx, wal_locked, status))
 }
 
 fn spawn_syncer(tx_writer: flume::Sender<Action>, mut interval: Interval) {
@@ -170,6 +205,7 @@ fn run(
     rx: flume::Receiver<Action>,
     sync: LogSync,
     wal_size: u32,
+    status: WalStatusHandle,
 ) -> Result<(), Error> {
     let _ = ThreadPriority::Max.set_for_current();
 
@@ -235,9 +271,13 @@ fn run(
                 }
 
                 if sync == LogSync::Immediate {
+                    status.set_state(WalRuntimeState::Syncing);
                     wal.active().flush()?;
+                    status.record_sync(Some(wal.active().id_until));
                 } else if sync == LogSync::ImmediateAsync {
+                    status.set_state(WalRuntimeState::Syncing);
                     wal.active().flush_async()?;
+                    status.record_sync(Some(wal.active().id_until));
                 } else {
                     is_dirty = true;
                 }
@@ -264,6 +304,7 @@ fn run(
                 last_log,
                 ack,
             } => {
+                status.set_state(WalRuntimeState::Compacting);
                 debug!(
                     "WAL Writer - Action::Remove from {from} until {until} / \
                     last_log: {last_log:?}\n{wal:?}"
@@ -281,6 +322,7 @@ fn run(
                     // If the flush fails, so would the log removal, and we would not have a hole.
                     active.flush_async()?;
                     is_dirty = false;
+                    status.record_sync(Some(active.id_until));
                 }
 
                 buf.clear();
@@ -310,6 +352,10 @@ fn run(
                         Err(err) => Err(err),
                     }
                 };
+                match &result {
+                    Ok(()) => status.record_compaction(Some(wal.active().id_until)),
+                    Err(error) => status.record_error(error),
+                }
                 if ack.send(result).is_err() {
                     debug!("WAL remove response receiver closed before completion");
                 }
@@ -318,8 +364,10 @@ fn run(
                 debug!("WAL Writer - Action::Vote");
 
                 buf.clear();
+                status.set_state(WalRuntimeState::Syncing);
                 wal.active().flush_async()?;
                 is_dirty = false;
+                status.record_sync(Some(wal.active().id_until));
 
                 meta.write()?.vote = Some(value);
                 let res = Metadata::write(meta.clone(), &wal.base_path);
@@ -330,12 +378,15 @@ fn run(
                 if is_dirty {
                     let active = wal.active();
                     buf.clear();
+                    status.set_state(WalRuntimeState::Syncing);
                     active.update_header(&mut buf)?;
                     active.flush_async()?;
                     is_dirty = false;
+                    status.record_sync(Some(active.id_until));
                 }
             }
             Action::Shutdown(ack) => {
+                status.set_state(WalRuntimeState::Stopping);
                 debug!("Raft logs store writer is being shut down");
                 shutdown_ack = Some(ack);
                 break;
@@ -345,15 +396,19 @@ fn run(
 
     debug!("Logs Writer exiting");
 
-    let active = wal.active();
-    buf.clear();
-    active.update_header(&mut buf)?;
-    active.flush()?;
+    let durable_index = {
+        let active = wal.active();
+        buf.clear();
+        active.update_header(&mut buf)?;
+        active.flush()?;
+        active.id_until
+    };
     Metadata::write(meta, &wal.base_path)?;
 
     // drop the lockfile before trying to remove it to unlock it
     drop(lockfile);
     LockFile::remove(&wal.base_path).expect("LockFile removal failed");
+    status.record_stopped(Some(durable_index));
 
     if let Some(ack) = shutdown_ack {
         ack.send(())
@@ -389,7 +444,7 @@ mod tests {
         let lockfile = LockFile::create(base_path)?;
         lockfile.lock()?;
         let meta = Arc::new(RwLock::new(Metadata::read_or_create(base_path)?));
-        let (writer, wal) = spawn(
+        let (writer, wal, _) = spawn(
             base_path.to_owned(),
             lockfile,
             LogSync::Immediate,
@@ -564,6 +619,137 @@ mod tests {
         drop(reader);
         drop(wal_locked);
         drop(meta);
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn status_distinguishes_append_from_durable_sync_and_clean_stop() -> Result<(), Error> {
+        let base_path = test_path("wal-status-durable-boundary");
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+        let lockfile = LockFile::create(&base_path)?;
+        lockfile.lock()?;
+        let meta = Arc::new(RwLock::new(Metadata::read_or_create(&base_path)?));
+        let (writer, _wal, status) = spawn(
+            base_path.clone(),
+            lockfile,
+            LogSync::IntervalMillis(60_000),
+            WAL_SIZE,
+            false,
+            meta,
+        )?;
+        // The interval's first tick is immediate. Let that empty sync pass so
+        // the assertion below measures this append rather than scheduler order.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let retained = LogId {
+            leader_id: LeaderId {
+                term: 9,
+                node_id: 2_u64,
+            },
+            index: 42,
+        };
+        let (entry_tx, entry_rx) = flume::bounded(2);
+        let (append_ack, append_rx) = oneshot::channel();
+        writer
+            .send(Action::Append {
+                rx: entry_rx,
+                callback: Box::new(|| {}),
+                ack: append_ack,
+            })
+            .unwrap();
+        entry_tx
+            .send(Some((retained.index, serialize(&retained)?)))
+            .unwrap();
+        entry_tx.send(None).unwrap();
+        append_rx.await.unwrap()?;
+
+        let appended = status.snapshot();
+        assert_eq!(appended.last_log_index, Some(42));
+        assert_eq!(appended.last_durable_index, None);
+        assert_eq!(appended.state, WalRuntimeState::Open);
+        assert!(appended.lock_owned);
+
+        writer.send(Action::Sync).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            if status.snapshot().last_durable_index == Some(42) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "explicit sync did not publish its durable boundary"
+            );
+            thread::yield_now();
+        }
+
+        let (shutdown_ack, shutdown_rx) = oneshot::channel();
+        writer.send(Action::Shutdown(shutdown_ack)).unwrap();
+        shutdown_rx.await.unwrap();
+        let stopped = status.snapshot();
+        assert_eq!(stopped.state, WalRuntimeState::Stopped);
+        assert!(!stopped.lock_owned);
+        assert_eq!(stopped.last_durable_index, Some(42));
+        fs::remove_dir_all(base_path)?;
+        Ok(())
+    }
+
+    #[test]
+    fn status_records_unclean_start_and_bounds_writer_errors() -> Result<(), Error> {
+        let base_path = test_path("wal-status-unclean-error");
+        let _ = fs::remove_dir_all(&base_path);
+        fs::create_dir_all(&base_path)?;
+        let lockfile = LockFile::create(&base_path)?;
+        lockfile.lock()?;
+        let meta = Arc::new(RwLock::new(Metadata::read_or_create(&base_path)?));
+        let (writer, _wal, status) = spawn(
+            base_path.clone(),
+            lockfile,
+            LogSync::Immediate,
+            WAL_SIZE,
+            true,
+            meta,
+        )?;
+
+        let startup = status.snapshot();
+        assert!(startup.unclean_start_observed);
+        assert_eq!(
+            startup
+                .last_recovery
+                .as_ref()
+                .map(|value| value.operation.as_str()),
+            Some("startup_integrity_check")
+        );
+
+        status.set_state(WalRuntimeState::Compacting);
+        assert_eq!(status.snapshot().state, WalRuntimeState::Compacting);
+        status.record_compaction(startup.last_durable_index);
+        let compacted = status.snapshot();
+        assert_eq!(compacted.state, WalRuntimeState::Open);
+        assert!(compacted.last_compaction_unix_ms.is_some());
+
+        // The writer's outer error boundary calls the same recorder for a
+        // failed flush/sync. Pin the operator-visible transition separately
+        // from the bounded-message assertion below.
+        status.set_state(WalRuntimeState::Syncing);
+        status.record_error(&"injected sync failure");
+        let sync_failed = status.snapshot();
+        assert_eq!(sync_failed.state, WalRuntimeState::Error);
+        assert_eq!(
+            sync_failed.last_error.as_ref().map(|value| value.message.as_str()),
+            Some("injected sync failure")
+        );
+
+        status.record_error(&"x".repeat(2_048));
+        let failed = status.snapshot();
+        assert_eq!(failed.state, WalRuntimeState::Error);
+        assert_eq!(
+            failed.last_error.as_ref().unwrap().message.chars().count(),
+            512
+        );
+
+        stop_writer(writer);
         fs::remove_dir_all(base_path)?;
         Ok(())
     }

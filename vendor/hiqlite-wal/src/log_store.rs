@@ -2,7 +2,7 @@ use crate::error::Error;
 use crate::lockfile::LockFile;
 use crate::metadata::Metadata;
 use crate::wal::WalFileSet;
-use crate::{LogSync, ShutdownHandle, reader, writer};
+use crate::{reader, writer, LogSync, ShutdownHandle, WalStatusHandle};
 use openraft::RaftTypeConfig;
 use std::fs;
 use std::marker::PhantomData;
@@ -21,6 +21,7 @@ where
     wal: Arc<RwLock<WalFileSet>>,
     pub writer: flume::Sender<writer::Action>,
     pub reader: flume::Sender<reader::Action>,
+    status: WalStatusHandle,
     _marker: PhantomData<T>,
 }
 
@@ -54,7 +55,7 @@ where
             let meta = Metadata::read_or_create(&base_path)?;
             let meta = Arc::new(RwLock::new(meta));
 
-            let (writer, wal) = writer::spawn(
+            let (writer, wal, status) = writer::spawn(
                 base_path,
                 lockfile,
                 sync,
@@ -69,6 +70,7 @@ where
                 wal,
                 writer,
                 reader,
+                status,
                 _marker: Default::default(),
             })
         })
@@ -97,7 +99,7 @@ where
         task::spawn_blocking(move || {
             let meta = Metadata::read_or_create(&base_path)?;
             let meta = Arc::new(RwLock::new(meta));
-            let (writer, _) = writer::spawn(
+            let (writer, _, _) = writer::spawn(
                 base_path,
                 lockfile,
                 LogSync::ImmediateAsync,
@@ -112,6 +114,11 @@ where
 
     pub fn shutdown_handle(&self) -> ShutdownHandle {
         ShutdownHandle::new(self.writer.clone(), self.reader.clone())
+    }
+
+    #[must_use]
+    pub fn status_handle(&self) -> WalStatusHandle {
+        self.status.clone()
     }
 
     pub async fn stop(self) -> Result<(), Error> {

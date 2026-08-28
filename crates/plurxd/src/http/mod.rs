@@ -9,6 +9,7 @@ mod analysis;
 mod auth;
 mod browse;
 mod cluster;
+pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
 mod dto;
@@ -67,6 +68,7 @@ use axum::Router;
 
 use crate::state::AppState;
 use plurx_core::cluster::membership::LocalServingRole;
+use serde::{Deserialize, Serialize};
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -110,6 +112,15 @@ pub fn router(state: AppState) -> Router {
             post(cluster::issue_learner_join_token),
         )
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/status", get(cluster_operations::aggregate))
+        .route(
+            "/cluster/support-bundle",
+            get(cluster_operations::support_bundle),
+        )
+        .route(
+            "/cluster/nodes/{node_id}/restart-preparation",
+            post(cluster_operations::prepare_restart).delete(cluster_operations::cancel_restart),
+        )
         .route(
             "/cluster/nodes/{node_id}/promote",
             post(cluster::promote_node),
@@ -343,6 +354,10 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(system::metrics))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
         .route(
+            cluster_operations::INTERNAL_PATH,
+            get(cluster_operations::local),
+        )
+        .route(
             crate::media_pool::SNAPSHOT_PATH,
             get(internal_media::snapshot),
         )
@@ -431,7 +446,15 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     {
         return true;
     }
-    if method == Method::GET && path == "/api/v1/cluster/nodes" {
+    if method == Method::GET
+        && matches!(
+            path,
+            "/api/v1/cluster/nodes"
+                | "/api/v1/cluster/status"
+                | "/api/v1/cluster/support-bundle"
+                | cluster_operations::INTERNAL_PATH
+        )
+    {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/leave" {
@@ -602,28 +625,69 @@ async fn healthz() -> &'static str {
     "ok\n"
 }
 
-/// Readiness: this node can do work (storage answers).
-async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    if let Some(policy) = state.serving.http_policy("/readyz") {
-        if policy.status != 200 {
-            return (
-                StatusCode::from_u16(policy.status).expect("serving policy status"),
-                policy.body,
-            );
-        }
-    }
-    // A fresh quorum watermark is already a recent replicated-store proof.
-    // Do not turn readiness into another multi-second Store request exactly
-    // when an isolated node needs to self-fence promptly.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReadinessFailure {
+    QuorumUnavailable,
+    StoreUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReadinessEvaluation {
+    pub(crate) ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// One typed readiness decision shared by `/readyz` and cluster status.
+///
+/// Replicated nodes use only the passive serving fence. A local SQLite node
+/// retains its existing bounded Store ping because it has no quorum proof.
+pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
     if state.serving.is_quorum_managed() {
-        return (StatusCode::OK, "ready\n");
+        return if state.serving.is_ready() {
+            ReadinessEvaluation {
+                ready: true,
+                reason: None,
+            }
+        } else {
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::QuorumUnavailable),
+            }
+        };
     }
     match state.store.ping().await {
-        Ok(()) => (StatusCode::OK, "ready\n"),
+        Ok(()) => ReadinessEvaluation {
+            ready: true,
+            reason: None,
+        },
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n")
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::StoreUnavailable),
+            }
         }
+    }
+}
+
+/// Readiness: this node can do work (storage answers).
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    match evaluate_readiness(&state).await {
+        ReadinessEvaluation { ready: true, .. } => (StatusCode::OK, "ready\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::QuorumUnavailable),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "quorum unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::StoreUnavailable),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            ready: false,
+            reason: None,
+        } => (StatusCode::SERVICE_UNAVAILABLE, "readiness unknown\n"),
     }
 }
 
@@ -632,6 +696,29 @@ async fn mutable_media_serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
+        request.method().as_str(),
+        request.uri().path(),
+    );
+    let _restart_admission = if starts_media {
+        match state.serving.try_restart_admission().await {
+            Some(admission) => Some(admission),
+            None => {
+                let mut response = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    crate::serving_fence::RESTART_DRAIN_JSON,
+                )
+                    .into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                return response;
+            }
+        }
+    } else {
+        None
+    };
     let Some(policy) = state.serving.http_policy(request.uri().path()) else {
         return next.run(request).await;
     };
@@ -1032,6 +1119,14 @@ mod tests {
     async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
         let (app, state) = test_app_with_state();
         state.serving.validation_set_ready(false);
+
+        assert_eq!(
+            evaluate_readiness(&state).await,
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::QuorumUnavailable),
+            }
+        );
 
         let (status, body) = call_text(&app, get("/healthz", None)).await;
         assert_eq!(status, StatusCode::OK);

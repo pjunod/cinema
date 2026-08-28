@@ -44,11 +44,18 @@ function shippedSource(name) {
 const BORROWED = [
   "esc",
   "fmtAgo",
+  "fmtBytes",
   "replicationText",
   "clusterQuorum",
   "clusterStateView",
   "membershipRefusalText",
   "clusterNodeRow",
+  "clusterOperationAge",
+  "clusterOperationReason",
+  "clusterOperationsUnavailable",
+  "clusterOperationsNodeRow",
+  "clusterRestartPreparationHtml",
+  "clusterOperationsCard",
   "clusterRefusalHtml",
   "joinPanel",
   "leavePanel",
@@ -152,6 +159,83 @@ function status(availability, nodes) {
   };
 }
 
+function operationStatus(membership, { safe = true, unreachable = false } = {}) {
+  const observations = membership.nodes.map((entry, index) => ({
+    membership: entry,
+    observation: unreachable && index === 1 ? "unreachable" : "answered",
+    sample_age_ms: 120,
+    error_class: unreachable && index === 1 ? "unreachable" : null,
+    status:
+      unreachable && index === 1
+        ? null
+        : {
+            observed_at_unix_ms: Date.now(),
+            node_id: entry.node_id,
+            raft_id: entry.raft_id,
+            hostname: entry.hostname,
+            build: "v0.2.7-operations",
+            protocol_min: 5,
+            protocol_max: 6,
+            process: { live: true },
+            serving: { ready: true },
+            raft: {
+              sample_valid: true,
+              watermark_valid: true,
+              sample_age_seconds: 0,
+              watermark_age_millis: 50,
+              current_term: 81,
+              leader_id: 1,
+              is_leader: entry.raft_id === 1,
+              applied_index: 482191,
+              commit_index: 482191,
+              apply_lag_entries: 0,
+            },
+            wal: {
+              available: true,
+              snapshot: {
+                state: "open",
+                lock_owned: true,
+                segment_count: 3,
+                allocated_bytes: 6291456,
+                first_retained_index: 480000,
+                last_log_index: 482191,
+                last_purged_index: 479999,
+                last_durable_index: 482191,
+                last_sync_unix_ms: Date.now(),
+                last_error: null,
+                last_recovery: null,
+              },
+            },
+            snapshot: {
+              available: true,
+              build_ok_count: 9,
+              build_error_count: 0,
+              install_ok_count: 2,
+              install_error_count: 0,
+            },
+            media: { local_active_sessions: 0, drained: true },
+          },
+  }));
+  return {
+    membership,
+    nodes: observations,
+    verdict: {
+      safe_to_restart_one: safe && !unreachable,
+      candidate_node_id: safe && !unreachable ? membership.nodes[1].node_id : null,
+      blockers: unreachable
+        ? [
+            {
+              code: "voter_not_observed",
+              node_id: membership.nodes[1].node_id,
+              message: "a voter did not answer the direct authenticated status probe",
+            },
+          ]
+        : [],
+      warnings: [],
+    },
+  };
+}
+
 // ---- the two-voter state is the point -------------------------------------
 
 test("two voters render as a reconfiguration in progress, never as redundancy", () => {
@@ -209,6 +293,134 @@ test("quorum arithmetic matches Raft majorities", () => {
   assert.deepEqual(ui.clusterQuorum(3), { majority: 2, tolerates: 1 });
   assert.deepEqual(ui.clusterQuorum(4), { majority: 3, tolerates: 1 });
   assert.deepEqual(ui.clusterQuorum(5), { majority: 3, tolerates: 2 });
+});
+
+test("operations card renders the server rollout verdict and direct evidence", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterOperationsCard(operationStatus(membership));
+  assert.match(html, /Ready to restart one voter/);
+  assert.match(html, /3 voters · majority 2 · 3 ready/);
+  assert.match(html, /Follower · term 81 · lag 0/);
+  assert.match(html, /open.*3 segments.*6\.0 MB.*durable 482191/s);
+  assert.match(html, /Unknown here — drain proxy connections separately/);
+  assert.match(html, /v0\.2\.7-operations/);
+});
+
+test("an unreachable voter is written as a blocker, never a healthy row", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterOperationsCard(
+    operationStatus(membership, { safe: false, unreachable: true }),
+  );
+  assert.match(html, /Do not restart another voter/);
+  assert.match(html, /voter not observed/);
+  assert.match(html, /Not observed · unreachable/);
+  const nodeBAt = html.indexOf('<div class="clhost">node-b');
+  const nodeBRow = html.slice(
+    html.lastIndexOf("<tr>", nodeBAt),
+    html.indexOf("</tr>", nodeBAt) + 5,
+  );
+  assert.doesNotMatch(nodeBRow, /Ready/);
+});
+
+test("election and fenced fixtures state why rollout is blocked", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const election = operationStatus(membership, { safe: false });
+  election.nodes[2].status.raft.current_term = 82;
+  election.nodes[2].status.raft.sample_valid = false;
+  election.verdict.blockers = [{
+    code: "leader_term_disagreement",
+    message: "voters do not agree on one current term and known leader",
+  }];
+  const electionHtml = ui.clusterOperationsCard(election);
+  assert.match(electionHtml, /term disagreement/);
+  assert.match(electionHtml, /stale or incomplete proof/);
+  assert.match(electionHtml, /leader term disagreement/);
+
+  const fenced = operationStatus(membership, { safe: false });
+  fenced.nodes[1].status.serving = { ready: false, reason: "quorum_stale" };
+  fenced.verdict.blockers = [{
+    code: "voter_not_ready",
+    node_id: "node-b",
+    message: "a voter is fenced from serving new work",
+  }];
+  const fencedHtml = ui.clusterOperationsCard(fenced);
+  assert.match(fencedHtml, /Fenced: quorum stale/);
+  assert.match(fencedHtml, /voter not ready.*node-b/s);
+});
+
+test("build skew and WAL errors remain visible in summary and node evidence", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const skew = operationStatus(membership);
+  skew.nodes[2].status.build = "v0.2.8-next";
+  skew.verdict.warnings = [{
+    code: "mixed_builds",
+    message: "voters are directly observed on mixed builds",
+  }];
+  const skewHtml = ui.clusterOperationsCard(skew);
+  assert.match(skewHtml, /2 observed builds/);
+  assert.match(skewHtml, /mixed builds/);
+  assert.match(skewHtml, /v0\.2\.8-next/);
+
+  const walError = operationStatus(membership, { safe: false });
+  walError.nodes[1].status.wal.snapshot.state = "error";
+  walError.nodes[1].status.wal.snapshot.last_error = {
+    observed_at_unix_ms: Date.now(),
+    message: "durability proof failed",
+  };
+  walError.verdict.blockers = [{
+    code: "wal_not_healthy",
+    node_id: "node-b",
+    message: "a voter's live WAL reports an error",
+  }];
+  const walHtml = ui.clusterOperationsCard(walError);
+  assert.match(walHtml, /wal not healthy.*node-b/s);
+  assert.match(walHtml, /durability proof failed/);
+});
+
+test("stale samples and four-voter-one-down fixtures never imply safety", () => {
+  const ui = sandbox();
+  const membership = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "voter"),
+  ]);
+  const stale = operationStatus(membership, { safe: false });
+  stale.nodes[1].observation = "invalid_response";
+  stale.nodes[1].error_class = "stale_peer_sample";
+  stale.verdict.blockers = [{
+    code: "voter_not_observed",
+    node_id: "node-b",
+    message: "a voter did not answer with a fresh sample",
+  }];
+  const staleHtml = ui.clusterOperationsCard(stale);
+  assert.match(staleHtml, /Not observed · stale peer sample/);
+  assert.match(staleHtml, /Do not restart another voter/);
+
+  const oneDown = operationStatus(membership, { safe: false, unreachable: true });
+  const oneDownHtml = ui.clusterOperationsCard(oneDown);
+  assert.match(oneDownHtml, /4 voters · majority 3 · 3 ready/);
+  assert.match(oneDownHtml, /Do not restart another voter/);
 });
 
 // ---- the never-joined install is the common one ---------------------------
@@ -735,8 +947,9 @@ test("the Cluster tab is registered and dispatched", () => {
   assert.match(SHIPPED_UI, /if\(tab==="cluster"\)\s*return clusterPanel\(d\)/);
   // The active-tab manifest fetches this roster on first Cluster open; it is
   // absent from every other tab's dependency wave.
-  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\[\]\}/);
+  assert.match(SHIPPED_UI, /cluster:\{required:\["cluster"\],secondary:\["clusterOps"\]\}/);
   assert.match(SHIPPED_UI, /cluster:\(\)=>api\("\/cluster\/nodes"\)/);
+  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)/);
   assert.equal(
     /Promise\.all\(\[[^\]]*cluster\/nodes/.test(SHIPPED_UI),
     false,
@@ -763,7 +976,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   }
 });
 
-test("this panel calls only the six cluster endpoints the node API ships", () => {
+test("this panel calls only the nine cluster endpoints the node API ships", () => {
   const called = new Set();
   const CALL = /api\(\s*([`"'])(\/cluster[^`"']*)\1/g;
   for (const [, , route] of SHIPPED_UI.matchAll(CALL)) {
@@ -780,6 +993,9 @@ test("this panel calls only the six cluster endpoints the node API ships", () =>
       "/cluster/nodes",
       "/cluster/nodes/<id>",
       "/cluster/nodes/<id>/promote",
+      "/cluster/nodes/<id>/restart-preparation",
+      "/cluster/status",
+      "/cluster/support-bundle",
     ],
   );
 });
