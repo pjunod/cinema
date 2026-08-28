@@ -1,7 +1,7 @@
 # Playback control protocol M4 — one producer deadline
 
 **Status:** implementation contract
-**Baseline:** `origin/main` at `9cd16d05` (PR #617)
+**Baseline:** `origin/main` at `9063bb1e` (PR #626)
 **Parent design:**
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md)
 **Delivery ledger:**
@@ -74,6 +74,7 @@ The initial `BeginProducerAttempt` receives one bounded
 
 ```text
 InitialProducerPolicy
+  presentation_contract_fingerprint
   startup_budget
   progress_budget
   exit_classification_budget
@@ -100,10 +101,13 @@ Exit classification uses a five-second mode of that same producer deadline.
 duration, valid exact-attempt ENDLIST is sufficient for
 `complete_unverified_duration`; absence of ENDLIST is never completion.
 
-`ValidatedRetryRecipe` is an opaque actor key plus a fingerprint; the session
-executor retains the immutable concrete command inputs. For a transcode it
-names either the same encoder with the proved CPU/color-safe pipeline, or the
-software encoder with its family-correct rate control and admission change.
+`ValidatedRetryRecipe` is an opaque actor key plus a recipe fingerprint and
+the exact frozen presentation-contract fingerprint; the session executor
+retains the immutable concrete command inputs. The actor retains that same
+presentation-contract fingerprint in `InitialProducerPolicy` and requires an
+exact match both when emitting and admitting `Retry`. For a transcode the
+recipe names either the same encoder with the proved CPU/color-safe pipeline,
+or the software encoder with its family-correct rate control and admission change.
 If the current pipeline has no color-safe fallback, there is no retry. It is
 never a blanket hardware-to-software rule. For copy it names the exact legacy
 ffmpeg HLS-muxer arguments.
@@ -126,7 +130,8 @@ ProducerControl
   phase: absent | starting | running | hold_requested | held |
          classifying_exit | decided | complete | terminal
   attempt
-  published
+  metadata_response_authorized
+  producer_media_published
   last_progress_at
   progress_deadline: None | ProducerProgressDeadline(mode, instant)
   pending_action: None | PendingProducerAction
@@ -189,8 +194,10 @@ Before the first advancing progress event, the deadline is
 to the event's fenced `published_at + progress_budget`. A source observation
 timestamp remains telemetry and cannot backdate or extend the actor's ingress
 deadline. Speed-only telemetry updates status but does not prove advancing
-output and cannot reset the deadline. Publication sets `published=true`; it
-does not itself excuse a producer that has stopped advancing.
+output and cannot reset the deadline. Attempt-bound response authorization
+sets `producer_media_published=true`; it does not itself excuse a producer that
+has stopped advancing. Generation-stable metadata authorization is tracked
+separately and does not change retry eligibility or the producer deadline.
 
 The actor accepts `ApplyProducerFlow` with the exact attempt, a monotonic flow
 revision, and the complete evaluated inputs for demand, time-ahead, byte, disk,
@@ -325,9 +332,11 @@ cutoff starts, the actor performs it without awaiting external work:
    precedence;
 5. apply response-publication admissions, successful flow acknowledgements,
    copy classifications, progress, and exit facts in their ingress sequence;
-6. let an accepted publication convert the pending verdict to a
-   post-publication failure, let accepted progress rearm, and only then emit a
-   producer decision if the exact armed deadline is still due; and
+6. let an accepted attempt-media publication convert only an uncommitted
+   provisional due observation to a post-publication failure, let accepted
+   progress rearm, and only then emit a producer decision if the exact armed
+   deadline is still due; an immutable `pending_decision` can never be
+   converted; and
 7. release both fences and perform any wake or external action. Every retained
    producer batch or command envelope then re-enters the same due-first
    dispatch one item at a time: reread `now`, run any now-due cutoff, and only
@@ -355,26 +364,76 @@ This gives deterministic outcomes under scheduler delay:
 ### 3.5 Response-publication fence
 
 Retry eligibility and response visibility share one actor linearization point.
-After a handler has prepared a playlist, init, subtitle, or segment response,
-but before it returns a body or exposes a reader, it submits
-`AuthorizeResponsePublication` with the exact attempt, object identity, and
-object kind. The actor:
+Every successful or bodyless response resolved from a live rolling generation
+crosses `AuthorizeResponsePublication` after it is fully prepared or opened
+but before a body or reader becomes visible. Typed startup/failure responses
+that expose no resolved producer object do not claim media publication: a
+generation-fenced `503` may report starting or retry-pending state, a
+decision-fenced `502` may report final producer failure, and a no-actor `404`
+reports that the capability is gone. The prepared media response carries one
+of three bounded bindings. Classification follows the body's actual data
+dependencies, not its route name:
 
-- rejects a stale, terminal, prepublication-failed, or already-retrying
-  attempt;
-- conservatively sets generation `published=true` before it replies yes; and
-- records the object's admitted published frontier when applicable.
+- `generation_metadata` contains only immutable delivery-generation facts and
+  relative capability URLs. The actor verifies the live generation and frozen
+  presentation contract but does not set `producer_media_published`, consume
+  the retry token, or alter the producer deadline;
+- `attempt_media` carries the exact producer attempt and bounded object
+  identity. The actor rejects a stale, terminal, prepublication-failed,
+  already-decided, or retrying attempt, atomically sets
+  `producer_media_published=true` before replying yes, and records the admitted
+  object frontier when applicable; and
+- `protocol_only` is reserved for a live-generation protocol response that
+  contains no producer-object-derived fact. It records no publication, lease
+  renewal, or frontier progress.
 
-Cancellation after authorization remains publication: bytes might have become
-visible, so retry must fail closed. Direct segment requests and guessed segment
-paths use this same admission; response-EOF media commit remains a separate
-lease/fetched-frontier fact. The compatibility playlist flag is updated only
+The following classification is normative:
+
+| Prepared response | Binding | Retry effect |
+|---|---|---|
+| Synthesized master using only a frozen presentation contract | `generation_metadata` | none |
+| Master whose body depends on attempt-produced init, playlist, or timeline data | `attempt_media` | consumes availability |
+| High-tier master route returning the live media-playlist envelope | `attempt_media` | consumes availability |
+| Video media playlist | `attempt_media` | consumes availability |
+| Subtitle media playlist or VTT segment | `attempt_media` | consumes availability |
+| Init or media segment, any satisfiable range, or `304` existence confirmation | `attempt_media` | consumes availability |
+| Unsatisfiable `416` carrying the opened object's length or ETag | `attempt_media` | consumes availability |
+| Internal init or playlist probe that produces no response | no admission | none |
+
+Subtitle declarations may be generation metadata inside a frozen master.
+Subtitle playlists and VTT bodies are attempt media because their windows and
+timelines depend on the exact video attempt. Unknown or unproved response
+dependencies default to `attempt_media`.
+
+The session generation freezes a `PresentationContract` before serving stable
+metadata. It contains every master-affecting source, track, codec, HDR,
+dimension, bitrate, frame-rate, URL-topology, and high-tier-collapse fact.
+Request-time master rendering cannot reread a mutable library row or probe the
+current attempt's init. The initial policy and validated retry recipe carry the
+same presentation-contract fingerprint, and the actor compares it at Retry
+emission and admission. A mismatch makes transparent same-generation retry
+illegal.
+
+Cancellation after attempt-media authorization remains publication because
+bytes might have escaped. Cancellation after generation-metadata authorization
+does not affect retry eligibility. Direct and guessed segment paths use the
+same admission. Response-EOF media commit remains a separate token-authorized
+lease and fetched-frontier fact. Compatibility playlist projection occurs only
 after actor authorization and never authorizes a response itself.
 
-Retry emission, retry admission, and final successor installation recheck this
-same actor state. Therefore a response admission that wins first forbids an
-in-place retry, while a retry decision that wins first prevents any predecessor
-body from becoming visible.
+The manager confirms exact `Arc<Session>` registry identity before and after
+the actor reply and returns an opaque, non-clone authorization token. Buffered
+completion and streamed EOF carry that token instead of reconstructing
+authority from strings. Rolling cached sessions use the actor path; immutable
+VOD responses use the same manager facade with VOD-registry authorization.
+
+Retry emission, retry admission, and final successor installation recheck the
+same actor state. Attempt-media authorization at or before the armed deadline
+is applied before final cutoff and prevents `Retry`; authorization after the
+deadline loses to the retained decision. A `Retry` decision that linearizes
+first prevents a predecessor body from becoming visible. Generation metadata
+does not participate in that retry race and remains admissible during a
+compatible in-place retry while the generation remains live.
 
 ## 4. Decisions and action execution
 
@@ -603,16 +662,19 @@ producer decision.
 
 ### 4.2 Pre-publication retry
 
-`Retry` is legal only when no response has been publication-authorized and the
-generation retry token is available for this reason. Emission consumes that
-token atomically. The process executor owns an explicit transaction:
+`Retry` is legal only when no attempt-bound producer-media response has been
+publication-authorized and the generation retry token is available for this
+reason. Generation-stable metadata authorization does not consume or suppress
+the retry. Emission consumes that token atomically. The process executor owns
+an explicit transaction:
 
 1. kills and reaps the exact failed attempt, if it is still present;
 2. clears the name-reusing session directory and verifies it is empty;
 3. resets the compatibility catalog/frontiers and releases predecessor scratch
    byte accounting only after the verified clear;
-4. calls the distinct `AdmitProducerRetry` command, which rechecks no response
-   admission and allocates a successor with retry state `consumed`;
+4. calls the distinct `AdmitProducerRetry` command, which rechecks that no
+   attempt-media response was authorized and allocates a successor with retry
+   state `consumed`;
 5. spawns the immutable validated recipe into a new exact-attempt supervisor;
 6. asks the actor to authorize final exact-attempt proxy installation;
 7. installs the proxy under the process-slot mutex; and
@@ -652,10 +714,11 @@ probe, and the producer deadline.
 
 ### 4.4 Post-publication failure
 
-Once anything has been published for the generation, timeout, non-success
-exit, or `unsupported` cannot replace its producer in place. The actor emits
-one `Fail`, the executor kills/reaps only the exact failed attempt, and the
-actor retains one internal proposal:
+Once attempt-bound producer media has been published for the generation,
+timeout, non-success exit, or `unsupported` cannot replace its producer in
+place. Generation-stable metadata alone does not close the validated retry
+window. The actor emits one `Fail`, the executor kills/reaps only the exact
+failed attempt, and the actor retains one internal proposal:
 
 ```json
 {
@@ -763,7 +826,8 @@ Activity and session status add:
 - pending probe sequence, attempt, active state (`queued` or `reading`),
   progress-deadline milliseconds remaining, and last settled outcome
   (`published`, `cancelled`, or `stale`);
-- current attempt and whether anything is published;
+- current attempt, `metadata_response_authorized`, and
+  `producer_media_published`;
 - retry state: `unavailable`, `available`, or `consumed`;
 - immutable last typed producer-decision reason and decision sequence;
 - completion verification: `verified_duration`, `unverified_duration`, or
@@ -903,7 +967,13 @@ M4 is complete only when all of the following are true:
 - the actor owns the sole rolling producer deadline;
 - fault injection proves one and only one pre-publication retry;
 - copy `Unsupported` consumes that same retry right;
-- every response kind crosses exact actor publication admission;
+- every successful or bodyless response resolved from a live rolling
+  generation crosses exact actor publication admission with a
+  dependency-correct `generation_metadata`, `attempt_media`, or
+  `protocol_only` binding; actor-derived startup/failure and no-actor errors
+  follow their explicit typed-error fences;
+- master-only traffic leaves retry available, while every attempt-media
+  response atomically closes the retry window before it becomes visible;
 - no post-publication event swaps or restarts the child;
 - a post-publication failure yields exactly one stable action proposal;
 - M4 emits no incomplete `prepare_replacement` wire action;
