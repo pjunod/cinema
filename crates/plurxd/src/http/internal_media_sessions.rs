@@ -50,6 +50,14 @@ impl IntoResponse for RemoteStartError {
 const REMOTE_ABORT_CAPACITY: usize = 128;
 const REMOTE_ABORT_WAIT: Duration = Duration::from_secs(5);
 
+fn admit_remote_start_serving_authority(
+    state: &AppState,
+) -> Result<(crate::serving_fence::ServingAuthority, u64), StatusCode> {
+    let authority = state.serving.authority();
+    let generation = authority.admit().ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    Ok((authority, generation))
+}
+
 pub(super) async fn pin_shared_session_before_deadline<F>(
     deadline: tokio::time::Instant,
     pin: F,
@@ -113,6 +121,8 @@ pub(crate) async fn start(
         .try_restart_admission()
         .await
         .ok_or(RemoteStartError::RestartDrain)?;
+    let (serving_authority, admitted_serving_generation) =
+        admit_remote_start_serving_authority(&state)?;
     let request = serde_json::from_slice::<RemoteStartRequest>(&body)
         .ok()
         .filter(RemoteStartRequest::is_valid)
@@ -138,6 +148,7 @@ pub(crate) async fn start(
                 request.user_id,
                 &user.username,
                 start_deadline,
+                admitted_serving_generation,
             )
             .await?;
         // Creation publishes the local worker before the shared-cache pin can
@@ -153,6 +164,11 @@ pub(crate) async fn start(
             request.incarnation_id.clone(),
             Some(started.replacement),
         );
+        if !serving_authority.is_current(admitted_serving_generation) {
+            return Err(crate::transcode::serving_fence_error(
+                "the node lost authority before the remote worker could be pinned",
+            ));
+        }
         let provisional_pin_ms =
             i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
         let pinned = pin_shared_session_before_deadline(
@@ -167,6 +183,11 @@ pub(crate) async fn start(
         .await?;
         if !pinned {
             return Err("shared cache generation changed before activation".to_owned());
+        }
+        if !serving_authority.is_current(admitted_serving_generation) {
+            return Err(crate::transcode::serving_fence_error(
+                "the node lost authority before remote activation confirmation",
+            ));
         }
         let response = RemoteStartResponse::from(started.info);
         let confirmation_state = start_state.clone();
@@ -223,6 +244,8 @@ pub(crate) async fn start(
         .map_err(|error| {
             if error.contains("already used") {
                 StatusCode::CONFLICT
+            } else if crate::transcode::is_serving_fence_error(&error) {
+                StatusCode::SERVICE_UNAVAILABLE
             } else if crate::transcode::is_retryable_capacity_error(&error) {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
@@ -646,6 +669,26 @@ async fn control_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn remote_start_requires_current_local_serving_authority() {
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let (_, first_generation) =
+            admit_remote_start_serving_authority(&state).expect("initial serving authority");
+
+        state.serving.validation_set_ready(false).await;
+        assert!(matches!(
+            admit_remote_start_serving_authority(&state),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        ));
+
+        state.serving.validation_set_ready(true).await;
+        let (authority, recovered_generation) =
+            admit_remote_start_serving_authority(&state).expect("recovered serving authority");
+        assert_ne!(recovered_generation, first_generation);
+        assert!(authority.is_current(recovered_generation));
+        assert!(!authority.is_current(first_generation));
+    }
 
     #[tokio::test]
     async fn remote_start_pin_error_is_returned_to_the_guarded_start() {

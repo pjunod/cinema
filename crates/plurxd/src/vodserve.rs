@@ -329,6 +329,51 @@ pub struct VodAttribution<'a> {
     pub supersession_user: &'a str,
 }
 
+/// A cluster start's synchronous serving admission. The generation is
+/// captured before any slow VOD preparation begins and is checked again at
+/// the final reader/registry attachment, so a loss followed by recovery
+/// cannot let an old admission publish new media.
+pub(crate) struct VodServingAdmission {
+    authority: crate::serving_fence::ServingAuthority,
+    generation: u64,
+    deadline: Instant,
+    #[cfg(test)]
+    pause_before_commit: Option<Arc<tokio::sync::Barrier>>,
+}
+
+impl VodServingAdmission {
+    pub(crate) fn new(
+        authority: crate::serving_fence::ServingAuthority,
+        generation: u64,
+        deadline: Instant,
+    ) -> Self {
+        Self {
+            authority,
+            generation,
+            deadline,
+            #[cfg(test)]
+            pause_before_commit: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn with_pause_before_commit(mut self, pause: Arc<tokio::sync::Barrier>) -> Self {
+        self.pause_before_commit = Some(pause);
+        self
+    }
+
+    async fn commit_guard_before(&self) -> Option<tokio::sync::OwnedRwLockReadGuard<()>> {
+        #[cfg(test)]
+        if let Some(pause) = self.pause_before_commit.as_ref() {
+            pause.wait().await;
+            pause.wait().await;
+        }
+        self.authority
+            .commit_guard_before(self.generation, self.deadline)
+            .await
+    }
+}
+
 /// The exact public-release generation that must remain closed across a slow
 /// VOD resurrection's final registry attachment.
 pub(crate) struct VodReleaseFence<'a> {
@@ -1254,8 +1299,32 @@ impl VodServe {
         attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
-        self.try_create_with_release_fence(req, file, settings, attribution, session_id, None)
+        self.try_create_with_release_fence(req, file, settings, attribution, session_id, None, None)
             .await
+    }
+
+    /// Cluster-only VOD creation. Unlike the legacy local entrypoint, this
+    /// carries a serving admission captured before preparation and fences the
+    /// final attachment against the corresponding quorum-loss transition.
+    pub(crate) async fn try_create_cluster(
+        &self,
+        req: &SessionRequest,
+        file: &MediaFile,
+        settings: &VodSettings,
+        attribution: VodAttribution<'_>,
+        session_id: String,
+        serving_admission: VodServingAdmission,
+    ) -> Result<VodStart, String> {
+        self.try_create_with_release_fence(
+            req,
+            file,
+            settings,
+            attribution,
+            session_id,
+            None,
+            Some(serving_admission),
+        )
+        .await
     }
 
     /// Prepare a resurrection normally, then serialize only its final
@@ -1279,6 +1348,7 @@ impl VodServe {
             attribution,
             session_id,
             Some(release_fence),
+            None,
         )
         .await
     }
@@ -1341,6 +1411,7 @@ impl VodServe {
         attribution: VodAttribution<'_>,
         session_id: String,
         release_fence: Option<VodReleaseFence<'_>>,
+        serving_admission: Option<VodServingAdmission>,
     ) -> Result<VodStart, String> {
         let SessionKind::Copy {
             aac,
@@ -1522,37 +1593,38 @@ impl VodServe {
         let previous_rendition = sessions
             .get(&session_id)
             .and_then(|session| session.rendition.as_ref().map(Arc::clone));
-        match previous_rendition {
-            Some(previous) if !Arc::ptr_eq(&previous, &rendition) => {
-                let mut previous_readers = previous.readers.lock().await;
-                let mut replacement_readers = rendition.readers.lock().await;
-                previous_readers.remove(&session_id);
-                if previous_readers.is_empty() {
+        let mut previous_readers = match previous_rendition.as_ref() {
+            Some(previous) if !Arc::ptr_eq(previous, &rendition) => {
+                Some(previous.readers.lock().await)
+            }
+            _ => None,
+        };
+        let mut replacement_readers = rendition.readers.lock().await;
+        let _serving_transition = if let Some(admission) = serving_admission.as_ref() {
+            Some(admission.commit_guard_before().await.ok_or_else(|| {
+                crate::transcode::serving_fence_error(crate::serving_fence::SERVING_FENCED_MESSAGE)
+            })?)
+        } else {
+            None
+        };
+        if let Some(previous_readers) = previous_readers.as_mut() {
+            previous_readers.remove(&session_id);
+            if previous_readers.is_empty() {
+                if let Some(previous) = previous_rendition.as_ref() {
                     *previous.dormant_since.lock().expect("dormant lock") = Some(Instant::now());
                 }
-                replacement_readers.insert(
-                    session_id.clone(),
-                    Reader {
-                        frontier: start_entry,
-                        last_served: None,
-                    },
-                );
-                *rendition.dormant_since.lock().expect("dormant lock") = None;
-                sessions.insert(session_id.clone(), replacement);
-            }
-            _ => {
-                let mut replacement_readers = rendition.readers.lock().await;
-                replacement_readers.insert(
-                    session_id.clone(),
-                    Reader {
-                        frontier: start_entry,
-                        last_served: None,
-                    },
-                );
-                *rendition.dormant_since.lock().expect("dormant lock") = None;
-                sessions.insert(session_id.clone(), replacement);
             }
         }
+        replacement_readers.insert(
+            session_id.clone(),
+            Reader {
+                frontier: start_entry,
+                last_served: None,
+            },
+        );
+        *rendition.dormant_since.lock().expect("dormant lock") = None;
+        sessions.insert(session_id.clone(), replacement);
+        drop(_serving_transition);
         drop(sessions);
         self.emit_lifecycle(
             &session_id,
@@ -6330,6 +6402,81 @@ mod tests {
             "the refusal must be typed: {error}"
         );
         assert!(!serve.owns("sess-a").await);
+    }
+
+    #[tokio::test]
+    async fn serving_loss_racing_final_cluster_attachment_leaves_no_session() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let base = crate::test_tempdir().expect("cluster serving fence base");
+        let (serve, file) = serve_on(base.path()).await;
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = fence.authority();
+        let generation = authority.admit().expect("initial serving authority");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        let create = tokio::spawn({
+            let serve = Arc::clone(&serve);
+            let file = file.clone();
+            let pause = Arc::clone(&pause);
+            async move {
+                serve
+                    .try_create_cluster(
+                        &request("cluster-fenced", 0.0),
+                        &file,
+                        &settings(),
+                        VodAttribution {
+                            user_name: "paul",
+                            item_title: "Fixture",
+                            supersession_user: "[\"user_id\",1]",
+                        },
+                        "cluster-fenced-session".to_owned(),
+                        VodServingAdmission::new(
+                            authority,
+                            generation,
+                            Instant::now() + Duration::from_secs(30),
+                        )
+                        .with_pause_before_commit(pause),
+                    )
+                    .await
+            }
+        });
+
+        pause.wait().await;
+        fence.validation_set_ready(false).await;
+        pause.wait().await;
+        let error = create
+            .await
+            .expect("cluster create task")
+            .expect_err("stale serving authority must refuse final attachment");
+        assert!(crate::transcode::is_serving_fence_error(&error), "{error}");
+        assert!(!serve.owns("cluster-fenced-session").await);
+
+        fence.validation_set_ready(true).await;
+        let recovered_authority = fence.authority();
+        let recovered_generation = recovered_authority
+            .admit()
+            .expect("recovered serving authority");
+        serve
+            .try_create_cluster(
+                &request("cluster-recovered", 0.0),
+                &file,
+                &settings(),
+                VodAttribution {
+                    user_name: "paul",
+                    item_title: "Fixture",
+                    supersession_user: "[\"user_id\",1]",
+                },
+                "cluster-recovered-session".to_owned(),
+                VodServingAdmission::new(
+                    recovered_authority,
+                    recovered_generation,
+                    Instant::now() + Duration::from_secs(30),
+                ),
+            )
+            .await
+            .expect("recovered authority may attach a new VOD session");
+        assert!(serve.owns("cluster-recovered-session").await);
     }
 
     #[tokio::test]

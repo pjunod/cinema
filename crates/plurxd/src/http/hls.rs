@@ -761,6 +761,13 @@ pub async fn create(
             break;
         }
         let result = if candidate == state.node_id {
+            let serving_authority = state.serving.authority();
+            let Some(admitted_serving_generation) = serving_authority.admit() else {
+                last_error = Some(ApiError::ServiceUnavailable(
+                    "the local media worker has no serving authority".to_owned(),
+                ));
+                continue;
+            };
             // Session creation owns a child process before publishing the map
             // entry. An owned task reaches a verdict even if this request is
             // cancelled, and its returned guard cleans the exact late worker
@@ -774,29 +781,33 @@ pub async fn create(
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
             let mut start_task = tokio::spawn(async move {
-                transcode
+                let started = transcode
                     .create_cluster_session(
                         &worker_request,
                         guard_user,
                         &user_name,
                         placement_deadline,
+                        admitted_serving_generation,
                     )
-                    .await
-                    .map(|started| {
-                        let info = started.info;
-                        let session_id = info.session_id.clone();
-                        let response = RemoteStartResponse::from(info);
-                        let guard = StartedSessionGuard::new(
-                            guard_state,
-                            guard_owner,
-                            guard_incarnation,
-                            session_id,
-                            guard_user,
-                            guard_request,
-                            Some(started.replacement),
-                        );
-                        (response, guard)
-                    })
+                    .await?;
+                let info = started.info;
+                let session_id = info.session_id.clone();
+                let response = RemoteStartResponse::from(info);
+                let guard = StartedSessionGuard::new(
+                    guard_state,
+                    guard_owner,
+                    guard_incarnation,
+                    session_id,
+                    guard_user,
+                    guard_request,
+                    Some(started.replacement),
+                );
+                if !serving_authority.is_current(admitted_serving_generation) {
+                    return Err(crate::transcode::serving_fence_error(
+                        "the local worker lost authority before shared-cache pinning",
+                    ));
+                }
+                Ok((response, guard, Some(admitted_serving_generation)))
             });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
                 Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
@@ -828,7 +839,7 @@ pub async fn create(
                         request_claim_id.clone(),
                         None,
                     );
-                    (info, guard)
+                    (info, guard, None)
                 })
                 .map_err(|error| {
                     ApiError::ServiceUnavailable(format!(
@@ -837,11 +848,11 @@ pub async fn create(
                 })
         };
         match result {
-            Ok((info, guard)) if info.is_valid() => {
-                started = Some((candidate, info, guard));
+            Ok((info, guard, serving_generation)) if info.is_valid() => {
+                started = Some((candidate, info, guard, serving_generation));
                 break;
             }
-            Ok((_info, _guard)) => {
+            Ok((_info, _guard, _serving_generation)) => {
                 // The armed guard aborts an invalid local result just as the
                 // peer transport rejects and aborts an invalid remote result.
                 tracing::warn!(
@@ -858,7 +869,7 @@ pub async fn create(
             }
         }
     }
-    let Some((owner_node_id, info, guard)) = started else {
+    let Some((owner_node_id, info, guard, local_serving_generation)) = started else {
         let _ = state
             .store
             .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
@@ -883,6 +894,13 @@ pub async fn create(
         {
             return Err(ApiError::ServiceUnavailable(
                 "shared cache generation changed before session activation".to_owned(),
+            ));
+        }
+        if local_serving_generation
+            .is_some_and(|generation| !state.serving.authority().is_current(generation))
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "the local media worker lost serving authority before activation".to_owned(),
             ));
         }
     }
@@ -1610,7 +1628,9 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
-    if crate::transcode::is_retryable_capacity_error(&error) {
+    if crate::transcode::is_serving_fence_error(&error)
+        || crate::transcode::is_retryable_capacity_error(&error)
+    {
         return ApiError::ServiceUnavailable(error);
     }
     if let Some(reason) = crate::transcode::invalid_reopen_reason(&error) {

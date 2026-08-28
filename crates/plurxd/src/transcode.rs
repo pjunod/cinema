@@ -49,6 +49,7 @@ const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
+const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
 #[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
@@ -118,6 +119,14 @@ fn replacement_deadline_error() -> String {
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
     error.starts_with(RETRYABLE_CAPACITY_PREFIX)
+}
+
+pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {
+    format!("{SERVING_FENCE_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_serving_fence_error(error: &str) -> bool {
+    error.starts_with(SERVING_FENCE_PREFIX)
 }
 
 /// Stable classification for a start this ffmpeg build cannot perform at all.
@@ -6448,6 +6457,12 @@ pub(crate) struct ClusterSessionStart {
     pub(crate) replacement: ClusterReplacementGuard,
 }
 
+#[derive(Clone, Copy)]
+struct ClusterServingAdmission {
+    generation: u64,
+    deadline: tokio::time::Instant,
+}
+
 /// Serializes one player's provisional cluster worker from local creation
 /// through the ingress activation verdict and exact predecessor settlement.
 /// Cluster make-before-break deliberately does not reap the predecessor
@@ -12091,7 +12106,7 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None, None)
+        self.create_session_inner(req, user_name, &supersession_user, None, None, None)
             .await
     }
 
@@ -12103,7 +12118,13 @@ impl TranscodeManager {
         user_id: i64,
         user_name: &str,
         deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        let serving_admission = ClusterServingAdmission {
+            generation: admitted_serving_generation,
+            deadline,
+        };
+        self.require_cluster_serving_authority(serving_admission)?;
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
@@ -12119,10 +12140,35 @@ impl TranscodeManager {
                 "the replacement start expired before it could finish provisional work",
             ));
         }
+        self.require_cluster_serving_authority(serving_admission)?;
         let info = self
-            .create_session_inner(req, user_name, &supersession_user, Some(deadline), None)
+            .create_session_inner(
+                req,
+                user_name,
+                &supersession_user,
+                Some(deadline),
+                None,
+                Some(serving_admission),
+            )
             .await?;
         Ok(ClusterSessionStart { info, replacement })
+    }
+
+    fn require_cluster_serving_authority(
+        &self,
+        admission: ClusterServingAdmission,
+    ) -> Result<(), String> {
+        if tokio::time::Instant::now() >= admission.deadline {
+            return Err(capacity_error(
+                "the replacement start expired before it could finish provisional work",
+            ));
+        }
+        self.serving_authority
+            .is_current(admission.generation)
+            .then_some(())
+            .ok_or_else(|| {
+                serving_fence_error("the node lost authority during cluster session creation")
+            })
     }
 
     /// Acquire the player replacement serialization separately from worker
@@ -12172,6 +12218,7 @@ impl TranscodeManager {
             &supersession_user,
             Some(deadline),
             Some(takeover),
+            None,
         )
         .await
     }
@@ -12231,7 +12278,11 @@ impl TranscodeManager {
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
+        serving_admission: Option<ClusterServingAdmission>,
     ) -> Result<StartInfo, String> {
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
             _ => {
@@ -12247,7 +12298,12 @@ impl TranscodeManager {
         }
         let claim = match req.request_id.as_deref() {
             Some(key) => match self.claim_request(key, req, supersession_user).await? {
-                Claimed::Recovered(info) => return Ok(info),
+                Claimed::Recovered(info) => {
+                    if let Some(admission) = serving_admission {
+                        self.require_cluster_serving_authority(admission)?;
+                    }
+                    return Ok(info);
+                }
                 Claimed::Mine(claim, normalized) => Some((claim, normalized)),
             },
             None => None,
@@ -12260,6 +12316,9 @@ impl TranscodeManager {
             }
             None => (None, req),
         };
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
 
         // Immutable VOD remains first. During the index backfill, a typed
         // prerequisite refusal may use the retained live engine rather than
@@ -12282,6 +12341,7 @@ impl TranscodeManager {
                     supersession_user,
                     replacement_deadline,
                     takeover.is_some(),
+                    serving_admission,
                 )
                 .await;
             match vod {
@@ -12330,6 +12390,7 @@ impl TranscodeManager {
                 supersession_user,
                 replacement_deadline,
                 takeover.is_some(),
+                serving_admission,
             )
             .await?;
         if let Some(claim) = claim {
@@ -12423,7 +12484,11 @@ impl TranscodeManager {
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
+        serving_admission: Option<ClusterServingAdmission>,
     ) -> Result<StartInfo, String> {
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
         if req.presentation != Presentation::Vod {
             return Err(vod_refusal_error(
                 "live_presentation_removed",
@@ -12466,20 +12531,31 @@ impl TranscodeManager {
             .flatten()
             .map(|item| item.title)
             .unwrap_or_else(|| format!("#{}", file.item_id));
-        let start = self
-            .vod
-            .try_create(
-                req,
-                &file,
-                &settings,
-                crate::vodserve::VodAttribution {
-                    user_name,
-                    item_title: &item_title,
-                    supersession_user,
-                },
-                session_id,
-            )
-            .await?;
+        let attribution = crate::vodserve::VodAttribution {
+            user_name,
+            item_title: &item_title,
+            supersession_user,
+        };
+        let start = if let Some(admission) = serving_admission {
+            self.vod
+                .try_create_cluster(
+                    req,
+                    &file,
+                    &settings,
+                    attribution,
+                    session_id,
+                    crate::vodserve::VodServingAdmission::new(
+                        self.serving_authority.clone(),
+                        admission.generation,
+                        admission.deadline.into_std(),
+                    ),
+                )
+                .await?
+        } else {
+            self.vod
+                .try_create(req, &file, &settings, attribution, session_id)
+                .await?
+        };
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
