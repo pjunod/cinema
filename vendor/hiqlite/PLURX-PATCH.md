@@ -58,13 +58,14 @@ Apache-2.0. Plurx carries ten compatibility patches for clustered deployments:
   work receives a stable error instead of a dropped-acknowledgement panic.
 - A client receiving `ForwardToLeader(None, None)` treats it as a definitive
   unaccepted request, probes its configured authenticated peers concurrently,
-  and reconnects in a detached two-second recovery budget before using the
-  existing single retry. Management clients never follow redirects, so their
-  custom API-secret header cannot leave the configured roster. This closes the
-  resumed-follower interval in which the local voter is healthy but has not yet
-  republished the current leader without allowing raw client calls to hang;
-  proxy-mode clients reconnect through the next configured proxy instead of
-  escaping that trust boundary.
+  and reconnects through a detached, bounded discovery and acknowledged stream
+  handoff. Database requests make at most three attempts, recovering after no
+  more than two definitive forwarding refusals; this covers the interval where
+  the first replacement is still learning the election winner without replaying
+  an accepted write or allowing raw client calls to hang. Management clients
+  never follow redirects, so their custom API-secret header cannot leave the
+  configured roster. Proxy-mode clients reconnect through the next configured
+  proxy instead of escaping that trust boundary.
 
 Remove this vendor when an upstream Hiqlite release contains all ten patches
 and Plurx has upgraded to it. Until then, the sparse-roster regression in

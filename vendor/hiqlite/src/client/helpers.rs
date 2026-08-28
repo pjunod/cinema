@@ -6,6 +6,8 @@ use crate::{
 };
 use openraft::RaftMetrics;
 use std::clone::Clone;
+#[cfg(feature = "sqlite")]
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -15,6 +17,13 @@ use tokio::time;
 use tracing::{debug, error, warn};
 
 const PROXY_ROTATION_TIMEOUT: Duration = Duration::from_secs(2);
+/// One election can expose an old leader and then a replacement that has not
+/// learned the winner yet. Both replies are definitive `ForwardToLeader`
+/// refusals, so retry the same unaccepted request after each bounded recovery.
+/// Three attempts cover that two-transition window without making a wedged
+/// cluster unbounded.
+#[cfg(feature = "sqlite")]
+const LEADER_REQUEST_MAX_ATTEMPTS: usize = 3;
 
 async fn first_some<T: Send + 'static>(mut probes: JoinSet<Option<T>>) -> Option<T> {
     while let Some(result) = probes.join_next().await {
@@ -49,7 +58,63 @@ async fn change_leader_and_wait(
         .unwrap_or(false)
 }
 
+#[cfg(feature = "sqlite")]
+async fn retry_request_after_leader_change<T, F, Fut, R, Recovery>(
+    mut request: F,
+    mut recover: R,
+) -> Result<T, Error>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<T, Error>>,
+    R: FnMut(Error) -> Recovery,
+    Recovery: Future<Output = (Error, bool)>,
+{
+    for attempt in 1..=LEADER_REQUEST_MAX_ATTEMPTS {
+        match request().await {
+            Ok(value) => return Ok(value),
+            Err(error) if attempt < LEADER_REQUEST_MAX_ATTEMPTS => {
+                let (error, recovered) = recover(error).await;
+                if !recovered {
+                    return Err(error);
+                }
+                warn!(
+                    attempt,
+                    max_attempts = LEADER_REQUEST_MAX_ATTEMPTS,
+                    "leader changed before accepting request; retrying exact request"
+                );
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the bounded leader retry loop always returns")
+}
+
 impl Client {
+    #[cfg(feature = "sqlite")]
+    pub(crate) async fn retry_db_after_leader_change<T, F, Fut>(
+        &self,
+        mut request: F,
+    ) -> Result<T, Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        retry_request_after_leader_change(
+            || request(),
+            |error| async move {
+                let recovered = self
+                    .was_leader_update_error(
+                        &error,
+                        &self.inner.leader_db,
+                        &self.inner.tx_client_db,
+                    )
+                    .await;
+                (error, recovered)
+            },
+        )
+        .await
+    }
+
     #[inline(always)]
     pub(crate) async fn build_addr(
         &self,
@@ -457,6 +522,7 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::future;
 
     #[tokio::test]
@@ -473,6 +539,7 @@ mod tests {
 
     #[test]
     fn direct_leader_recovery_and_proxy_rotation_keep_distinct_bounds() {
+        assert_eq!(LEADER_REQUEST_MAX_ATTEMPTS, 3);
         assert_eq!(LEADER_DISCOVERY_TIMEOUT, Duration::from_secs(8));
         assert_eq!(
             crate::LEADER_STREAM_CONNECT_TIMEOUT,
@@ -484,6 +551,72 @@ mod tests {
             Duration::from_secs(14)
         );
         assert_eq!(PROXY_ROTATION_TIMEOUT, Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn two_consecutive_unaccepted_requests_recover_before_the_third_attempt() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut results = VecDeque::from([
+            Err(Error::Connect("first leader changed".to_owned())),
+            Err(Error::Connect("replacement still electing".to_owned())),
+            Ok(42_u8),
+        ]);
+
+        let value = retry_request_after_leader_change(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                future::ready(results.pop_front().expect("bounded request attempt"))
+            },
+            |error| {
+                recoveries.fetch_add(1, Ordering::Relaxed);
+                future::ready((error, true))
+            },
+        )
+        .await
+        .expect("the third exact request reaches the stable leader");
+
+        assert_eq!(value, 42);
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(recoveries.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test]
+    async fn leader_retry_stays_bounded_and_does_not_recover_terminal_errors() {
+        let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let error = retry_request_after_leader_change(
+            || {
+                attempts.fetch_add(1, Ordering::Relaxed);
+                future::ready(Err::<(), _>(Error::Connect("still electing".to_owned())))
+            },
+            |error| {
+                recoveries.fetch_add(1, Ordering::Relaxed);
+                future::ready((error, true))
+            },
+        )
+        .await
+        .expect_err("three unaccepted requests exhaust the bound");
+        assert!(error.to_string().contains("still electing"));
+        assert_eq!(attempts.load(Ordering::Relaxed), 3);
+        assert_eq!(recoveries.load(Ordering::Relaxed), 2);
+
+        let terminal_attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let terminal_recoveries = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        retry_request_after_leader_change(
+            || {
+                terminal_attempts.fetch_add(1, Ordering::Relaxed);
+                future::ready(Err::<(), _>(Error::BadRequest("terminal".into())))
+            },
+            |error| {
+                terminal_recoveries.fetch_add(1, Ordering::Relaxed);
+                future::ready((error, false))
+            },
+        )
+        .await
+        .expect_err("a terminal error is returned immediately");
+        assert_eq!(terminal_attempts.load(Ordering::Relaxed), 1);
+        assert_eq!(terminal_recoveries.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(start_paused = true)]
