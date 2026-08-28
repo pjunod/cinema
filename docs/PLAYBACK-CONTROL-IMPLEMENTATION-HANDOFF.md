@@ -7,8 +7,9 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Last formally reviewed head:**
-`841e695fee6c1ca16ac3591f4d496dea710825a0` (unanimously approved by Store,
-lifecycle, and integration reviewers after all 190 owner rows matched;
+`f0c2297c3ec0a598b233e2a2aca73fbb8d165538` (compile repair unanimously
+approved by Store, lifecycle, and integration reviewers after runtime head
+`841e695f` passed its broad review and all 190 owner rows matched;
 earlier rejected heads `9121db03`, `9809d553`, `bb69eb7e`, `31e7d5e2`, and
 `763c230c`)
 **Implementation freeze:** `f02bf5b5a2ed820f99308ad69720bb449bdf3109`
@@ -16,16 +17,19 @@ in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
 **Validation-evidence freeze:** `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`
 for regression-history evidence; owner-inventory reconciliation
 `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`; compile repair
-`ef74b41e57bc26eff06a156024b02029c2c2e768`; and its mapping
-`b1fe8151d566b54a5958a19911743195769aaa86` on branch
+`ef74b41e57bc26eff06a156024b02029c2c2e768`; its mapping
+`b1fe8151d566b54a5958a19911743195769aaa86`; assertion repairs through
+`87a587a3e0a7c56bbb296807772651131cca97c9`; and their mappings
+`fd08622144c64ae9b17d049bcd54cec8b1dacd91` and `87a587a3` on branch
 `codex/playback-control-m4-prepublication`.
 **Current candidate identity:** the PR tip containing this handoff; PR #636's
 body pins the exact full object ID because a commit cannot contain its own hash.
-**Runtime review state:** exact head `841e695f` was unanimously approved
-read-only. Its one full unit invocation stopped at compilation, before any test
-body executed, on 11 Store errors. `ef74b41e` makes the minimal compile-only
-repair and `b1fe8151` maps its evidence. The combined docs-bearing branch tip
-still requires targeted exact-head review before a directly affected rerun.
+**Runtime review state:** exact runtime head `841e695f` and compile-repair head
+`f0c2297c` were unanimously approved read-only. The directly affected rerun
+then compiled successfully and ran 641 tests: 606 passed, 30 hit sandbox
+local-bind denials, and five found stale inventories/high-water expectations.
+Assertion-only repairs through `87a587a3` now require targeted exact-head
+review before only those failed names rerun.
 **Current implementation:** the candidate assembles actor-owned
 prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
@@ -42,10 +46,11 @@ The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
 **Validation state:** `cargo fmt`, static diff inspection, and static ownership
 recounts passed. `make unit` ran exactly once at unanimously approved
-`841e695f`; compilation failed before tests on four nonexistent Hiqlite helper
-calls, six missing test-constant imports, and one SQLite `Option`/mutable-borrow
-shadow. After targeted approval, rerun only the directly affected
-`plurx-core` library and Store-contract targets. PR #626's merged baseline
+`841e695f`; compilation failed before tests on 11 Store errors. After the
+approved compile repair, the directly affected `plurx-core` library and Store
+contracts compiled and ran 641 tests: 606 passed, five deterministic
+assertions are repaired, and 30 socket fixtures require unrestricted local
+binds. Rerun only those failed names after targeted approval. PR #626's merged baseline
 was green in focused Rust 85/85, ownership 7/7, `make check`,
 `make cluster-check`, and hosted run `33129200705`.
 
@@ -450,9 +455,11 @@ containing this handoff was reviewed as `5a9e19ae`: Store and lifecycle
 approved it, while integration found no runtime defect and requested only the
 17 owner-inventory corrections now committed as `31a93198`. The reconciled
 head `841e695f` then received unanimous exact-head approval. Its one full unit
-run stopped during compilation before tests; `ef74b41e` repairs the 11 Store
-errors and `b1fe8151` maps that evidence. The new immutable PR tip must receive
-targeted exact-head approval before the directly affected rerun.
+run stopped during compilation before tests; `ef74b41e` repaired the 11 Store
+errors and `f0c2297c` received unanimous targeted approval. The directly
+affected rerun compiled and executed 641 tests, with 606 passing, 30 sandbox
+bind denials, and five stale assertion failures. Repairs through `87a587a3`
+must receive targeted exact-head approval before only those failed names rerun.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -781,23 +788,26 @@ PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
 repair head `e40c56d4` are historical commits. Exact head
-`841e695fee6c1ca16ac3591f4d496dea710825a0` is the last formally reviewed
-head and received unanimous approval. Runtime behavior and tests are frozen in
+`f0c2297c3ec0a598b233e2a2aca73fbb8d165538` is the last formally reviewed
+head and received unanimous targeted approval after runtime head `841e695f`.
+Runtime behavior is frozen in
 `f02bf5b5a2ed820f99308ad69720bb449bdf3109`; regression-history evidence is
 frozen in `95cd9a2e7ac03ff9fa77a8b2276b42850adf89cf`; owner-inventory
 corrections are frozen in `31a93198bc14db6fbcb43e7fdd0e9b4d488fcf19`;
-and the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`.
+the compile repair plus mapping are frozen in `ef74b41e` and `b1fe8151`; and
+the assertion repairs plus mappings are frozen through `87a587a3`.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
 1. Verify the final docs-bearing candidate excludes both vendor target trees
    and record its exact immutable branch head without pushing it yet.
-2. Obtain targeted independent adversarial approval of the compile-repaired
+2. Obtain targeted independent adversarial approval of the assertion-repaired
    local PR candidate. If a finding changes behavior, repair it and
    freeze/review a new exact head.
-3. Rerun only the directly affected `plurx-core` library and Store-contract
-   targets. The one full local unit invocation has already been consumed.
+3. Rerun only the five deterministic assertion names and the 30 exact
+   socket-bind-denied names outside the restrictive sandbox. The one full
+   local unit invocation has already been consumed.
 4. Run required non-unit cluster/integration validation, push/open the PR,
    require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.
@@ -1135,8 +1145,8 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After the active prepublication candidate, the remaining work is:
 
-1. Review the post-`841e695f` compile repair, rerun only its directly affected
-   targets, satisfy cluster/hosted gates, and merge the production
+1. Review the post-`f0c2297c` assertion repairs, rerun only failed names,
+   satisfy cluster/hosted gates, and merge the production
    decision, prepublication retry, response-admission, relay/VOD ownership,
    and confirmed-reap cut.
 2. Move published-lifetime stall classification and recovery behind the actor
