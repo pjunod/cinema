@@ -1184,13 +1184,16 @@ impl VodServe {
         Some(Ok((rendition.playlist.clone(), owner)))
     }
 
-    /// The three-outcome segment GET (plan §2.3). `None` = not a VOD session;
-    /// `Ok(None)` = genuinely unknown name → the caller 404s.
+    /// The three-outcome segment GET (plan §2.3). The outer `None` means this
+    /// is not a VOD session. An inner `Ok((None, owner))` is a genuine miss
+    /// from one exact attachment; HTTP must retain that owner through its
+    /// bodyless 404 admission instead of reconstructing identity from the
+    /// reusable session id.
     pub async fn segment(
         &self,
         session_id: &str,
         name: &str,
-    ) -> Option<Result<Option<(SegmentReady, ResponseOwner)>, VodError>> {
+    ) -> Option<Result<(Option<SegmentReady>, ResponseOwner), VodError>> {
         let (rendition, budget, owner) = match self.session_rendition(session_id).await? {
             Ok(found) => found,
             Err(error) => return Some(Err(error)),
@@ -1199,21 +1202,21 @@ impl VodServe {
             return Some(
                 self.serve_init(&rendition, budget)
                     .await
-                    .map(|ready| Some((ready, owner))),
+                    .map(|ready| (Some(ready), owner)),
             );
         }
         let Some(index) = planned_index(name) else {
             // Traversal names and everything else that is not `segNNNNN.m4s`
             // fail the same digit discipline `is_safe_segment` enforces.
-            return Some(Ok(None));
+            return Some(Ok((None, owner)));
         };
         if index as usize >= rendition.plan.len() {
-            return Some(Ok(None));
+            return Some(Ok((None, owner)));
         }
         Some(
             self.serve_segment(&rendition, session_id, index, budget)
                 .await
-                .map(|ready| Some((ready, owner))),
+                .map(|ready| (Some(ready), owner)),
         )
     }
 
@@ -4012,7 +4015,7 @@ mod tests {
         // that is the protocol working, so retry the way a client would.
         for _ in 0..20 {
             match serve.segment(session, name).await {
-                Some(Ok(Some((ready, owner)))) => {
+                Some(Ok((Some(ready), owner))) => {
                     let index = planned_index(name);
                     assert!(serve.commit_resolved_media(session, &owner, index).await);
                     return ready;
@@ -4026,11 +4029,11 @@ mod tests {
         panic!("fetching {name} never materialized");
     }
 
-    fn describe(answer: Option<Result<Option<(SegmentReady, ResponseOwner)>, VodError>>) -> String {
+    fn describe(answer: Option<Result<(Option<SegmentReady>, ResponseOwner), VodError>>) -> String {
         match answer {
             None => "None".into(),
-            Some(Ok(None)) => "Ok(None)".into(),
-            Some(Ok(Some((ready, _)))) => format!("Ok(Some(len {}))", ready.len),
+            Some(Ok((None, _))) => "Ok(None)".into(),
+            Some(Ok((Some(ready), _))) => format!("Ok(Some(len {}))", ready.len),
             Some(Err(error)) => format!("Err({error:?})"),
         }
     }
@@ -4111,7 +4114,7 @@ mod tests {
 
         // The init the map names is served with its own strong etag.
         let init = match serve.segment("sess-a", "init.mp4").await {
-            Some(Ok(Some((ready, _)))) => ready,
+            Some(Ok((Some(ready), _))) => ready,
             other => panic!("init.mp4: {}", describe(other)),
         };
         assert!(init.etag.contains("-init-"), "{}", init.etag);
@@ -4347,7 +4350,7 @@ mod tests {
                 .await
                 .expect("a vod session")
             {
-                Ok(Some((ready, _))) => assert!(ready.len > 0),
+                Ok((Some(ready), _)) => assert!(ready.len > 0),
                 other => panic!(
                     "segment {segment} must serve instantly: {:?}",
                     describe(Some(other))
@@ -4409,7 +4412,7 @@ mod tests {
                 .await
                 .expect("a vod session")
             {
-                Ok(Some((ready, _))) => assert!(ready.len > 0),
+                Ok((Some(ready), _)) => assert!(ready.len > 0),
                 other => panic!(
                     "adopted segment {segment} must serve instantly: {:?}",
                     describe(Some(other))
@@ -4539,7 +4542,10 @@ mod tests {
             "seg.m4s",       // no digits
         ] {
             match serve.segment("sess-a", name).await.expect("a vod session") {
-                Ok(None) => {}
+                Ok((None, owner)) => assert!(
+                    serve.response_owner_is_live("sess-a", &owner).await,
+                    "{name} must retain the exact attachment that classified its 404"
+                ),
                 other => panic!(
                     "{name} must be the caller's 404: {:?}",
                     describe(Some(other))
@@ -4602,7 +4608,7 @@ mod tests {
         assert_eq!(status.working_set_budget_bytes, 8 << 30);
         assert!(matches!(
             serve.segment("sess-a", "notes.txt").await,
-            Some(Ok(None))
+            Some(Ok((None, _)))
         ));
         let (_, owner) = serve
             .playlist("sess-a")
@@ -5534,7 +5540,7 @@ mod tests {
         );
         // And the init is servable without any producer having spawned.
         match second.segment("sess-b", INIT_NAME).await.expect("ours") {
-            Ok(Some((ready, _))) => assert!(ready.len > 0),
+            Ok((Some(ready), _)) => assert!(ready.len > 0),
             other => panic!("init.mp4 must serve: {:?}", describe(Some(other))),
         }
         assert!(

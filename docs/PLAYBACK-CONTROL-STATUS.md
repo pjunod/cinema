@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-27
+**Updated:** 2026-08-28
 **Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
 **Current work:** first actor-owned prepublication recovery cut on
 `codex/playback-control-m4-prepublication` in the disposable clone. The
@@ -11,8 +11,8 @@ cancellation settlement, first-media handoff, and checked ownership inventory
 are now assembled. The working-tree adversarial passes found and repaired
 deadline, failure-replay, retry-cutoff, cancellation, executor-loss,
 metadata-commit, process-reap, registry-lock, typed-error, and subtitle-owner
-defects. Independent actor, transcode, and HTTP reviewers now report no
-remaining P1/P2/P3 finding in their targeted scopes. Formal exact-head review
+defects. Earlier targeted actor, transcode, and HTTP passes reported no
+remaining P1/P2/P3 finding in their narrower scopes. Formal exact-head review
 of `ab3808b1` then rejected the combined candidate: normal prepublication
 retirement released admissions before confirmed reap; the owner ledger missed
 the new termination wrappers; response rejection could still become false
@@ -24,8 +24,18 @@ deadline in actor observation, storage/registry waits, polling, and synchronous
 flow control; those paths now share one outer absolute deadline, HTTP actor
 observation is fail-closed, and consequential flow work is queued to the
 session-owned worker. Formatting, whitespace, and the read-only mechanical
-ownership recount are clean. The repaired tree still needs to be committed and
-approved as one immutable exact head.
+ownership recount were clean, and the repairs were committed as `e40c56d4`.
+Formal review of that exact head approved process/resource ownership but found
+that EOF projection could be lost after actor commit, first-media settlement
+remained unbounded, corrupt-cache cleanup remained cancellable, exact current
+master/VTT/segment/retirement outcomes could still become false `404`, and
+subtitle preparation plus VOD resurrection escaped their deadlines. Those
+findings are repaired in the working tree. A follow-up integration audit then
+caught a handle-only first-media retirement fence, stale attempt-status
+admission after terminal failure, bodyless `416` using media admission,
+unbounded initial VOD probes/preparation, remote handoff becoming `404`, and
+ownerless VOD misses. The second repair set is now complete in the working
+tree; the next step is to freeze and adversarially review its exact commit.
 No unit test has run on this branch. The
 full unit suite runs once, only after final exact-head adversarial approval; a
 failure permits only the failed or directly affected tests to rerun. PR #626's runtime commits
@@ -153,7 +163,7 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Active candidate assembled.** The actor now exposes startup policy, contract fingerprint, response/retry cutoff, executor state, and immutable decision application. The transcode executor is the sole prepublication action owner; the first admitted attempt-media response synchronously transfers to the retained published-lifetime owner. |
-| Adversarial implementation review | **Exact head `ab3808b1` rejected; repairs complete in the working tree, immutable review pending.** Earlier targeted passes repaired deadline/retry ordering, first-media cancellation and handoff, immediate-exit replay, executor loss, bounded failure cleanup, registry-lock scope, typed error reclassification, and subtitle owner fencing. Formal review then found one P1 admission-before-reap defect, five P2 lifecycle/HTTP/owner-ledger defects, and one stale-handoff P3. The repair pass also closed a later moving-tree audit of the full playlist deadline. A new exact head must receive independent approval before tests. |
+| Adversarial implementation review | **Exact head `e40c56d4` rejected; second repair set complete.** Its formal findings and the follow-up retirement-import, stale-status, bodyless-admission, remote-handoff, VOD-owner, and request-wide-boundary defects are repaired. The repaired branch head still needs independent exact-head approval before tests. |
 | Unit/focused tests | **Gate closed; none run on this branch.** Per user direction there will be one full unit-suite run, on the final reviewed merge candidate. After a failure, only failed or directly affected tests may rerun. |
 | Full/cluster/hosted gates | **Pending active-candidate review.** The merged #626 baseline is green. Cluster/integration and required hosted PR checks remain required, but no local unit suite runs during review. |
 

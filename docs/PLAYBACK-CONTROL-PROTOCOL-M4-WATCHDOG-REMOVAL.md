@@ -383,6 +383,9 @@ dependencies, not its route name:
   already-decided, or retrying attempt, atomically sets
   `producer_media_published=true` before replying yes, and records the admitted
   object frontier when applicable; and
+- `attempt_status` carries an exact-attempt classification but no media body.
+  The actor rejects stale or terminal state without closing retry, claiming
+  first-media ownership, renewing the lease, or advancing a frontier; and
 - `protocol_only` is reserved for a live-generation protocol response that
   contains no producer-object-derived fact. It records no publication, lease
   renewal, or frontier progress.
@@ -397,7 +400,7 @@ The following classification is normative:
 | Video media playlist | `attempt_media` | consumes availability |
 | Subtitle media playlist or VTT segment | `attempt_media` | consumes availability |
 | Init or media segment, any satisfiable range, or `304` existence confirmation | `attempt_media` | consumes availability |
-| Unsatisfiable `416` carrying the opened object's length or ETag | `attempt_media` | consumes availability |
+| Unsatisfiable `416` carrying the opened object's length or ETag | `attempt_status` | none |
 | Internal init or playlist probe that produces no response | no admission | none |
 
 Subtitle declarations may be generation metadata inside a frozen master.

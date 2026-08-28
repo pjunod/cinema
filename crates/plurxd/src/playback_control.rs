@@ -2051,6 +2051,13 @@ pub(crate) enum RollingResponsePublicationBinding {
     AttemptMedia {
         producer_attempt: u64,
     },
+    /// Exact-attempt authorization for a typed status response. Unlike media
+    /// publication, this neither closes retry nor claims first-media
+    /// ownership; unlike the legacy protocol response, it remains valid after
+    /// media publication.
+    AttemptStatus {
+        producer_attempt: u64,
+    },
     ProtocolOnly {
         producer_attempt: u64,
     },
@@ -2082,6 +2089,13 @@ impl RollingResponsePublication {
         }
     }
 
+    pub(crate) fn attempt_status(object: RollingResponseObject, producer_attempt: u64) -> Self {
+        Self {
+            object,
+            binding: RollingResponsePublicationBinding::AttemptStatus { producer_attempt },
+        }
+    }
+
     pub(crate) fn protocol_only(object: RollingResponseObject, producer_attempt: u64) -> Self {
         Self {
             object,
@@ -2107,6 +2121,10 @@ struct RollingFirstMediaPublicationHandoffState {
     outcome: AtomicU8,
     notify: tokio::sync::Notify,
     prepublication_projection: Option<Arc<AtomicBool>>,
+    /// Capacity follows the move-only actor command, not the request future.
+    /// A timed-out request therefore cannot release admission while its
+    /// unsettled handoff is still retained in the actor mailbox.
+    _settlement_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 pub(crate) struct RollingFirstMediaPublicationWaiter {
@@ -2121,16 +2139,21 @@ impl RollingFirstMediaPublicationHandoff {
                 outcome: AtomicU8::new(0),
                 notify: tokio::sync::Notify::new(),
                 prepublication_projection: None,
+                _settlement_permit: None,
             }),
         }
     }
 
-    pub(crate) fn with_prepublication_projection(projection: Arc<AtomicBool>) -> Self {
+    pub(crate) fn with_prepublication_projection(
+        projection: Arc<AtomicBool>,
+        settlement_permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> Self {
         Self {
             state: Arc::new(RollingFirstMediaPublicationHandoffState {
                 outcome: AtomicU8::new(0),
                 notify: tokio::sync::Notify::new(),
                 prepublication_projection: Some(projection),
+                _settlement_permit: Some(settlement_permit),
             }),
         }
     }
@@ -2142,28 +2165,36 @@ impl RollingFirstMediaPublicationHandoff {
     }
 
     fn settle(&self, accepted: bool) {
-        if self
-            .state
-            .outcome
-            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
-            .is_ok()
-        {
-            if accepted {
-                if let Some(projection) = &self.state.prepublication_projection {
-                    projection.store(false, Ordering::Release);
-                }
-            }
-            self.state
-                .outcome
-                .store(if accepted { 1 } else { 2 }, Ordering::Release);
-            self.state.notify.notify_waiters();
-            self.state.notify.notify_one();
-        }
+        self.state.settle(accepted);
+    }
+
+    fn is_pending(&self) -> bool {
+        self.state.outcome.load(Ordering::Acquire) == 0
     }
 
     #[cfg(test)]
     pub(crate) fn settle_for_test(&self, accepted: bool) {
         self.settle(accepted);
+    }
+}
+
+impl RollingFirstMediaPublicationHandoffState {
+    fn settle(&self, accepted: bool) {
+        if self
+            .outcome
+            .compare_exchange(0, 3, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            if accepted {
+                if let Some(projection) = &self.prepublication_projection {
+                    projection.store(false, Ordering::Release);
+                }
+            }
+            self.outcome
+                .store(if accepted { 1 } else { 2 }, Ordering::Release);
+            self.notify.notify_waiters();
+            self.notify.notify_one();
+        }
     }
 }
 
@@ -2199,9 +2230,63 @@ impl RollingFirstMediaPublicationWaiter {
         }
     }
 
+    fn settle_rejected(&self) {
+        self.state.settle(false);
+    }
+
     #[cfg(test)]
     fn is_accepted(&self) -> bool {
         self.state.outcome.load(Ordering::Acquire) == 1
+    }
+}
+
+/// Move-only completion for one exact rolling segment EOF. The actor consumes
+/// it while holding the producer transition fence, so the authoritative
+/// commit, compatibility projection, and flow wake are one synchronous
+/// operation even if the HTTP future or actor reply disappears immediately
+/// after acceptance.
+pub(crate) struct RollingMediaCommitHandoff {
+    producer_attempt: u64,
+    segment_index: i64,
+    segment_end_ms: Option<i64>,
+    compatibility_attempt: Arc<std::sync::Mutex<u64>>,
+    high_segment: Arc<AtomicI64>,
+    fetched_end_ms: Arc<AtomicI64>,
+    flow_sync: Arc<RollingFlowSync>,
+}
+
+impl RollingMediaCommitHandoff {
+    fn matches(
+        &self,
+        producer_attempt: u64,
+        segment_index: Option<i64>,
+        segment_end_ms: Option<i64>,
+    ) -> bool {
+        self.producer_attempt == producer_attempt
+            && segment_index == Some(self.segment_index)
+            && self.segment_end_ms == segment_end_ms
+    }
+
+    fn settle(self, accepted: bool) {
+        if !accepted {
+            return;
+        }
+        let projected_attempt = self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *projected_attempt == self.producer_attempt {
+            let previous = self
+                .high_segment
+                .fetch_max(self.segment_index, Ordering::Relaxed);
+            if self.segment_index >= previous {
+                if let Some(end) = self.segment_end_ms {
+                    self.fetched_end_ms.fetch_max(end, Ordering::Relaxed);
+                }
+            }
+        }
+        drop(projected_attempt);
+        self.flow_sync.request();
     }
 }
 
@@ -3091,6 +3176,7 @@ enum RollingControlCommand {
         producer_attempt: u64,
         segment_index: Option<i64>,
         segment_end_ms: Option<i64>,
+        handoff: Option<RollingMediaCommitHandoff>,
         deadline: Instant,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
@@ -4914,6 +5000,17 @@ impl RollingControlActor {
                     first_producer_media_publication: false,
                 })
             }
+            RollingResponsePublicationBinding::AttemptStatus { producer_attempt } => {
+                if publication.object == RollingResponseObject::ProtocolResponse {
+                    return Err(ResponsePublicationRejection::InvalidBinding);
+                }
+                if producer_attempt != self.delivery.producer_attempt {
+                    return Err(ResponsePublicationRejection::StaleAttempt);
+                }
+                Ok(RollingResponseAuthorization {
+                    first_producer_media_publication: false,
+                })
+            }
             RollingResponsePublicationBinding::ProtocolOnly { producer_attempt } => {
                 if publication.object != RollingResponseObject::ProtocolResponse {
                     return Err(ResponsePublicationRejection::InvalidBinding);
@@ -5327,6 +5424,17 @@ impl RollingControlActor {
                 .as_ref()
                 .map(|decision| decision.decision_sequence());
             let was_retired = self.retired;
+            // Some synchronous fail-closed paths (notably a detached
+            // first-media settlement that reaches its absolute deadline)
+            // publish retirement through the handle-side fence while the
+            // actor may still have queued commands. Import that monotone
+            // fence before folding or applying any of them so a follower can
+            // never revive publication or renew the actor after the timeout.
+            // `was_retired` is sampled first so the normal transition wake
+            // still reaches the passive executor.
+            if self.retired_fence.load(Ordering::Acquire) && !self.retired {
+                let _ = self.terminate(RollingTerminalCause::AuthorityFence);
+            }
             let publication_may_win_exact_deadline = matches!(
                 &command,
                 RollingControlCommand::AuthorizeResponsePublication {
@@ -5334,11 +5442,11 @@ impl RollingControlActor {
                         binding: RollingResponsePublicationBinding::AttemptMedia { .. },
                         ..
                     },
-                    handoff: Some(_),
+                    handoff: Some(handoff),
                     deadline,
                     reply,
                     ..
-                } if !reply.is_closed() && rolling_now() < *deadline
+                } if handoff.is_pending() && !reply.is_closed() && rolling_now() < *deadline
             );
             self.fold_producer_blocks_at(published_at, preceding_producer);
             if !publication_may_win_exact_deadline {
@@ -5472,7 +5580,9 @@ impl RollingControlActor {
                             .prepublication
                             .as_ref()
                             .is_some_and(|control| !control.producer_media_published);
-                        let authorized = if first_media_handoff_required && handoff.is_none() {
+                        let authorized = if first_media_handoff_required
+                            && handoff.as_ref().is_none_or(|handoff| !handoff.is_pending())
+                        {
                             Err(ResponsePublicationRejection::InvalidBinding)
                         } else {
                             self.authorize_response_publication_at(published_at, publication)
@@ -5522,10 +5632,19 @@ impl RollingControlActor {
                     producer_attempt,
                     segment_index,
                     segment_end_ms,
+                    handoff,
                     deadline,
                     reply,
                 } => {
-                    let committed = !reply.is_closed()
+                    let handoff_matches = match (&handoff, segment_index) {
+                        (Some(handoff), Some(_)) => {
+                            handoff.matches(producer_attempt, segment_index, segment_end_ms)
+                        }
+                        (None, None) => true,
+                        _ => false,
+                    };
+                    let committed = handoff_matches
+                        && !reply.is_closed()
                         && rolling_now() < deadline
                         && self.commit_media_at(
                             published_at,
@@ -5536,6 +5655,9 @@ impl RollingControlActor {
                         );
                     if committed {
                         transition.lease_deadline = self.deadline();
+                    }
+                    if let Some(handoff) = handoff {
+                        handoff.settle(committed);
                     }
                     let _ = reply.send(committed);
                 }
@@ -6383,6 +6505,7 @@ impl RollingControlHandle {
         producer_attempt: u64,
         segment_index: Option<i64>,
         segment_end_ms: Option<i64>,
+        handoff: Option<RollingMediaCommitHandoff>,
         deadline: Instant,
     ) -> bool {
         let (reply, response) = tokio::sync::oneshot::channel();
@@ -6393,6 +6516,7 @@ impl RollingControlHandle {
                     producer_attempt,
                     segment_index,
                     segment_end_ms,
+                    handoff,
                     deadline,
                     reply,
                 },
@@ -6683,6 +6807,49 @@ impl RollingControlHandle {
         self.retired.store(true, Ordering::Release);
         self.producer_events.notify_flow_capacity_waiters();
         self.flow_sync.request();
+    }
+
+    /// Resolve a detached first-media waiter that reached its request
+    /// deadline. The actor uses this same fence while mutating publication
+    /// state and settling the handoff, so an already-accepted transfer wins
+    /// intact; otherwise rejection and retirement linearize before the queued
+    /// command can claim first media later.
+    pub(crate) fn settle_first_media_at_deadline(
+        &self,
+        waiter: &RollingFirstMediaPublicationWaiter,
+    ) -> bool {
+        let _transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(accepted) = waiter.settled_outcome() {
+            return accepted;
+        }
+        waiter.settle_rejected();
+        self.retired.store(true, Ordering::Release);
+        self.producer_events.notify_flow_capacity_waiters();
+        self.flow_sync.request();
+        false
+    }
+
+    pub(crate) fn media_commit_handoff(
+        &self,
+        producer_attempt: u64,
+        segment_index: i64,
+        segment_end_ms: Option<i64>,
+        compatibility_attempt: Arc<std::sync::Mutex<u64>>,
+        high_segment: Arc<AtomicI64>,
+        fetched_end_ms: Arc<AtomicI64>,
+    ) -> RollingMediaCommitHandoff {
+        RollingMediaCommitHandoff {
+            producer_attempt,
+            segment_index,
+            segment_end_ms,
+            compatibility_attempt,
+            high_segment,
+            fetched_end_ms,
+            flow_sync: Arc::clone(&self.flow_sync),
+        }
     }
 
     pub(crate) fn request_flow(&self) -> u64 {
@@ -11112,6 +11279,7 @@ mod tests {
                     producer_attempt: attempt,
                     segment_index: Some(7),
                     segment_end_ms: Some(28_000),
+                    handoff: None,
                     deadline: rolling_now() + Duration::from_secs(1),
                     reply,
                 },
@@ -11130,6 +11298,7 @@ mod tests {
                     producer_attempt: attempt,
                     segment_index: Some(8),
                     segment_end_ms: Some(32_000),
+                    handoff: None,
                     deadline: rolling_now() - Duration::from_millis(1),
                     reply,
                 },
@@ -11146,6 +11315,113 @@ mod tests {
             after.delivery.fetched_end_ms,
             before.delivery.fetched_end_ms
         );
+    }
+
+    #[tokio::test]
+    async fn accepted_segment_eof_projects_frontier_and_flow_before_reply() {
+        let started = rolling_now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        let attempt = actor
+            .begin_producer_attempt_at(started)
+            .expect("producer attempt");
+        let compatibility_attempt = Arc::new(std::sync::Mutex::new(attempt));
+        let high_segment = Arc::new(AtomicI64::new(-1));
+        let fetched_end_ms = Arc::new(AtomicI64::new(0));
+        let flow_sync = Arc::new(RollingFlowSync::new());
+        let handoff = RollingMediaCommitHandoff {
+            producer_attempt: attempt,
+            segment_index: 7,
+            segment_end_ms: Some(28_000),
+            compatibility_attempt,
+            high_segment: Arc::clone(&high_segment),
+            fetched_end_ms: Arc::clone(&fetched_end_ms),
+            flow_sync: Arc::clone(&flow_sync),
+        };
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 1,
+                published_at: started + Duration::from_millis(1),
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::CommitMedia {
+                    kind: "accepted-response-eof",
+                    producer_attempt: attempt,
+                    segment_index: Some(7),
+                    segment_end_ms: Some(28_000),
+                    handoff: Some(handoff),
+                    deadline: rolling_now() + Duration::from_secs(1),
+                    reply,
+                },
+            })
+            .await;
+
+        assert_eq!(high_segment.load(Ordering::Acquire), 7);
+        assert_eq!(fetched_end_ms.load(Ordering::Acquire), 28_000);
+        assert_eq!(flow_sync.requested.load(Ordering::Acquire), 1);
+        drop(response);
+        assert_eq!(high_segment.load(Ordering::Acquire), 7);
+        assert_eq!(
+            actor
+                .snapshot_at(started + Duration::from_millis(1))
+                .delivery
+                .fetched_segment,
+            Some(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn first_media_deadline_rejects_and_fences_a_late_handoff() {
+        let (control, mut registration) =
+            RollingControlHandle::spawn_prepublication_transcode("first-media-deadline");
+        assert_eq!(registration.register().await, Ok(()));
+        assert_eq!(
+            control
+                .begin_initial_producer_attempt(hardware_policy(
+                    "presentation-first-media-deadline",
+                    "recipe-first-media-deadline",
+                ))
+                .await,
+            Ok(1)
+        );
+        let handoff = RollingFirstMediaPublicationHandoff::new();
+        let waiter = handoff.waiter();
+
+        assert!(!control.settle_first_media_at_deadline(&waiter));
+        assert!(control.is_retired());
+        handoff.settle_for_test(true);
+        assert_eq!(waiter.settled_outcome(), Some(false));
+
+        // This represents a response that already resolved the exact owner
+        // and reached actor admission after the request ahead of it timed out.
+        // The next actor command must import the external retirement fence,
+        // not let a fresh handoff revive first-media publication.
+        let follower_handoff = RollingFirstMediaPublicationHandoff::new();
+        let follower_waiter = follower_handoff.waiter();
+        assert_eq!(
+            control
+                .authorize_response_publication(
+                    RollingResponsePublication::attempt_media(
+                        RollingResponseObject::VideoMediaPlaylist,
+                        1,
+                    ),
+                    Some(follower_handoff),
+                    rolling_now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(ResponsePublicationRejection::SessionEnded)
+        );
+        assert_eq!(follower_waiter.settled_outcome(), Some(false));
+
+        let Ok(RollingExpiryClaim::Retired(snapshot)) = control.claim_expiry().await else {
+            panic!("external first-media retirement must become actor terminal state");
+        };
+        assert_eq!(
+            snapshot.terminal,
+            Some(RollingTerminalCause::AuthorityFence)
+        );
+        assert!(!snapshot.producer_control.producer_media_published);
     }
 
     #[tokio::test]
@@ -11309,6 +11585,13 @@ mod tests {
                     RollingResponseObject::ProtocolResponse,
                     1,
                 ),
+            ),
+            Err(ResponsePublicationRejection::DecisionCommitted)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                exit_at,
+                RollingResponsePublication::attempt_status(RollingResponseObject::MediaSegment, 1,),
             ),
             Err(ResponsePublicationRejection::DecisionCommitted)
         );

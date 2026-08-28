@@ -1,23 +1,29 @@
 # Playback control rewrite — implementation handoff
 
-**Updated:** 2026-08-27
+**Updated:** 2026-08-28
 **Merged baseline:** `origin/main` at `9063bb1e` (PR #626)
 **Active PR:** not opened yet
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Last formally reviewed head:** `ab3808b1ce48b1493075cdf4f1022e73a7010a2b`
-(rejected: one P1, five P2, and one P3; repairs complete in the working tree,
-new immutable review head pending)
+**Last formally reviewed head:** `e40c56d400a820bdd609dc7b1eff5446c25e92a1`
+(rejected: one transcode approval; actor and HTTP change requests; next repair
+head pending)
 **Runtime implementation head:** `0e80c6ba` (`feat(playback): own transcode
 prepublication recovery`; formal exact-head review pending)
-**Runtime review state:** the actor scope was approved, but transcode and HTTP
-formal review found confirmed-reap admission, owner-ledger, false-`404`, ETag,
-shared-wait-budget, and bounded-settlement defects. The working tree repairs
-all of them. A follow-up moving-tree audit also closed unbounded actor,
-storage/lock, polling, telemetry, and flow-control work inside playlist
-preparation. No formal approval exists for the active candidate until this
-repaired tree is committed and re-reviewed.
+**Runtime review state:** exact head `e40c56d4` repaired the earlier
+confirmed-reap, owner-ledger, false-`404`, ETag, shared-wait-budget, and
+bounded-settlement findings. Its formal review approved process/resource
+ownership but rejected the combined candidate: EOF projection could be lost
+after actor commit; first-media settlement remained unbounded; cached cleanup
+was cancellable; master/VTT/segment/retirement outcomes still collapsed into
+`404`; and subtitle preparation plus VOD resurrection escaped their deadlines.
+Those findings are repaired in the working tree. A follow-up moving-tree
+integration audit then found a handle-only first-media retirement fence, stale
+attempt-status admission after terminal failure, bodyless `416` using media
+admission, unbounded initial VOD probes/preparation, remote handoff becoming
+`404`, and ownerless VOD misses. Those second-pass findings are repaired in the
+working tree; the repaired branch head must now be frozen and reviewed.
 **Current implementation:** actor, HTTP response admission, transcode executor,
 frozen rolling presentation, cancellation settlement, synchronous first-media
 handoff, status projection, and checked owner inventory are committed at
@@ -25,10 +31,10 @@ handoff, status projection, and checked owner inventory are committed at
 production-authoritative cut: initial transcode startup uses one actor
 deadline, one validated prepublication retry, exact response publication
 admission, and one cancellation-safe executor. Published-lifetime and copy
-compatibility owners remain later cuts. Runtime `0e80c6ba` is committed; the
-formal findings against documentation head `ab3808b1` are repaired in the
-worktree. Formatting, whitespace, and a read-only exact ownership recount are
-clean; no build or test has run.
+compatibility owners remain later cuts. Runtime `0e80c6ba` and repair head
+`e40c56d4` are committed; the latter's newly reported lifecycle and
+classification findings are the active working-tree repair. No build or test
+has run.
 **Test state:** no tests have run on the active branch by design. The user
 requires adversarial implementation review before unit tests and exactly one
 full unit-suite run on the final reviewed merge candidate. If that run fails,
@@ -95,8 +101,8 @@ The rewrite is not starting from scratch:
 The active branch starts from merged #626. Commit `43bd459d` corrected the
 response-publication contract before implementation: frozen generation
 metadata leaves retry available, attempt media closes it atomically, current
-attempt-derived `416` responses are media publication, actor-derived errors
-have explicit non-media fences, and the retry recipe carries the exact
+attempt-derived bodyless responses carry an explicit exact-attempt status
+fence, actor-derived errors have explicit non-media fences, and the retry recipe carries the exact
 presentation-contract fingerprint. One adversarial pass found four defects;
 the corrected delta is approved. No active-branch unit test has run yet.
 
@@ -135,7 +141,7 @@ Formal review of `ab3808b1` subsequently found these additional defects:
   had no actual lifecycle bound or bounded settlement owner.
 
 The continuation ledger itself was the P3: it still described runtime and docs
-as uncommitted. The working tree now closes every formal item: routine
+as uncommitted. Exact head `e40c56d4` closes every earlier formal item: routine
 prepublication retirement transfers child, scratch, and admissions to a
 confirmed-reap owner; every new lifecycle action/timer is counted; response
 state races stay typed `503`; rolling validators bind incarnation and exact
@@ -150,8 +156,18 @@ puts the whole operation under the existing absolute playlist deadline, makes
 the HTTP observation command deadline-aware and fail-closed after
 cancellation, clamps polling to the remaining time, queues consequential flow
 work to the session-owned worker, detaches non-response slide telemetry, and
-publishes cached-integrity failure before cleanup can be cancelled. These
-repairs still require immutable exact-head review before the test gate opens.
+publishes cached-integrity failure before cleanup can be cancelled.
+
+Formal review of that head then found the remaining blockers: EOF actor commit
+and compatibility projection were not one cancellation-safe application;
+first-media settlement lacked finite owner capacity; corrupt-cache cleanup
+could still be cancelled after publishing failure; master, VTT, segment, and
+retired-but-registered outcomes could still become false `404`; and subtitle
+preparation plus VOD resurrection escaped their advertised deadlines. Those
+findings are repaired. Follow-up integration review found the remaining
+retirement-import, stale-status, bodyless-admission, request-deadline,
+remote-handoff, and VOD-negative-owner defects. The repair is complete and
+must receive immutable exact-head approval before the test gate opens.
 
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
@@ -479,12 +495,13 @@ topology, and daemon-integration contracts.
 PR #626 is merged as `9063bb1e`. The current disposable branch is
 `codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
 runtime `0e80c6ba`, and rejected documentation/review head `ab3808b1` are
-committed. Formal and moving-tree repairs are complete in the worktree. The preserved untracked vendor
+committed. First repair head `e40c56d4` is also committed and formally rejected;
+its findings are being repaired in the worktree. The preserved untracked vendor
 build artifacts remain outside every commit.
 Continue in this order:
 
-1. Commit the completed `ab3808b1` and playlist-deadline repairs without
-   including either vendor target tree.
+1. Repair every `e40c56d4` actor/HTTP finding, update the semantic owner
+   inventory and status docs, and commit without either vendor target tree.
 2. Obtain independent adversarial approval of the resulting exact branch head
    without running unit tests.
 3. If review changes behavior, re-review only the changed behavioral delta and
@@ -512,7 +529,9 @@ The active cut owns only transcode prepublication:
   budget and no retry;
 - generation-stable master metadata crosses actor admission without consuming
   retry; video/subtitle playlists, VTT, init/media objects, ranges, `304`, and
-  attempt-derived `416` responses close retry before exposure;
+  other media-bearing attempt responses close retry before exposure, while a
+  bodyless `416` uses exact-attempt status admission and does not claim first
+  media;
 - the executor uses a weak Session reference, confirms predecessor reap before
   scratch clear, verifies the clear, admits the exact recipe, installs one
   successor, and acknowledges the immutable decision; failure never recurses;

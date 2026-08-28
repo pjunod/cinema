@@ -59,7 +59,7 @@ replacement = "retained process-replacement serialization projection; actor deci
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 15
+expected_occurrences = 17
 kind = "mixed_ownership_lock"
 replacement = "specific actor, attempt, response-admission, resource, or catalog-revision fences"
 
@@ -173,14 +173,14 @@ id = "response-media-commit"
 pattern = "\\.commit_media\\("
 expected_occurrences = 2
 kind = "response_admission"
-replacement = "retained as response-EOF fetched-frontier evidence, not retry authorization"
+replacement = "response EOF enters the actor with a move-only RollingMediaCommitHandoff so actor delivery, compatibility frontier, and flow wake settle synchronously; detached HTTP completion owns the bounded call"
 
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 61
+expected_occurrences = 63
 kind = "structural_task_scan"
-replacement = "every new detached task requires ownership-catalog review; playlist-slide telemetry is detached from the bounded response and producer recovery moves only to the actor executor"
+replacement = "every detached task requires ownership-catalog review; the bounded EOF settlement and CAS-elected cache invalidation/retirement tasks own their work after request cancellation, while producer recovery moves only to the actor executor"
 
 [[symbols]]
 id = "all-runtime-owned-async-tasks"
@@ -236,7 +236,7 @@ id = "first-media-lifetime-handoff"
 pattern = "spawn_published_lifetime_watch_for_stall"
 expected_occurrences = 2
 kind = "recovery_owner"
-replacement = "synchronously claimed by actor response admission after prepublication closes; never decides startup recovery"
+replacement = "synchronously claimed by actor response admission after prepublication closes; a bounded permit and fail-closed deadline owner retain settlement after request cancellation; the compatibility watcher never decides startup recovery"
 
 [[symbols]]
 id = "prepublication-confirmed-reap-owner"
@@ -288,7 +288,7 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 31
+expected_occurrences = 33
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
@@ -338,7 +338,112 @@ expected_occurrences = 6
 [[module_symbols]]
 id = "m4-first-media-publication-handoff"
 pattern = "RollingFirstMediaPublicationHandoff"
-expected_occurrences = 15
+expected_occurrences = 19
+
+[[module_symbols]]
+id = "m4-first-media-settlement-capacity"
+pattern = "MAX_FIRST_MEDIA_SETTLEMENT_OWNERS"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-first-media-settlement-owner"
+pattern = "first_media_settlement_slots"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-response-completion-settlement"
+pattern = "settle_streamed_response_completion"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-response-completion-capacity"
+pattern = "RESPONSE_COMPLETION_CAPACITY"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-response-publication-lifecycle-budget"
+pattern = "RESPONSE_PUBLICATION_LIFECYCLE_BUDGET"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-eof-media-commit-handoff"
+pattern = "RollingMediaCommitHandoff"
+expected_occurrences = 7
+
+[[module_symbols]]
+id = "m4-cache-integrity-cleanup-latch"
+pattern = "cache_integrity_cleanup_started"
+expected_occurrences = 14
+
+[[module_symbols]]
+id = "m4-cache-integrity-cleanup-owner"
+pattern = "fail_cached_session_integrity"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-attempt-status-admission"
+pattern = "AttemptStatus"
+expected_occurrences = 7
+
+[[module_symbols]]
+id = "m4-vod-resurrection-deadline"
+pattern = "vod_resurrected_before"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-first-media-deadline-settlement"
+pattern = "settle_first_media_at_deadline"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-cache-integrity-failure-code"
+pattern = "CACHED_MEDIA_INTEGRITY_FAILURE"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-retired-cache-failure-admission"
+pattern = "owns_retired_cache_integrity_failure"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-cache-cleanup-retirement-owner"
+pattern = "retire_session_until_with_owner"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-segment-request-lifecycle-budget"
+pattern = "SEGMENT_REQUEST_LIFECYCLE_BUDGET"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-response-publication-subdeadline"
+pattern = "response_publication_deadline_before"
+expected_occurrences = 23
+
+[[module_symbols]]
+id = "m4-playlist-request-deadline-chain"
+pattern = "playlist_request_deadlines"
+expected_occurrences = 5
+
+[[module_symbols]]
+id = "m4-segment-request-deadline"
+pattern = "segment_request_deadline"
+expected_occurrences = 3
+
+[[module_symbols]]
+id = "m4-bounded-vod-lookup"
+pattern = "vod_(?:playlist|segment)_before"
+expected_occurrences = 7
+
+[[module_symbols]]
+id = "m4-typed-segment-resolution"
+pattern = "SegmentPublication"
+expected_occurrences = 25
+
+[[module_symbols]]
+id = "m4-typed-presentation-resolution"
+pattern = "HlsPresentationResolution"
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-executor-registration"
@@ -401,7 +506,7 @@ expected_occurrences = 6
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 283
+expected_occurrences = 285
 
 [[module_structures]]
 id = "method-spawn"
@@ -416,7 +521,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 358
+expected_occurrences = 391
 
 [[module_structures]]
 id = "bare-time-constructor"
