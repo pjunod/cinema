@@ -293,7 +293,7 @@ read when you open the tab, not on every Settings visit.
 | `Recovery required` | The latest committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
 
 The node cards lead with each machine's short OS hostname, label the current
-leader beside it, then shows the advertised host and stable node id underneath.
+leader beside it, then show the advertised host and stable node id underneath.
 The advertised host may be a DNS name or IP; loopback is written `localhost`
 instead of `127.0.0.1`, and listener ports stay private. A native daemon reads
 the hostname from the OS. A container should set `PLURX_NODE_HOSTNAME` to the
@@ -305,6 +305,16 @@ the durable one the node was admitted under, not a phase of joining; a learner
 keeps it for as long as it is a member. Read the nested replication status for
 leader and apply-lag health. Media paths and token material are not in that
 payload and are not shown.
+
+Every node card starts expanded and combines two sources without pretending
+they are the same: **Membership** is committed roster state, while
+**Operations** is the bounded direct observation from that process. Collapse a
+card when you only need its hostname, role, leadership, and direct-readiness
+badge; **Collapse all** and **Expand all** change every card together. The
+cluster-wide operational verdict and its quorum/build/sample facts stay above
+the cards because they authorize one cluster action, not one machine in
+isolation. **Watch state** and **Capacity** are labeled facts above that verdict,
+not unlabeled notes after the roster.
 
 ### Planned node maintenance — fence, drain, update, resume
 
@@ -344,9 +354,10 @@ previous-release join, promotion, or removal coordinator while the lease
 exists, so the exclusion remains effective throughout a rolling upgrade or
 rollback without permanently blocking later recovery.
 
-The workflow in **Maintenance & leadership** is the authoritative checklist;
-the full-width **Operations** card above it remains the stricter direct-peer
-restart verdict and WAL/snapshot evidence surface:
+The workflow in **Maintenance & leadership** is the authoritative checklist.
+The **Operational readiness** summary above the node cards remains the stricter
+direct-peer restart verdict; each expanded node card holds that machine's WAL,
+snapshot, protocol, media, and build evidence:
 
 1. The target blocks new local admissions and waits for any admission already
    in flight to publish or fail. Existing HLS, direct streams, publication, and
@@ -1666,18 +1677,18 @@ original majority from host/storage backups. The offline WAL commands below
 collect and preserve bounded evidence, but deliberately do not apply a recovery
 plan or turn one surviving voter into a new cluster.
 
-### Cluster operations status and guarded voter restarts
+### Cluster node status and guarded voter restarts
 
-Open **Settings → Cluster → Operations** for the cluster-wide view. The
-roster remains the authority for committed membership; Operations adds a
-direct, authenticated observation from every voter and one conservative
-restart verdict. An ordinary SQLite server continues to show **Not clustered**
-and has no cluster operations card.
+Open **Settings → Cluster** for the cluster-wide view. Each node card keeps the
+authoritative committed membership beside a direct, authenticated process
+observation, while the summary above the cards gives one conservative restart
+verdict. An ordinary SQLite server continues to show **Not clustered** and has
+no direct operations evidence.
 
 The verdict is phrased as **Ready to restart one voter** or **Do not restart
 another voter**. It is an authorization for one rolling-restart step, not a
 general health badge. An unreachable voter stays visible as unreachable and
-never becomes healthy by omission. Expand a node row to see the IDs and
+never becomes healthy by omission. Expand a node card to see the IDs and
 protocol range that were checked, Raft term and indices, WAL durability and
 recovery observations, recent snapshot outcomes, and media-drain details.
 
@@ -1728,8 +1739,8 @@ response is incompatible.
 
 #### Daily cluster check
 
-1. Open **Settings → Cluster → Operations**, press **Refresh**, and read
-   the server verdict before reading individual green cells.
+1. Open **Settings → Cluster**, press **Refresh status**, and read the server
+   verdict before reading individual ready badges.
 2. Confirm the committed voter count and quorum, one leader and term, maximum
    apply lag of zero, and a fresh oldest sample.
 3. Confirm every voter reports an open, locked, error-free WAL whose durable
@@ -1835,7 +1846,7 @@ escalation; this build has no force-reconfigure path.
 
 #### Stalled or failing WAL and snapshots
 
-Start with the online evidence. Expand the voter in Operations and preserve a
+Start with the online evidence. Expand the affected node card and preserve a
 support bundle. `wal_not_healthy` means the live WAL snapshot is absent, not
 open, does not own the real lock, has a current error, or has not made its last
 log index durable. A recent failed snapshot outcome is evidence to retain; it

@@ -883,18 +883,41 @@
   .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
   .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
   .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
-  .cluster-main{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(290px,.8fr);gap:16px;align-items:start}
+  .cluster-main{display:grid;gap:16px}
   .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
   .cluster-card h3{font-size:15px;margin:0 0 5px}
   .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
+  .clcontextfacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
+  .clcontextfact{border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:10px 12px}
+  .clcontextfact>span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:4px}
+  .clcontextfact>b{display:block;font-size:12.5px;line-height:1.45;color:var(--text)}
+  .clcontextfact>small{display:block;margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.4}
+  .clopssummary{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+  .clopssummary .clstate{margin:10px 0 0}
+  .clopssummary h4{margin:0 0 3px;font-size:13.5px}
   .clnodes{display:grid;gap:10px;margin-top:12px}
-  .clnode{border:1px solid var(--line);border-radius:10px;padding:13px;background:var(--panel)}
+  .clnode{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
   .clnode.maintenance{border-color:var(--warn,#fbbf24);background:color-mix(in srgb,var(--warn) 5%,var(--panel))}
   .clnode.stale{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
-  .clnodehead,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
-  .clnodemeta{display:grid;grid-template-columns:repeat(4,minmax(90px,1fr));gap:7px;margin-top:12px}
-  .clnodemeta div{border-top:1px solid var(--line);padding-top:8px;font-size:12px;color:var(--text)}
-  .clnodemeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
+  .clnode>summary{position:relative;cursor:pointer;list-style:none;padding:13px 42px 13px 13px}
+  .clnode>summary::-webkit-details-marker{display:none}
+  .clnode>summary::after{content:"›";position:absolute;right:15px;top:50%;color:var(--muted);font-size:22px;line-height:1;transform:translateY(-50%) rotate(90deg);transition:transform .15s ease}
+  .clnode:not([open])>summary::after{transform:translateY(-50%) rotate(0)}
+  .clnode>summary:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+  .clnodesummary,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .clnodesummaryright{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+  .clnodebody{padding:0 13px 13px;border-top:1px solid var(--line)}
+  .clnodegroups{display:grid;grid-template-columns:minmax(220px,.9fr) minmax(0,1.6fr);gap:14px}
+  .clnodegroup{min-width:0;padding-top:11px}
+  .clgrouptitle{margin-bottom:8px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+  .clnodemeta{display:grid;grid-template-columns:repeat(2,minmax(90px,1fr));gap:7px}
+  .clnodemeta div,.clnodeopmeta div{border-top:1px solid var(--line);padding-top:7px;font-size:12px;color:var(--text);min-width:0;overflow-wrap:anywhere}
+  .clnodemeta span,.clnodeopmeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
+  .clnodeopmeta{display:grid;grid-template-columns:repeat(3,minmax(90px,1fr));gap:7px}
+  .clnodeunknown{border:1px solid var(--line);border-radius:8px;padding:9px 10px;color:var(--muted);font-size:12px;line-height:1.45}
+  .clnodedetail{margin-top:9px;color:var(--muted);font-size:11.5px}
+  .clnodedetail>summary{cursor:pointer;color:var(--text);font-weight:600}
+  .clnodedetail .kvgrid{margin-top:8px}
   .clnodefoot{align-items:center;margin-top:12px}
   .clnodefoot .hint{margin:0;max-width:450px}
   .clactions{display:grid;gap:9px;margin-top:14px}
@@ -921,12 +944,15 @@
   @media(max-width:900px){
     .cluster-health{grid-template-columns:repeat(3,1fr)}
     .cluster-health>.clstate{grid-column:1/-1}
-    .cluster-main{grid-template-columns:1fr}
+    .clnodegroups{grid-template-columns:1fr}
   }
   @media(max-width:620px){
     .cluster-health{grid-template-columns:1fr}
     .cluster-health>.clstate{grid-column:auto}
+    .clcontextfacts{grid-template-columns:1fr}
     .clnodemeta{grid-template-columns:repeat(2,1fr)}
+    .clnodeopmeta{grid-template-columns:repeat(2,1fr)}
+    .clnodesummaryright{justify-content:flex-start}
   }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}
@@ -11431,9 +11457,12 @@ function membershipRefusalText(code,message){
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
 function clusterDirectMaintenanceStatus(ops,nodeId){
-  if(!ops||ops.unavailable) return null;
-  const row=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
+  const row=clusterDirectOperationRow(ops,nodeId);
   return row&&row.observation==="answered"&&row.status?row.status:null;
+}
+function clusterDirectOperationRow(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
 }
 function clusterMaintenanceEntryVerdict(ops,nodeId){
   if(!ops||ops.unavailable) return null;
@@ -11452,6 +11481,70 @@ function clusterMaintenanceResumeReady(n,ops){
     direct.process&&direct.process.live&&direct.serving&&
     direct.serving.reason==="maintenance"&&direct.media&&direct.media.drained&&
     Number(direct.media.admissions_in_flight||0)===0);
+}
+function clusterNodeOperationsBadge(n,ops){
+  if(!ops) return `<span class="pill">Collecting status</span>`;
+  if(ops.unavailable) return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Status unavailable</span>`;
+  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  if(!row||row.observation!=="answered"||!s)
+    return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Not observed</span>`;
+  const wal=s.wal&&s.wal.snapshot;
+  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  if(!s.process||!s.process.live||!s.serving||!s.serving.ready||!s.raft||!s.raft.sample_valid||!s.raft.watermark_valid||!walHealthy)
+    return `<span class="pill" style="color:var(--warn);border-color:var(--warn)">Needs attention</span>`;
+  return `<span class="pill" style="color:var(--good);border-color:var(--good)">Direct status ready</span>`;
+}
+function clusterNodeOperationsHtml(n,ops){
+  if(!ops) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeunknown">Collecting direct process, serving, Raft, WAL, snapshot, media, and build evidence…</div></section>`;
+  if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
+  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  if(!row||row.observation!=="answered"||!s){
+    const why=clusterOperationReason(row&&(row.error_class||row.observation)||"not_observed");
+    return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
+  }
+  const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
+  const process=s.process&&s.process.live
+    ? `<span style="color:var(--good)">Live</span> · ${esc(clusterOperationAge(row.sample_age_ms))}`
+    : `<span style="color:var(--bad)">Not live</span>`;
+  const serving=s.serving&&s.serving.ready
+    ? `<span style="color:var(--good)">Ready</span>`
+    : `<span style="color:var(--bad)">Fenced: ${esc(clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
+  const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
+  const raftText=raft.sample_valid&&raft.watermark_valid
+    ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
+    : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
+  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  const walText=wal
+    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const snapshotText=snap.available
+    ? snap.last_build_outcome
+      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"}`
+      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
+  const lastError=wal&&wal.last_error?wal.last_error.message:"None";
+  const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
+  return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
+      <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
+      <div><span>Snapshot</span>${snapshotText}</div><div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
+    <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
+      <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
+        <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
+        <dt>Applied / commit</dt><dd>${raft.applied_index===null||raft.applied_index===undefined?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null||raft.commit_index===undefined?"unknown":esc(String(raft.commit_index))}</dd>
+        <dt>Raft sample</dt><dd>${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}</dd>
+        <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
+        <dt>WAL durable index</dt><dd>${wal&&wal.last_durable_index!==null?esc(String(wal.last_durable_index)):"unknown"}</dd>
+        <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
+        <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
+        <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
+        <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
+        <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>
+  </section>`;
 }
 function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const voter=n.is_voter;
@@ -11498,13 +11591,15 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
     : "Maintenance is reversible and does not remove this node from membership.";
-  return `<article class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}">
-    <div class="clnodehead"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
-      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div>${role}</div></div>
-    <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
-      <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div>
-    <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div>
-  </article>`;
+  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()">
+    <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
+      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
+    <div class="clnodebody"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
+      <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
+        <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div></section>
+      ${clusterNodeOperationsHtml(n,context.operations)}</div>
+      <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div></div>
+  </details>`;
 }
 function clusterRecoveryState(cluster){
   if(cluster.recovery) return cluster.recovery;
@@ -11600,60 +11695,11 @@ function clusterOperationReason(value){
   return String(value||"unknown").replaceAll("_"," ");
 }
 function clusterOperationsUnavailable(message){
-  return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
+  return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
       <p class="muted" style="margin:0">Direct voter observations and the guarded rollout verdict.</p></div>
       <button class="ghost sm" onclick="refreshClusterOperations(this)">Retry status</button></div>
     <div class="clstate warn" role="status"><h3>Do not restart another voter</h3>
       <p>The bounded operations status could not be collected: ${message||"request failed"}. Keep every available voter running and retry; a roster heartbeat is not a substitute for a direct peer observation.</p></div></div>`;
-}
-function clusterOperationsNodeRow(row){
-  const n=row.membership||{};
-  const s=row.status;
-  const answered=row.observation==="answered"&&s;
-  if(!answered){
-    const why=clusterOperationReason(row.error_class||row.observation);
-    return `<tr><td class="libname clidentity"><div class="clhost">${esc(n.hostname||n.node_id||"Unknown node")}</div>
-        <div class="clid">Node ID ${esc(n.node_id||"unknown")}</div></td>
-      <td data-label="Process" style="color:var(--bad)">Not observed · ${esc(why)}</td>
-      <td data-label="Serving">Unknown</td><td data-label="Raft">Unknown</td><td data-label="WAL">Unknown</td>
-      <td data-label="Snapshot">Unknown</td><td data-label="Media">Unknown</td><td data-label="Build">Unknown</td></tr>`;
-  }
-  const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
-  const process=`<span style="color:var(--good)">Live</span> · ${esc(clusterOperationAge(row.sample_age_ms))}`;
-  const serving=s.serving&&s.serving.ready
-    ? `<span style="color:var(--good)">Ready</span>`
-    : `<span style="color:var(--bad)">Fenced: ${esc(clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
-  const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
-  const raftText=raft.sample_valid&&raft.watermark_valid
-    ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
-    : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
-  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
-  const walText=wal
-    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")} · durable ${wal.last_durable_index===null?"unknown":esc(String(wal.last_durable_index))}`
-    : `<span style="color:var(--bad)">Unavailable</span>`;
-  const snapshotText=snap.available
-    ? snap.last_build_outcome
-      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"}`
-      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors`
-    : `<span style="color:var(--bad)">Unavailable</span>`;
-  const mediaText=`${esc(String(media.local_active_sessions))} session${media.local_active_sessions===1?"":"s"} · ${media.drained?"drained":"draining"}`;
-  const lastError=wal&&wal.last_error?wal.last_error.message:"None";
-  const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
-  const detail=`<tr><td colspan="8"><details class="clopsdetail"><summary>Details for ${esc(n.hostname||n.node_id)}</summary>
-    <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
-      <dt>Protocol range</dt><dd>${esc(String(s.protocol_min))}–${esc(String(s.protocol_max))}</dd>
-      <dt>Applied / commit</dt><dd>${raft.applied_index===null?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null?"unknown":esc(String(raft.commit_index))}</dd>
-      <dt>Raft sample</dt><dd>${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}</dd>
-      <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
-      <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
-      <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
-      <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
-      <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
-      <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details></td></tr>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(n.hostname||n.node_id)}</span>${n.is_leader?`<span class="pill clleader">Leader</span>`:""}</div>
-      <div class="clid">Node ID ${esc(n.node_id)}</div></td><td data-label="Process">${process}</td>
-    <td data-label="Serving">${serving}</td><td data-label="Raft">${raftText}</td><td data-label="WAL">${walText}</td>
-    <td data-label="Snapshot">${snapshotText}</td><td data-label="Media">${mediaText}</td><td data-label="Build" class="clopscode">${esc(s.build)}</td></tr>${detail}`;
 }
 function clusterRestartPreparationHtml(localRow){
   const media=localRow&&localRow.status&&localRow.status.media;
@@ -11671,7 +11717,7 @@ function clusterRestartPreparationHtml(localRow){
     <button class="ghost sm" onclick='cancelLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Cancel preparation</button></div>`;
 }
 function clusterOperationsCard(ops){
-  if(!ops) return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
+  if(!ops) return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
       <p class="muted" style="margin:0">Collecting direct voter observations and the guarded rollout verdict…</p></div></div></div>`;
   if(ops.unavailable) return clusterOperationsUnavailable(esc(ops.message||"request failed"));
   const rows=ops.nodes||[], answered=rows.filter(row=>row.observation==="answered"&&row.status);
@@ -11696,8 +11742,8 @@ function clusterOperationsCard(ops){
   const prepareAction=canPrepare
     ? `<button class="ghost sm" onclick='prepareLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Prepare this voter for restart</button>`
     : safe?`<span class="hint">Open ${esc(ops.verdict.candidate_node_id)} directly to prepare that voter.</span>`:"";
-  return `<div class="card"><div class="clopshead"><div><h2 class="section" style="margin-top:0">Operations</h2>
-      <p class="muted" style="margin:0">Direct process-local evidence, collected under one bounded deadline.</p></div>
+  return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
+      <p class="muted" style="margin:0">Cluster-wide verdict from the direct evidence shown inside each node.</p></div>
       <div class="row">${prepareAction}<button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
       <button class="ghost sm" onclick="refreshClusterOperations(this)">Refresh status</button></div></div>
     <div class="clstate ${safe?"good":"warn"}" role="status"><h3>${esc(title)}</h3>
@@ -11709,9 +11755,7 @@ function clusterOperationsCard(ops){
       <div class="clopsfact"><span class="muted">Build convergence</span><b>${builds.length===1?esc(builds[0]):`${builds.length} observed builds`}</b></div>
       <div class="clopsfact"><span class="muted">Commit / apply</span><b>maximum lag ${lags.length?esc(String(Math.max(...lags))):"unknown"}</b></div>
       <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
-      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(clusterOperationAge(oldest))}</b></div></div>
-    <div style="overflow-x:auto"><table aria-label="Direct cluster operations status"><thead><tr><th>Host</th><th>Process</th><th>Serving</th><th>Raft</th><th>WAL</th><th>Snapshot</th><th>Media</th><th>Build</th></tr></thead>
-      <tbody>${rows.map(clusterOperationsNodeRow).join("")}</tbody></table></div></div>`;
+      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(clusterOperationAge(oldest))}</b></div></div></div>`;
 }
 async function refreshClusterOperations(btn){
   const generation=PAGE_RENDER_GENERATION;
@@ -11794,15 +11838,16 @@ function clusterPanel(d){
   // the same renderer as Settings → System.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
   const capacity=clustered&&cluster.capacity;
-  const capacityText=capacity
-    ? `${capacity.ready_read_workers} ready non-voting read worker${capacity.ready_read_workers===1?"":"s"}; `+
-      `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}; `+
-      `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
-    : "Capacity details unavailable.";
+  const capacityHeadline=capacity
+    ? `${capacity.ready_read_workers} ready read worker${capacity.ready_read_workers===1?"":"s"} · ${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}`
+    : "Capacity details unavailable";
+  const capacityDetail=capacity
+    ? `${capacity.voting_nodes} voters · quorum ${capacity.voting_quorum} · tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}. Read capacity and replicated copies do not increase voting redundancy.`
+    : "Read capacity and voting redundancy could not be read.";
   const maintenanceActive=nodes.some(node=>node.maintenance);
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<div class="clnodes">${nodes.map(node=>{
+    ? `<div class="clnodes" id="cluster-node-list">${nodes.map(node=>{
         const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
         return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
       }).join("")}</div>`
@@ -11815,11 +11860,12 @@ function clusterPanel(d){
     <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
     <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
     <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
-    ${operations}
-    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Nodes</h3><p>Heartbeat freshness is committed state, not a direct network probe; the Operations table above contains direct peer observations.</p></div><button class="ghost sm" onclick="retryCluster()">Refresh</button></div>${roster}
-      <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"} — the same reading as the System tab.</div>
-      <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div></section>
-      ${clustered?clusterOperationsPanel(cluster,d.clusterOps):`<section class="cluster-card"><h3>Cluster operations</h3><p>Clustering is not enabled on this server.</p></section>`}</div>
+    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+      <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
+      <div class="clcontextfacts"><div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>Same authoritative reading as the System tab.</small></div>
+        <div class="clcontextfact"><span>Capacity</span><b>${esc(capacityHeadline)}</b><small>${esc(capacityDetail)}</small></div></div>
+      ${operations}${roster}</section>
+      ${clustered?clusterOperationsPanel(cluster,d.clusterOps):""}</div>
     ${statusFailure?`<div class="row"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
     ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details>`:""}
@@ -11831,6 +11877,21 @@ function clusterPanel(d){
         <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
       <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
       <div class="logbox" id="cllogbox">Loading…</div></div></details></div>`;
+}
+function toggleClusterNodes(btn){
+  const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
+  const expand=cards.some(card=>!card.open);
+  cards.forEach(card=>{ card.open=expand; });
+  syncClusterNodeToggle();
+  if(btn) btn.focus();
+}
+function syncClusterNodeToggle(){
+  const btn=document.getElementById("clnodes-toggle");
+  if(!btn) return;
+  const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
+  const allOpen=cards.length>0&&cards.every(card=>card.open);
+  btn.textContent=allOpen?"Collapse all":"Expand all";
+  btn.setAttribute("aria-expanded",String(allOpen));
 }
 function retryCluster(){
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
