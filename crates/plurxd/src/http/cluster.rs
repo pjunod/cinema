@@ -190,27 +190,27 @@ pub async fn enter_maintenance(
             .map_err(api_error);
     }
     let preflight = collect_aggregate(&state).await?;
-    let single_local_voter = preflight.membership.capacity.voting_nodes == 1
-        && preflight.membership.nodes.iter().any(|node| {
-            node.node_id == state.node_id
-                && node.is_voter
-                && node.reachable
-                && !node.removal_pending
-        });
-    if !single_local_voter && !preflight.verdict.safe_to_restart_one {
+    let readiness = preflight
+        .maintenance
+        .iter()
+        .find(|verdict| verdict.node_id == state.node_id)
+        .ok_or_else(|| {
+            ApiError::typed(
+                StatusCode::CONFLICT,
+                "maintenance_preflight_unsafe",
+                "the target is absent from the direct cluster observations",
+            )
+        })?;
+    if !readiness.safe_to_enter {
+        let reason = readiness
+            .blockers
+            .first()
+            .map(|finding| finding.message.as_str())
+            .unwrap_or("the direct maintenance preflight did not prove this target safe");
         return Err(ApiError::typed(
             StatusCode::CONFLICT,
             "maintenance_preflight_unsafe",
-            "the current direct cluster observations do not permit preparing a voter",
-        ));
-    }
-    if !single_local_voter
-        && preflight.verdict.candidate_node_id.as_deref() != Some(state.node_id.as_str())
-    {
-        return Err(ApiError::typed(
-            StatusCode::CONFLICT,
-            "maintenance_candidate_mismatch",
-            "open the current safe restart candidate directly before entering maintenance",
+            format!("maintenance is not safe for this target: {reason}"),
         ));
     }
     state
@@ -542,6 +542,9 @@ mod tests {
         assert!(begin < wait && wait < commit);
         assert!(enter.contains("cancel_restart_preparation(active_sessions)"));
         assert!(enter.contains("node_id != state.node_id"));
+        assert!(enter.contains(".maintenance"));
+        assert!(!enter.contains("candidate_node_id"));
+        assert!(!enter.contains("safe_to_restart_one"));
 
         let exit = source
             .split_once("pub async fn exit_maintenance(")

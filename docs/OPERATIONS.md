@@ -321,28 +321,33 @@ refuses maintenance on either survivor. A one-voter cluster may enter
 maintenance with an expected service outage.
 
 Open the exact target backend before choosing **Enter maintenance**. In a
-multi-voter cluster, the server accepts the request only when the full-width
-**Operations** verdict names that local process as the safe restart candidate.
-A directly observed one-voter server is the explicit service-outage exception.
-Sending either action through another cluster node or a non-sticky load
-balancer is refused because only the target can linearize its own work
-admissions and inspect its local process registries.
+multi-voter cluster, the target-specific maintenance preflight requires fresh
+direct evidence from the voter set and proves that fencing this target still
+leaves the current quorum. Unlike the stricter rollout candidate, it may approve
+the current leader or a node with existing streams: the maintenance operation
+first fences new admissions, hands leadership off when needed, and lets that
+existing work drain. A stable caught-up learner may also enter maintenance
+without subtracting a vote. A directly observed one-voter server is the explicit
+service-outage exception. Sending either action through another cluster node or
+a non-sticky load balancer is refused because only the target can linearize its
+own work admissions and inspect its local process registries.
 
 The workflow in **Maintenance & leadership** is the authoritative checklist;
 the full-width **Operations** card above it remains the stricter direct-peer
 restart verdict and WAL/snapshot evidence surface:
 
-1. If the target is leader, a reachable zero-lag follower campaigns and a
+1. The target blocks new local admissions and waits for any admission already
+   in flight to publish or fail. Existing HLS, direct streams, publication, and
+   offline preparation remain owned and may finish; maintenance never kills
+   them implicitly.
+2. If the target is leader, a reachable zero-lag follower campaigns and a
    stable successor is observed before the maintenance row commits.
-2. The target reads the replicated row from its local applied state, fences
+3. The target reads the replicated row from its local applied state, fences
    new HTTP work and cluster-wide singleton jobs, refuses media placement, and
    acknowledges that fence in its next heartbeat.
-3. Existing HLS, direct streams, publication, and offline preparation may
-   finish. Before the replicated fence commits, the target blocks new local
-   admissions and waits for any admission already in flight to publish or
-   fail. The checklist uses direct process evidence for all of these owners in
-   addition to replicated media-session leases; maintenance never kills them
-   implicitly.
+4. The checklist uses direct process evidence for every local owner in addition
+   to replicated media-session leases. It becomes update/reboot ready only after
+   the existing work from step 1 has drained.
 4. **Ready to update or reboot** means the target acknowledged the fence, is
    not leader, is reachable with zero apply lag, and the directly observed
    process owns no local work or admission in flight. You may then update or

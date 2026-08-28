@@ -11414,9 +11414,7 @@ function membershipRefusalText(code,message){
     maintenance_node_mismatch:
       "Open the target node directly. Only that running process can fence and drain its own work or clear its durable maintenance fence.",
     maintenance_preflight_unsafe:
-      "Direct cluster observations do not currently identify a voter that is safe to restart. Keep every available voter running and clear the Operations blockers first.",
-    maintenance_candidate_mismatch:
-      "This node is not the current safe restart candidate. Open the candidate named in Operations directly and retry there.",
+      "Direct cluster observations do not currently prove this node safe to maintain. Keep every available voter running and clear the Operations blockers first.",
     election_quorum_unavailable:
       "Raft cannot elect a leader without a reachable voter majority. Restore an original voter instead of repeatedly forcing elections.",
     election_candidate_unavailable:
@@ -11434,6 +11432,10 @@ function clusterDirectMaintenanceStatus(ops,nodeId){
   if(!ops||ops.unavailable) return null;
   const row=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
   return row&&row.observation==="answered"&&row.status?row.status:null;
+}
+function clusterMaintenanceEntryVerdict(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
 }
 function clusterMaintenanceReady(n,ops){
   const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
@@ -11482,7 +11484,7 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
     : "";
   const maintenanceAction=n.maintenance
     ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
-    : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Operations has not selected this node as the safe restart candidate.':'Fence new work and drain this process.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
+    : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
   const remove=n.node_id===localNodeId
     ? `<span class="muted">Use graceful leave in Danger zone</span>`
     : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
@@ -11796,15 +11798,12 @@ function clusterPanel(d){
       `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
     : "Capacity details unavailable.";
   const maintenanceActive=nodes.some(node=>node.maintenance);
-  const singleLocalObserved=capacity&&capacity.voting_nodes===1&&d.clusterOps&&!d.clusterOps.unavailable&&
-    (d.clusterOps.nodes||[]).some(row=>row.observation==="answered"&&row.membership&&
-      row.membership.node_id===cluster.local_node_id&&row.membership.is_voter);
-  const maintenanceCandidate=singleLocalObserved?cluster.local_node_id:
-    d.clusterOps&&!d.clusterOps.unavailable&&d.clusterOps.verdict&&d.clusterOps.verdict.safe_to_restart_one?
-      d.clusterOps.verdict.candidate_node_id:null;
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<div class="clnodes">${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id,node.node_id===maintenanceCandidate,nodeContext)).join("")}</div>`
+    ? `<div class="clnodes">${nodes.map(node=>{
+        const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
+        return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
+      }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
   const recovery=clustered?clusterRecoveryState(cluster):null;

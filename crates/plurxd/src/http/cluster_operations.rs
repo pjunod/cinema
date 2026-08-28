@@ -16,7 +16,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use futures_util::{stream, StreamExt};
 use plurx_core::cluster::membership::{
-    ActivityPeer, ClusterNodeRecord, MembershipStatus, MAX_OPERATIONS_PEERS,
+    ActivityPeer, ClusterNodeRecord, MembershipStatus, NodeRole, MAX_OPERATIONS_PEERS,
 };
 use plurx_core::cluster::migration::status::{
     DbSnapshotMetricsSnapshot, WalRuntimeState, WalStatusSnapshot,
@@ -180,6 +180,8 @@ pub(crate) struct ClusterOperationsAggregate {
     pub membership: MembershipStatus,
     pub nodes: Vec<ClusterNodeObservation>,
     pub verdict: RolloutVerdict,
+    #[serde(default)]
+    pub maintenance: Vec<MaintenanceEntryVerdict>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -196,6 +198,13 @@ pub(crate) struct RolloutFinding {
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct MaintenanceEntryVerdict {
+    pub node_id: String,
+    pub safe_to_enter: bool,
+    pub blockers: Vec<RolloutFinding>,
 }
 
 pub(crate) async fn local(
@@ -255,12 +264,14 @@ pub(crate) async fn collect_aggregate(
         observed_at_unix_ms,
     );
     let verdict = rollout_verdict(&membership, &observations);
+    let maintenance = maintenance_entry_verdicts(&membership, &observations);
     Ok(ClusterOperationsAggregate {
         schema_version: 1,
         observed_at_unix_ms,
         membership,
         nodes: observations,
         verdict,
+        maintenance,
     })
 }
 
@@ -902,6 +913,256 @@ fn rollout_verdict(
     }
 }
 
+/// Direct, target-specific proof for starting reversible maintenance.
+///
+/// This deliberately differs from the rollout verdict. A rollout candidate
+/// must already be a drained non-leader voter because the next operator action
+/// may be an immediate process stop. Maintenance begins by fencing admissions;
+/// it therefore has to admit a busy target so existing work can drain, and it
+/// has to admit the leader so the core can hand leadership off before the
+/// durable maintenance fence is committed. A stable learner has no vote to
+/// subtract, but still needs a healthy direct process and a healthy voter set.
+pub(crate) fn maintenance_entry_verdicts(
+    membership: &MembershipStatus,
+    observations: &[ClusterNodeObservation],
+) -> Vec<MaintenanceEntryVerdict> {
+    let voters = observations
+        .iter()
+        .filter(|row| row.membership.is_voter)
+        .collect::<Vec<_>>();
+    let directly_live_voters = voters
+        .iter()
+        .filter(|row| {
+            row.observation == ObservationState::Answered
+                && row
+                    .status
+                    .as_ref()
+                    .is_some_and(|status| status.process.live)
+        })
+        .count();
+    let terms = voters
+        .iter()
+        .filter_map(|row| row.status.as_ref()?.raft.current_term)
+        .collect::<BTreeSet<_>>();
+    let leaders = voters
+        .iter()
+        .filter_map(|row| row.status.as_ref()?.raft.leader_id)
+        .collect::<BTreeSet<_>>();
+    let protocol_min = voters
+        .iter()
+        .filter_map(|row| row.status.as_ref().map(|status| status.protocol_min))
+        .max()
+        .unwrap_or(i64::MAX);
+    let protocol_max = voters
+        .iter()
+        .filter_map(|row| row.status.as_ref().map(|status| status.protocol_max))
+        .min()
+        .unwrap_or(i64::MIN);
+
+    observations
+        .iter()
+        .map(|target| {
+            let mut blockers = Vec::new();
+            if membership.recovery.required || !membership.recovery.quorum_available {
+                blocker(
+                    &mut blockers,
+                    "maintenance_quorum_unavailable",
+                    "the voter majority and an elected leader must be directly healthy before maintenance begins",
+                    None,
+                );
+            }
+            for row in observations {
+                if row.membership.removal_pending {
+                    blocker(
+                        &mut blockers,
+                        "membership_lifecycle_pending",
+                        "a committed node removal is still pending",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if row.membership.maintenance {
+                    blocker(
+                        &mut blockers,
+                        "maintenance_already_active",
+                        "another durable maintenance fence is already active",
+                        Some(&row.membership.node_id),
+                    );
+                }
+            }
+            for row in &voters {
+                if row.observation != ObservationState::Answered {
+                    blocker(
+                        &mut blockers,
+                        "voter_not_observed",
+                        "a voter did not answer the direct authenticated status probe",
+                        Some(&row.membership.node_id),
+                    );
+                    continue;
+                }
+                let Some(status) = row.status.as_ref() else {
+                    continue;
+                };
+                if !status.process.live {
+                    blocker(
+                        &mut blockers,
+                        "process_not_live",
+                        "a voter did not report a live process",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if !status.serving.ready {
+                    blocker(
+                        &mut blockers,
+                        "voter_not_ready",
+                        "a voter is already fenced from serving new work",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if status.media.new_admissions_blocked {
+                    blocker(
+                        &mut blockers,
+                        "restart_preparation_active",
+                        "a node is already preparing for restart or maintenance",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if !status.raft.sample_valid || !status.raft.watermark_valid {
+                    blocker(
+                        &mut blockers,
+                        "raft_sample_stale",
+                        "a voter lacks a fresh local Raft and quorum-watermark sample",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if status.raft.apply_lag_entries != Some(0) {
+                    blocker(
+                        &mut blockers,
+                        "apply_lag_not_zero",
+                        "a voter's current apply lag is stale, unknown, or non-zero",
+                        Some(&row.membership.node_id),
+                    );
+                }
+                if !wal_is_healthy(&status.wal) {
+                    blocker(
+                        &mut blockers,
+                        "wal_not_healthy",
+                        "a voter's live WAL is unavailable, not open, not durable, or reports an error",
+                        Some(&row.membership.node_id),
+                    );
+                }
+            }
+            if terms.len() != 1 || leaders.len() != 1 || voters.len() != directly_live_voters {
+                blocker(
+                    &mut blockers,
+                    "leader_term_disagreement",
+                    "voters do not agree on one current term and known leader",
+                    None,
+                );
+            }
+            if voters.len() != directly_live_voters
+                || protocol_min > protocol_max
+                || membership.protocol.active_min < protocol_min
+                || membership.protocol.active_max > protocol_max
+            {
+                blocker(
+                    &mut blockers,
+                    "protocol_incompatible",
+                    "the observed voter binaries do not share the cluster's active protocol range",
+                    None,
+                );
+            }
+
+            if target.membership.role == NodeRole::Voter && !target.membership.is_voter {
+                blocker(
+                    &mut blockers,
+                    "membership_lifecycle_pending",
+                    "a voter is still joining and cannot begin maintenance",
+                    Some(&target.membership.node_id),
+                );
+            }
+            if target.observation != ObservationState::Answered {
+                blocker(
+                    &mut blockers,
+                    "target_not_observed",
+                    "the target did not answer its direct authenticated status probe",
+                    Some(&target.membership.node_id),
+                );
+            } else if let Some(status) = target.status.as_ref() {
+                if !status.process.live || !status.serving.ready {
+                    blocker(
+                        &mut blockers,
+                        "target_not_ready",
+                        "the target process is not live and ready to fence new work",
+                        Some(&target.membership.node_id),
+                    );
+                }
+                if status.media.new_admissions_blocked {
+                    blocker(
+                        &mut blockers,
+                        "restart_preparation_active",
+                        "the target is already preparing for restart or maintenance",
+                        Some(&target.membership.node_id),
+                    );
+                }
+                if !target.membership.is_voter {
+                    if !status.raft.sample_valid || status.raft.apply_lag_entries != Some(0) {
+                        blocker(
+                            &mut blockers,
+                            "learner_not_caught_up",
+                            "the learner needs a fresh zero-lag Raft sample before maintenance",
+                            Some(&target.membership.node_id),
+                        );
+                    }
+                    if !wal_is_healthy(&status.wal) {
+                        blocker(
+                            &mut blockers,
+                            "wal_not_healthy",
+                            "the learner's live WAL is unavailable, not open, not durable, or reports an error",
+                            Some(&target.membership.node_id),
+                        );
+                    }
+                    if status.protocol_min > membership.protocol.active_min
+                        || status.protocol_max < membership.protocol.active_max
+                    {
+                        blocker(
+                            &mut blockers,
+                            "protocol_incompatible",
+                            "the learner binary does not cover the cluster's active protocol range",
+                            Some(&target.membership.node_id),
+                        );
+                    }
+                }
+            } else {
+                blocker(
+                    &mut blockers,
+                    "target_status_missing",
+                    "the target direct probe returned no process status",
+                    Some(&target.membership.node_id),
+                );
+            }
+
+            if target.membership.is_voter
+                && membership.capacity.voting_nodes > 1
+                && directly_live_voters.saturating_sub(1)
+                    < membership.capacity.voting_quorum
+            {
+                blocker(
+                    &mut blockers,
+                    "maintenance_would_lose_quorum",
+                    "fencing this voter would leave fewer directly live voters than quorum requires",
+                    Some(&target.membership.node_id),
+                );
+            }
+
+            MaintenanceEntryVerdict {
+                node_id: target.membership.node_id.clone(),
+                safe_to_enter: blockers.is_empty(),
+                blockers,
+            }
+        })
+        .collect()
+}
+
 fn wal_is_healthy(wal: &WalStatus) -> bool {
     wal.snapshot.as_ref().is_some_and(|snapshot| {
         wal.available
@@ -1242,6 +1503,107 @@ mod tests {
             .blockers
             .iter()
             .any(|finding| finding.code == "restart_preparation_active"));
+    }
+
+    #[test]
+    fn maintenance_entry_admits_the_leader_a_busy_follower_and_a_stable_learner() {
+        let mut membership = test_membership("node-1", 3);
+        membership.nodes.push(ClusterNodeRecord {
+            node_id: "node-4".to_owned(),
+            hostname: "node-4".to_owned(),
+            advertised_host: "node-4:8080".to_owned(),
+            raft_id: 4,
+            role: NodeRole::Learner,
+            is_voter: false,
+            is_leader: false,
+            reachable: true,
+            last_seen_at: 1,
+            removal_pending: false,
+            learner_protocol_ready: true,
+            bounded_read_ready: true,
+            apply_lag_entries: Some(0),
+            storage_headroom_bytes: Some(1),
+            voter_storage_ready: false,
+            maintenance: false,
+            maintenance_requested_at: None,
+            maintenance_acknowledged: false,
+            maintenance_ready: false,
+            active_media_sessions: 0,
+        });
+        membership.capacity.non_voting_replicas = 1;
+        membership.capacity.ready_read_workers = 1;
+        let mut observations = test_observations(&membership);
+        observations[1]
+            .status
+            .as_mut()
+            .expect("busy follower status")
+            .media = MediaDrainStatus {
+            local_active_sessions: 2,
+            drained: false,
+            new_admissions_blocked: false,
+            admissions_in_flight: 0,
+            preparation_expires_at_unix_ms: None,
+            direct_play_connections: DirectPlayConnectionStatus::UnknownRequiresProxy,
+            restart_commands: Vec::new(),
+        };
+
+        let verdicts = maintenance_entry_verdicts(&membership, &observations);
+        for node_id in ["node-1", "node-2", "node-4"] {
+            let verdict = verdicts
+                .iter()
+                .find(|verdict| verdict.node_id == node_id)
+                .expect("target verdict");
+            assert!(
+                verdict.safe_to_enter,
+                "{node_id} should enter maintenance: {:?}",
+                verdict.blockers
+            );
+        }
+    }
+
+    #[test]
+    fn maintenance_entry_subtracts_only_a_voters_vote() {
+        let mut membership = test_membership("node-1", 2);
+        membership.nodes.push(ClusterNodeRecord {
+            node_id: "node-3".to_owned(),
+            hostname: "node-3".to_owned(),
+            advertised_host: "node-3:8080".to_owned(),
+            raft_id: 3,
+            role: NodeRole::Learner,
+            is_voter: false,
+            is_leader: false,
+            reachable: true,
+            last_seen_at: 1,
+            removal_pending: false,
+            learner_protocol_ready: true,
+            bounded_read_ready: true,
+            apply_lag_entries: Some(0),
+            storage_headroom_bytes: Some(1),
+            voter_storage_ready: false,
+            maintenance: false,
+            maintenance_requested_at: None,
+            maintenance_acknowledged: false,
+            maintenance_ready: false,
+            active_media_sessions: 0,
+        });
+        let observations = test_observations(&membership);
+        let verdicts = maintenance_entry_verdicts(&membership, &observations);
+        let voter = verdicts
+            .iter()
+            .find(|verdict| verdict.node_id == "node-1")
+            .expect("voter verdict");
+        assert!(!voter.safe_to_enter);
+        assert!(voter
+            .blockers
+            .iter()
+            .any(|finding| finding.code == "maintenance_would_lose_quorum"));
+        assert!(
+            verdicts
+                .iter()
+                .find(|verdict| verdict.node_id == "node-3")
+                .expect("learner verdict")
+                .safe_to_enter
+        );
     }
 
     #[test]

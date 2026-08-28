@@ -50,6 +50,7 @@ const BORROWED = [
   "clusterStateView",
   "membershipRefusalText",
   "clusterDirectMaintenanceStatus",
+  "clusterMaintenanceEntryVerdict",
   "clusterMaintenanceReady",
   "clusterMaintenanceResumeReady",
   "clusterNodeRow",
@@ -274,6 +275,16 @@ function operationStatus(membership, { safe = true, unreachable = false } = {}) 
         : [],
       warnings: [],
     },
+    maintenance: membership.nodes.map((entry) => ({
+      node_id: entry.node_id,
+      safe_to_enter:
+        !unreachable &&
+        (entry.is_voter
+          ? membership.capacity.voting_nodes === 1 ||
+            membership.capacity.voting_nodes >= 3
+          : entry.role === "learner"),
+      blockers: [],
+    })),
   };
 }
 
@@ -313,7 +324,7 @@ test("the two-voter state reaches the rendered panel as those words", () => {
   assertNoRedundancyClaim(html.replace(/<[^>]*>/g, " "), "the two-voter panel");
   assert.match(
     html,
-    /disabled title="Operations has not selected this node as the safe restart candidate/,
+    /disabled title="Direct maintenance preflight has not approved this node/,
   );
 });
 
@@ -868,6 +879,33 @@ test("the healthy cluster layout separates health, nodes, operations, and danger
   assert.match(html, /Force election/);
   assert.match(html, /Danger zone · membership changes/);
   assert.equal(html.includes("<table"), false);
+});
+
+test("maintenance entry is available directly on a leader, busy follower, and learner", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { active_media_sessions: 2 }),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: true }),
+  ]);
+  const ops = operationStatus(cluster);
+  ops.nodes[1].status.media = { local_active_sessions: 2, drained: false };
+
+  for (const nodeId of ["node-a", "node-b", "node-d"]) {
+    cluster.local_node_id = nodeId;
+    const html = ui.clusterPanel({
+      cluster,
+      clusterOps: ops,
+      sys: { replication: REPLICATION },
+    });
+    const marker = `<div class="clid">Node ID ${nodeId}</div>`;
+    const start = html.lastIndexOf(marker);
+    assert.notEqual(start, -1);
+    const card = html.slice(start, html.indexOf("</article>", start));
+    assert.match(card, /Enter maintenance/);
+    assert.doesNotMatch(card, /disabled[^>]*>Enter maintenance/);
+  }
 });
 
 test("maintenance renders the acknowledged handoff, catch-up, and drain workflow", () => {

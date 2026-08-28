@@ -8354,6 +8354,24 @@ mod tests {
     }
 
     #[test]
+    fn leader_handoff_precedes_the_durable_maintenance_fence() {
+        let source = include_str!("membership.rs")
+            .split_once("pub async fn enter_maintenance(")
+            .expect("maintenance entry")
+            .1
+            .split_once("pub async fn exit_maintenance(")
+            .expect("maintenance entry end")
+            .0;
+        let handoff = source
+            .find("self.handoff_leadership(target.raft_id, &status).await?")
+            .expect("leader handoff");
+        let commit = source
+            .find("INSERT INTO cluster_node_maintenance")
+            .expect("durable maintenance fence");
+        assert!(handoff < commit);
+    }
+
+    #[test]
     fn maintenance_exit_is_one_atomic_current_process_and_drain_proof() {
         let mut connection = rusqlite::Connection::open_in_memory().expect("sqlite");
         connection
