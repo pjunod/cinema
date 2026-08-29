@@ -1636,7 +1636,7 @@ struct PrepublicationCopyRetry {
 #[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Clone)]
 enum PrepublicationRetry {
-    Transcode(PrepublicationTranscodeRetry),
+    Transcode(Box<PrepublicationTranscodeRetry>),
     Copy(PrepublicationCopyRetry),
 }
 
@@ -14936,7 +14936,9 @@ impl TranscodeManager {
                 "rolling control actor rejected executor registration: {reason:?}"
             ));
         }
-        let executor_retry = retry.clone().map(PrepublicationRetry::Transcode);
+        let executor_retry = retry
+            .clone()
+            .map(|retry| PrepublicationRetry::Transcode(Box::new(retry)));
         let (executor_activation, manager_publication) = tokio::sync::oneshot::channel();
         spawn_prepublication_executor_owner(
             &session,
@@ -27594,8 +27596,7 @@ mod tests {
             let newest = playlist
                 .lines()
                 .map(str::trim)
-                .filter(|line| is_safe_segment(line) && segment_index(line).is_some())
-                .next_back()
+                .rfind(|line| is_safe_segment(line) && segment_index(line).is_some())
                 .expect("advertised media segment")
                 .to_owned();
             let playlist_deadline = Instant::now() + Duration::from_secs(5);

@@ -37,11 +37,9 @@ const MAX_ERROR_DETAIL_BYTES: usize = 512;
 const MAX_CAPABILITY_VALUES: usize = 8;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
-/// Conservative compatibility default while the later M4 policy-admission
-/// slice moves the existing hardware/software/copy startup budgets into the
-/// actor. This deadline is action-passive: it records an exact provisional due
-/// coordinate but does not retry, kill, replace, or otherwise compete with
-/// legacy recovery.
+/// Compatibility budget retained only by legacy actor fixtures. Production
+/// attempts use their typed hardware, software, or copy policy budget.
+#[cfg(test)]
 const PRODUCER_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 const PREPUBLICATION_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 const PREPUBLICATION_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
@@ -4843,6 +4841,7 @@ impl RollingControlActor {
         Ok(attempt)
     }
 
+    #[cfg(test)]
     fn begin_producer_attempt_at(&mut self, now: Instant) -> Result<u64, ProducerAttemptRejection> {
         if self.prepublication.is_some() {
             return Err(ProducerAttemptRejection::InvalidPolicy);
