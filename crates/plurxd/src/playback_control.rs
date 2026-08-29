@@ -2230,6 +2230,48 @@ enum ProducerPhysicalFlowState {
     Held,
 }
 
+/// What the actor has been asked to make the producer's physical flow, as
+/// distinct from what a successful signal has already made it.
+///
+/// The merged slices sequence only the *acknowledgement*: a successful
+/// SIGSTOP/SIGCONT enters producer ingress as an ordered `FlowApplied`
+/// barrier. The desire itself lived in a caller's stack frame and in the
+/// `Session::suspended` atomic, so two evaluations could each believe they
+/// owned the next signal. This carries the desire onto the same sequence
+/// without touching the applied state: per the M4 contract, requesting a hold
+/// does not change the running deadline, and a resume arms nothing until its
+/// acknowledgement lands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProducerFlowIntention {
+    /// Monotonic on the desired side only. Distinct from the applied ingress
+    /// coordinate in `producer_flow_revision`; conflating them would let an
+    /// acknowledgement silence a newer desire.
+    revision: u64,
+    desired: ProducerPhysicalFlowState,
+}
+
+/// The actor's answer to one intention.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ProducerFlowIntentionOutcome {
+    /// The desire was accepted and no signal is outstanding, so the caller
+    /// owns issuing exactly this one.
+    Issue {
+        revision: u64,
+        hold: bool,
+    },
+    /// Accepted and recorded, but a signal for an earlier revision is still
+    /// outstanding. The contract coalesces here: its acknowledgement is
+    /// applied first, and the actor issues again only if the desire still
+    /// differs. The caller must not signal.
+    Coalesced,
+    /// The desire already matches the applied state and nothing is
+    /// outstanding, so there is nothing to do.
+    Settled,
+    /// An older revision, a different attempt, a retired actor, or revoked
+    /// signal authorization. Never a reason to signal.
+    Rejected,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProducerFlowApplied {
     revision: u64,
@@ -3461,6 +3503,11 @@ enum RollingControlCommand {
         deadline: Instant,
         reply: tokio::sync::oneshot::Sender<bool>,
     },
+    ApplyProducerFlow {
+        producer_attempt: u64,
+        desired_hold: bool,
+        reply: tokio::sync::oneshot::Sender<ProducerFlowIntentionOutcome>,
+    },
     Snapshot {
         reply: tokio::sync::oneshot::Sender<RollingLeaseSnapshot>,
     },
@@ -3500,6 +3547,7 @@ impl RollingControlCommand {
             Self::ClassifyProducerExit { .. } => Some(16),
             Self::ExecutorSettled { .. } => Some(17),
             Self::ClassifyCopyProducerExit { .. } => Some(18),
+            Self::ApplyProducerFlow { .. } => Some(19),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -4168,6 +4216,8 @@ struct RollingControlActor {
     copy_producer_exit_classification: Option<CopyProducerExitClassification>,
     producer_flow_revision: u64,
     producer_physical_flow: ProducerPhysicalFlowState,
+    producer_flow_intention: ProducerFlowIntention,
+    producer_flow_signal_outstanding: bool,
     last_applied_ingress_sequence: u64,
     retired: bool,
     terminal: Option<RollingTerminalCause>,
@@ -4264,6 +4314,11 @@ impl RollingControlActor {
             copy_producer_exit_classification: None,
             producer_flow_revision: 0,
             producer_physical_flow: ProducerPhysicalFlowState::Running,
+            producer_flow_intention: ProducerFlowIntention {
+                revision: 0,
+                desired: ProducerPhysicalFlowState::Running,
+            },
+            producer_flow_signal_outstanding: false,
             last_applied_ingress_sequence: 0,
             retired: false,
             terminal: None,
@@ -4654,6 +4709,65 @@ impl RollingControlActor {
     /// discards the running budget; a late Hold preserves the already-won due
     /// coordinate. Resume grants a fresh full budget only after an eligible
     /// Held state was actually applied.
+    /// Record one desired physical-flow state on the shared actor sequence.
+    ///
+    /// This is ordering only. It never touches `producer_physical_flow` or the
+    /// progress deadline: per the M4 contract, requesting a hold does not
+    /// change the running deadline, and a resume arms nothing when requested
+    /// or queued — only the exact-attempt supervisor's successful
+    /// acknowledgement does either. What it does own is *who may signal*: a
+    /// desire arriving while a signal is outstanding coalesces into the newest
+    /// revision instead of racing a second syscall against it.
+    fn apply_producer_flow_intention_at(
+        &mut self,
+        now: Instant,
+        producer_attempt: u64,
+        desired: ProducerPhysicalFlowState,
+    ) -> ProducerFlowIntentionOutcome {
+        if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live)
+            || self.retired
+            || !self.producer_signal_authorized
+            || producer_attempt != self.delivery.producer_attempt
+        {
+            return ProducerFlowIntentionOutcome::Rejected;
+        }
+        if desired == self.producer_flow_intention.desired
+            && !self.producer_flow_signal_outstanding
+            && desired == self.producer_physical_flow
+        {
+            return ProducerFlowIntentionOutcome::Settled;
+        }
+        let revision = self.producer_flow_intention.revision.saturating_add(1);
+        self.producer_flow_intention = ProducerFlowIntention { revision, desired };
+        if self.producer_flow_signal_outstanding {
+            return ProducerFlowIntentionOutcome::Coalesced;
+        }
+        if desired == self.producer_physical_flow {
+            return ProducerFlowIntentionOutcome::Settled;
+        }
+        self.producer_flow_signal_outstanding = true;
+        ProducerFlowIntentionOutcome::Issue {
+            revision,
+            hold: matches!(desired, ProducerPhysicalFlowState::Held),
+        }
+    }
+
+    /// Release the outstanding-signal claim after one signal attempt finishes,
+    /// and report whether the desire still diverges from the applied state.
+    ///
+    /// Called for a failed syscall as well as a successful one: a failure
+    /// publishes no barrier, so without this the actor would believe a signal
+    /// were forever in flight and never issue again.
+    fn settle_producer_flow_signal(&mut self, producer_attempt: u64) -> bool {
+        if producer_attempt != self.delivery.producer_attempt {
+            return false;
+        }
+        self.producer_flow_signal_outstanding = false;
+        self.producer_signal_authorized
+            && !self.retired
+            && self.producer_flow_intention.desired != self.producer_physical_flow
+    }
+
     fn apply_producer_flow_applied_at(&mut self, now: Instant, applied: ProducerFlowApplied) {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return;
@@ -4664,6 +4778,10 @@ impl RollingControlActor {
             return;
         }
         self.producer_flow_revision = applied.revision;
+        // The acknowledgement ends this signal's outstanding claim. A desire
+        // recorded while it was in flight is applied next, by the caller that
+        // observes the divergence — not from inside this fold.
+        self.producer_flow_signal_outstanding = false;
         let previous = self.producer_physical_flow;
         match applied.state {
             ProducerPhysicalFlowState::Held => {
@@ -4831,6 +4949,13 @@ impl RollingControlActor {
         self.producer_exit_classifier = exit_classifier;
         self.copy_producer_exit_classification = None;
         self.producer_physical_flow = ProducerPhysicalFlowState::Running;
+        // Desired flow is attempt-scoped. A predecessor's outstanding desire
+        // must not survive into its successor and signal a different child.
+        self.producer_flow_intention = ProducerFlowIntention {
+            revision: 0,
+            desired: ProducerPhysicalFlowState::Running,
+        };
+        self.producer_flow_signal_outstanding = false;
         self.producer_signal_authorized = true;
         self.arm_producer_deadline(
             attempt,
@@ -6800,6 +6925,22 @@ impl RollingControlActor {
                     }
                     let _ = reply.send(committed);
                 }
+                RollingControlCommand::ApplyProducerFlow {
+                    producer_attempt,
+                    desired_hold,
+                    reply,
+                } => {
+                    let outcome = self.apply_producer_flow_intention_at(
+                        published_at,
+                        producer_attempt,
+                        if desired_hold {
+                            ProducerPhysicalFlowState::Held
+                        } else {
+                            ProducerPhysicalFlowState::Running
+                        },
+                    );
+                    let _ = reply.send(outcome);
+                }
                 RollingControlCommand::Snapshot { reply } => {
                     // A snapshot is an actor command, not an advisory timestamp
                     // read. If it reaches the mailbox at the exact deadline while
@@ -7500,6 +7641,41 @@ impl RollingControlHandle {
     /// Publish the executor's one bounded, exact-attempt natural-exit proof.
     /// Command sealing orders the proof after its exit barrier; the actor's
     /// existing `ClassifyingExit` deadline remains the only verdict clock.
+    /// Put one desired physical-flow state on the shared actor sequence and
+    /// learn whether this caller owns the next signal.
+    ///
+    /// The reply is the only authorization to signal. `Coalesced` means an
+    /// earlier signal is still outstanding and this desire will be applied
+    /// after its acknowledgement; `Settled` means the desire already matches
+    /// the applied state. Neither is a licence to call the supervisor.
+    pub(crate) async fn request_producer_flow_before(
+        &self,
+        producer_attempt: u64,
+        desired_hold: bool,
+        deadline: Instant,
+    ) -> ProducerFlowIntentionOutcome {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command_before(
+                RollingControlCommand::ApplyProducerFlow {
+                    producer_attempt,
+                    desired_hold,
+                    reply,
+                },
+                deadline,
+            )
+            .await
+            .is_err()
+        {
+            return ProducerFlowIntentionOutcome::Rejected;
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(ProducerFlowIntentionOutcome::Rejected)
+    }
+
     pub(crate) async fn classify_producer_exit_before(
         &self,
         evidence: RollingProducerCompletionEvidence,
@@ -8193,7 +8369,7 @@ static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 20] = [const { AtomicU64::new(0) }; 20];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -8482,6 +8658,7 @@ pub(crate) fn prometheus() -> String {
         "classify_producer_exit",
         "executor_settled",
         "classify_copy_producer_exit",
+        "apply_producer_flow",
     ]
     .iter()
     .enumerate()
@@ -10283,6 +10460,158 @@ mod tests {
                 mode: ProducerProgressDeadlineMode::Advancing,
                 instant: started + Duration::from_secs(44),
             })
+        );
+    }
+
+    #[test]
+    fn a_flow_intention_never_moves_the_applied_state_or_the_deadline() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        let armed = actor.producer_progress_deadline;
+        assert!(armed.is_some(), "an admitted attempt arms a deadline");
+
+        // Requesting a hold does not change the running deadline.
+        assert_eq!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(1),
+                1,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Issue {
+                revision: 1,
+                hold: true
+            },
+        );
+        assert_eq!(actor.producer_progress_deadline, armed);
+        assert_eq!(actor.producer_physical_flow, ProducerPhysicalFlowState::Running);
+    }
+
+    #[test]
+    fn a_flow_intention_coalesces_while_a_signal_is_outstanding() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+
+        assert_eq!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(1),
+                1,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Issue {
+                revision: 1,
+                hold: true
+            },
+        );
+        // A second desire while that signal is in flight must not authorize a
+        // second syscall; it becomes the newest revision instead.
+        assert_eq!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(2),
+                1,
+                ProducerPhysicalFlowState::Running,
+            ),
+            ProducerFlowIntentionOutcome::Coalesced,
+        );
+        assert_eq!(actor.producer_flow_intention.revision, 2);
+        assert_eq!(
+            actor.producer_flow_intention.desired,
+            ProducerPhysicalFlowState::Running
+        );
+
+        // The hold acknowledgement lands; the newest desire still diverges, so
+        // exactly one further signal is owed.
+        actor.apply_producer_flow_applied_at(
+            started + Duration::from_secs(3),
+            ProducerFlowApplied {
+                revision: 1,
+                producer_attempt: 1,
+                state: ProducerPhysicalFlowState::Held,
+                published_at: started + Duration::from_secs(3),
+            },
+        );
+        assert!(actor.settle_producer_flow_signal(1));
+    }
+
+    #[test]
+    fn a_failed_signal_releases_the_outstanding_claim() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        assert!(matches!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(1),
+                1,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Issue { .. }
+        ));
+        // No barrier is published for a failed syscall. Without settling here
+        // the actor would believe a signal were forever in flight.
+        assert!(
+            actor.settle_producer_flow_signal(1),
+            "the desire still diverges, so another signal is owed"
+        );
+        assert_eq!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(2),
+                1,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Issue {
+                revision: 2,
+                hold: true
+            },
+        );
+    }
+
+    #[test]
+    fn a_flow_intention_for_another_attempt_is_rejected() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        assert_eq!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(1),
+                2,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Rejected,
+            "a predecessor or successor attempt may not signal this child"
+        );
+    }
+
+    #[test]
+    fn attempt_succession_clears_a_predecessor_flow_intention() {
+        let started = Instant::now();
+        let mut actor =
+            RollingControlActor::new(started, "session-start", Arc::new(AtomicBool::new(false)));
+        assert_eq!(actor.begin_producer_attempt_at(started), Ok(1));
+        assert!(matches!(
+            actor.apply_producer_flow_intention_at(
+                started + Duration::from_secs(1),
+                1,
+                ProducerPhysicalFlowState::Held,
+            ),
+            ProducerFlowIntentionOutcome::Issue { .. }
+        ));
+        assert_eq!(
+            actor.begin_producer_attempt_at(started + Duration::from_secs(2)),
+            Ok(2)
+        );
+        assert_eq!(actor.producer_flow_intention.revision, 0);
+        assert_eq!(
+            actor.producer_flow_intention.desired,
+            ProducerPhysicalFlowState::Running
+        );
+        assert!(
+            !actor.producer_flow_signal_outstanding,
+            "a successor must not inherit an outstanding signal claim"
         );
     }
 
