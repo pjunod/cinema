@@ -27455,7 +27455,26 @@ mod tests {
         write_real_video(&src, 60);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file_at(&store, &src.to_string_lossy()).await;
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(160),
+                height: Some(120),
+                ..Default::default()
+            },
+        )
+        .await;
+        let seeded = store
+            .get_file(file_id)
+            .await
+            .expect("read real fixture probe")
+            .expect("real fixture file");
+        assert_eq!(seeded.video_codec.as_deref(), Some("h264"));
+        assert_eq!((seeded.width, seeded.height), (Some(160), Some(120)));
         let work = crate::test_tempdir().expect("work");
         let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
@@ -27514,6 +27533,12 @@ mod tests {
             loop {
                 match session.progress.out_time_ms() {
                     Some(ms) if ms >= 3_000 => return ms,
+                    _ if session.failed.load(Acquire) => {
+                        panic!(
+                            "ffmpeg failed before its output timeline advanced: {:?}",
+                            session.failure_reason()
+                        );
+                    }
                     _ => tokio::time::sleep(Duration::from_millis(50)).await,
                 }
             }
@@ -27735,7 +27760,27 @@ mod tests {
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
-        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        seed_file_with_probe_at(
+            store,
+            path,
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(6_000_000),
+                container: Some("mkv".into()),
+                video_codec: Some("hevc".into()),
+                width: Some(3840),
+                height: Some(2160),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn seed_file_with_probe_at(
+        store: &Arc<dyn Store>,
+        path: &str,
+        probe: plurx_core::domain::ProbeResult,
+    ) -> i64 {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
         let lib = store
             .create_library(&NewLibrary {
                 name: "L".into(),
@@ -27758,20 +27803,7 @@ mod tests {
             .await
             .expect("movie");
         store
-            .upsert_file(
-                movie,
-                path,
-                1,
-                1,
-                &ProbeResult {
-                    duration_ms: Some(6_000_000),
-                    container: Some("mkv".into()),
-                    video_codec: Some("hevc".into()),
-                    width: Some(3840),
-                    height: Some(2160),
-                    ..Default::default()
-                },
-            )
+            .upsert_file(movie, path, 1, 1, &probe)
             .await
             .expect("file")
     }
