@@ -2218,9 +2218,7 @@ async fn own_published_attempt_cleanup(
     settled: tokio::sync::oneshot::Sender<PublishedFailureCleanupOutcome>,
 ) {
     let (cause_kind, failure_reason, completion_disposition) = match cause {
-        PublishedAttemptCleanupCause::Failure { reason, .. } => {
-            ("failure", Some(reason), None)
-        }
+        PublishedAttemptCleanupCause::Failure { reason, .. } => ("failure", Some(reason), None),
         PublishedAttemptCleanupCause::Completion { disposition } => {
             ("completion", None, Some(disposition))
         }
@@ -2249,9 +2247,9 @@ async fn own_published_attempt_cleanup(
             Ok(outcome) => {
                 if outcome == PublishedFailureCleanupOutcome::Reaped {
                     if let PublishedAttemptCleanupCause::Failure {
-                        decision_sequence,
-                        ..
-                    } = cause {
+                        decision_sequence, ..
+                    } = cause
+                    {
                         if let Err(error) = session
                             .control
                             .decision_applied(decision_sequence, None)
@@ -5139,9 +5137,7 @@ impl Session {
         if snapshot.terminal.is_some()
             || snapshot.delivery.producer_attempt != producer_attempt
             || !snapshot.producer_control.producer_media_published
-            || !snapshot
-                .producer_control
-                .producer_ended_with_proposal
+            || !snapshot.producer_control.producer_ended_with_proposal
         {
             return None;
         }
@@ -14725,13 +14721,14 @@ impl TranscodeManager {
                 }
             }
         };
-        let expected_remaining_ms = file.duration_ms.filter(|duration_ms| *duration_ms > 0).map(
-            |duration_ms| {
-                duration_ms
-                    .saturating_sub((start_seconds * 1_000.0).round() as i64)
-                    .max(0)
-            },
-        );
+        let expected_remaining_ms =
+            file.duration_ms
+                .filter(|duration_ms| *duration_ms > 0)
+                .map(|duration_ms| {
+                    duration_ms
+                        .saturating_sub((start_seconds * 1_000.0).round() as i64)
+                        .max(0)
+                });
         let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
         let policy = if let Some(retry) = retry.as_ref() {
             crate::playback_control::InitialProducerPolicy::hardware(
@@ -14892,10 +14889,7 @@ impl TranscodeManager {
                 executor_sid,
             ));
             let unexpected_exit = match worker.await {
-                Err(join_error) => Some((
-                    format!("executor task failed: {join_error}"),
-                    None,
-                )),
+                Err(join_error) => Some((format!("executor task failed: {join_error}"), None)),
                 Ok(exit) => exit.monitor_cleanup_attempt().map(|producer_attempt| {
                     (
                         "executor returned failed-closed".to_owned(),
@@ -17531,9 +17525,7 @@ impl TranscodeManager {
                                         self.sessions.lock(),
                                     )
                                     .await
-                                    .map_err(|_| {
-                                        MediaResponsePublicationRejection::StateChanged
-                                    })?
+                                    .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
                                     .get(session_id)
                                     .cloned();
                                     require_publication_authority!();
@@ -17541,13 +17533,11 @@ impl TranscodeManager {
                                         .as_ref()
                                         .is_some_and(|current| Arc::ptr_eq(current, session))
                                     {
-                                        return Err(
-                                            MediaResponsePublicationRejection::OwnerGone,
-                                        );
+                                        return Err(MediaResponsePublicationRejection::OwnerGone);
                                     }
-                                    return Err(
-                                        MediaResponsePublicationRejection::ProducerEnded(reason),
-                                    );
+                                    return Err(MediaResponsePublicationRejection::ProducerEnded(
+                                        reason,
+                                    ));
                                 }
                             }
                         }
@@ -19234,10 +19224,8 @@ impl TranscodeManager {
             {
                 let beyond_frontier = producer_request_beyond_frontier(idx, published_segment);
                 if beyond_frontier {
-                    let waited_ms = started_waiting
-                        .elapsed()
-                        .as_millis()
-                        .min(i64::MAX as u128) as i64;
+                    let waited_ms =
+                        started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
                     tracing::warn!(
                         session = %session_log_id(session_id),
                         segment = name,
@@ -28801,23 +28789,16 @@ mod tests {
             .expect("create published scratch");
         let playlist = scratch.join("index.m3u8");
         let segment = scratch.join("seg00000.ts");
-        tokio::fs::write(
-            &playlist,
-            b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("seed published playlist");
+        tokio::fs::write(&playlist, b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n")
+            .await
+            .expect("seed published playlist");
         tokio::fs::write(&segment, b"published media")
             .await
             .expect("seed published segment");
 
         let admissions = Admissions::new();
-        let session = watchdog_session_with_publication(
-            &scratch,
-            Some(long_running_child()),
-            false,
-            true,
-        );
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
         session.actor_prepublication_transcode.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
@@ -28866,8 +28847,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn successful_published_completion_reaps_child_and_returns_capacity_without_deleting_media()
-    {
+    async fn successful_published_completion_reaps_child_and_returns_capacity_without_deleting_media(
+    ) {
         let root = crate::test_tempdir().expect("published completion root");
         let scratch = root.path().join("scratch");
         tokio::fs::create_dir_all(&scratch)
@@ -28886,12 +28867,8 @@ mod tests {
             .expect("seed completed segment");
 
         let admissions = Admissions::new();
-        let session = watchdog_session_with_publication(
-            &scratch,
-            Some(successful_child()),
-            false,
-            true,
-        );
+        let session =
+            watchdog_session_with_publication(&scratch, Some(successful_child()), false, true);
         session.actor_prepublication_transcode.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
@@ -29039,9 +29016,11 @@ mod tests {
         control.observe_producer_exit(producer_attempt, false, Some(1), None);
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {
-                if control.snapshot().await.is_some_and(|snapshot| {
-                    snapshot.producer_control.producer_ended_with_proposal
-                }) {
+                if control
+                    .snapshot()
+                    .await
+                    .is_some_and(|snapshot| snapshot.producer_control.producer_ended_with_proposal)
+                {
                     return;
                 }
                 tokio::task::yield_now().await;
