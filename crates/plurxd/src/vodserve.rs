@@ -341,6 +341,11 @@ pub(crate) struct VodServingAdmission {
     pause_before_commit: Option<Arc<tokio::sync::Barrier>>,
 }
 
+struct VodCreateFences<'a> {
+    release_fence: Option<VodReleaseFence<'a>>,
+    serving_admission: Option<VodServingAdmission>,
+}
+
 impl VodServingAdmission {
     pub(crate) fn new(
         authority: crate::serving_fence::ServingAuthority,
@@ -1299,8 +1304,18 @@ impl VodServe {
         attribution: VodAttribution<'_>,
         session_id: String,
     ) -> Result<VodStart, String> {
-        self.try_create_with_release_fence(req, file, settings, attribution, session_id, None, None)
-            .await
+        self.try_create_with_release_fence(
+            req,
+            file,
+            settings,
+            attribution,
+            session_id,
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: None,
+            },
+        )
+        .await
     }
 
     /// Cluster-only VOD creation. Unlike the legacy local entrypoint, this
@@ -1321,8 +1336,10 @@ impl VodServe {
             settings,
             attribution,
             session_id,
-            None,
-            Some(serving_admission),
+            VodCreateFences {
+                release_fence: None,
+                serving_admission: Some(serving_admission),
+            },
         )
         .await
     }
@@ -1347,8 +1364,10 @@ impl VodServe {
             settings,
             attribution,
             session_id,
-            Some(release_fence),
-            None,
+            VodCreateFences {
+                release_fence: Some(release_fence),
+                serving_admission: None,
+            },
         )
         .await
     }
@@ -1410,8 +1429,7 @@ impl VodServe {
         settings: &VodSettings,
         attribution: VodAttribution<'_>,
         session_id: String,
-        release_fence: Option<VodReleaseFence<'_>>,
-        serving_admission: Option<VodServingAdmission>,
+        fences: VodCreateFences<'_>,
     ) -> Result<VodStart, String> {
         let SessionKind::Copy {
             aac,
@@ -1535,7 +1553,7 @@ impl VodServe {
         let rendition = Arc::clone(&attachment.rendition);
 
         let start_entry = entry_containing(&rendition.plan, req.start_seconds);
-        let _release_transition = if let Some(release_fence) = release_fence {
+        let _release_transition = if let Some(release_fence) = fences.release_fence {
             let guard = release_fence.transition.lock_owned().await;
             if release_fence.released.load(Acquire) {
                 return Err(crate::transcode::vod_refusal_error(
@@ -1600,7 +1618,7 @@ impl VodServe {
             _ => None,
         };
         let mut replacement_readers = rendition.readers.lock().await;
-        let _serving_transition = if let Some(admission) = serving_admission.as_ref() {
+        let _serving_transition = if let Some(admission) = fences.serving_admission.as_ref() {
             Some(admission.commit_guard_before().await.ok_or_else(|| {
                 crate::transcode::serving_fence_error(crate::serving_fence::SERVING_FENCED_MESSAGE)
             })?)

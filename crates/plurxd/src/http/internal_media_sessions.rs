@@ -337,11 +337,10 @@ pub(crate) async fn start(
         .map_err(|error| {
             if error.contains("already used") {
                 StatusCode::CONFLICT
-            } else if crate::transcode::is_serving_fence_error(&error) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else if crate::transcode::is_start_infrastructure_error(&error) {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else if crate::transcode::is_retryable_capacity_error(&error) {
+            } else if crate::transcode::is_serving_fence_error(&error)
+                || crate::transcode::is_start_infrastructure_error(&error)
+                || crate::transcode::is_retryable_capacity_error(&error)
+            {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::UNPROCESSABLE_ENTITY

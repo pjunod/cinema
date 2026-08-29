@@ -1449,7 +1449,7 @@ pub async fn create(
             )
             .await
             {
-                PublishableActivationWait::Ready(route) => route,
+                PublishableActivationWait::Ready(route) => *route,
                 PublishableActivationWait::Pending => {
                     if let Some(guard) = guard.as_mut() {
                         guard.disarm();
@@ -1913,7 +1913,7 @@ pub(super) async fn wait_for_confirmed_activation(
 }
 
 enum PublishableActivationWait {
-    Ready(MediaSessionRoute),
+    Ready(Box<MediaSessionRoute>),
     Pending,
     Gone,
 }
@@ -1945,7 +1945,7 @@ async fn wait_for_publishable_activation(
                 if route_matches_activation(&route, activation)
                     && route.publication_ready_at_ms == 0 =>
             {
-                return PublishableActivationWait::Ready(route);
+                return PublishableActivationWait::Ready(Box::new(route));
             }
             Ok(Ok(Some(route)))
                 if route_matches_activation(&route, activation)
