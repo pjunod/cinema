@@ -26,7 +26,8 @@ the earlier code and evidence with no actionable P0–P3 finding. Corrected
 behavior/docs head `cdc27aa8` passed exact review and was pushed; run
 `33234021296` then exposed only the three test-shape inventory counts
 reconciled at `c94cdcf3` and mapped through `4ad4a4da`. Run `33234420211`
-passed every non-fast-Rust job and completed its hosted broad suite with
+passed every selected substantive lane other than fast Rust and completed its
+hosted broad suite with
 1,281 passing, seven failing, and three ignored tests. Repair `4b76a34e`
 closes all seven stale lifecycle fixtures by exact name, and `7dc30a42` maps
 the evidence. Three source reviews and one mapped-tip review approve those
@@ -939,7 +940,8 @@ both exact failed methods pass 2/2. The compile repair plus mapping are frozen i
 historical fixture construction and completion assertions are frozen in
 `411bf818` and `4d38a084`.
 Hosted run `33228540108` exposed six exact Rust cases repaired at `c48a9867`.
-Run `33230939191` then passed every selected job except fast Rust, which exposed
+Run `33230939191` then passed every selected substantive lane other than fast
+Rust, which exposed
 eight completed failures and one cleanup hang. The integrated repair is
 committed at `600a95aa`, mapped through `700bcdd9`, approved by both adversarial
 lanes, and green for all nine exact names. Package Clippy, formatting, diff,
@@ -948,8 +950,9 @@ Run `33234021296` stopped in preflight on the three structural counts changed
 by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
 `4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
 equality assertions; its exact failed validation method passes. Run
-`33234420211` passed every non-fast-Rust lane and completed its hosted broad suite;
-all seven stale fixture failures are exact-green at reviewed repair
+`33234420211` passed every selected substantive lane other than fast Rust and
+completed its hosted broad suite; the aggregate gate failed as a consequence.
+All seven stale fixture failures are exact-green at reviewed repair
 `4b76a34e`, mapped through `7dc30a42`. No second manual/local broad suite was
 run; the required hosted rerun will execute its normal fast-Rust gate.
 The preserved untracked vendor build artifacts remain outside every commit.
@@ -1051,7 +1054,8 @@ failure. None is permitted to select playback recovery.
 | Owner or bound | Current authority | Why it remains | Deletion or replacement milestone |
 |---|---|---|---|
 | actor `ProducerProgressDeadline` | Selects the sole prepublication retry or failure at the 12-second hardware or 30-second software boundary | FFmpeg cannot report every silent wedge | Permanent approved server progress deadline after M4 |
-| `watch_for_stall*`, `SOFTWARE_GRACE`, `PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active` | Published-lifetime and copy compatibility recovery only | Those two recovery scopes have not moved fully into the actor | Later M4 published-lifetime and copy cuts delete the polling/election owners; the actor deadline retains the required silent-wedge bound |
+| `SOFTWARE_GRACE` | Copy-startup compatibility recovery only; the published-lifetime watcher starts with zero added grace | Copy startup has not moved fully into the actor | The later M4 copy cut deletes this startup grace owner |
+| `watch_for_stall*`, `PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active` | Published-lifetime and copy compatibility recovery only | Those two recovery scopes have not moved fully into the actor | Later M4 published-lifetime and copy cuts delete the polling/election owners; the actor deadline retains the required silent-wedge bound |
 | `child_transition`, `replacing_child`, `begin_child_replacement`, `kill_child_for_replacement`, `install_replacement_child` | Serializes compatibility child replacement and exact resource transfer | Published/copy in-place replacement still exists | Later M4 cuts replace it with actor decision plus exact-attempt supervisor settlement and drive legacy catalog counts to zero |
 | `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) and `PREPUBLICATION_REAP_RETRY` (5 s) | Repeatedly requests termination and waits for exact terminal proof while retaining process admission and scratch | A stuck kill/wait must not leak a permit or authorize overlapping children | Remains as bounded process cleanup; later M4 may simplify the compatibility lock, not the confirmed-reap requirement |
 | rolling retirement and scratch settlement | Detached exact owner confirms reap; scratch cleanup uses three 5-second attempts separated by 5 seconds, then leaves recovery to startup/maintenance sweep | Caller cancellation and slow filesystem cleanup cannot strand child or accounting ownership | Remains as lifecycle cleanup; later M4 deletes only compatibility replacement inputs |
