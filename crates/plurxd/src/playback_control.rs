@@ -13413,7 +13413,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at,
                 }),
-                false,
+                true,
                 exit_at,
             );
             actor.producer_events.publish_at(
@@ -13424,7 +13424,7 @@ mod tests {
                     signal: None,
                     observed_at: exit_at + Duration::from_nanos(1),
                 }),
-                false,
+                true,
                 exit_at + Duration::from_nanos(1),
             );
             let preceding_producer = actor.producer_events.drain_blocks();
