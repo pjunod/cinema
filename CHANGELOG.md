@@ -8,6 +8,38 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Cluster tab is laid out around its two components.** The replicated
+  database had no section of its own: watch state was one run-on sentence
+  wedged between the node cards, and the rest of the store's readings were
+  either inside a node's evidence or only in `/metrics`. **Replicated
+  database** is now its own section reporting the health verdict, the elected
+  leader and term, the quorum-confirmed commit watermark against this node's
+  applied index, apply lag, distance behind, last observed convergence,
+  snapshot and WAL health, the active protocol range, and how old those
+  readings are — all from projections the panel already fetched, with no new
+  endpoint and no new measurement. **Cluster nodes** sits beside it,
+  **Maintenance** collects the restart-readiness verdict, planned work, and
+  the Danger zone, and **Troubleshooting** collects the cluster log, the
+  quorum and sample readings, and the last refusal behind one tab strip.
+  Missing readings say `unknown` rather than borrowing a neighbouring field, a
+  proven-unavailable store says so instead, and a machine that is not in a
+  cluster gets the short version of the tab rather than a roster, a
+  restart-safety verdict and a ledger of unknowns for a Raft it does not run.
+
+- **The Cluster tab remembers what you folded.** The database section and each
+  node card fold; a folded database keeps its health pill and a one-line
+  summary, so folding hides the detail and never the verdict. The state is
+  kept in that browser and nowhere else, keyed by node id rather than by row,
+  so a node leaving the cluster cannot collapse whichever card takes its
+  place. A browser with site data blocked gets the shipped defaults.
+
+- **Watch state is reported once.** The System tab's Server card no longer
+  carries a second copy of the replication sentence; the Cluster tab is the
+  only surface that reports watch-state durability, so there is no second
+  reading to go stale against the first.
+
 ### Added
 
 - **Cluster nodes now have reversible, restart-safe maintenance mode.** An

@@ -237,10 +237,13 @@ Two refusals come out of that path and they are not variants of one problem:
 
 ### Reading watch-state replication status
 
-Open **Settings → System** and read **Watch state** in the Server card's
-**Right now** row. The same projection is in the admin-only
-`GET /api/v1/system` response under `replication`; it contains only backend and
-Raft progress facts, never users, titles, media paths, tokens, or library data.
+Open **Settings → Cluster** and read the **Replicated database** section. That
+is the only place plurx reports watch-state durability: the System tab used to
+carry a second copy of the same sentence, and two readings of one projection on
+two screens is how an operator ends up comparing a stale copy against a fresh
+one. The same projection is in the admin-only `GET /api/v1/system` response
+under `replication`; it contains only backend and Raft progress facts, never
+users, titles, media paths, tokens, or library data.
 
 | Surface | What it means | What to do |
 |---|---|---|
@@ -270,9 +273,9 @@ endpoint observes an in-sync sample. The Settings page samples this when you
 open it; the timestamp does not claim that an unseen convergence happened
 between visits.
 
-This row is status, not membership control. **Settings → Cluster** is the
-membership surface, and the admin-only cluster endpoints below are the same
-operations from a terminal. Their `replication` member is this exact projection
+This section is status, not membership control. The **Maintenance** section on
+the same tab is the membership surface, and the admin-only cluster endpoints
+below are the same operations from a terminal. Their `replication` member is this exact projection
 rather than a second answer for lag.
 
 ### The Cluster tab
@@ -310,11 +313,42 @@ Every node card starts expanded and combines two sources without pretending
 they are the same: **Membership** is committed roster state, while
 **Operations** is the bounded direct observation from that process. Collapse a
 card when you only need its hostname, role, leadership, and direct-readiness
-badge; **Collapse all** and **Expand all** change every card together. The
-cluster-wide operational verdict and its quorum/build/sample facts stay above
-the cards because they authorize one cluster action, not one machine in
-isolation. **Watch state** and **Capacity** are labeled facts above that verdict,
-not unlabeled notes after the roster.
+badge; **Collapse all** and **Expand all** change every card together.
+
+#### How the tab is laid out
+
+The tab describes two things, and they never share a card. **Replicated
+database** is the store: the health verdict, the elected leader and term, the
+quorum-confirmed commit watermark against this node's applied index, apply lag,
+how far behind the projection says this node is, when convergence was last
+positively observed, snapshot and WAL health, the active protocol range, and
+how old the readings themselves are. **Cluster nodes** is the machines carrying
+it. **Maintenance** holds the restart-readiness verdict, planned work, and the
+Danger zone that mints join tokens and removes members. **Troubleshooting**
+holds the cluster log, the quorum and sample readings, and the last refusal,
+one tab at a time.
+
+A machine that is not in a cluster gets a shorter version of the same tab:
+the banner, a **Replicated database** section that names the backend and says
+there are no peers, and **Troubleshooting**. There is no roster, no
+restart-readiness verdict and no maintenance section, because none of them
+describe a single machine — and eleven `unknown` rows would read as a failed
+read rather than as an install with no Raft in it.
+
+Both **Replicated database** and the node cards fold. The database section
+keeps its health pill and a one-line summary — leader, term, commit, applied,
+lag, last converged — when it is collapsed, so folding hides the detail and
+never the verdict. What is folded is remembered in this browser and nowhere
+else, keyed by node id rather than by row, so a node leaving the cluster does
+not collapse whichever card takes its place. A browser with site data blocked
+simply gets the defaults: everything expanded. The selected Troubleshooting tab
+is remembered the same way, because an operational change repaints this panel
+and would otherwise snap you back to the log every few seconds while you watch
+a node drain.
+
+The cluster-wide operational verdict and its quorum/build/sample facts sit in
+**Maintenance** rather than beside the roster, because they authorize one
+cluster action, not one machine in isolation.
 
 ### Planned node maintenance — fence, drain, update, resume
 

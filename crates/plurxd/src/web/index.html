@@ -678,8 +678,6 @@
   .storage-table .stgrate{white-space:nowrap}
   .system-now{display:grid;gap:4px}
   .system-now-counts{color:var(--text);font-weight:600}
-  .system-now-watch{max-width:76ch;color:var(--muted);line-height:1.55}
-  .system-now-watch b{color:var(--text);font-weight:600}
   @media(max-width:640px){
     .storage-table{grid-template-columns:minmax(0,1fr);gap:0}
     .storage-table .stgrate{margin-bottom:6px;white-space:normal}
@@ -884,7 +882,32 @@
   .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
   .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
   .cluster-main{display:grid;gap:16px}
+  /* Two components, two columns. The store never shares a card with the
+     machines carrying it, so a number on this screen always belongs to
+     exactly one of them. */
+  .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
+  .cluster-board.clsolo{grid-template-columns:1fr}
+  .clcolumn{min-width:0}
+  /* What a folded database section still says. Collapsing hides the detail,
+     never the verdict: the health pill stays in the header and this line keeps
+     the readings somebody checks before expanding it again. */
+  .cldbsumm{margin-top:11px;font-family:var(--font-mono);font-size:11.5px;line-height:1.7;
+    color:var(--muted);font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+  .cldbsumm b{color:var(--text);font-weight:500}
+  .cldbledger{display:grid;grid-template-columns:minmax(112px,auto) minmax(0,1fr);gap:7px 14px;
+    margin:12px 0 0;font-size:12.5px;font-variant-numeric:tabular-nums}
+  .cldbledger dt{color:var(--muted)}
+  .cldbledger dd{margin:0;color:var(--text);overflow-wrap:anywhere}
+  .cldbledger dd.num{font-family:var(--font-mono);font-size:12px}
+  .cltabs{display:flex;gap:4px;margin-top:13px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+  .cltab{border:0;background:none;color:var(--muted);font-size:12.5px;font-weight:600;
+    padding:8px 12px;cursor:pointer;border-bottom:2px solid transparent;border-radius:7px 7px 0 0;width:auto}
+  .cltab:hover{color:var(--text)}
+  .cltab[aria-selected="true"]{color:var(--text);border-bottom-color:var(--accent)}
+  .cltab:focus-visible{outline:2px solid var(--accent);outline-offset:-2px}
+  .clpane{padding-top:12px}
   .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
+  .cluster-card .cluster-card{border:0;border-radius:0;background:none;padding:15px 0 0;margin-top:15px;border-top:1px solid var(--line)}
   .cluster-card h3{font-size:15px;margin:0 0 5px}
   .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
   .clcontextfacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
@@ -907,13 +930,13 @@
   .clnodesummary,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
   .clnodesummaryright{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
   .clnodebody{padding:0 13px 13px;border-top:1px solid var(--line)}
-  .clnodegroups{display:grid;grid-template-columns:minmax(220px,.9fr) minmax(0,1.6fr);gap:14px}
+  .clnodegroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,215px),1fr));gap:14px}
   .clnodegroup{min-width:0;padding-top:11px}
   .clgrouptitle{margin-bottom:8px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
-  .clnodemeta{display:grid;grid-template-columns:repeat(2,minmax(90px,1fr));gap:7px}
+  .clnodemeta{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,92px),1fr));gap:7px}
   .clnodemeta div,.clnodeopmeta div{border-top:1px solid var(--line);padding-top:7px;font-size:12px;color:var(--text);min-width:0;overflow-wrap:anywhere}
   .clnodemeta span,.clnodeopmeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
-  .clnodeopmeta{display:grid;grid-template-columns:repeat(3,minmax(90px,1fr));gap:7px}
+  .clnodeopmeta{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,118px),1fr));gap:7px}
   .clnodeunknown{border:1px solid var(--line);border-radius:8px;padding:9px 10px;color:var(--muted);font-size:12px;line-height:1.45}
   .clnodedetail{margin-top:9px;color:var(--muted);font-size:11.5px}
   .clnodedetail>summary{cursor:pointer;color:var(--text);font-weight:600}
@@ -942,16 +965,14 @@
   .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
   .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
   @media(max-width:900px){
+    .cluster-board{grid-template-columns:1fr}
     .cluster-health{grid-template-columns:repeat(3,1fr)}
     .cluster-health>.clstate{grid-column:1/-1}
-    .clnodegroups{grid-template-columns:1fr}
   }
   @media(max-width:620px){
     .cluster-health{grid-template-columns:1fr}
     .cluster-health>.clstate{grid-column:auto}
     .clcontextfacts{grid-template-columns:1fr}
-    .clnodemeta{grid-template-columns:repeat(2,1fr)}
-    .clnodeopmeta{grid-template-columns:repeat(2,1fr)}
     .clnodesummaryright{justify-content:flex-start}
   }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
@@ -10807,9 +10828,9 @@ function renderSettings(){
   const tab=settingsTab();
   const manifest=SETTINGS_MANIFEST[tab];
   if(!manifest.required.every(key=>SETTINGS_LOADED.has(key))) return;
-  document.getElementById("main").innerHTML=`<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody">${settingsPanel(tab,d)}</div>`;
+  document.getElementById("main").innerHTML=`<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody">${settingsPanel(tab,d)}</div>`;
   if(tab==="system") return refreshLogs(); // its initial loading row is part of settled
-  if(tab==="cluster") return refreshClusterLogs();
+  if(tab==="cluster"){ applyClusterFolds(); return refreshClusterLogs(); }
 }
 function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
@@ -11293,7 +11314,6 @@ function systemPanel(sys,playbackEvents){
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>Right now</dt><dd><div class="system-now">
           <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
-          <div class="system-now-watch"><b>Watch state</b> · ${replicationText(sys.replication)}</div>
         </div></dd>
       </dl></div>
     <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
@@ -11356,7 +11376,7 @@ function clusterStateView(cluster){
     return {tone:"warn", title:"Cluster status unavailable",
       body:"The current membership roster could not be read. This does not mean this server has left its "+
         "cluster. Keep the available nodes running and retry the roster; if it still fails, read the "+
-        "replication status on the System tab and inspect the server logs before restarting anything."};
+        "replicated database section below and inspect the server logs before restarting anything."};
   const nodes=cluster.nodes||[];
   const voters=nodes.filter(n=>n.is_voter).length;
   const learnerNodes=nodes.filter(n=>n.role==="learner"&&!n.is_voter);
@@ -11591,10 +11611,10 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
     : "Maintenance is reversible and does not remove this node from membership.";
-  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()">
+  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater()">
     <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
-    <div class="clnodebody"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
+    <div class="clnodebody" data-node="${esc(n.node_id)}"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
       <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
         <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div></section>
       ${clusterNodeOperationsHtml(n,context.operations)}</div>
@@ -11668,7 +11688,7 @@ function clusterOperationsPanel(cluster,ops){
   const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
   const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
   const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
-  return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance &amp; leadership</h3><p>Planned work without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Planned work</h3><p>Maintenance and leader elections, without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
     <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
       <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
         <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
@@ -11823,6 +11843,303 @@ async function downloadClusterSupportBundle(btn){
   }catch(error){ toast(error&&error.message||"Support bundle failed"); }
   finally{ if(btn) btn.disabled=false; }
 }
+// ---- the replicated database ---------------------------------------------
+// The store is the other half of this screen, and until now it had no section
+// of its own: watch state was one run-on sentence ("Replicated in sync ·
+// applied term 7, index 118442 · …") wedged between the node cards, and every
+// other Raft reading was buried in per-node evidence or in /metrics. Nothing
+// here is a new measurement. `cluster.replication` is the same projection the
+// sentence already used, and the term / commit watermark / snapshot / WAL /
+// protocol readings come from this node's own row of the direct status the
+// node cards already render. Laid out as a ledger, they answer the question
+// the sentence could not: is a write that lands here durable, and how far
+// behind is this machine.
+// `sys` is not in the Cluster tab's manifest, so a cold load straight into
+// this tab has no replication projection to read. `membership_unavailable` is
+// the server saying this process is not running a replicated store, which is
+// the same fact the projection would have carried, so the panel states it
+// rather than reporting its own missing request as a cluster problem.
+function clusterSqliteReplication(){
+  return {backend:"sqlite",health:"healthy",clustered:false,
+    explanation:"Watch state is stored on this server only."};
+}
+function clusterDatabaseStatus(cluster,ops){
+  const row=clusterDirectOperationRow(ops,cluster&&cluster.local_node_id);
+  return row&&row.observation==="answered"&&row.status?row.status:null;
+}
+// Capacity and redundancy are different quantities and this panel must never
+// let one stand in for the other, so the arithmetic is said once, here.
+function clusterCapacityText(capacity){
+  if(!capacity) return {headline:"Capacity details unavailable",
+    detail:"Read capacity and voting redundancy could not be read."};
+  return {
+    headline:`${capacity.ready_read_workers} ready read worker${capacity.ready_read_workers===1?"":"s"} · `+
+      `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}`,
+    detail:`${capacity.voting_nodes} voters · quorum ${capacity.voting_quorum} · tolerates `+
+      `${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}. `+
+      "Read capacity and replicated copies do not increase voting redundancy."};
+}
+// SQLite is deliberately not "healthy" and not "synced": with no peer there is
+// nowhere for a pause to carry over to, and a green tick would be a claim
+// about redundancy this install does not have.
+function clusterDatabaseHealth(replication){
+  if(!replication) return {tone:"warn",label:"Status unavailable"};
+  if(replication.backend==="sqlite") return {tone:"calm",label:"Single node"};
+  if(replication.health==="degraded") return {tone:"warn",label:"Degraded"};
+  return {tone:"good",label:replication.clustered?"In sync":"One node"};
+}
+function clusterHealthPill(tone,label){
+  const colour=tone==="good"?"color:var(--good);border-color:var(--good)"
+    :tone==="warn"?"color:var(--warn);border-color:var(--warn)":"";
+  return `<span class="pill" style="${colour}">${esc(label)}</span>`;
+}
+// What survives folding. Collapsing the section hides the detail, never the
+// verdict: the health pill stays in the header and this line keeps the six
+// readings somebody would check before deciding whether to expand it again.
+function clusterDatabaseSummary(cluster,replication,ops){
+  const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
+  const leader=(cluster.nodes||[]).find(n=>n.is_leader);
+  const known=value=>value!==null&&value!==undefined;
+  const parts=[`leader <b>${leader?esc(leader.hostname||leader.node_id):"unknown"}</b>`];
+  if(known(raft.current_term)) parts.push(`term <b>${esc(String(raft.current_term))}</b>`);
+  if(known(raft.commit_index)) parts.push(`commit <b>${esc(String(raft.commit_index))}</b>`);
+  if(replication&&known(replication.last_applied_index))
+    parts.push(`applied <b>${esc(String(replication.last_applied_index))}</b>`);
+  if(known(raft.apply_lag_entries)) parts.push(`lag <b>${esc(String(raft.apply_lag_entries))}</b>`);
+  if(replication&&replication.last_converged_at)
+    parts.push(`converged <b>${esc(fmtAgo(replication.last_converged_at))}</b>`);
+  return parts.join(" · ");
+}
+// The WAL says one of three things: it was never observed, it is proven
+// unavailable, or it answered — and an answer that is `open` with a live error
+// or unflushed entries is a fault, which is exactly the predicate the node
+// badge already uses.
+// Every age in the direct status is computed on the server and frozen into
+// the response, while this panel keeps rendering from that one fetch for as
+// long as the tab is open. Without the time since the aggregate was taken, the
+// freshness row says "now" indefinitely.
+function clusterSampleAge(ops,millis){
+  if(millis===null||millis===undefined) return null;
+  const taken=ops&&ops.observed_at_unix_ms;
+  return taken?millis+Math.max(0,Date.now()-taken):millis;
+}
+function clusterDatabaseWal(status){
+  if(!status) return "unknown";
+  const wal=status.wal&&status.wal.snapshot;
+  if(!wal) return `<span style="color:var(--bad)">unavailable${
+    status.wal&&status.wal.reason?` · ${esc(clusterOperationReason(status.wal.reason))}`:""}</span>`;
+  const healthy=wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  const durable=wal.last_durable_index===null||wal.last_durable_index===undefined
+    ? "unknown":esc(String(wal.last_durable_index));
+  const fault=wal.last_error?` · ${esc(wal.last_error.message||"error")}`
+    :!wal.lock_owned?" · lock not held"
+    :wal.last_log_index!==wal.last_durable_index?` · ${esc(String(wal.last_log_index))} logged, ${durable} durable`:"";
+  return `<span style="color:var(--${healthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · durable ${durable}${fault}`;
+}
+function clusterDatabaseRows(cluster,replication,ops){
+  if(replication&&replication.backend==="sqlite")
+    return [["Backend","SQLite · single node",false],
+      ["Peers","none — watch state is durable here and has nowhere to fall behind",false]];
+  const status=clusterDatabaseStatus(cluster,ops);
+  const raft=(status&&status.raft)||{}, snap=(status&&status.snapshot)||{};
+  const wal=status&&status.wal&&status.wal.snapshot;
+  const leader=(cluster.nodes||[]).find(n=>n.is_leader);
+  const num=value=>(value===null||value===undefined)?"unknown":esc(String(value));
+  const sampled=raft.applied_index!==null&&raft.applied_index!==undefined;
+  const applied=sampled?esc(String(raft.applied_index))
+    :(replication&&replication.last_applied_index!==null&&replication.last_applied_index!==undefined
+      ? esc(String(replication.last_applied_index)):"unknown");
+  const behindKnown=replication&&(replication.behind_by!==null&&replication.behind_by!==undefined
+    ? true:replication.health!=="degraded");
+  const behind=behindKnown?Number(replication.behind_by||0):null;
+  const lag=raft.apply_lag_entries===null||raft.apply_lag_entries===undefined
+    ? "unknown":`${esc(String(raft.apply_lag_entries))} entr${raft.apply_lag_entries===1?"y":"ies"}`;
+  return [
+    ["Backend",replication?(replication.backend==="sqlite"?"SQLite · single node":"hiqlite · Raft"):"unknown",false],
+    ["Leader",leader?`${esc(leader.hostname||leader.node_id)}${leader.node_id===cluster.local_node_id?' <span class="muted">this node</span>':""}`:"none elected",false],
+    ["Term",num(raft.current_term),true],
+    ["Quorum commit",num(raft.commit_index),true],
+    ["Applied here",`${applied}${!sampled&&replication&&replication.last_applied_term!==null&&replication.last_applied_term!==undefined?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""}`,true],
+    ["Apply lag",lag,true],
+    ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
+    ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
+    ["Snapshots",status?(snap.available
+      ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
+      : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
+    ["WAL",clusterDatabaseWal(status),true],
+    ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],
+    ["Reading age",!status?"unknown":raft.sample_valid&&raft.watermark_valid
+      ? `local ${esc(clusterOperationAge(clusterSampleAge(ops,(raft.sample_age_seconds||0)*1000)))} · `+
+        `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`
+      : `<span style="color:var(--bad)">stale or incomplete proof</span>`,false],
+  ];
+}
+function clusterDatabasePanel(cluster,replication,capacity,ops){
+  const health=clusterDatabaseHealth(replication);
+  const cap=clusterCapacityText(capacity);
+  const rows=clusterDatabaseRows(cluster,replication,ops)
+    .map(([label,value,numeric])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}>${value}</dd>`).join("");
+  return `<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Replicated database</h3>
+      <p>${replication&&replication.backend==="sqlite"?"Where watch state is stored on this machine."
+        :"Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up."}</p></div>
+      <div class="row">${clusterHealthPill(health.tone,health.label)}<button class="ghost sm" id="cldb-toggle"
+        aria-controls="cluster-database" aria-expanded="true" onclick="toggleClusterDatabase(this)">Hide</button></div></div>
+    <div class="cldbsumm" id="cluster-database-summary" hidden>${clusterDatabaseSummary(cluster,replication,ops)}</div>
+    <div id="cluster-database"><div class="clcontextfacts">
+      <div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>The one authoritative reading; the System tab no longer repeats it.</small></div>
+      ${capacity?`<div class="clcontextfact"><span>Capacity</span><b>${esc(cap.headline)}</b><small>${esc(cap.detail)}</small></div>`:""}</div>
+      <dl class="cldbledger">${rows}</dl></div></section>`;
+}
+// ---- folding, and remembering it -----------------------------------------
+// Which sections are open is a per-browser convenience, so it is kept in this
+// browser and never in the cluster. Nodes are keyed by node id rather than by
+// position, so a node leaving the cluster drops out of the stored set instead
+// of collapsing whichever card inherits its row. Every read and write is
+// guarded: a browser with site data blocked throws on access, and the panel
+// still has to render with no stored value at all.
+// A function rather than a bare const so the key travels with the two helpers
+// that use it: tests extract these by declaration, and a free const between
+// functions is picked up only by accident.
+function clusterFoldKey(){ return "plurx.cluster.fold"; }
+function clusterFoldRead(){
+  try{
+    const raw=localStorage.getItem(clusterFoldKey());
+    if(!raw) return null;
+    const state=JSON.parse(raw);
+    if(!state||typeof state!=="object"||Array.isArray(state)) return null;
+    const kept={};
+    if(typeof state.database==="boolean") kept.database=state.database;
+    if(Array.isArray(state.nodes_closed)) kept.nodes_closed=state.nodes_closed.filter(id=>typeof id==="string");
+    if(typeof state.tab==="string") kept.tab=state.tab;
+    return kept;
+  }catch(e){ return null; }
+}
+function clusterFoldWrite(patch){
+  try{
+    localStorage.setItem(clusterFoldKey(),JSON.stringify(Object.assign({},clusterFoldRead()||{},patch)));
+  }catch(e){ /* storage blocked: the panel keeps working, it just forgets */ }
+}
+function setClusterDatabaseFold(open){
+  const body=document.getElementById("cluster-database");
+  const summary=document.getElementById("cluster-database-summary");
+  const btn=document.getElementById("cldb-toggle");
+  if(!body||!summary||!btn) return;
+  body.hidden=!open; summary.hidden=open;
+  btn.textContent=open?"Hide":"Show";
+  btn.setAttribute("aria-expanded",String(open));
+}
+function toggleClusterDatabase(btn){
+  const body=document.getElementById("cluster-database");
+  if(!body) return;
+  const open=body.hidden;
+  setClusterDatabaseFold(open);
+  clusterFoldWrite({database:open});
+  if(btn) btn.focus();
+}
+// The node id lives on the card body rather than on the <details> itself so
+// the card's markup still leads with the hostname a person recognizes.
+function clusterNodeFoldId(card){
+  const body=card&&card.querySelector?card.querySelector(".clnodebody"):null;
+  return body?body.getAttribute("data-node"):null;
+}
+// Chrome fires one `toggle` per <details open> as the panel is parsed, so
+// persisting from `ontoggle` would overwrite the stored set with "everything
+// open" on every visit — measured, not assumed. A click is a real gesture, and
+// the card's open state has flipped by the time the task runs.
+function clusterNodeFoldLater(){
+  setTimeout(clusterNodeFoldSave,0);
+}
+function clusterNodeFoldSave(){
+  try{
+    const closed=[...document.querySelectorAll("#cluster-node-list>.clnode")]
+      .filter(card=>!card.open).map(clusterNodeFoldId).filter(Boolean);
+    clusterFoldWrite({nodes_closed:closed});
+  }catch(e){ /* see clusterFoldWrite */ }
+}
+// Run after the panel is written into the document: the markup ships with the
+// defaults (database open, every node open) and this restores what the last
+// visit left, so a fresh browser and a blocked-storage browser both get the
+// defaults rather than an empty screen.
+function applyClusterFolds(){
+  try{
+    const state=clusterFoldRead();
+    if(state&&typeof state.database==="boolean") setClusterDatabaseFold(state.database);
+    if(state&&typeof state.tab==="string"&&document.getElementById("cltab-"+state.tab)) showClusterTab(state.tab);
+    if(state&&Array.isArray(state.nodes_closed)){
+      [...document.querySelectorAll("#cluster-node-list>.clnode")].forEach(card=>{
+        const id=clusterNodeFoldId(card);
+        if(id) card.open=state.nodes_closed.indexOf(id)===-1;
+      });
+    }
+    syncClusterNodeToggle();
+  }catch(e){ /* see clusterFoldWrite */ }
+}
+// ---- troubleshooting -----------------------------------------------------
+// One place for the evidence you reach for when something is wrong, instead of
+// a log card at the bottom and four hint sentences scattered above it. The
+// tabs are radio-style: exactly one pane is visible, and the log keeps its own
+// id so the refresher does not care which pane is showing.
+function clusterTabButton(id,label,selected){
+  return `<button class="cltab" role="tab" id="cltab-${id}" aria-selected="${selected?"true":"false"}"
+    aria-controls="clpane-${id}" onclick="selectClusterTab('${id}')">${esc(label)}</button>`;
+}
+function selectClusterTab(id){
+  showClusterTab(id);
+  clusterFoldWrite({tab:id});
+}
+function showClusterTab(id){
+  const tabs=[...document.querySelectorAll(".cltabs>.cltab")];
+  tabs.forEach(tab=>{
+    const mine=tab.id==="cltab-"+id;
+    tab.setAttribute("aria-selected",String(mine));
+    const pane=document.getElementById(tab.getAttribute("aria-controls"));
+    if(pane) pane.hidden=!mine;
+  });
+}
+function clusterDiagnosticsFacts(cluster,ops){
+  const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
+  const nodes=cluster.nodes||[];
+  const voters=nodes.filter(n=>n.is_voter);
+  const fresh=voters.filter(n=>n.reachable).length;
+  const q=clusterQuorum(voters.length);
+  const pending=nodes.filter(n=>n.removal_pending).length;
+  const ages=ops&&!ops.unavailable
+    ? (ops.nodes||[]).map(row=>row.sample_age_ms).filter(age=>age!==null&&age!==undefined):[];
+  const oldest=ages.length?clusterSampleAge(ops,Math.max(...ages)):null;
+  if(!voters.length) return `<dl class="cldbledger"><dt>Voter roster</dt>
+    <dd>No committed voter roster is readable from this node, so there is no quorum arithmetic to state.</dd></dl>`;
+  return `<dl class="cldbledger"><dt>Heartbeat quorum</dt><dd>${fresh>=q.majority
+      ? `<span style="color:var(--good)">available</span> — ${fresh} of ${voters.length} voters fresh`
+      : `<span style="color:var(--bad)">unavailable</span> — ${fresh} of ${voters.length} voters fresh`}</dd>
+    <dt>Quorum arithmetic</dt><dd>${q.majority} of ${voters.length} voters must agree on every write; ${q.tolerates} may be lost</dd>
+    <dt>Removals pending</dt><dd class="num">${pending}</dd>
+    <dt>Local Raft sample</dt><dd class="num">${raft.sample_valid&&raft.watermark_valid?"valid":"stale or incomplete"}</dd>
+    <dt>Oldest direct sample</dt><dd class="num">${oldest===null?"unknown":esc(clusterOperationAge(oldest))}</dd></dl>`;
+}
+function clusterTroubleshootingPanel(cluster,ops){
+  const refusal=clusterRefusalHtml();
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Troubleshooting</h3>
+      <p>Evidence for when something is wrong. Nothing here changes membership.</p></div>
+      <div class="row"><button class="ghost sm" onclick="downloadClusterDiagnostics()">Download roster snapshot</button></div></div>
+    <div class="cltabs" role="tablist">${clusterTabButton("log","Cluster log",true)}${
+      clusterTabButton("readings","Readings",false)}${clusterTabButton("refusals","Refusals",false)}</div>
+    <div class="clpane" id="clpane-log" role="tabpanel" aria-labelledby="cltab-log">
+      <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
+          <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
+          <option value="error">Errors</option><option value="debug">Debug+</option></select>
+        <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
+        <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
+      <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
+      <div class="logbox" id="cllogbox">Loading…</div></div>
+    <div class="clpane" id="clpane-readings" role="tabpanel" aria-labelledby="cltab-readings" hidden>
+      ${clusterDiagnosticsFacts(cluster,ops)}
+      <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
+        Direct samples come from each voter answering for itself.</div></div>
+    <div class="clpane" id="clpane-refusals" role="tabpanel" aria-labelledby="cltab-refusals" hidden>
+      ${refusal||`<div class="hint">No cluster operation has been refused in this session. A refusal is kept
+        here with the sentence explaining what to do next, because a toast is 2.2 seconds and these answers
+        are paragraphs.</div>`}</div></section>`;
+}
 function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
   // and the endpoints behind this are admin-only on their own account.
@@ -11834,16 +12151,11 @@ function clusterPanel(d){
   const clustered=!cluster.unavailable;
   const statusFailure=cluster.unavailable&&cluster.code!=="membership_unavailable";
   const nodes=clustered?(cluster.nodes||[]):[];
-  // One lag answer, not a second competing one: this is the same projection and
-  // the same renderer as Settings → System.
-  const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
+  // One lag answer, not a second competing one. The replicated database panel
+  // below is now the only place in Cinema that reports it.
+  const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication)
+    ||(cluster.code==="membership_unavailable"?clusterSqliteReplication():null);
   const capacity=clustered&&cluster.capacity;
-  const capacityHeadline=capacity
-    ? `${capacity.ready_read_workers} ready read worker${capacity.ready_read_workers===1?"":"s"} · ${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}`
-    : "Capacity details unavailable";
-  const capacityDetail=capacity
-    ? `${capacity.voting_nodes} voters · quorum ${capacity.voting_quorum} · tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}. Read capacity and replicated copies do not increase voting redundancy.`
-    : "Read capacity and voting redundancy could not be read.";
   const maintenanceActive=nodes.some(node=>node.maintenance);
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
@@ -11852,37 +12164,41 @@ function clusterPanel(d){
         return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
       }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
-  const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
+  // A failed roster read still belongs to a cluster, so the roster column and
+  // its retry stay; only a machine that has never joined loses them.
+  const roomForRoster=clustered||statusFailure;
   const recovery=clustered?clusterRecoveryState(cluster):null;
+  const recoveryRequired=Boolean(recovery&&recovery.required);
+  // Two components, two columns, and each one keeps its own facts: the store on
+  // the left, the machines carrying it on the right. Maintenance and
+  // troubleshooting are sections of their own below, rather than hint
+  // sentences and a details element tucked under the roster.
+  const operations=clustered?clusterOperationsPanel(cluster,d.clusterOps):"";
   const leader=nodes.find(n=>n.is_leader);
   const reachable=nodes.filter(n=>n.reachable).length;
-  return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recovery&&recovery.required?'warn':state.tone}"><h3>${esc(recovery&&recovery.required?'Recovery required':state.title)}</h3><p>${esc(recovery&&recovery.required?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
-    <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
-    <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
-    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
-    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
-      <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
-      <div class="clcontextfacts"><div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>Same authoritative reading as the System tab.</small></div>
-        <div class="clcontextfact"><span>Capacity</span><b>${esc(capacityHeadline)}</b><small>${esc(capacityDetail)}</small></div></div>
-      ${operations}${roster}</section>
-      ${clustered?clusterOperationsPanel(cluster,d.clusterOps):""}</div>
-    ${statusFailure?`<div class="row"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
-    ${clusterRefusalHtml()}
-    ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details>`:""}
-    <details class="cldanger"><summary>Cluster diagnostics</summary><div class="cldangerbody"><h2 class="section" style="margin-top:0">Cluster log</h2>
-      <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
-          <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
-          <option value="error">Errors</option><option value="debug">Debug+</option></select>
-        <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
-        <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
-      <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
-      <div class="logbox" id="cllogbox">Loading…</div></div></details></div>`;
+  return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recoveryRequired?'warn':state.tone}"><h3>${esc(recoveryRequired?'Recovery required':state.title)}</h3><p>${esc(recoveryRequired?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
+    ${clustered?`<div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
+    <div class="clmetric"><strong>${reachable} / ${nodes.length}</strong><span>Fresh heartbeats</span></div>
+    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div>`:""}</div>
+    ${recoveryRequired?operations:""}
+    <div class="cluster-board${roomForRoster?"":" clsolo"}">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
+      ${roomForRoster?`<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+        <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
+        ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
+        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>`:""}</div>
+    ${clustered?`<div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
+        <p>Restart readiness, planned work, and the membership changes that need a credential.</p></div></div>
+        <div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>
+        ${recoveryRequired?"":operations}
+        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section></div>`:""}
+    ${clusterTroubleshootingPanel(cluster,d.clusterOps)}</div>`;
 }
 function toggleClusterNodes(btn){
   const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
   const expand=cards.some(card=>!card.open);
   cards.forEach(card=>{ card.open=expand; });
   syncClusterNodeToggle();
+  clusterNodeFoldSave();
   if(btn) btn.focus();
 }
 function syncClusterNodeToggle(){
