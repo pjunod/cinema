@@ -5003,9 +5003,9 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
     let status = match &err {
         PlaylistError::SessionGone => StatusCode::NOT_FOUND,
         PlaylistError::StartupTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
-        PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        PlaylistError::ProducerExited(_)
+        | PlaylistError::ProducerEnded(_)
+        | PlaylistError::SessionFailed(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
         session = %crate::transcode::session_log_id(session),
