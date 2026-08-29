@@ -4408,15 +4408,32 @@ impl RollingControlActor {
         )
     }
 
+    /// A retry is installed while its predecessor's retained Retry decision
+    /// still awaits DecisionApplied. That exact N -> N+1 overlap is not a
+    /// second decision owner: the successor must retain its own startup/exit
+    /// evidence until the executor acknowledges the predecessor decision.
+    fn pending_retry_precedes_successor(&self, producer_attempt: u64) -> bool {
+        self.delivery.producer_attempt == producer_attempt
+            && self.pending_decision.as_deref().is_some_and(|decision| {
+                matches!(
+                    decision,
+                    ProducerDecision::Retry { failed_attempt, .. }
+                        if failed_attempt.checked_add(1) == Some(producer_attempt)
+                )
+            })
+    }
+
     fn arm_producer_deadline(
         &mut self,
         producer_attempt: u64,
         mode: ProducerProgressDeadlineMode,
         instant: Instant,
     ) {
+        let pending_retry_successor_start = mode == ProducerProgressDeadlineMode::Starting
+            && self.pending_retry_precedes_successor(producer_attempt);
         if self.retired
             || self.has_terminal_prepublication_failure()
-            || self.pending_decision.is_some()
+            || (self.pending_decision.is_some() && !pending_retry_successor_start)
             || self.prepublication.as_ref().is_some_and(|control| {
                 !matches!(control.completion, ProducerCompletionState::Incomplete)
             })
@@ -5067,7 +5084,8 @@ impl RollingControlActor {
         self.producer_progress_deadline = None;
         self.producer_signal_authorized = false;
         if self.has_terminal_prepublication_failure()
-            || self.pending_decision.is_some()
+            || (self.pending_decision.is_some()
+                && !self.pending_retry_precedes_successor(observation.producer_attempt))
             || self.prepublication.as_ref().is_some_and(|control| {
                 !matches!(control.completion, ProducerCompletionState::Incomplete)
             })
@@ -13252,11 +13270,23 @@ mod tests {
             actor.admit_producer_retry_at(first_deadline, 1, "recipe-successor"),
             Ok(2)
         );
+        let successor_deadline = first_deadline + PREPUBLICATION_SOFTWARE_STARTUP_BUDGET;
+        let expected_successor_deadline = Some(ProducerProgressDeadline {
+            producer_attempt: 2,
+            mode: ProducerProgressDeadlineMode::Starting,
+            instant: successor_deadline,
+        });
+        assert_eq!(
+            actor.producer_progress_deadline,
+            expected_successor_deadline,
+            "the successor owns its startup clock while Retry remains pending"
+        );
         assert_eq!(actor.decision_applied_at(1, Some(2)), Ok(()));
-        let successor_deadline = actor
-            .producer_progress_deadline
-            .expect("successor startup deadline")
-            .instant;
+        assert_eq!(
+            actor.producer_progress_deadline,
+            expected_successor_deadline,
+            "DecisionApplied must preserve the admitted successor clock"
+        );
         assert!(actor.settle_due_deadlines_at(successor_deadline).is_some());
         assert!(matches!(
             actor.pending_decision.as_deref(),
@@ -13273,6 +13303,111 @@ mod tests {
         );
         assert_eq!(actor.decision_applied_at(2, None), Ok(()));
         assert_eq!(actor.decision_applied_at(2, None), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn successor_exit_before_retry_ack_is_retained_as_the_final_decision() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-successor-exit", "recipe-successor-exit"),
+            ),
+            Ok(1)
+        );
+        let first_deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        assert!(actor.settle_due_deadlines_at(first_deadline).is_some());
+        assert!(
+            !actor.pending_retry_precedes_successor(1),
+            "a pending Retry never exempts its failed predecessor"
+        );
+        assert_eq!(
+            actor.admit_producer_retry_at(first_deadline, 1, "recipe-successor-exit"),
+            Ok(2)
+        );
+        assert!(actor.pending_retry_precedes_successor(2));
+
+        let exit_at = first_deadline + Duration::from_secs(1);
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exit_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 2,
+                    success: false,
+                    code: Some(23),
+                    signal: None,
+                    observed_at: exit_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        let successor_exit = Some(ProducerProcessExitDue {
+            producer_attempt: 2,
+            published_at: exit_at,
+            code: Some(23),
+            signal: None,
+        });
+        assert_eq!(actor.producer_process_exit_due, successor_exit);
+        assert!(matches!(
+            actor.pending_decision.as_deref(),
+            Some(ProducerDecision::Retry {
+                decision_sequence: 1,
+                failed_attempt: 1,
+                ..
+            })
+        ));
+
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exit_at + Duration::from_nanos(1),
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(99),
+                    signal: None,
+                    observed_at: exit_at + Duration::from_nanos(1),
+                },
+            ),
+            ProducerExitAcceptance::Rejected
+        );
+        assert_eq!(
+            actor.producer_process_exit_due, successor_exit,
+            "the stale predecessor cannot replace the retained successor exit"
+        );
+
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 1,
+                published_at: exit_at,
+                preceding_producer: Vec::new(),
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::DecisionApplied {
+                    decision_sequence: 1,
+                    installed_attempt: Some(2),
+                    reply,
+                },
+            })
+            .await;
+        assert_eq!(response.await.expect("retry acknowledgement"), Ok(()));
+        assert!(matches!(
+            actor.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                decision_sequence: 2,
+                failed_attempt: 2,
+                reason: ProducerDecisionReason::ProcessExit,
+                ..
+            })
+        ));
+        assert!(
+            !actor.pending_retry_precedes_successor(2),
+            "a pending Fail never gains the retry-overlap exemption"
+        );
+        assert_eq!(
+            actor.admit_producer_retry_at(exit_at, 2, "recipe-successor-exit"),
+            Err(ProducerAttemptRejection::RetryUnavailable)
+        );
     }
 
     #[test]
