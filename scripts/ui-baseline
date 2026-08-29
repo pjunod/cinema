@@ -1231,7 +1231,22 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
     # Console errors and uncaught exceptions are collected for the whole visit,
     # not sampled at the end: an error thrown during boot is exactly the kind
     # this gate exists to catch, and it is long gone by the time we screenshot.
-    page.on("console", lambda m: problems.append(f"console.{m.type}: {m.text}") if m.type == "error" else None)
+    # The URL is part of the finding, not decoration. A bare
+    # "console.error: 503 (Service Unavailable)" names neither the endpoint nor
+    # the layer that answered, and a 503 that appears once every few hundred
+    # captures is not reproducible on demand — the one run that caught it has
+    # to carry enough to diagnose from. Playwright puts the originating
+    # resource in `location`, so record it when there is one.
+    def note_console(message):
+        if message.type != "error":
+            return
+        origin = (message.location or {}).get("url") or ""
+        problems.append(
+            f"console.{message.type}: {message.text}"
+            + (f" [{origin}]" if origin else "")
+        )
+
+    page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
     try:
         response = page.goto(base_url + "/" + route["hash"], wait_until="domcontentloaded",
