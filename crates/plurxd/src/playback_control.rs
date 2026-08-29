@@ -11735,7 +11735,8 @@ mod tests {
         let attempt = actor
             .begin_producer_attempt_at(started)
             .expect("producer attempt");
-        let before = actor.snapshot_at(started).delivery;
+        let observed_at = started + Duration::from_millis(2);
+        let before = actor.snapshot_at(observed_at).delivery;
 
         let (reply, response) = tokio::sync::oneshot::channel();
         drop(response);
@@ -11768,12 +11769,7 @@ mod tests {
             })
             .await;
         assert!(!response.await.expect("expired observation reply"));
-        assert_eq!(
-            actor
-                .snapshot_at(started + Duration::from_millis(2))
-                .delivery,
-            before
-        );
+        assert_eq!(actor.snapshot_at(observed_at).delivery, before);
     }
 
     #[tokio::test]

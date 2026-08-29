@@ -23904,39 +23904,45 @@ mod tests {
     /// reuse `touch` and nothing would visibly break.
     #[tokio::test]
     async fn polling_status_does_not_keep_a_session_alive() {
-        super::require_ffmpeg();
-        use plurx_core::store::SqliteStore;
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
-        let work = crate::test_tempdir().expect("work");
-        let mgr = Arc::new(TranscodeManager::new(
-            Arc::clone(&store),
-            work.path().to_path_buf(),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
-        let info = mgr
-            .start(file_id, 720, 0.0, None, None, "paul", "pb-paul")
-            .await
-            .expect("start");
+        let root = crate::test_tempdir().expect("status fixture");
+        let session_id = "status-does-not-renew";
+        let fixture = HlsDeliveryFixture::publish(root.path(), session_id).await;
+        let mgr = Arc::clone(&fixture.state.transcode);
 
         // Let the idle clock advance, then poll status several times.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let before = mgr.session_status(&info.session_id).await.expect("status");
-        assert_eq!(before.hold_reason, None, "a running session is not held");
-        assert_eq!(before.resume_below_seconds, None);
-        assert_eq!(before.resume_below_bytes, None);
-        let before = before.idle_seconds;
-        for _ in 0..5 {
-            assert!(mgr.session_status(&info.session_id).await.is_some());
-        }
-        let after = mgr
-            .session_status(&info.session_id)
+        let before = fixture
+            .session
+            .control
+            .snapshot()
             .await
-            .expect("status")
-            .idle_seconds;
+            .expect("rolling actor");
         assert!(
-            after >= before,
+            before.idle_for >= Duration::from_millis(300),
+            "the fixture establishes a measurable pre-poll idle interval"
+        );
+        let before_status = mgr.session_status(session_id).await.expect("status");
+        assert_eq!(
+            before_status.hold_reason, None,
+            "a running session is not held"
+        );
+        assert_eq!(before_status.resume_below_seconds, None);
+        assert_eq!(before_status.resume_below_bytes, None);
+        for _ in 0..5 {
+            assert!(mgr.session_status(session_id).await.is_some());
+        }
+        let after = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor");
+        assert_eq!(
+            after.last_renewal_kind, "test-start",
+            "status polling must not renew the playback lease"
+        );
+        assert!(
+            after.idle_for >= before.idle_for,
             "idle time must keep running while status is polled"
         );
 
@@ -23944,24 +23950,29 @@ mod tests {
         // keeps the assertion above from passing vacuously on a session whose
         // clock never moved. This is the shared response commit point; the
         // actual readers would long-poll for output this fixture cannot make.
-        let owner_session = mgr.live_session(&info.session_id).await.expect("session");
         let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
-            producer_attempt: owner_session.control.current_producer_attempt(),
-            session: owner_session,
+            producer_attempt: fixture.session.control.current_producer_attempt(),
+            session: Arc::clone(&fixture.session),
         });
         assert!(
-            mgr.commit_resolved_media(&info.session_id, &owner, "test-fetch", None, true)
+            mgr.commit_resolved_media(session_id, &owner, "test-fetch", None, true)
                 .await
         );
+        let renewed = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor");
         assert_eq!(
-            mgr.session_status(&info.session_id)
-                .await
-                .expect("status")
-                .idle_seconds,
-            0,
+            renewed.last_renewal_kind, "test-fetch",
+            "the accepted response records its exact renewal source"
+        );
+        assert!(
+            renewed.idle_for < after.idle_for,
             "fetching from a session is what keeps it alive"
         );
-        assert!(mgr.stop_session(&info.session_id, "test").await);
+        assert!(mgr.stop_session(session_id, "test").await);
     }
 
     /// The playlist is the only place a copied segment's true duration is
@@ -25230,7 +25241,10 @@ mod tests {
         let text = String::from_utf8(playlist).expect("utf8 playlist");
         assert!(text.contains("seg00000.ts"));
         assert!(text.contains("seg00001.ts"));
-        assert!(session.playlist_published.load(Relaxed));
+        assert!(
+            !session.playlist_published.load(Relaxed),
+            "the read-only fixture does not impersonate response authorization"
+        );
         let actor_delivery = session
             .control
             .snapshot()
@@ -25640,11 +25654,14 @@ mod tests {
             "it must have actually waited rather than found the playlist already there"
         );
         publish.await.expect("publisher");
-        assert!(session
-            .control
-            .snapshot()
-            .await
-            .is_some_and(|lease| lease.last_renewal_kind == "playlist"));
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "resolving bytes alone must not impersonate a completed HTTP response"
+        );
 
         // Never published. Refused at the deadline — and as a retryable
         // "still starting", never as a session that failed or went away.
@@ -26936,12 +26953,12 @@ mod tests {
             .lock()
             .await
             .insert("retained-window".into(), Arc::clone(&session));
-        let served = String::from_utf8(
-            mgr.playlist("retained-window")
-                .await
-                .expect("served playlist"),
-        )
-        .expect("playlist utf8");
+        let (served, playlist_owner) = mgr
+            .playlist_with_owner("retained-window")
+            .await
+            .map_err(|error| error.error)
+            .expect("served playlist");
+        let served = String::from_utf8(served).expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
@@ -26949,18 +26966,32 @@ mod tests {
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
+        assert!(
+            mgr.commit_resolved_media(
+                "retained-window",
+                &playlist_owner,
+                "playlist",
+                Some("index.m3u8"),
+                true,
+            )
+            .await,
+            "the successful playlist delivery commits its exact owner"
+        );
+        let before_miss = session.control.snapshot().await.expect("rolling actor");
+        assert_eq!(before_miss.last_renewal_kind, "playlist");
 
         assert!(mgr
             .segment("retained-window", "seg00029.ts")
             .await
             .expect("pruned request")
             .is_none());
+        let after_miss = session.control.snapshot().await.expect("rolling actor");
+        assert_eq!(
+            after_miss.last_renewal_kind, "playlist",
+            "a pruned media miss must not change the playback lease source"
+        );
         assert!(
-            session
-                .control
-                .snapshot()
-                .await
-                .is_some_and(|lease| lease.last_renewal_kind == "playlist"),
+            after_miss.idle_for >= before_miss.idle_for,
             "a pruned media miss must not renew the playback lease"
         );
 
@@ -27548,13 +27579,13 @@ mod tests {
     /// then written would let every racer through.
     #[tokio::test]
     async fn concurrent_starts_cannot_exceed_the_hardware_slot_cap() {
-        super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        // A box that believes it has NVENC. The encode will fail (there is no
-        // GPU here) but admission happens before the spawn, which is the point.
+        // A box that believes it has NVENC. Keep the returned permits alive
+        // instead of spawning an encoder that immediately fails on a runner
+        // without a GPU; the cap concerns simultaneous ownership, not how many
+        // failed producers can pass through the same slots over five seconds.
         let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -27569,40 +27600,41 @@ mod tests {
             .await
             .expect("cap");
 
-        // Five players, all at once, each with its own playback id so none
-        // supersedes another.
+        let workload = Workload {
+            source_height: 2160,
+            codec: "hevc",
+            hdr: None,
+            target_height: 1080,
+        };
         let mut starts = Vec::new();
-        for n in 0..5 {
+        for _ in 0..5 {
             let mgr = Arc::clone(&mgr);
             starts.push(tokio::spawn(async move {
-                mgr.start(file_id, 1080, 0.0, None, None, "paul", &format!("pb-{n}"))
+                mgr.admit_live(Encoder::Nvenc, workload, Duration::ZERO)
                     .await
             }));
         }
-        let mut admitted = 0;
+        let mut admitted = Vec::new();
         let mut refused = 0;
         for s in starts {
             match s.await.expect("join") {
-                Ok(_) => admitted += 1,
+                Ok(admission) => {
+                    assert_eq!(admission.encoder, Encoder::Nvenc);
+                    assert!(admission.hw_slot.is_some());
+                    assert!(admission.sw_permit.is_none());
+                    admitted.push(admission);
+                }
                 Err(why) => {
-                    // The 4K HEVC fixture is exactly the shape software cannot
-                    // carry, so the overflow is refused rather than downgraded
-                    // — and it says why rather than failing anonymously.
                     assert!(why.contains("hardware transcode slots"), "{why}");
                     refused += 1;
                 }
             }
         }
-        assert_eq!(admitted, 2, "the cap is the cap");
+        assert_eq!(admitted.len(), 2, "the cap is the cap");
         assert_eq!(refused, 3);
         assert_eq!(mgr.admissions.in_use(), 2, "and it is accounted for");
 
-        // Ending a session gives its slot back — the guard rides on the
-        // session, so every way one can end returns the slot.
-        let live: Vec<String> = mgr.sessions.lock().await.keys().cloned().collect();
-        for id in live {
-            assert!(mgr.stop_session(&id, "test").await);
-        }
+        drop(admitted);
         assert_eq!(mgr.admissions.in_use(), 0, "slots come back");
     }
 
@@ -32263,15 +32295,16 @@ mod tests {
         assert!(mgr.stop_session(&revived.session_id, "test").await);
     }
 
-    /// The check-then-act race the reservation exists to close: two creates
-    /// carrying the same request id, in flight at the same time, must produce
-    /// one session between them — not one encoder each with the loser handed
-    /// a stream its twin's supersession already killed. No interleaving is
-    /// asserted, only the outcome, so this passes whether the runtime overlaps
-    /// them or happens to serialize them.
+    /// The check-then-act race the reservation exists to close: a follower
+    /// carrying the same request id while the owner is still in flight must
+    /// recover the one live session the owner records. Exercise that claim
+    /// transition directly so a deliberately prompt producer failure cannot
+    /// turn this into the separate stale-ready-key recovery contract.
     #[tokio::test]
     async fn concurrent_creates_with_one_request_id_share_one_session() {
-        super::require_ffmpeg();
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
@@ -32298,19 +32331,42 @@ mod tests {
             presentation: Default::default(),
             block_budget_secs: None,
         };
+        let supersession_user = serde_json::json!(["username", "paul"]).to_string();
 
-        let (a, b) = tokio::join!(
-            mgr.create_session(&request, "paul"),
-            mgr.create_session(&request, "paul"),
+        let first = mgr
+            .claim_request("req-race", &request, &supersession_user)
+            .await
+            .expect("first claim");
+        let Claimed::Mine(claim, _) = first else {
+            panic!("the first request owns the reservation")
+        };
+
+        let mut follower = Box::pin(mgr.claim_request("req-race", &request, &supersession_user));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(follower.as_mut().poll(&mut context), Poll::Pending),
+            "the identical follower waits on the in-flight reservation"
         );
-        let a = a.expect("first create");
-        let b = b.expect("second create");
-        assert_eq!(
-            a.session_id, b.session_id,
-            "both callers must be handed the one session the id names"
+
+        let session_id = "coalesced-request-session";
+        let mut session = test_session(work.path().join("coalesced-session"));
+        session.file_id = file_id;
+        mgr.sessions
+            .lock()
+            .await
+            .insert(session_id.to_owned(), Arc::new(session));
+        claim.complete(
+            session_id,
+            &std::collections::HashSet::from([session_id.to_owned()]),
         );
+
+        let recovered = match follower.await.expect("follower claim") {
+            Claimed::Recovered(info) => info,
+            Claimed::Mine(_, _) => panic!("the follower must not reserve a second create"),
+        };
+        assert_eq!(recovered.session_id, session_id);
         assert_eq!(mgr.active_sessions().await, 1, "and exactly one exists");
-        assert!(mgr.stop_session(&a.session_id, "test").await);
+        assert!(mgr.stop_session(session_id, "test").await);
     }
 
     /// A create that fails must clear its reservation on the way out. The
