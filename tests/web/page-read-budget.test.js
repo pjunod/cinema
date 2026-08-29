@@ -363,7 +363,12 @@ test("cockpit Settings makes the active tab and long System values distinct", as
   assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
   assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
   assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
-  assert.match(shippedSource("systemPanel"), /class="system-now-watch"/);
+  // Watch-state durability is reported once, on the Cluster tab, and nowhere
+  // else. Two readings of the same projection on two screens is how an
+  // operator ends up comparing a stale copy against a fresh one.
+  assert.doesNotMatch(shippedSource("systemPanel"), /system-now-watch|Watch state/);
+  assert.doesNotMatch(shippedSource("systemPanel"), /replicationText/);
+  assert.doesNotMatch(SHIPPED_UI, /\.system-now-watch\{/);
 });
 
 test("an old Settings tick cannot block or release a newer generation", async () => {

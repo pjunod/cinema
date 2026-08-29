@@ -678,8 +678,6 @@
   .storage-table .stgrate{white-space:nowrap}
   .system-now{display:grid;gap:4px}
   .system-now-counts{color:var(--text);font-weight:600}
-  .system-now-watch{max-width:76ch;color:var(--muted);line-height:1.55}
-  .system-now-watch b{color:var(--text);font-weight:600}
   @media(max-width:640px){
     .storage-table{grid-template-columns:minmax(0,1fr);gap:0}
     .storage-table .stgrate{margin-bottom:6px;white-space:normal}
@@ -11315,7 +11313,6 @@ function systemPanel(sys,playbackEvents){
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
         <dt>Right now</dt><dd><div class="system-now">
           <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
-          <div class="system-now-watch"><b>Watch state</b> · ${replicationText(sys.replication)}</div>
         </div></dd>
       </dl></div>
     <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
