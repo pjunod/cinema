@@ -7,16 +7,17 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Current review candidate:** the documentation tip above runtime repairs
-`6e01bbc3` and `07bb95bc`, with regression mappings `529144ca` and `ea36ccd2`.
+through `4da3bbde`, with regression evidence closed through `c8467a9a`.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
 takeover, current-owner retry publication, and resolved-replay freshness.
 Store, lifecycle, and end-to-end integration reviewers unanimously approved
-the repaired source with no P0–P3 finding after exact head
-`032292a159513e51f13bab5db1d6081c46b0cc5c` exposed and rejected detached
-remote-START restart-admission loss. Immutable review of the next docs-bearing
-exact head is next.
+every repaired source delta with no remaining P0–P3 finding after exact head
+`032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached remote-START
+restart-admission loss and the required cluster gate exposed five Hiqlite
+placeholder-order defects. Immutable review of the docs-bearing exact head is
+next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -52,19 +53,19 @@ before durable-ID adoption and seed/publication.
 The legacy published-lifetime and copy recovery decisions still remain
 disjoint compatibility owners; this cut does not claim their deletion.
 **Validation state:** `make unit` ran exactly once at the pre-rebase commit now
-mapped to `b1eeba78`; compilation failed before tests on 11 Store errors. After approved
-repairs, all 641 directly affected tests are accounted green without a second
-full-suite run. The aggregate cluster gate's two stale historical-fixture
-failures pass by exact name after `411bf818`/`4d38a084`; every already-passing
-vendor WAL and Store case, the full cluster harness, seven activation tests,
-and two Activity tests are also accounted green. Formatting, workspace Clippy,
-validation catalog, history, 122 operations contracts, and 52 benchmark checks
-pass for the unchanged pre-rebase content. The current activation repair is
-formatted, diff-clean, production compiler-clean, and unanimously approved
-before freeze, but deliberately
-untested until its exact-head review completes. After approval, run only
-directly affected tests and required static, cluster, and hosted gates; then
-merge PR #636.
+mapped to `b1eeba78`; compilation failed before tests on 11 Store errors. After
+approved repairs, all 641 directly affected historical tests are accounted
+green without a second full-suite run. On the current repair, the activation
+Store contract, five daemon activation/replay tests, two SQLite migrations,
+two Hiqlite schema tests, and the placeholder-order invariant pass. The first
+required cluster run passed every vendor WAL/Hiqlite probe and 61/67 Store
+contracts; `4da3bbde` repaired all six failed paths plus one latent Abandon
+binding, and every failed three-voter name passes on exact rerun. The complete
+cluster harness, seven activation tests,
+and two Activity tests pass. Formatting, workspace Clippy, validation catalog,
+history, 123 operations contracts, 52 benchmark checks, and web policy pass.
+Only docs-bearing exact-head review, push, hosted CI, and merge remain for PR
+#636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -849,9 +850,10 @@ rebased candidate `8964e3b1` found the internal remote-start serving-authority
 bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` closed that
 first issue. Subsequent review exposed the provisional activation lifecycle
 gaps described at the top of this handoff. The final three-phase repair is
-frozen in `6e01bbc3`, with restart-admission repair `07bb95bc` and regression
-mappings `529144ca`/`ea36ccd2`; the documentation tip is the immutable review
-candidate.
+frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
+migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
+placeholder-order repair `4da3bbde`. Regression evidence is closed through
+`c8467a9a`; the documentation tip is the immutable review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
 `8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
@@ -863,11 +865,10 @@ The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Commit this documentation refresh, update the PR body, and obtain unanimous
-   exact-head review of that exact object ID.
-2. Only after approval, run the directly affected tests and required static
-   and cluster gates. Push the approved and locally green candidate to PR #636,
-   require every hosted check green on the exact final head, merge, and
+1. Commit this documentation refresh and obtain unanimous exact-head review of
+   that exact object ID.
+2. Update the PR body, push the reviewed and locally green candidate to PR
+   #636, require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.
 
 Do not skip the adversarial-review gate because an automatically started
