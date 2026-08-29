@@ -11091,7 +11091,7 @@ mod tests {
 
     /// Every playlist refusal, from the session's verdict to the wire.
     ///
-    /// All four used to be `ApiError::NotFound("transcode session")` — one
+    /// All five used to be `ApiError::NotFound("transcode session")` — one
     /// anonymous 404 that hls.js escalates to a fatal `levelLoadError`
     /// whatever caused it. The status now separates what the client can do
     /// about it, and the typed body carries the sentence a person reads.
@@ -11111,6 +11111,12 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "producer_failed",
                 "exit status: 1",
+            ),
+            (
+                PlaylistError::ProducerEnded("progress deadline elapsed".into()),
+                StatusCode::BAD_GATEWAY,
+                "producer_ended",
+                "already listed remains available",
             ),
             (
                 PlaylistError::SessionFailed("the encoder never produced any video".into()),
@@ -11137,6 +11143,7 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
             assert_eq!(json["code"], code);
             let message = json["message"].as_str().expect("message");
+            assert_eq!(err.retryable(), code == "startup_timeout", "{code}");
             assert!(
                 message.to_lowercase().contains(fragment),
                 "{code}: \"{message}\" should contain \"{fragment}\""
