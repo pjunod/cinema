@@ -9,7 +9,8 @@
 fully green · merge `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
 **Current work:** the next M4 cut on
 `codex/playback-control-m4-copy-lifetime` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`. PR #641 completed the actor-managed
+`/private/tmp/plurx-playback-control-clone`, frozen as candidate
+`36f27dd88625c021945978762635937cb3d3fccc`. PR #641 completed the actor-managed
 published-transcode lifetime: one `ProducerProgressDeadline` remains
 authoritative across publication, emits one stable postpublication failure
 decision with `RetainPublished`, freezes the committed frontier, returns typed
@@ -21,7 +22,7 @@ attempts classify process exits immediately. Reader completion and process
 exit rendezvous under one bounded actor classification deadline before
 ENDLIST/frontier proof. The legacy copy watchdog, watchdog election,
 request-side exit inference, and copy-owned replacement policy are removed in
-the working tree. Compile-only
+the candidate. Compile-only
 `cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds,
 and the static ownership recount has zero mismatches across 32 source symbols
 and seven entrypoints. The first adversarial pass found a P2
@@ -47,7 +48,7 @@ in `fmp4`/`copyseg` now say malformed input is a
 reader failure, structural `Unsupported` remains actor/publication-gated, and
 odd-track handling does not imply an unconditional fallback. No broad unit
 suite has run for this cut; the one permitted broad run, final
-static/cluster/hosted gates, PR, and merge remain.
+static/cluster/hosted gates, exact-PR-head review, and merge remain.
 
 PR #641's one permitted broad local `make unit` invocation has already run and
 must not be repeated for that merged cut. The `plurxd` target reported 1,243

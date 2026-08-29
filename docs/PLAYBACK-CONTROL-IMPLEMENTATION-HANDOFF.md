@@ -9,9 +9,10 @@
 (hosted run `33243486511` fully green; merge
 `32af5fa997459174e6b0bfe69bddd72473a1d5f6`)
 **Active branch:** `codex/playback-control-m4-copy-lifetime`
-**Current runtime/evidence heads:** none beyond merged `main`; the copy
-actor/executor runtime and ownership-inventory changes are on the active
-disposable clone. Compile-only
+**Current candidate implementation head:**
+`36f27dd88625c021945978762635937cb3d3fccc`; the copy actor/executor runtime and
+ownership-inventory changes are committed on the active disposable clone.
+Compile-only
 `cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds,
 and the static ownership recount reports zero mismatches across 32 source
 symbols and seven entrypoints. No broad unit suite has run.
