@@ -9,17 +9,40 @@
 fully green · merge `a48884906da351ca0c72dc99c227aa169911d089`
 **Current work:** the next M4 cut on
 `codex/playback-control-m4-published-lifetime` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`. Working-tree implementation is in
-progress, but no immutable candidate or gate result exists yet. The cut covers
-actor-managed transcodes after first media. It will keep
-the actor's `ProducerProgressDeadline` armed across publication, emit one
-stable postpublication failure decision with `RetainPublished`, and expose a
-typed `producer_ended` boundary without destroying already published media.
-Copy watchdog and replacement owners remain deliberately active until the
-separate copy cut.
+`/private/tmp/plurx-playback-control-clone`. Implementation and regression
+mapping are committed through
+`2f34a8eae08c16c7db9d9e96149fb7b6d26f4434`. Earlier exact candidate
+`f151b9788213474c3382c3a2494a6259b71bc216` received three formal exact-head
+adversarial approvals; `2f34a8ea` adds the final validation-history mapping
+and still requires its own immutable-head review. The cut covers
+actor-managed transcodes after first media. It keeps the actor's
+`ProducerProgressDeadline` armed across publication, emits one stable
+postpublication failure decision with `RetainPublished`, and exposes a typed
+`producer_ended` boundary without destroying already published media. The
+published-transcode progress watchdog is removed. Copy watchdog and
+replacement owners remain deliberately active until the separate copy cut.
 
-The one allowed full local unit invocation was consumed before tests while
-compiling Store code. The directly affected rerun then executed 641 tests:
+The active cut's one permitted broad local `make unit` invocation has already
+run and must not be repeated locally. The `plurxd` target reported 1,243
+passed, 55 failed, and three ignored tests. One directly affected actor test
+found a real retry-successor deadline regression and is fixed; all four exact
+repaired successor tests pass. The other 54 `plurxd` failures are sandbox
+environment failures at bind, mDNS/listener, or macOS `ps` observation seams.
+The `plurx-core` cluster failures likewise stop at sandbox-denied bind/listener
+setup rather than product assertions. Non-test gates are green: formatting,
+lint, validation lint (23/27/12,843), history (1,118/768/661/80/77), 123
+operations contracts, 52 benchmark checks, web policy, and diff inspection.
+Unrestricted `make cluster-check` also passes its vendor recovery, 67-test
+replicated Store contract, real membership/failover/topology drills, seven
+daemon activation tests, and two cluster activity tests. Immutable final
+branch-tip review, wholly green hosted CI, and merge remain. A later accidental
+duplicate invocation stopped before the cluster workload because macOS
+platform certificate loading reported no available keychain; it reached no
+product assertion and is not being retried locally.
+
+For historical #636 validation, its one allowed full local unit invocation was
+consumed before tests while compiling Store code. The directly affected rerun
+then executed 641 tests:
 606 passed initially, five deterministic inventory/high-water failures passed
 after exact repairs, and all 30 socket fixtures passed by exact name with
 unrestricted loopback binds. The aggregate cluster gate found two stale
@@ -207,7 +230,8 @@ fencing, observation-only actor projection, and command/deadline metrics are
 now part of the validated baseline. PR #636 subsequently moved
 prepublication transcode recovery and response settlement into that actor and
 executor. Published-transcode lifetime and copy recovery remain compatibility
-owners on merged `main`; the active cut targets only the former.
+owners on merged `main`; the active branch has now moved only the former into
+the actor and leaves copy compatibility-owned.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -228,7 +252,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | PR #636 merged production startup recovery, make-before-break publication fencing, explicit three-phase cluster activation, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Implement and verify actor-managed published-lifetime transcode failure; a later copy cut removes copy watchdog and replacement owners |
+| M4 — server watchdog removal | **In progress** | PR #636 merged production startup recovery; the active branch implements actor-managed published-lifetime failure and removes its compatibility watcher through `2f34a8ea` | Complete final-review/hosted/merge gates; a later copy cut removes copy watchdog and replacement owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -277,13 +301,14 @@ admission closes retry before attempt bytes escape, and one executor applies
 the sole validated prepublication retry.
 
 The active branch `codex/playback-control-m4-published-lifetime` owns only
-actor-managed transcodes after first media. The planned cut keeps the existing
-actor deadline armed, maps terminal postpublication producer failure to one
-stable proposal and `CleanupPolicy::RetainPublished`, and serves already
-materialized playlist/init/segment data while requests beyond the committed
-frontier receive typed `producer_ended`. A zero process exit is success only
-after ENDLIST/frontier completion is proven. Copy startup, copy stall recovery,
-and copy child replacement are outside this cut and remain compatibility-owned.
+actor-managed transcodes after first media. The implemented cut keeps the
+existing actor deadline armed, maps terminal postpublication producer failure
+to one stable proposal and `CleanupPolicy::RetainPublished`, and serves
+already materialized playlist/init/segment data while requests beyond the
+committed frontier receive typed `producer_ended`. A zero process exit is
+success only after ENDLIST/frontier completion is proven. Copy startup, copy
+stall recovery, and copy child replacement are outside this cut and remain
+compatibility-owned.
 
 M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
@@ -304,11 +329,11 @@ Review and test state for M4:
 | Static owner inventory | **Reconciled through `c4a1d96d` and test-shape update `c94cdcf3`; exact inventory remains green at `7dc30a42`.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. Hosted run `33226975369` exposed sixteen stale exact counts after the activation and cleanup repairs; run `33234021296` exposed one joined waiter task, nine bounded fixture timers, and six Barrier waits added by the reviewed hosted-gate tests. Independent reviews recomputed every count and confirmed no new production owner. The exact failed validation methods pass without changing scanner regexes, scan scope, or equality assertions. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Merged in #636.** Exact head `d1b117bf2bddba600c659f2b2354ea50ee10830a` assembles actor startup policy, response/retry cutoff, exact decision application, make-before-break replacement, three-phase cluster activation, durable terminal/publication state, bounded response and relay ownership, and VOD lifecycle ownership. The published-lifetime working tree is in progress but is not frozen or reviewed. |
-| Adversarial implementation review | **PR #636 approved and merged.** Its source, gate, inventory, and lifecycle-fixture repairs received exact-head approval with no actionable P0–P3 finding. The active published-lifetime cut requires a new immutable-head adversarial review after implementation. |
-| Format/static inspection | **PR #636 green.** Its final hosted run included the required static and policy gates. The active cut has not run its gates. |
-| Unit/focused tests | **PR #636 green.** Hosted run `33236731526` passed the normal fast-Rust gate and every required job. The active cut has not run tests. |
-| Full/cluster/hosted gates | **PR #636 green and merged.** Hosted run `33236731526` was fully green before merge `a48884906da351ca0c72dc99c227aa169911d089`. The active cut still requires implementation, exact-head review, one full local unit run after approval, required cluster/static gates, a wholly green hosted run, and merge. |
+| Operational projection | **Implemented through `2f34a8ea`.** Actor-managed transcodes retain one producer deadline after first media, freeze one stable failure proposal/frontier, reap the exact failed attempt with `RetainPublished`, and return typed `producer_ended` beyond that frontier. Copy remains on its compatibility owner. |
+| Adversarial implementation review | **Three formal approvals on exact candidate `f151b978`.** Those reviews found no actionable P0–P3 issue after the retry-successor repairs. Mapping head `2f34a8ea` still needs one immutable final review before PR gates. |
+| Format/static inspection | **Green through `2f34a8ea`.** Formatting, lint, validation lint (23/27/12,843), history (1,118/768/661/80/77), 123 operations contracts, 52 benchmark checks, web policy, and diff inspection pass. |
+| Unit/focused tests | **The one allowed broad local run is consumed.** `plurxd`: 1,243 passed · 55 failed · three ignored. One directly affected product failure is fixed and four exact successor tests pass; 54 `plurxd` failures and the `plurx-core` cluster failures are sandbox bind/mDNS/`ps` environment failures. Do not rerun the broad suite locally. |
+| Full/cluster/hosted gates | **Cluster green.** Unrestricted `make cluster-check` passed vendor recovery, the 67-test replicated Store contract, real membership/failover/topology drills, seven daemon activation tests, and two cluster activity tests. A later accidental duplicate stopped at unrelated macOS platform-certificate keychain loading before the cluster workload. Immutable final branch-tip review and wholly green hosted CI remain. Do not run another local broad unit suite. |
 
 ## Watchdog-removal ledger
 
@@ -316,19 +341,19 @@ The target is not zero timers. The target is no overlapping recovery owners.
 The detailed symbol-by-symbol contract is in the plan's
 [deadline inventory](PLAYBACK-CONTROL-PROTOCOL-PLAN.md#7-deadlines-and-watchdog-inventory).
 
-Merged `main` has actor-owned prepublication transcode recovery, but it has not
-reached the final target. The active branch moves only actor-managed transcode
-published-lifetime failure. Copy recovery remains an explicit later cut and
-must not overlap actor ownership after its cutover.
+Merged `main` has actor-owned prepublication transcode recovery. The active
+branch now also owns actor-managed transcode published-lifetime failure and
+has removed that scope's compatibility progress watcher. Copy recovery remains
+an explicit later cut and must not overlap actor ownership after its cutover.
 
 ### Merged baseline and active-cut watchdog disposition
 
 | Mechanism | Merged baseline and active-cut disposition | Why it remains, if retained |
 |---|---|---|
 | `FIRST_SEGMENT_GRACE` and the detached startup downgrade loop | **Removed from production.** `FIRST_SEGMENT_GRACE` has zero source owners, and `downgrade_one_step` is no longer a production recovery path. | The actor's one exact `ProducerProgressDeadline` and immutable retry decision replace them. |
-| `SOFTWARE_GRACE` | **Retained only for copy startup.** The first-media transfer starts the compatibility lifetime watcher with zero additional startup grace. | Copy startup still uses the value until that bounded cut moves to the actor; published-lifetime compatibility instead retains `PROGRESS_STALL` and `WATCHDOG_POLL`. |
-| `PROGRESS_STALL` | **Merged: retained for published transcodes and copy. Active cut: remove the published-transcode decision owner only.** | A producer cannot self-report a silent wedge. The actor deadline replaces the transcode verdict; copy keeps its threshold until the copy cut. |
-| `WATCHDOG_POLL`, `watch_for_stall*`, and `watchdog_active` | **Merged: retained for published-lifetime and copy compatibility. Active cut: remove only the actor-managed transcode watcher.** | Copy still has no production actor decision executor, so its polling and election path remains until the later copy cut. |
+| `SOFTWARE_GRACE` | **Retained only for copy startup.** Actor-managed published transcodes no longer start the compatibility lifetime watcher. | Copy startup still uses the value until that bounded cut moves to the actor. |
+| `PROGRESS_STALL` | **Removed as an actor-managed published-transcode verdict; retained for copy.** | A producer cannot self-report a silent wedge. The actor deadline now owns the transcode verdict; copy keeps its threshold until the copy cut. |
+| `WATCHDOG_POLL`, `watch_for_stall*`, and `watchdog_active` | **Removed from actor-managed published transcodes; retained for copy compatibility.** | Copy still has no production actor decision executor, so its polling and election path remains until the later copy cut. |
 | `child_transition` and `replacing_child` | **Deliberately retained for copy replacement and exact resource serialization.** | The active cut does not remove copy child ownership. The later copy cut must replace it before these symbols can reach zero production owners. |
 | copy fallback/recovery | **Recovery retained; response authorization actor-fenced in merged #636.** | #636 orders compatibility failure before kill/reap and admits copy/cache responses through the actor, but copy recovery decisions have not moved into it. |
 | `PREPUBLICATION_REAP_RETRY` (5 s) and `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) | **Retained lifecycle cleanup bounds, not playback watchdogs.** | They retry bounded termination until the exact predecessor is confirmed reaped while retaining process admission and scratch; they cannot choose retry, replacement, playback failure, or response publication. |
@@ -350,7 +375,6 @@ must not overlap actor ownership after its cutover.
 
 | Mechanism | What it currently does | Removal owner |
 |---|---|---|
-| published-transcode progress watcher | Polls published actor-managed transcodes and can replace or kill the encoder | The active M4 cut moves the verdict to the retained actor deadline, uses `RetainPublished`, and returns typed `producer_ended` beyond the committed frontier |
 | copy startup/progress watcher and fallback | Polls copy startup and lifetime progress and can replace the copy child | A later copy cut must add production actor decision execution before deleting these owners |
 | `child_transition`, `watchdog_active`, `replacing_child` | Serializes the remaining compatibility replacement paths | Retained for copy in the active cut; delete only after copy action ownership moves to the actor/executor |
 | playlist and live-segment wait budgets | Bound an HTTP request waiting for publication | M3c1 records publication in actor state; later M3 routes waiters through it; bounded HTTP deadlines remain by design |
@@ -395,10 +419,10 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Implement the actor-managed transcode published-lifetime cut, then freeze
-   one immutable head for adversarial review. After approval, run the full
-   local unit suite once, repair only failed/directly affected tests, complete
-   required cluster/static gates, obtain a wholly green hosted run, and merge.
+1. Obtain immutable final branch-tip review, require wholly green hosted CI,
+   and merge the actor-managed published-lifetime cut. The unrestricted
+   cluster gate is green; the one permitted broad local unit run is already
+   consumed and must not be repeated.
 2. Move copy startup/exit/fallback to a production actor executor, then delete
    the retained copy watchdog and in-place replacement owners.
 3. Complete Apple and Android M2 reporters and record timer/alternate-ingress
