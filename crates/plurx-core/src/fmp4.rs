@@ -5163,6 +5163,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn an_oversized_nested_box_is_malformed_before_the_resource_ceiling() {
+        let mut child = Vec::new();
+        child.extend_from_slice(&1u32.to_be_bytes());
+        child.extend_from_slice(b"skip");
+        child.extend_from_slice(&u64::MAX.to_be_bytes());
+        assert!(matches!(
+            peek_box(&child, 0),
+            Err(Fmp4Error::Unsupported(_))
+        ));
+        assert!(matches!(
+            children(&child),
+            Err(Fmp4Error::Malformed(reason)) if reason.contains("runs past its parent")
+        ));
+    }
+
     /// ffmpeg writes a `traf` only for tracks with buffered samples, and stops
     /// waiting for one that has gone `max_interleave_delta` without a packet —
     /// so a late-starting or gapped audio track produces video-only fragments

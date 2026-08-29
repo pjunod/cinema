@@ -468,9 +468,9 @@ pattern = "BindResponsePublicationContract"
 expected_occurrences = 4
 
 [[module_symbols]]
-id = "m4-compatibility-failure-fence"
+id = "m4-session-failure-fence"
 pattern = "failure_fence"
-expected_occurrences = 15
+expected_occurrences = 16
 
 [[module_symbols]]
 id = "m4-immutable-prepublication-process-scope"

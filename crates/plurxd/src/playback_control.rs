@@ -12604,6 +12604,33 @@ mod tests {
             Err(ProducerAttemptRejection::PresentationContractMismatch)
         );
         assert_eq!(mismatch.delivery.producer_attempt, 0);
+
+        let failed = Arc::new(AtomicBool::new(true));
+        let mut failed_before_policy = registered_prepublication_actor(started);
+        assert_eq!(
+            failed_before_policy.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            failed_before_policy.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("copy-contract", "copy-retry"),
+            ),
+            Err(ProducerAttemptRejection::SessionEnded)
+        );
+        assert_eq!(failed_before_policy.delivery.producer_attempt, 0);
+        let control = failed_before_policy
+            .prepublication
+            .as_ref()
+            .expect("prepublication control");
+        assert!(control.initial_policy.is_none());
+        assert!(matches!(
+            &control.retry_state,
+            PrepublicationRetryState::Unavailable
+        ));
     }
 
     #[tokio::test]
