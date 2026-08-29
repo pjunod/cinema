@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["b4c8d11d"]
+reason = "This validation-only commit completes the lifetime regression ledger and changes no runtime behavior."
+ignore = true
