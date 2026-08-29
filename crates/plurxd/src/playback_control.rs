@@ -1504,15 +1504,16 @@ pub(crate) struct RollingLeaseSnapshot {
     /// True only when the playback deadline, rather than an explicit
     /// lifecycle fence, performed the actor's terminal transition.
     pub expiration_claimed: bool,
-    /// Bounded, actor-owned rolling producer truth. This is observation-only
-    /// until the later M4 decision/executor cutover removes the compatibility
-    /// recovery owners.
+    /// Bounded, actor-owned rolling producer truth. Generic copy/cache actors
+    /// remain observation-only; opted-in transcodes expose their exact
+    /// decision, proposal, and completion evidence here.
     pub producer_control: RollingProducerOperationalSnapshot,
 }
 
 /// The only producer-failure reasons that may be retained by the M4 actor.
 /// Legacy rolling sessions remain action-passive; only the explicit
-/// pre-publication transcode constructor permits production decisions.
+/// actor-managed transcode constructor permits production decisions before or
+/// after first-media publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -1646,6 +1647,8 @@ pub(crate) struct InitialProducerPolicy {
     pub progress_budget: Duration,
     pub retry_recipe: Option<ValidatedRetryRecipe>,
     pub presentation_contract_fingerprint: String,
+    expected_remaining_ms: Option<i64>,
+    completion_tolerance_ms: i64,
 }
 
 impl InitialProducerPolicy {
@@ -1659,6 +1662,8 @@ impl InitialProducerPolicy {
             progress_budget,
             retry_recipe: Some(retry_recipe),
             presentation_contract_fingerprint,
+            expected_remaining_ms: None,
+            completion_tolerance_ms: 10_000,
         }
     }
 
@@ -1671,7 +1676,22 @@ impl InitialProducerPolicy {
             progress_budget,
             retry_recipe: None,
             presentation_contract_fingerprint,
+            expected_remaining_ms: None,
+            completion_tolerance_ms: 10_000,
         }
+    }
+
+    /// Freeze the exact natural-exit completion policy beside attempt
+    /// admission. The classifier may report playlist facts, but it cannot
+    /// choose a more permissive expected duration or tolerance after exit.
+    pub(crate) fn with_completion_expectation(
+        mut self,
+        expected_remaining_ms: Option<i64>,
+        completion_tolerance_ms: i64,
+    ) -> Self {
+        self.expected_remaining_ms = expected_remaining_ms;
+        self.completion_tolerance_ms = completion_tolerance_ms;
+        self
     }
 
     fn validate(&self) -> Result<(), ProducerAttemptRejection> {
@@ -1683,6 +1703,10 @@ impl InitialProducerPolicy {
             || self.presentation_contract_fingerprint.len() > MAX_FINGERPRINT_BYTES
             || self.progress_budget.is_zero()
             || self.progress_budget > MAX_PROGRESS_BUDGET
+            || self
+                .expected_remaining_ms
+                .is_some_and(|remaining| !(0..=MAX_MEDIA_MILLIS).contains(&remaining))
+            || !(1..=120_000).contains(&self.completion_tolerance_ms)
             || (self.startup_kind == ProducerStartupKind::Software && self.retry_recipe.is_some())
         {
             return Err(ProducerAttemptRejection::InvalidPolicy);
@@ -1755,14 +1779,60 @@ impl ProducerDecision {
 pub(crate) enum ProducerDecisionPoll {
     Idle,
     Decision(Arc<ProducerDecision>),
+    ClassifyExit(RollingProducerExitProbe),
     Terminal(RollingTerminalCause),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum RollingProducerExecutorPoll {
     Decision(Arc<ProducerDecision>),
+    ClassifyExit(RollingProducerExitProbe),
     Terminal(RollingTerminalCause),
     Unavailable,
+}
+
+/// One immutable, exact-attempt request for the executor's bounded playlist
+/// completion read. The actor's `ClassifyingExit` progress deadline is the
+/// sole verdict clock; the probe does not create a second watchdog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RollingProducerExitProbe {
+    pub probe_sequence: u64,
+    pub producer_attempt: u64,
+    pub deadline: Instant,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RollingProducerCompletionEvidence {
+    pub probe_sequence: u64,
+    pub producer_attempt: u64,
+    pub end_list: bool,
+    pub final_segment: Option<i64>,
+    pub final_end_ms: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RollingProducerCompletionDisposition {
+    CompleteVerifiedDuration,
+    CompleteUnverifiedDuration,
+    FailedPartialSuccess,
+    Stale,
+}
+
+impl RollingProducerCompletionDisposition {
+    fn metric_index(self) -> usize {
+        match self {
+            Self::CompleteVerifiedDuration => 0,
+            Self::CompleteUnverifiedDuration => 1,
+            Self::FailedPartialSuccess => 2,
+            Self::Stale => 3,
+        }
+    }
+
+    fn record(self) -> Self {
+        ROLLING_PRODUCER_EXIT_CLASSIFICATIONS[self.metric_index()]
+            .fetch_add(1, Ordering::Relaxed);
+        self
+    }
 }
 
 enum DecisionTransportPoll {
@@ -1799,7 +1869,7 @@ pub struct RollingProducerOperationalSnapshot {
     pub decision_sequence: Option<u64>,
     pub decision_reason: Option<&'static str>,
     /// Bounded executor/lifecycle state, including exact DecisionApplied
-    /// acknowledgement for the opted-in pre-publication scope.
+    /// acknowledgement for the opted-in producer lifetime.
     pub executor_state: &'static str,
     pub executor_pending_decision_age_ms: Option<i64>,
     pub executor_last_observed_sequence: u64,
@@ -1807,6 +1877,25 @@ pub struct RollingProducerOperationalSnapshot {
     pub executor_registered: bool,
     pub decision_applied_sequence: Option<u64>,
     pub decision_installed_attempt: Option<u64>,
+    pub pending_probe_sequence: Option<u64>,
+    pub pending_probe_attempt: Option<u64>,
+    pub pending_probe_deadline_remaining_ms: Option<i64>,
+    pub last_probe_outcome: &'static str,
+    pub producer_ended_with_proposal: bool,
+    pub proposal: Option<RollingProducerProposalSnapshot>,
+    pub completion: &'static str,
+    pub completion_attempt: Option<u64>,
+    pub completion_final_segment: Option<i64>,
+    pub completion_final_end_ms: Option<i64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct RollingProducerProposalSnapshot {
+    pub proposal_id: String,
+    pub kind: &'static str,
+    pub reason: &'static str,
+    pub source: &'static str,
+    pub severity: &'static str,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1974,9 +2063,9 @@ struct ProducerDeadlineDue {
     deadline: Instant,
 }
 
-/// Immediate typed observation for a non-success producer exit. The later
-/// decision/publication slice turns this into `ProducerDecision::Fail`; this
-/// slice records no action and leaves every compatibility owner untouched.
+/// Immediate typed observation for a non-success producer exit. Actor-managed
+/// transcodes turn it into one immutable decision; compatibility actors retain
+/// the ordered fact without gaining an action owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProducerProcessExitDue {
     producer_attempt: u64,
@@ -2019,6 +2108,7 @@ struct ProducerFlowApplied {
 pub(crate) struct RollingProducerTransitionFence {
     lease_deadline: Instant,
     install_authorization: Option<ProducerInstallCoordinate>,
+    producer_signal_authorized: bool,
 }
 
 impl RollingProducerTransitionFence {
@@ -2026,6 +2116,7 @@ impl RollingProducerTransitionFence {
         Self {
             lease_deadline,
             install_authorization: None,
+            producer_signal_authorized: true,
         }
     }
 }
@@ -2486,7 +2577,7 @@ impl RollingFlowSync {
 /// under the transition plus ingress fence and assigns the next coordinate;
 /// later producer facts therefore cannot leapfrog a queued command. This
 /// shared ordering is action-passive for legacy actors and decision-bearing
-/// only for the explicit prepublication constructor.
+/// only for the explicit actor-managed transcode constructor.
 struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
@@ -3186,6 +3277,11 @@ enum RollingControlCommand {
         installed_attempt: Option<u64>,
         reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
     },
+    ClassifyProducerExit {
+        evidence: RollingProducerCompletionEvidence,
+        deadline: Instant,
+        reply: tokio::sync::oneshot::Sender<RollingProducerCompletionDisposition>,
+    },
     ObservePublication {
         observation: RollingPublicationObservation,
         deadline: Option<Instant>,
@@ -3241,6 +3337,7 @@ impl RollingControlCommand {
             Self::AuthorizeResponsePublication { .. } => Some(11),
             Self::AdmitProducerRetry { .. } => Some(12),
             Self::DecisionApplied { .. } => Some(13),
+            Self::ClassifyProducerExit { .. } => Some(16),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -3526,6 +3623,15 @@ impl RollingDecisionTransport {
                             break;
                         }
                     }
+                    DecisionTransportPoll::Available(ProducerDecisionPoll::ClassifyExit(_)) => {
+                        // Only the explicit executor registration is eligible
+                        // for completion work. Compatibility actors never
+                        // create this value; keep this observer passive if a
+                        // future constructor is miswired.
+                        if !observation.finish_observing() {
+                            break;
+                        }
+                    }
                     DecisionTransportPoll::Available(ProducerDecisionPoll::Terminal(_)) => {
                         observation.settle_terminal();
                         break;
@@ -3592,6 +3698,9 @@ impl RollingProducerExecutorRegistration {
                         .last_observed_sequence
                         .store(decision.decision_sequence(), Ordering::Release);
                     return RollingProducerExecutorPoll::Decision(decision);
+                }
+                DecisionTransportPoll::Available(ProducerDecisionPoll::ClassifyExit(probe)) => {
+                    return RollingProducerExecutorPoll::ClassifyExit(probe);
                 }
                 DecisionTransportPoll::Available(ProducerDecisionPoll::Terminal(cause)) => {
                     transport.executor_observation.settle_terminal();
@@ -3711,6 +3820,70 @@ struct ProducerDecisionApplied {
     installed_attempt: Option<u64>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerCompletionState {
+    Incomplete,
+    CompleteVerifiedDuration {
+        producer_attempt: u64,
+        final_segment: i64,
+        final_end_ms: i64,
+    },
+    CompleteUnverifiedDuration {
+        producer_attempt: u64,
+        final_segment: i64,
+        final_end_ms: i64,
+    },
+}
+
+impl ProducerCompletionState {
+    fn status(self) -> &'static str {
+        match self {
+            Self::Incomplete => "incomplete",
+            Self::CompleteVerifiedDuration { .. } => "complete_verified_duration",
+            Self::CompleteUnverifiedDuration { .. } => "complete_unverified_duration",
+        }
+    }
+
+    fn evidence(self) -> (Option<u64>, Option<i64>, Option<i64>) {
+        match self {
+            Self::Incomplete => (None, None, None),
+            Self::CompleteVerifiedDuration {
+                producer_attempt,
+                final_segment,
+                final_end_ms,
+            }
+            | Self::CompleteUnverifiedDuration {
+                producer_attempt,
+                final_segment,
+                final_end_ms,
+            } => (
+                Some(producer_attempt),
+                Some(final_segment),
+                Some(final_end_ms),
+            ),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerProbeOutcome {
+    None,
+    Published,
+    Cancelled,
+    Stale,
+}
+
+impl ProducerProbeOutcome {
+    fn status(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Published => "published",
+            Self::Cancelled => "cancelled",
+            Self::Stale => "stale",
+        }
+    }
+}
+
 struct PrepublicationProducerControl {
     executor_registered: bool,
     initial_policy: Option<InitialProducerPolicy>,
@@ -3722,6 +3895,10 @@ struct PrepublicationProducerControl {
     decision_applied: Option<ProducerDecisionApplied>,
     failure_applied: bool,
     last_action_failure: Option<&'static str>,
+    next_probe_sequence: u64,
+    pending_probe: Option<RollingProducerExitProbe>,
+    last_probe_outcome: ProducerProbeOutcome,
+    completion: ProducerCompletionState,
 }
 
 /// Immutable response-admission contract for rolling generations whose
@@ -3752,6 +3929,10 @@ impl PrepublicationProducerControl {
             decision_applied: None,
             failure_applied: false,
             last_action_failure: None,
+            next_probe_sequence: 1,
+            pending_probe: None,
+            last_probe_outcome: ProducerProbeOutcome::None,
+            completion: ProducerCompletionState::Incomplete,
         }
     }
 }
@@ -3788,6 +3969,7 @@ struct RollingControlActor {
     response_publication_contract: Option<RollingResponsePublicationContract>,
     next_install_revision: u64,
     authorized_install: Option<ProducerInstallCoordinate>,
+    producer_signal_authorized: bool,
     executor_loss_cutoff_pending: bool,
     last_flow_ticket: u64,
     #[cfg(test)]
@@ -3881,6 +4063,7 @@ impl RollingControlActor {
             response_publication_contract: None,
             next_install_revision: 1,
             authorized_install: None,
+            producer_signal_authorized: !prepublication_transcode,
             executor_loss_cutoff_pending: false,
             last_flow_ticket: 0,
             #[cfg(test)]
@@ -3934,12 +4117,39 @@ impl RollingControlActor {
         })
     }
 
+    fn has_published_producer_failure_proposal(&self) -> bool {
+        self.prepublication
+            .as_ref()
+            .is_some_and(|control| control.producer_media_published)
+            && self
+                .pending_decision
+                .as_ref()
+                .or(self.last_decision.as_ref())
+                .is_some_and(|decision| {
+                    matches!(decision.as_ref(), ProducerDecision::Fail { proposal: Some(_), .. })
+                })
+    }
+
     fn producer_operational_snapshot_at(&self, now: Instant) -> RollingProducerOperationalSnapshot {
         let prepublication = self.prepublication.as_ref();
         let decision_evidence = self
             .pending_decision
             .as_ref()
             .or(self.last_decision.as_ref());
+        let retained_proposal = decision_evidence.and_then(|decision| match decision.as_ref() {
+            ProducerDecision::Fail {
+                proposal: Some(proposal),
+                ..
+            } => Some(proposal),
+            _ => None,
+        });
+        let producer_ended_with_proposal = prepublication
+            .is_some_and(|control| control.producer_media_published)
+            && retained_proposal.is_some();
+        let completion = prepublication
+            .map_or(ProducerCompletionState::Incomplete, |control| control.completion);
+        let (completion_attempt, completion_final_segment, completion_final_end_ms) =
+            completion.evidence();
         let deadline_mode = self
             .producer_progress_deadline
             .map(|deadline| match deadline.mode {
@@ -3962,8 +4172,10 @@ impl RollingControlActor {
         });
         let phase = if self.retired {
             "terminal"
-        } else if prepublication.is_some_and(|control| control.producer_media_published) {
-            "published_compatibility"
+        } else if !matches!(completion, ProducerCompletionState::Incomplete) {
+            "complete"
+        } else if producer_ended_with_proposal {
+            "producer_ended_with_proposal"
         } else if self.has_terminal_prepublication_failure() {
             "failed"
         } else if self.pending_decision.is_some() {
@@ -3980,6 +4192,9 @@ impl RollingControlActor {
                 Some(ProducerProgressDeadlineMode::Starting) => "starting",
                 Some(ProducerProgressDeadlineMode::Advancing) => "running",
                 Some(ProducerProgressDeadlineMode::ClassifyingExit) => "classifying_exit",
+                None if prepublication.is_some_and(|control| control.producer_media_published) => {
+                    "published"
+                }
                 None => "unarmed",
             }
         };
@@ -4003,12 +4218,16 @@ impl RollingControlActor {
             },
             last_flow_applied_sequence: self.producer_flow_revision,
             last_applied_sequence: self.last_applied_ingress_sequence,
-            observation_only: prepublication.is_none_or(|control| {
-                control.producer_media_published || self.has_terminal_prepublication_failure()
-            }),
+            observation_only: prepublication.is_none()
+                || self.has_terminal_prepublication_failure()
+                || producer_ended_with_proposal
+                || !matches!(completion, ProducerCompletionState::Incomplete),
             action_owner: match prepublication {
-                Some(control) if control.producer_media_published => {
-                    "legacy_published_compatibility"
+                Some(_) if producer_ended_with_proposal => "producer_ended_with_proposal",
+                Some(control)
+                    if !matches!(control.completion, ProducerCompletionState::Incomplete) =>
+                {
+                    "complete"
                 }
                 Some(_) if self.has_terminal_prepublication_failure() => "terminal_failure",
                 Some(_) => "playback_control_actor",
@@ -4057,6 +4276,33 @@ impl RollingControlActor {
             decision_installed_attempt: prepublication
                 .and_then(|control| control.decision_applied)
                 .and_then(|applied| applied.installed_attempt),
+            pending_probe_sequence: prepublication
+                .and_then(|control| control.pending_probe)
+                .map(|probe| probe.probe_sequence),
+            pending_probe_attempt: prepublication
+                .and_then(|control| control.pending_probe)
+                .map(|probe| probe.producer_attempt),
+            pending_probe_deadline_remaining_ms: prepublication
+                .and_then(|control| control.pending_probe)
+                .map(|probe| {
+                    i64::try_from(probe.deadline.saturating_duration_since(now).as_millis())
+                        .unwrap_or(i64::MAX)
+                }),
+            last_probe_outcome: prepublication
+                .map_or(ProducerProbeOutcome::None, |control| control.last_probe_outcome)
+                .status(),
+            producer_ended_with_proposal,
+            proposal: retained_proposal.map(|proposal| RollingProducerProposalSnapshot {
+                proposal_id: proposal.proposal_id.clone(),
+                kind: proposal.kind,
+                reason: proposal.reason.status(),
+                source: proposal.source,
+                severity: proposal.severity,
+            }),
+            completion: completion.status(),
+            completion_attempt,
+            completion_final_segment,
+            completion_final_end_ms,
         }
     }
 
@@ -4070,6 +4316,7 @@ impl RollingControlActor {
         transition.install_authorization = (!self.executor_loss_cutoff_pending)
             .then_some(self.authorized_install)
             .flatten();
+        transition.producer_signal_authorized = self.producer_signal_authorized;
     }
 
     fn producer_progress_budget(&self) -> Duration {
@@ -4094,10 +4341,10 @@ impl RollingControlActor {
     ) {
         if self.retired
             || self.has_terminal_prepublication_failure()
-            || self
-                .prepublication
-                .as_ref()
-                .is_some_and(|control| control.producer_media_published)
+            || self.pending_decision.is_some()
+            || self.prepublication.as_ref().is_some_and(|control| {
+                !matches!(control.completion, ProducerCompletionState::Incomplete)
+            })
             || producer_attempt != self.delivery.producer_attempt
             || (self.producer_physical_flow == ProducerPhysicalFlowState::Held
                 && !matches!(mode, ProducerProgressDeadlineMode::ClassifyingExit))
@@ -4147,14 +4394,14 @@ impl RollingControlActor {
 
     /// Session lifecycle is always the higher-priority clock. Only a live
     /// session may record a producer deadline; legacy actors retain it
-    /// passively while opted-in prepublication actors may settle a decision.
+    /// passively while opted-in actor-managed transcodes may settle a decision.
     #[cfg(test)]
     fn settle_due_deadlines_at(&mut self, now: Instant) -> Option<ProducerDeadlineDue> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return None;
         }
         let due = self.settle_producer_deadline_at(now);
-        let _ = self.maybe_commit_prepublication_decision_at(now);
+        let _ = self.maybe_commit_producer_decision_at(now);
         due
     }
 
@@ -4336,6 +4583,7 @@ impl RollingControlActor {
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
         self.producer_physical_flow = ProducerPhysicalFlowState::Running;
+        self.producer_signal_authorized = true;
         self.arm_producer_deadline(
             attempt,
             ProducerProgressDeadlineMode::Starting,
@@ -4418,11 +4666,18 @@ impl RollingControlActor {
         if let Some(cause) = self.terminal {
             return ProducerDecisionPoll::Terminal(cause);
         }
-        self.pending_decision
+        if let Some(decision) = self
+            .pending_decision
             .as_ref()
             .filter(|decision| decision.decision_sequence() > after_sequence)
             .cloned()
-            .map_or(ProducerDecisionPoll::Idle, ProducerDecisionPoll::Decision)
+        {
+            return ProducerDecisionPoll::Decision(decision);
+        }
+        self.prepublication
+            .as_ref()
+            .and_then(|control| control.pending_probe)
+            .map_or(ProducerDecisionPoll::Idle, ProducerDecisionPoll::ClassifyExit)
     }
 
     fn producer_failure_reason(&self) -> Option<(u64, ProducerDecisionReason)> {
@@ -4441,7 +4696,7 @@ impl RollingControlActor {
         })
     }
 
-    fn commit_prepublication_decision_at(
+    fn commit_producer_decision_at(
         &mut self,
         committed_at: Instant,
         failed_attempt: u64,
@@ -4457,7 +4712,9 @@ impl RollingControlActor {
         let Some(control) = self.prepublication.as_mut() else {
             return false;
         };
-        if control.producer_media_published || control.failure_applied {
+        if control.failure_applied
+            || !matches!(control.completion, ProducerCompletionState::Incomplete)
+        {
             return false;
         }
         let Some(policy) = control.initial_policy.as_ref() else {
@@ -4466,9 +4723,10 @@ impl RollingControlActor {
         let decision_sequence = control.next_decision_sequence;
         control.next_decision_sequence = control.next_decision_sequence.saturating_add(1);
 
+        let producer_media_published = control.producer_media_published;
         let retry_recipe = match &control.retry_state {
             PrepublicationRetryState::Available(recipe)
-                if !control.producer_media_published
+                if !producer_media_published
                     && !self.executor_lost
                     && recipe.presentation_contract_fingerprint
                         == policy.presentation_contract_fingerprint =>
@@ -4503,10 +4761,16 @@ impl RollingControlActor {
                 decision_sequence,
                 failed_attempt,
                 reason,
-                proposal: None,
+                proposal: producer_media_published.then(|| ActionProposal {
+                    proposal_id: uuid::Uuid::new_v4().to_string(),
+                    kind: "replace_failed_producer",
+                    reason,
+                    source: "server",
+                    severity: "required",
+                }),
                 cleanup: ProducerFailureCleanup {
                     kind: ProducerFailureCleanupKind::ProducerFailureCleanup,
-                    cleanup_policy: if control.producer_media_published {
+                    cleanup_policy: if producer_media_published {
                         CleanupPolicy::RetainPublished
                     } else {
                         CleanupPolicy::DiscardPrepublication
@@ -4518,6 +4782,10 @@ impl RollingControlActor {
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
         self.authorized_install = None;
+        self.producer_signal_authorized = false;
+        if control.pending_probe.take().is_some() {
+            control.last_probe_outcome = ProducerProbeOutcome::Cancelled;
+        }
         let decision = Arc::new(decision);
         self.last_decision = Some(Arc::clone(&decision));
         self.pending_decision = Some(decision);
@@ -4526,11 +4794,11 @@ impl RollingControlActor {
         true
     }
 
-    fn maybe_commit_prepublication_decision_at(&mut self, committed_at: Instant) -> bool {
+    fn maybe_commit_producer_decision_at(&mut self, committed_at: Instant) -> bool {
         let Some((failed_attempt, reason)) = self.producer_failure_reason() else {
             return false;
         };
-        self.commit_prepublication_decision_at(committed_at, failed_attempt, reason)
+        self.commit_producer_decision_at(committed_at, failed_attempt, reason)
     }
 
     fn mark_executor_lost(&mut self, now: Instant) {
@@ -4539,18 +4807,15 @@ impl RollingControlActor {
         }
         self.executor_lost = true;
         self.decision_wake.executor_observation.settle_lost();
-        let failed_prepublication = self.prepublication.as_ref().is_some_and(|control| {
-            control.initial_policy.is_some() && !control.producer_media_published
+        let failed_managed_producer = self.prepublication.as_ref().is_some_and(|control| {
+            control.initial_policy.is_some()
+                && matches!(control.completion, ProducerCompletionState::Incomplete)
         });
-        if failed_prepublication && self.pending_decision.is_none() {
+        if failed_managed_producer && self.pending_decision.is_none() {
             let attempt = self.delivery.producer_attempt;
-            let _ = self.commit_prepublication_decision_at(
-                now,
-                attempt,
-                ProducerDecisionReason::ExecutorLost,
-            );
+            let _ = self.commit_producer_decision_at(now, attempt, ProducerDecisionReason::ExecutorLost);
         }
-        if failed_prepublication {
+        if failed_managed_producer {
             if let Some(control) = self.prepublication.as_mut() {
                 if matches!(
                     &control.retry_state,
@@ -4563,6 +4828,7 @@ impl RollingControlActor {
                 control.last_action_failure = Some("executor_lost");
             }
             self.authorized_install = None;
+            self.producer_signal_authorized = false;
             self.producer_progress_deadline = None;
             self.producer_deadline_due = None;
             self.producer_process_exit_due = None;
@@ -4572,6 +4838,7 @@ impl RollingControlActor {
     fn wake_executor_after_transition(
         &self,
         previous_decision_sequence: Option<u64>,
+        previous_probe_sequence: Option<u64>,
         was_retired: bool,
     ) {
         let became_terminal = !was_retired && self.retired;
@@ -4585,8 +4852,15 @@ impl RollingControlActor {
             .pending_decision
             .as_ref()
             .map(|decision| decision.decision_sequence());
+        let current_probe_sequence = self
+            .prepublication
+            .as_ref()
+            .and_then(|control| control.pending_probe)
+            .map(|probe| probe.probe_sequence);
         if (current_decision_sequence.is_some()
             && current_decision_sequence != previous_decision_sequence)
+            || (current_probe_sequence.is_some()
+                && current_probe_sequence != previous_probe_sequence)
             || became_terminal
         {
             self.decision_wake.wake();
@@ -4703,11 +4977,12 @@ impl RollingControlActor {
         });
         self.producer_exit_at = Some(observation.observed_at.min(published_at));
         self.producer_progress_deadline = None;
+        self.producer_signal_authorized = false;
         if self.has_terminal_prepublication_failure()
-            || self
-                .prepublication
-                .as_ref()
-                .is_some_and(|control| control.producer_media_published)
+            || self.pending_decision.is_some()
+            || self.prepublication.as_ref().is_some_and(|control| {
+                !matches!(control.completion, ProducerCompletionState::Incomplete)
+            })
         {
             self.producer_deadline_due = None;
             self.producer_process_exit_due = None;
@@ -4729,15 +5004,154 @@ impl RollingControlActor {
                 .producer_deadline_due
                 .is_none_or(|due| due.producer_attempt != observation.producer_attempt)
         {
+            let deadline = published_at
+                .checked_add(PRODUCER_EXIT_CLASSIFICATION_BUDGET)
+                .unwrap_or(published_at);
             self.arm_producer_deadline(
                 observation.producer_attempt,
                 ProducerProgressDeadlineMode::ClassifyingExit,
-                published_at
-                    .checked_add(PRODUCER_EXIT_CLASSIFICATION_BUDGET)
-                    .unwrap_or(published_at),
+                deadline,
             );
+            if self.producer_progress_deadline.is_some_and(|armed| {
+                armed.producer_attempt == observation.producer_attempt
+                    && armed.mode == ProducerProgressDeadlineMode::ClassifyingExit
+                    && armed.instant == deadline
+            }) {
+                if let Some(control) = self.prepublication.as_mut() {
+                    let probe_sequence = control.next_probe_sequence;
+                    control.next_probe_sequence = control.next_probe_sequence.saturating_add(1);
+                    control.pending_probe = Some(RollingProducerExitProbe {
+                        probe_sequence,
+                        producer_attempt: observation.producer_attempt,
+                        deadline,
+                    });
+                }
+            }
         }
         ProducerExitAcceptance::Accepted
+    }
+
+    fn classify_producer_exit_at(
+        &mut self,
+        published_at: Instant,
+        evidence: RollingProducerCompletionEvidence,
+    ) -> RollingProducerCompletionDisposition {
+        let matching_probe = self.prepublication.as_ref().and_then(|control| {
+            control.pending_probe.filter(|probe| {
+                probe.probe_sequence == evidence.probe_sequence
+                    && probe.producer_attempt == evidence.producer_attempt
+            })
+        });
+        let exact_success_exit = self.delivery.producer_attempt == evidence.producer_attempt
+            && self
+                .delivery
+                .producer_exit
+                .as_ref()
+                .is_some_and(|exit| exit.success)
+            && self.producer_progress_deadline.is_some_and(|deadline| {
+                deadline.producer_attempt == evidence.producer_attempt
+                    && deadline.mode == ProducerProgressDeadlineMode::ClassifyingExit
+                    && published_at <= deadline.instant
+            });
+        let Some(probe) = matching_probe.filter(|probe| {
+            exact_success_exit && published_at <= probe.deadline && !self.retired
+        }) else {
+            if let Some(control) = self.prepublication.as_mut() {
+                if control.pending_probe.is_some()
+                    && matches!(control.completion, ProducerCompletionState::Incomplete)
+                    && !control.failure_applied
+                {
+                    control.last_probe_outcome = ProducerProbeOutcome::Stale;
+                }
+            }
+            return RollingProducerCompletionDisposition::Stale.record();
+        };
+
+        let (expected_remaining_ms, completion_tolerance_ms) = self
+            .prepublication
+            .as_ref()
+            .and_then(|control| control.initial_policy.as_ref())
+            .map(|policy| {
+                (
+                    policy.expected_remaining_ms,
+                    policy.completion_tolerance_ms,
+                )
+            })
+            .expect("a pending completion probe requires an admitted producer policy");
+        let frontier = evidence.final_segment.zip(evidence.final_end_ms).filter(
+            |(final_segment, final_end_ms)| {
+                *final_segment >= 0
+                    && *final_end_ms > 0
+                    && self
+                        .delivery
+                        .published_segment
+                        .is_none_or(|published| *final_segment >= published)
+                    && self
+                        .delivery
+                        .published_end_ms
+                        .is_none_or(|published| *final_end_ms >= published)
+            },
+        );
+        if let Some((final_segment, final_end_ms)) = frontier {
+            self.delivery.playlist_ready |= evidence.end_list;
+            self.delivery.published_segment = Some(
+                self.delivery
+                    .published_segment
+                    .map_or(final_segment, |current| current.max(final_segment)),
+            );
+            self.delivery.published_end_ms = Some(
+                self.delivery
+                    .published_end_ms
+                    .map_or(final_end_ms, |current| current.max(final_end_ms)),
+            );
+        }
+        let completion = frontier.filter(|_| evidence.end_list).and_then(
+            |(final_segment, final_end_ms)| match expected_remaining_ms {
+                Some(expected) => (final_end_ms.abs_diff(expected)
+                    <= u64::try_from(completion_tolerance_ms).unwrap_or(u64::MAX))
+                .then_some((
+                    RollingProducerCompletionDisposition::CompleteVerifiedDuration,
+                    ProducerCompletionState::CompleteVerifiedDuration {
+                        producer_attempt: evidence.producer_attempt,
+                        final_segment,
+                        final_end_ms,
+                    },
+                )),
+                None => Some((
+                    RollingProducerCompletionDisposition::CompleteUnverifiedDuration,
+                    ProducerCompletionState::CompleteUnverifiedDuration {
+                        producer_attempt: evidence.producer_attempt,
+                        final_segment,
+                        final_end_ms,
+                    },
+                )),
+            },
+        );
+
+        let control = self
+            .prepublication
+            .as_mut()
+            .expect("matching completion probe requires producer control");
+        debug_assert_eq!(control.pending_probe, Some(probe));
+        control.pending_probe = None;
+        control.last_probe_outcome = ProducerProbeOutcome::Published;
+        self.producer_progress_deadline = None;
+        self.producer_deadline_due = None;
+        self.producer_process_exit_due = None;
+        self.producer_signal_authorized = false;
+        self.authorized_install = None;
+        self.decision_wake.executor_observation.acknowledge();
+
+        if let Some((disposition, completion)) = completion {
+            control.completion = completion;
+            return disposition.record();
+        }
+        let _ = self.commit_producer_decision_at(
+            published_at,
+            evidence.producer_attempt,
+            ProducerDecisionReason::PartialSuccessExit,
+        );
+        RollingProducerCompletionDisposition::FailedPartialSuccess.record()
     }
 
     /// Apply one constant-space ingress proof against the deadline armed
@@ -4884,7 +5298,7 @@ impl RollingControlActor {
     ) {
         self.fold_producer_blocks_at(now, blocks);
         let _ = self.settle_producer_deadline_at(now);
-        let _ = self.maybe_commit_prepublication_decision_at(now);
+        let _ = self.maybe_commit_producer_decision_at(now);
     }
 
     #[cfg(test)]
@@ -5146,14 +5560,29 @@ impl RollingControlActor {
                         first_producer_media_publication: false,
                     });
                 }
-                if self.pending_decision.is_some() {
+                if self.pending_decision.is_some()
+                    && self
+                        .prepublication
+                        .as_ref()
+                        .is_none_or(|control| !control.producer_media_published)
+                {
+                    return Err(ResponsePublicationRejection::DecisionCommitted);
+                }
+                // RetainPublished keeps exact bytes at or behind the frozen
+                // frontier readable, but a playlist reload is fresh demand for
+                // a mutable manifest. If the failure verdict wins this actor
+                // transaction, the caller must publish the typed ProducerEnded
+                // status instead of replaying a partial EVENT playlist.
+                if publication.object == RollingResponseObject::VideoMediaPlaylist
+                    && self.has_published_producer_failure_proposal()
+                {
                     return Err(ResponsePublicationRejection::DecisionCommitted);
                 }
                 if self
                     .producer_process_exit_due
                     .is_some_and(|due| due.producer_attempt == producer_attempt)
                 {
-                    let _ = self.maybe_commit_prepublication_decision_at(now);
+                    let _ = self.maybe_commit_producer_decision_at(now);
                     return Err(ResponsePublicationRejection::DecisionCommitted);
                 }
                 if self.producer_progress_deadline.is_some_and(|deadline| {
@@ -5164,7 +5593,7 @@ impl RollingControlActor {
                 if self.producer_deadline_due.is_some_and(|due| {
                     due.producer_attempt == producer_attempt && now > due.deadline
                 }) {
-                    let _ = self.maybe_commit_prepublication_decision_at(now);
+                    let _ = self.maybe_commit_producer_decision_at(now);
                     return Err(ResponsePublicationRejection::DecisionCommitted);
                 }
                 let control = self
@@ -5178,9 +5607,6 @@ impl RollingControlActor {
                 }
                 if first_producer_media_publication {
                     self.authorized_install = None;
-                    self.producer_progress_deadline = None;
-                    self.producer_deadline_due = None;
-                    self.producer_process_exit_due = None;
                 }
                 Ok(RollingResponseAuthorization {
                     first_producer_media_publication,
@@ -5366,6 +5792,40 @@ impl RollingControlActor {
         {
             return false;
         }
+        if let Some((final_segment, final_end_ms)) = self
+            .prepublication
+            .as_ref()
+            .and_then(|control| match control.completion {
+                ProducerCompletionState::Incomplete => None,
+                ProducerCompletionState::CompleteVerifiedDuration {
+                    final_segment,
+                    final_end_ms,
+                    ..
+                }
+                | ProducerCompletionState::CompleteUnverifiedDuration {
+                    final_segment,
+                    final_end_ms,
+                    ..
+                } => Some((final_segment, final_end_ms)),
+            })
+        {
+            if observation
+                .published_segment
+                .is_some_and(|segment| segment > final_segment)
+                || observation
+                    .published_end_ms
+                    .is_some_and(|end_ms| end_ms > final_end_ms)
+                || observation.next_media_sequence > final_segment.saturating_add(1)
+                || observation
+                    .resolved_fetched_segment
+                    .is_some_and(|segment| segment > final_segment)
+                || observation
+                    .resolved_fetched_end_ms
+                    .is_some_and(|end_ms| end_ms > final_end_ms)
+            {
+                return false;
+            }
+        }
         self.delivery.playlist_ready |= observation.playlist_ready;
         if observation.published_segment >= self.delivery.published_segment {
             self.delivery.published_segment = observation.published_segment;
@@ -5475,6 +5935,12 @@ impl RollingControlActor {
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
         self.authorized_install = None;
+        self.producer_signal_authorized = false;
+        if let Some(control) = self.prepublication.as_mut() {
+            if control.pending_probe.take().is_some() {
+                control.last_probe_outcome = ProducerProbeOutcome::Cancelled;
+            }
+        }
         self.pending_decision = None;
         self.decision_committed_at = None;
         self.retired_fence.store(true, Ordering::Release);
@@ -5531,6 +5997,11 @@ impl RollingControlActor {
                 .pending_decision
                 .as_ref()
                 .map(|decision| decision.decision_sequence());
+            let previous_probe_sequence = self
+                .prepublication
+                .as_ref()
+                .and_then(|control| control.pending_probe)
+                .map(|probe| probe.probe_sequence);
             let was_retired = self.retired;
             // Some synchronous fail-closed paths (notably a detached
             // first-media settlement that reaches its absolute deadline)
@@ -5556,10 +6027,18 @@ impl RollingControlActor {
                     ..
                 } if handoff.is_pending() && !reply.is_closed() && rolling_now() < *deadline
             );
+            let classification_may_win_exact_deadline = matches!(
+                &command,
+                RollingControlCommand::ClassifyProducerExit {
+                    deadline,
+                    reply,
+                    ..
+                } if !reply.is_closed() && published_at <= *deadline && rolling_now() < *deadline
+            );
             self.fold_producer_blocks_at(published_at, preceding_producer);
-            if !publication_may_win_exact_deadline {
+            if !publication_may_win_exact_deadline && !classification_may_win_exact_deadline {
                 let _ = self.settle_producer_deadline_at(published_at);
-                let _ = self.maybe_commit_prepublication_decision_at(published_at);
+                let _ = self.maybe_commit_producer_decision_at(published_at);
             }
             self.last_applied_ingress_sequence = self.last_applied_ingress_sequence.max(sequence);
             if let Some(metric_index) = command.metric_index() {
@@ -5738,6 +6217,18 @@ impl RollingControlActor {
                     let _ =
                         reply.send(self.decision_applied_at(decision_sequence, installed_attempt));
                 }
+                RollingControlCommand::ClassifyProducerExit {
+                    evidence,
+                    deadline,
+                    reply,
+                } => {
+                    let disposition = if reply.is_closed() || rolling_now() >= deadline {
+                        RollingProducerCompletionDisposition::Stale
+                    } else {
+                        self.classify_producer_exit_at(published_at, evidence)
+                    };
+                    let _ = reply.send(disposition);
+                }
                 RollingControlCommand::ObservePublication {
                     observation,
                     deadline,
@@ -5837,7 +6328,7 @@ impl RollingControlActor {
                 }
             }
             let _ = self.settle_producer_deadline_at(published_at);
-            let _ = self.maybe_commit_prepublication_decision_at(published_at);
+            let _ = self.maybe_commit_producer_decision_at(published_at);
             self.sync_install_authorization(&mut transition);
             drop(transition);
             self.producer_events
@@ -5846,15 +6337,30 @@ impl RollingControlActor {
             let deferred_result = deferred_begin_reply;
             #[cfg(not(test))]
             let deferred_result = std::marker::PhantomData::<()>;
-            (deferred_result, previous_decision_sequence, was_retired)
+            (
+                deferred_result,
+                previous_decision_sequence,
+                previous_probe_sequence,
+                was_retired,
+            )
         };
         #[cfg(test)]
-        let (deferred_begin_reply, previous_decision_sequence, was_retired) = _deferred_begin_reply;
+        let (
+            deferred_begin_reply,
+            previous_decision_sequence,
+            previous_probe_sequence,
+            was_retired,
+        ) = _deferred_begin_reply;
         #[cfg(not(test))]
-        let (_, previous_decision_sequence, was_retired) = _deferred_begin_reply;
+        let (_, previous_decision_sequence, previous_probe_sequence, was_retired) =
+            _deferred_begin_reply;
         // The actor state is committed and all actor/ingress locks are
         // released before settling/notifying the passive executor.
-        self.wake_executor_after_transition(previous_decision_sequence, was_retired);
+        self.wake_executor_after_transition(
+            previous_decision_sequence,
+            previous_probe_sequence,
+            was_retired,
+        );
         #[cfg(test)]
         if let Some(DeferredProducerAttemptReply {
             reply,
@@ -5902,6 +6408,11 @@ impl RollingControlActor {
             .pending_decision
             .as_ref()
             .map(|decision| decision.decision_sequence());
+        let previous_probe_sequence = self
+            .prepublication
+            .as_ref()
+            .and_then(|control| control.pending_probe)
+            .map(|probe| probe.probe_sequence);
         let was_retired = self.retired;
         let mut ingress = producer_events
             .state
@@ -5917,7 +6428,11 @@ impl RollingControlActor {
         if freed_flow_capacity {
             producer_events.flow_capacity_available.notify_waiters();
         }
-        self.wake_executor_after_transition(previous_decision_sequence, was_retired);
+        self.wake_executor_after_transition(
+            previous_decision_sequence,
+            previous_probe_sequence,
+            was_retired,
+        );
         None
     }
 
@@ -6464,6 +6979,32 @@ impl RollingControlHandle {
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
+    /// Publish the executor's one bounded, exact-attempt natural-exit proof.
+    /// Command sealing orders the proof after its exit barrier; the actor's
+    /// existing `ClassifyingExit` deadline remains the only verdict clock.
+    pub(crate) async fn classify_producer_exit_before(
+        &self,
+        evidence: RollingProducerCompletionEvidence,
+        deadline: Instant,
+    ) -> Result<RollingProducerCompletionDisposition, ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_command_before(
+            RollingControlCommand::ClassifyProducerExit {
+                evidence,
+                deadline,
+                reply,
+            },
+            deadline,
+        )
+        .await
+        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(ProducerAttemptRejection::ControlUnavailable)
+    }
+
     /// Poll the immutable actor decision after an executor-owned sequence.
     /// Polling is a read and never clears or acknowledges the one-slot value.
     #[cfg(test)]
@@ -6915,12 +7456,13 @@ impl RollingControlHandle {
     /// state change whose acknowledgement the actor could not retain.
     pub(crate) fn reserve_producer_flow_applied(
         &self,
-        _guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
+        guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
         producer_attempt: u64,
     ) -> bool {
         if self.is_retired()
             || self.sender.is_closed()
             || self.current_producer_attempt() != producer_attempt
+            || !guard.producer_signal_authorized
         {
             return false;
         }
@@ -6970,7 +7512,10 @@ impl RollingControlHandle {
         guard: &std::sync::MutexGuard<'_, RollingProducerTransitionFence>,
         now: Instant,
     ) -> bool {
-        !self.is_retired() && !self.sender.is_closed() && now < guard.lease_deadline
+        !self.is_retired()
+            && !self.sender.is_closed()
+            && guard.producer_signal_authorized
+            && now < guard.lease_deadline
     }
 
     /// A closed mailbox cannot accept another renewal. The repair loop uses
@@ -7101,7 +7646,9 @@ static ROLLING_PRODUCER_EVENT_COALESCED: [AtomicU64; 2] = [const { AtomicU64::ne
 static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
+static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] =
+    [const { AtomicU64::new(0) }; 4];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -7354,6 +7901,19 @@ pub(crate) fn prometheus() -> String {
         ));
     }
     output.push_str(
+        "# HELP plurx_playback_rolling_producer_exit_classifications_total Bounded exact-attempt natural-exit classification outcomes.\n\
+         # TYPE plurx_playback_rolling_producer_exit_classifications_total counter\n",
+    );
+    for (index, outcome) in ["verified", "unverified", "partial_success", "stale"]
+        .iter()
+        .enumerate()
+    {
+        output.push_str(&format!(
+            "plurx_playback_rolling_producer_exit_classifications_total{{outcome=\"{outcome}\"}} {}\n",
+            ROLLING_PRODUCER_EXIT_CLASSIFICATIONS[index].load(Ordering::Relaxed),
+        ));
+    }
+    output.push_str(
         "# HELP plurx_playback_rolling_control_commands_total Sequenced rolling actor commands dequeued by bounded kind.\n\
          # TYPE plurx_playback_rolling_control_commands_total counter\n",
     );
@@ -7374,6 +7934,7 @@ pub(crate) fn prometheus() -> String {
         "decision_applied",
         "commit_generation_metadata",
         "bind_response_publication_contract",
+        "classify_producer_exit",
     ]
     .iter()
     .enumerate()
@@ -10902,9 +11463,15 @@ mod tests {
         assert!(metrics.contains(
             "plurx_playback_rolling_producer_deadline_observations_total{mode=\"advancing\"}"
         ));
+        assert!(metrics.contains(
+            "plurx_playback_rolling_producer_exit_classifications_total{outcome=\"partial_success\"}"
+        ));
         assert!(
             metrics.contains("plurx_playback_rolling_control_commands_total{kind=\"snapshot\"}")
         );
+        assert!(metrics.contains(
+            "plurx_playback_rolling_control_commands_total{kind=\"classify_producer_exit\"}"
+        ));
     }
 
     async fn activate_route(
@@ -11332,7 +11899,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn exact_deadline_attempt_media_wins_and_ends_actor_recovery_ownership() {
+    async fn exact_deadline_attempt_media_wins_then_retains_one_published_failure() {
         let started = rolling_now();
         let mut actor = registered_prepublication_actor(started);
         assert_eq!(
@@ -11370,7 +11937,22 @@ mod tests {
             })
         );
         assert!(handoff_result.is_accepted());
-        assert!(actor.pending_decision.is_none());
+        let retained = actor
+            .pending_decision
+            .clone()
+            .expect("exact-deadline publication retains one post-publication failure");
+        let ProducerDecision::Fail {
+            reason,
+            proposal: Some(proposal),
+            cleanup,
+            ..
+        } = retained.as_ref()
+        else {
+            panic!("published deadline must fail with an immutable proposal");
+        };
+        assert_eq!(*reason, ProducerDecisionReason::StartupDeadline);
+        assert!(uuid::Uuid::parse_str(&proposal.proposal_id).is_ok());
+        assert_eq!(cleanup.cleanup_policy, CleanupPolicy::RetainPublished);
         assert!(actor.producer_progress_deadline.is_none());
         assert!(actor.producer_deadline_due.is_none());
         assert!(actor.producer_process_exit_due.is_none());
@@ -11390,9 +11972,9 @@ mod tests {
             ),
             ProducerExitAcceptance::Accepted
         );
-        assert!(actor.pending_decision.is_none());
+        assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
         actor.mark_executor_lost(deadline + Duration::from_secs(3));
-        assert!(actor.pending_decision.is_none());
+        assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
         assert!(actor
             .authorize_response_publication_at(
                 deadline + Duration::from_secs(3),
@@ -11414,8 +11996,350 @@ mod tests {
             "generation-metadata-eof",
         ));
         let status = actor.producer_operational_snapshot_at(deadline);
-        assert_eq!(status.action_owner, "legacy_published_compatibility");
+        assert_eq!(status.phase, "producer_ended_with_proposal");
+        assert_eq!(status.action_owner, "producer_ended_with_proposal");
         assert!(status.producer_media_published);
+        assert!(status.producer_ended_with_proposal);
+        assert_eq!(
+            status.proposal.as_ref().map(|proposal| proposal.proposal_id.as_str()),
+            Some(proposal.proposal_id.as_str())
+        );
+    }
+
+    #[test]
+    fn first_media_retains_advancing_deadline_and_published_failure_is_immutable() {
+        let started = Instant::now();
+        let progressed_at = started + Duration::from_secs(1);
+        let published_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-published", "recipe-published"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_producer_progress_at(
+            progressed_at,
+            RollingProducerProgressObservation {
+                producer_attempt: 1,
+                out_time_ms: Some(1_000),
+                speed_milli: Some(1_000),
+                recent_speed_milli: Some(1_000),
+                observed_at: progressed_at,
+            },
+        ));
+        let advancing = actor
+            .producer_progress_deadline
+            .expect("advancing deadline before publication");
+        assert_eq!(advancing.mode, ProducerProgressDeadlineMode::Advancing);
+        assert!(actor
+            .authorize_response_publication_at(
+                published_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.producer_progress_deadline,
+            Some(advancing),
+            "first media must not create an unmonitored published interval"
+        );
+
+        assert!(actor.settle_due_deadlines_at(advancing.instant).is_some());
+        let retained = actor.pending_decision.clone().expect("published failure");
+        let ProducerDecision::Fail {
+            decision_sequence: 1,
+            failed_attempt: 1,
+            reason: ProducerDecisionReason::ProgressDeadline,
+            proposal: Some(proposal),
+            cleanup,
+        } = retained.as_ref()
+        else {
+            panic!("published deadline emits one retain-published failure");
+        };
+        assert!(uuid::Uuid::parse_str(&proposal.proposal_id).is_ok());
+        assert_eq!(cleanup.cleanup_policy, CleanupPolicy::RetainPublished);
+        assert_eq!(
+            actor.admit_producer_retry_at(advancing.instant, 1, "recipe-published"),
+            Err(ProducerAttemptRejection::RetryUnavailable)
+        );
+        assert!(actor.settle_due_deadlines_at(advancing.instant + Duration::from_secs(30)).is_none());
+        assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                advancing.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                ),
+            ),
+            Err(ResponsePublicationRejection::DecisionCommitted),
+            "new playlist demand must lose to the retained producer verdict"
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                advancing.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                ),
+            )
+            .is_ok());
+        let status = actor.producer_operational_snapshot_at(advancing.instant);
+        assert!(status.producer_ended_with_proposal);
+        assert_eq!(status.phase, "producer_ended_with_proposal");
+        assert_eq!(
+            status.proposal.as_ref().map(|value| value.proposal_id.as_str()),
+            Some(proposal.proposal_id.as_str())
+        );
+        assert!(!actor.producer_signal_authorized);
+        assert!(actor.authorized_install.is_none());
+    }
+
+    #[test]
+    fn successful_exit_requires_attempt_fenced_completion_before_classification_deadline() {
+        let started = Instant::now();
+        let exit_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        let policy = InitialProducerPolicy::software(
+            "presentation-complete".to_owned(),
+            PRODUCER_PROGRESS_BUDGET,
+        )
+        .with_completion_expectation(Some(20_000), 10_000);
+        assert_eq!(actor.begin_initial_producer_attempt_at(started, policy), Ok(1));
+        assert!(actor.observe_producer_progress_at(
+            started + Duration::from_secs(1),
+            RollingProducerProgressObservation {
+                producer_attempt: 1,
+                out_time_ms: Some(10_000),
+                speed_milli: None,
+                recent_speed_milli: None,
+                observed_at: started + Duration::from_secs(1),
+            },
+        ));
+        assert!(actor
+            .authorize_response_publication_at(
+                started + Duration::from_millis(1500),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exit_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: exit_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        let ProducerDecisionPoll::ClassifyExit(probe) = actor.poll_producer_decision_at(0) else {
+            panic!("successful exit must wake one exact classifier probe");
+        };
+        assert_eq!(probe.producer_attempt, 1);
+        assert_eq!(probe.deadline, exit_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET);
+        assert_eq!(
+            actor.classify_producer_exit_at(
+                exit_at + Duration::from_millis(1),
+                RollingProducerCompletionEvidence {
+                    probe_sequence: probe.probe_sequence,
+                    producer_attempt: 1,
+                    end_list: true,
+                    final_segment: Some(1),
+                    final_end_ms: Some(20_000),
+                },
+            ),
+            RollingProducerCompletionDisposition::CompleteVerifiedDuration
+        );
+        assert_eq!(actor.poll_producer_decision_at(0), ProducerDecisionPoll::Idle);
+        assert!(actor.pending_decision.is_none());
+        let status = actor.producer_operational_snapshot_at(exit_at + Duration::from_secs(1));
+        assert_eq!(status.phase, "complete");
+        assert_eq!(status.completion, "complete_verified_duration");
+        assert_eq!(status.completion_attempt, Some(1));
+        assert_eq!(status.completion_final_segment, Some(1));
+        assert_eq!(status.completion_final_end_ms, Some(20_000));
+        assert!(!status.producer_ended_with_proposal);
+        assert_eq!(status.last_probe_outcome, "published");
+        assert!(!actor.observe_publication_at(
+            exit_at + Duration::from_millis(2),
+            RollingPublicationObservation {
+                producer_attempt: 1,
+                playlist_ready: true,
+                published_segment: Some(2),
+                published_end_ms: Some(26_000),
+                next_media_sequence: 3,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            },
+        ));
+        assert_eq!(
+            actor.classify_producer_exit_at(
+                exit_at + Duration::from_millis(3),
+                RollingProducerCompletionEvidence {
+                    probe_sequence: probe.probe_sequence,
+                    producer_attempt: 1,
+                    end_list: false,
+                    final_segment: None,
+                    final_end_ms: None,
+                },
+            ),
+            RollingProducerCompletionDisposition::Stale
+        );
+        assert_eq!(
+            actor
+                .producer_operational_snapshot_at(exit_at + Duration::from_secs(1))
+                .completion,
+            "complete_verified_duration"
+        );
+        assert_eq!(
+            actor
+                .producer_operational_snapshot_at(exit_at + Duration::from_secs(1))
+                .last_probe_outcome,
+            "published"
+        );
+    }
+
+    #[test]
+    fn missing_completion_evidence_yields_one_retain_published_proposal() {
+        let started = Instant::now();
+        let exit_at = started + Duration::from_secs(1);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::software(
+                    "presentation-partial".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                started + Duration::from_millis(500),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exit_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: exit_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        let deadline = exit_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET;
+        assert!(actor.settle_due_deadlines_at(deadline).is_some());
+        let retained = actor.pending_decision.clone().expect("classification failure");
+        assert!(matches!(
+            retained.as_ref(),
+            ProducerDecision::Fail {
+                reason: ProducerDecisionReason::ExitClassificationDeadline,
+                proposal: Some(_),
+                cleanup: ProducerFailureCleanup {
+                    cleanup_policy: CleanupPolicy::RetainPublished,
+                    ..
+                },
+                ..
+            }
+        ));
+        assert_eq!(
+            actor
+                .prepublication
+                .as_ref()
+                .expect("producer control")
+                .last_probe_outcome,
+            ProducerProbeOutcome::Cancelled
+        );
+        assert_eq!(actor.pending_decision.as_ref(), Some(&retained));
+    }
+
+    #[test]
+    fn incomplete_exit_evidence_fails_once_without_waiting_for_the_deadline() {
+        let started = Instant::now();
+        let exit_at = started + Duration::from_secs(1);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::software(
+                    "presentation-partial-now".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                started + Duration::from_millis(500),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.observe_producer_exit_at(
+                exit_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: exit_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        let ProducerDecisionPoll::ClassifyExit(probe) = actor.poll_producer_decision_at(0) else {
+            panic!("successful exit must expose its exact evidence request");
+        };
+        assert_eq!(
+            actor.classify_producer_exit_at(
+                exit_at + Duration::from_millis(1),
+                RollingProducerCompletionEvidence {
+                    probe_sequence: probe.probe_sequence,
+                    producer_attempt: 1,
+                    end_list: false,
+                    final_segment: Some(0),
+                    final_end_ms: Some(6_000),
+                },
+            ),
+            RollingProducerCompletionDisposition::FailedPartialSuccess
+        );
+        let retained = actor.pending_decision.clone().expect("partial success verdict");
+        assert!(matches!(
+            retained.as_ref(),
+            ProducerDecision::Fail {
+                decision_sequence: 1,
+                failed_attempt: 1,
+                reason: ProducerDecisionReason::PartialSuccessExit,
+                proposal: Some(_),
+                cleanup: ProducerFailureCleanup {
+                    cleanup_policy: CleanupPolicy::RetainPublished,
+                    ..
+                },
+            }
+        ));
+        assert_eq!(actor.poll_producer_decision_at(0), ProducerDecisionPoll::Decision(retained));
     }
 
     #[tokio::test]
@@ -11996,6 +12920,8 @@ mod tests {
                     progress_budget: PRODUCER_PROGRESS_BUDGET,
                     retry_recipe: Some(invalid_recipe),
                     presentation_contract_fingerprint: "presentation-retry".to_owned(),
+                    expected_remaining_ms: None,
+                    completion_tolerance_ms: 10_000,
                 },
             ),
             Err(ProducerAttemptRejection::InvalidPolicy)
