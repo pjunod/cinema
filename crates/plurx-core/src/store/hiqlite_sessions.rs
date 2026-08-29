@@ -1175,20 +1175,21 @@ impl MediaSessionStore for HiqliteAuthStore {
                         (
                             "UPDATE media_sessions SET state = 'ended',
                                     terminal_reason = 'replaced', lease_expires_at_ms = $1,
-                                    publication_ready_at_ms = $11, updated_at_ms = $1
-                              WHERE incarnation_id = $2 AND session_id = $3 AND user_id = $4
-                                AND playback_id = $5 AND request_fingerprint = $6
-                                AND owner_node_id = $7 AND owner_epoch = 1
-                                AND state = 'active' AND recipe_json = $8
-                                AND response_json = $9 AND media_origin_ms = $10
-                                AND ($12 = '' AND publication_ready_at_ms = $11
+                                    publication_ready_at_ms = $2, updated_at_ms = $1
+                              WHERE incarnation_id = $3 AND session_id = $4 AND user_id = $5
+                                AND playback_id = $6 AND request_fingerprint = $7
+                                AND owner_node_id = $8 AND owner_epoch = 1
+                                AND state = 'active' AND recipe_json = $9
+                                AND response_json = $10 AND media_origin_ms = $11
+                                AND ($12 = '' AND publication_ready_at_ms = $2
                                   OR $12 != '' AND EXISTS (SELECT 1
-                                  FROM media_session_requests WHERE user_id = $4
-                                    AND request_id = $12 AND incarnation_id = $2
-                                    AND request_fingerprint = $6 AND playback_id = $5
-                                    AND owner_node_id = $7 AND state IN ('failed', 'starting')))",
+                                  FROM media_session_requests WHERE user_id = $5
+                                    AND request_id = $12 AND incarnation_id = $3
+                                    AND request_fingerprint = $7 AND playback_id = $6
+                                    AND owner_node_id = $8 AND state IN ('failed', 'starting')))",
                             params!(
                                 now_ms,
+                                MEDIA_SESSION_PUBLICATION_BLOCKED,
                                 activation.incarnation_id.as_str(),
                                 activation.session_id.as_str(),
                                 activation.user_id,
@@ -1198,7 +1199,6 @@ impl MediaSessionStore for HiqliteAuthStore {
                                 activation.recipe_json.as_str(),
                                 activation.response_json.as_str(),
                                 activation.media_origin_ms,
-                                MEDIA_SESSION_PUBLICATION_BLOCKED,
                                 request_id
                             ),
                         ),
@@ -1899,7 +1899,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                         media_sequence = MAX(media_sequence, $5)
                       WHERE incarnation_id = $6 AND owner_node_id = $7 AND owner_epoch = $8
                         AND state = 'active' AND lease_expires_at_ms > $2
-                        AND publication_ready_at_ms != $10
+                        AND publication_ready_at_ms != $9
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
@@ -1907,7 +1907,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND media_sessions.publication_ready_at_ms = 0
                             AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
                         AND EXISTS (SELECT 1 FROM job_leases
-                          WHERE resource = $9 AND owner_node_id = $7 AND fence = $8
+                          WHERE resource = $10 AND owner_node_id = $7 AND fence = $8
                             AND expires_at_ms = $1)",
                 params!(
                     lease_expires_at_ms,
@@ -1918,8 +1918,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                     renewal.incarnation_id.as_str(),
                     owner_node_id,
                     renewal.owner_epoch,
-                    lease_resource.as_str(),
-                    MEDIA_SESSION_PUBLICATION_BLOCKED
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    lease_resource.as_str()
                 ),
             ));
             statements.push((
@@ -2003,16 +2003,16 @@ impl MediaSessionStore for HiqliteAuthStore {
         let sql = format!(
             "SELECT {ROUTE_COLS} FROM media_sessions
               WHERE state = 'active' AND lease_expires_at_ms <= $1
-                AND publication_ready_at_ms != $6
+                AND publication_ready_at_ms != $2
                 AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                   WHERE request.user_id = media_sessions.user_id
                     AND request.incarnation_id = media_sessions.incarnation_id
                     AND request.state = 'starting'
                     AND media_sessions.publication_ready_at_ms = 0
                     AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                AND ($2 = 0 OR lease_expires_at_ms > $3
-                  OR (lease_expires_at_ms = $3 AND incarnation_id > $4))
-              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $5"
+                AND ($3 = 0 OR lease_expires_at_ms > $4
+                  OR (lease_expires_at_ms = $4 AND incarnation_id > $5))
+              ORDER BY lease_expires_at_ms, incarnation_id LIMIT $6"
         );
         validate_sql(&sql)?;
         Ok(self
@@ -2021,11 +2021,11 @@ impl MediaSessionStore for HiqliteAuthStore {
                 sql,
                 params!(
                     now_ms,
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
                     has_cursor,
                     after_lease_expires_at_ms,
                     after_incarnation_id,
-                    limit,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED
+                    limit
                 ),
             )
             .await?
@@ -2097,7 +2097,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             updated_at_ms = $4
                       WHERE incarnation_id = $5 AND owner_node_id = $6 AND owner_epoch = $7
                         AND state = 'active' AND lease_expires_at_ms <= $4
-                        AND publication_ready_at_ms != $9
+                        AND publication_ready_at_ms != $8
                         AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                           WHERE request.user_id = media_sessions.user_id
                             AND request.incarnation_id = media_sessions.incarnation_id
@@ -2116,7 +2116,7 @@ impl MediaSessionStore for HiqliteAuthStore {
                             AND request.state = 'starting') <= 1
                         AND discontinuity_sequence < 9223372036854775807
                         AND EXISTS (SELECT 1 FROM job_leases
-                          WHERE resource = $8 AND owner_node_id = $1 AND fence = $2
+                          WHERE resource = $9 AND owner_node_id = $1 AND fence = $2
                             AND expires_at_ms = $3 AND updated_at_ms = $4)",
                     params!(
                         takeover.next_owner_node_id.as_str(),
@@ -2126,8 +2126,8 @@ impl MediaSessionStore for HiqliteAuthStore {
                         takeover.incarnation_id.as_str(),
                         takeover.expected_owner_node_id.as_str(),
                         takeover.expected_owner_epoch,
-                        lease_resource.as_str(),
-                        MEDIA_SESSION_PUBLICATION_BLOCKED
+                        MEDIA_SESSION_PUBLICATION_BLOCKED,
+                        lease_resource.as_str()
                     ),
                 ),
                 (
@@ -2588,19 +2588,19 @@ impl MediaSessionStore for HiqliteAuthStore {
                    FROM media_sessions
                   WHERE owner_node_id = $1 AND state = 'active'
                     AND lease_expires_at_ms > $2
-                    AND publication_ready_at_ms != $4
+                    AND publication_ready_at_ms != $3
                     AND NOT EXISTS (SELECT 1 FROM media_session_requests request
                       WHERE request.user_id = media_sessions.user_id
                         AND request.incarnation_id = media_sessions.incarnation_id
                         AND request.state = 'starting'
                         AND media_sessions.publication_ready_at_ms = 0
                         AND request.claim_expires_at_ms <= media_sessions.lease_expires_at_ms)
-                  ORDER BY updated_at_ms, incarnation_id LIMIT $3",
+                  ORDER BY updated_at_ms, incarnation_id LIMIT $4",
                 params!(
                     owner_node_id,
                     now_ms,
-                    MAX_OWNED,
-                    MEDIA_SESSION_PUBLICATION_BLOCKED
+                    MEDIA_SESSION_PUBLICATION_BLOCKED,
+                    MAX_OWNED
                 ),
             )
             .await?
@@ -2643,10 +2643,13 @@ mod tests {
     /// site and cost this module four statements at once.
     #[test]
     fn every_replicated_placeholder_is_introduced_in_order() {
+        let production_source = SOURCE
+            .split_once("\n#[cfg(test)]")
+            .map_or(SOURCE, |(source, _)| source);
         let mut statement = String::new();
         let mut in_statement = false;
         let mut offenders = Vec::new();
-        for (number, line) in SOURCE.lines().enumerate() {
+        for (number, line) in production_source.lines().enumerate() {
             let quotes = line.matches('"').count();
             if !in_statement && quotes == 1 {
                 in_statement = true;
