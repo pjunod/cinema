@@ -68,6 +68,9 @@ const BORROWED = [
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
+  "clusterSqliteReplication",
+  "clusterSampleAge",
+  "clusterDatabaseWal",
   "clusterDatabaseStatus",
   "clusterCapacityText",
   "clusterDatabaseHealth",
@@ -78,6 +81,8 @@ const BORROWED = [
   "clusterTabButton",
   "clusterDiagnosticsFacts",
   "clusterTroubleshootingPanel",
+  "showClusterTab",
+  "selectClusterTab",
   "clusterFoldKey",
   "clusterFoldRead",
   "clusterFoldWrite",
@@ -1376,11 +1381,20 @@ test("the replicated database is its own section with the store's own readings",
     node("node-b", 2, "voter"),
     node("node-c", 3, "voter"),
   ]);
-  const html = ui.clusterPanel({
-    cluster,
-    clusterOps: operationStatus(cluster),
-    sys: { replication: REPLICATION },
+  // The panel reports THIS machine's store, so every peer gets readings that
+  // would be obviously wrong here: a follower reading the leader's row is the
+  // mistake this fixture exists to catch.
+  const ops = operationStatus(cluster);
+  ops.nodes.forEach((row) => {
+    if (row.membership.node_id === cluster.local_node_id) return;
+    row.status.raft.current_term = 77;
+    row.status.raft.commit_index = 111111;
+    row.status.raft.applied_index = 111111;
+    row.status.protocol_min = 1;
+    row.status.protocol_max = 2;
+    row.status.snapshot.build_ok_count = 999;
   });
+  const html = ui.clusterPanel({ cluster, clusterOps: ops, sys: { replication: REPLICATION } });
   assert.match(html, /<h3>Replicated database<\/h3>/);
   assert.match(html, /id="cluster-database"/);
   assert.match(html, /<dt>Quorum commit<\/dt><dd class="num">482191<\/dd>/);
@@ -1388,7 +1402,10 @@ test("the replicated database is its own section with the store's own readings",
   assert.match(html, /<dt>Apply lag<\/dt><dd class="num">0 entries<\/dd>/);
   assert.match(html, /<dt>Protocol<\/dt><dd class="num">5–6<\/dd>/);
   assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error<\/dd>/);
-  assert.match(html, /<dt>Applied here<\/dt><dd class="num">912/);
+  // The watermark and the applied index have to come from one sample or their
+  // difference is not a lag, so both are the direct status's, not the
+  // membership projection's separately-fetched index.
+  assert.match(html, /<dt>Applied here<\/dt><dd class="num">482191<\/dd>/);
   // The store's facts sit in the store's column: watch state must reach the
   // page before the node roster, not inside it.
   assert.ok(
@@ -1446,6 +1463,36 @@ test("the quorum watermark is the quorum's, not this node's applied index", () =
   assert.equal(rows.get("Behind by"), "4 changes");
 });
 
+test("the database reports this machine's store, not the leader's", () => {
+  // On a follower these are two different rows of the same response, and the
+  // panel's whole claim is that it describes the machine you are looking at:
+  // its applied index, its lag, its WAL, its protocol range. A fixture where
+  // the local node is also the leader cannot tell the two apart.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter"),
+    node("node-b", 2, "voter", { is_leader: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  assert.equal(cluster.local_node_id, "node-a");
+  const ops = operationStatus(cluster);
+  ops.nodes.forEach((row) => {
+    const local = row.membership.node_id === cluster.local_node_id;
+    row.status.raft.is_leader = row.membership.raft_id === 2;
+    row.status.raft.applied_index = local ? 482100 : 482191;
+    row.status.raft.commit_index = local ? 482191 : 482191;
+    row.status.raft.apply_lag_entries = local ? 91 : 0;
+    row.status.protocol_max = local ? 6 : 9;
+  });
+  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  assert.equal(rows.get("Applied here"), "482100");
+  assert.equal(rows.get("Apply lag"), "91 entries");
+  assert.equal(rows.get("Protocol"), "5–6");
+  // The leader row is still the leader's: naming the elected leader is a
+  // membership fact, and it must not drag its readings along with it.
+  assert.match(rows.get("Leader"), /node-b/);
+});
+
 test("database readings say unknown instead of inventing a number", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
@@ -1457,7 +1504,91 @@ test("database readings say unknown instead of inventing a number", () => {
   // The membership projection is a different source and is still present, so
   // the applied index must not be blanked along with the direct sample.
   assert.match(rows.get("Applied here"), /^912/);
-  assert.match(rows.get("Reading age"), /stale or incomplete proof/);
+  assert.equal(rows.get("Reading age"), "unknown");
+  // The counting rows are the tempting ones: `build 0 ok / 0 error` reads as a
+  // measurement, and "0 changes behind" beside a degraded pill is a claim.
+  assert.equal(rows.get("Snapshots"), "unknown");
+  assert.equal(rows.get("WAL"), "unknown");
+  const degraded = new Map(
+    ui.clusterDatabaseRows(cluster, { backend: "hiqlite", health: "degraded", clustered: true }, null)
+      .map((row) => [row[0], row[1]]),
+  );
+  assert.equal(degraded.get("Behind by"), "unknown");
+});
+
+test("a proven-unavailable store reads as broken, not as unobserved", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const local = ops.nodes[0];
+  local.status.snapshot = { available: false, build_ok_count: 0, build_error_count: 0, install_ok_count: 0, install_error_count: 0 };
+  local.status.wal = { available: false, reason: "lock_contended" };
+  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  assert.match(rows.get("Snapshots"), /unavailable/);
+  assert.match(rows.get("WAL"), /unavailable/);
+  assert.match(rows.get("WAL"), /lock contended/);
+  assert.match(rows.get("WAL"), /var\(--bad\)/);
+
+  // An open WAL that is holding unflushed entries or carrying a live error is
+  // a fault, and the ledger must say so with the same predicate the node badge
+  // uses rather than printing a neutral "open".
+  const faulted = operationStatus(cluster);
+  faulted.nodes[0].status.wal.snapshot.last_log_index = 482195;
+  const walRow = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, faulted).map((row) => [row[0], row[1]])).get("WAL");
+  assert.match(walRow, /var\(--bad\)/);
+  assert.match(walRow, /482195 logged, 482191 durable/);
+});
+
+test("the freshness row ages while the tab stays open", () => {
+  // Every age in the direct status is computed on the server and frozen into
+  // the response, and this panel renders from one fetch for as long as the tab
+  // is open. Without the time since the aggregate was taken the row that
+  // exists to report staleness says "now" indefinitely.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  ops.observed_at_unix_ms = Date.now() - 600_000;
+  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  assert.match(rows.get("Reading age"), /local 10m ago/);
+  assert.match(rows.get("Reading age"), /watermark 10m ago/);
+  assert.equal(ui.clusterSampleAge(ops, null), null);
+});
+
+test("a cold load into the Cluster tab still knows it is a single-node install", () => {
+  // `sys` is not in this tab's manifest, so opening Settings straight onto
+  // Cluster has no replication projection at all. Reporting that as "status
+  // unavailable" under a banner saying nothing is wrong made the verdict
+  // depend on which tab you happened to visit first.
+  const ui = sandbox();
+  const html = ui.clusterPanel({ cluster: { unavailable: true, code: "membership_unavailable", nodes: [] } });
+  assert.match(html, /class="pill"[^>]*>Single node</);
+  assert.match(html, /SQLite single-node/);
+  assert.doesNotMatch(html, /Status unavailable/);
+  assert.match(html, /<dt>Backend<\/dt><dd>SQLite · single node<\/dd>/);
+});
+
+test("a machine that is not clustered is not told to preserve a voter", () => {
+  // The restart-safety verdict and the roster both belong to a cluster. Left
+  // mounted on a SQLite install, /cluster/status's 503 was patched into the
+  // page as "Do not restart another voter", beside an empty node card.
+  const ui = sandbox();
+  const html = ui.clusterPanel({ cluster: { unavailable: true, code: "membership_unavailable", nodes: [] } });
+  assert.doesNotMatch(html, /id="cluster-operations"/);
+  assert.doesNotMatch(html, /<h3>Cluster nodes<\/h3>/);
+  assert.doesNotMatch(html, /<h3>Maintenance<\/h3>/);
+  // Nor a ledger of eleven "unknown" rows: there is no Raft here to fail to
+  // read, so the section says what is true about a single machine.
+  assert.match(html, /<dt>Peers<\/dt><dd>none — watch state is durable here/);
+  assert.doesNotMatch(html, /<dt>Quorum commit<\/dt>/);
+  // And the readings pane must not answer with arithmetic over zero voters.
+  assert.match(html, /No committed voter roster is readable/);
+  assert.doesNotMatch(html, /of 0 voters must agree/);
 });
 
 test("a single-node install reads as one node, never as redundancy", () => {
@@ -1494,9 +1625,13 @@ function foldDom({ cards = [], toggle = null, database = null } = {}) {
 }
 
 function foldCard(nodeId, open) {
+  // Reads like the browser does: the id lives on the card body, under the
+  // attribute the markup writes. A stub that answers any selector with any
+  // attribute would let both of those be renamed without a failure.
+  const body = { getAttribute: (name) => (name === "data-node" ? nodeId : null) };
   return {
     open,
-    querySelector: () => ({ getAttribute: () => nodeId }),
+    querySelector: (selector) => (selector === ".clnodebody" ? body : null),
   };
 }
 
@@ -1618,8 +1753,57 @@ test("a page load cannot overwrite the remembered folds", () => {
   assert.match(row, /ontoggle="syncClusterNodeToggle\(\)"/);
   assert.doesNotMatch(row, /ontoggle="[^"]*clusterNodeFoldSave/);
   assert.match(row, /onclick="clusterNodeFoldLater\(\)"/);
+  // And the card carries the id the fold is keyed by, where the reader looks.
+  assert.match(row, /<div class="clnodebody" data-node="\$\{esc\(n\.node_id\)\}">/);
   // And the click saves after the card's open state has actually flipped.
   assert.match(shippedSource("clusterNodeFoldLater"), /setTimeout\(clusterNodeFoldSave,0\)/);
+});
+
+test("the fold is restored where the panel is written, and saved by every control", () => {
+  // Both are call sites: the helpers can be perfect while the panel never
+  // calls them. Deleting either line leaves the feature dead with the rest of
+  // these tests green.
+  assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
+  assert.match(shippedSource("toggleClusterNodes"), /clusterNodeFoldSave\(\);/);
+  assert.match(shippedSource("selectClusterTab"), /clusterFoldWrite\(\{tab:id\}\)/);
+});
+
+test("the troubleshooting tab is a fold like any other", () => {
+  const ui = sandbox();
+  const storage = fakeStorage();
+  const panes = {
+    "clpane-log": { hidden: false },
+    "clpane-readings": { hidden: true },
+    "clpane-refusals": { hidden: true },
+  };
+  const tabs = [
+    { id: "cltab-log", attrs: {}, controls: "clpane-log" },
+    { id: "cltab-readings", attrs: {}, controls: "clpane-readings" },
+    { id: "cltab-refusals", attrs: {}, controls: "clpane-refusals" },
+  ].map((tab) => ({
+    ...tab,
+    setAttribute(name, value) { this.attrs[name] = value; },
+    getAttribute: () => tab.controls,
+  }));
+  const document = {
+    querySelectorAll: () => tabs,
+    getElementById: (id) => panes[id] || tabs.find((tab) => tab.id === id) || null,
+  };
+  withDom(document, storage, () => ui.selectClusterTab("readings"));
+  assert.deepEqual(
+    Object.entries(panes).map(([id, pane]) => [id, pane.hidden]),
+    [["clpane-log", true], ["clpane-readings", false], ["clpane-refusals", true]],
+  );
+  assert.deepEqual(tabs.map((tab) => tab.attrs["aria-selected"]), ["false", "true", "false"]);
+  // Every operational change repaints this panel from scratch, so a chosen tab
+  // that is not remembered snaps back to the log every few seconds while you
+  // watch a node drain.
+  assert.equal(JSON.parse(storage.read("plurx.cluster.fold")).tab, "readings");
+  panes["clpane-readings"].hidden = true;
+  panes["clpane-log"].hidden = false;
+  withDom(document, storage, () => ui.applyClusterFolds());
+  assert.equal(panes["clpane-readings"].hidden, false);
+  assert.equal(panes["clpane-log"].hidden, true);
 });
 
 test("the fold never carries anything but the fold", () => {
@@ -1630,6 +1814,22 @@ test("the fold never carries anything but the fold", () => {
   assert.match(shippedSource("clusterNodeFoldSave"), /nodes_closed/);
   assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldWrite\(\{database:open\}\)/);
   assert.doesNotMatch(shippedSource("clusterDatabasePanel"), /localStorage/);
+});
+
+test("a stored fold that is not a fold is ignored, not carried forward", () => {
+  const ui = sandbox();
+  const junk = fakeStorage({ "plurx.cluster.fold": JSON.stringify([1, 2, 3]) });
+  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldRead(), null));
+  const stray = fakeStorage({
+    "plurx.cluster.fold": JSON.stringify({ database: false, nodes_closed: ["a", 7], tab: "log", stowaway: "x" }),
+  });
+  withDom(foldDom(), stray, () => {
+    assert.deepEqual(ui.clusterFoldRead(), { database: false, nodes_closed: ["a"], tab: "log" });
+    ui.clusterFoldWrite({ database: true });
+  });
+  assert.deepEqual(JSON.parse(stray.read("plurx.cluster.fold")), {
+    database: true, nodes_closed: ["a"], tab: "log",
+  });
 });
 
 // ---- troubleshooting -------------------------------------------------------
