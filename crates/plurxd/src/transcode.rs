@@ -19015,6 +19015,16 @@ impl TranscodeManager {
         self.vod.last_touch_for_test(session_id).await
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_vod_terminal_detach_pause_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
+        self.vod.set_terminal_detach_pause_for_test(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn vod_has_attached_reader_for_test(&self, session_id: &str) -> bool {
+        self.vod.has_attached_reader_for_test(session_id).await
+    }
+
     /// Both byte views across every live session, from their cached figures —
     /// summing these must not cost a directory walk per session, or the flow
     /// controller could not run on every segment fetch.
@@ -19914,8 +19924,25 @@ impl HlsDeliveryFixture {
         .await
     }
 
+    async fn publish_with_separate_state_root(
+        session_dir: &std::path::Path,
+        state_root: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None).await
+    }
+
     async fn publish_with_takeover(
         dir: &std::path::Path,
+        session_id: &str,
+        takeover: Option<SessionTakeoverStart>,
+    ) -> Self {
+        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover).await
+    }
+
+    async fn publish_with_takeover_and_state_root(
+        session_dir: &std::path::Path,
+        state_root: &std::path::Path,
         session_id: &str,
         takeover: Option<SessionTakeoverStart>,
     ) -> Self {
@@ -19958,7 +19985,7 @@ impl HlsDeliveryFixture {
             .await
             .expect("file");
 
-        let mut raw_session = test_session(dir.to_path_buf());
+        let mut raw_session = test_session(session_dir.to_path_buf());
         raw_session.takeover = takeover;
         raw_session.file_id = file_id;
         let frozen_file = store
@@ -19983,12 +20010,12 @@ impl HlsDeliveryFixture {
             "test".into(),
             Arc::clone(&store),
             crate::state::Dirs {
-                artwork: dir.join("artwork"),
-                transcode: dir.join("transcode"),
-                cache: dir.join("cache"),
-                subs: dir.join("subs"),
-                runtime_cache: dir.join("runtime"),
-                renditions: dir.join("renditions"),
+                artwork: state_root.join("artwork"),
+                transcode: state_root.join("transcode"),
+                cache: state_root.join("cache"),
+                subs: state_root.join("subs"),
+                runtime_cache: state_root.join("runtime"),
+                renditions: state_root.join("renditions"),
             },
             "test-node".into(),
             EncoderCaps::default(),
@@ -20038,6 +20065,65 @@ impl HlsDeliveryFixture {
             .delivery
     }
 
+    pub(crate) async fn wait_for_delivery_projection(
+        &self,
+        expected_kind: &'static str,
+        expected_fetched_segment: Option<i64>,
+    ) -> crate::playback_control::RollingDeliverySnapshot {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = self
+                    .session
+                    .control
+                    .snapshot()
+                    .await
+                    .expect("fixture control actor");
+                if snapshot.last_renewal_kind == expected_kind
+                    && snapshot.delivery.fetched_segment == expected_fetched_segment
+                {
+                    return snapshot.delivery;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached response completion reached the control actor")
+    }
+
+    pub(crate) async fn refresh_frozen_presentation_from_store(&mut self, session_id: &str) {
+        let file = self
+            .store
+            .get_file(self.session.file_id)
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        let registered = self
+            .state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .remove(session_id)
+            .expect("registered fixture session");
+        assert!(Arc::ptr_eq(&registered, &self.session));
+        drop(registered);
+
+        let session = Arc::get_mut(&mut self.session)
+            .expect("fixture owns the only session reference while rebuilding presentation");
+        let context = session
+            .frozen_presentation
+            .as_ref()
+            .expect("frozen fixture presentation")
+            .context
+            .clone();
+        session.frozen_presentation =
+            Some(FrozenHlsPresentation::new(file, context, &session.kind));
+        self.state
+            .transcode
+            .register_session_for_test(session_id, Arc::clone(&self.session))
+            .await;
+    }
+
     pub(crate) async fn begin_producer_attempt(
         &self,
     ) -> Result<u64, crate::playback_control::ProducerAttemptRejection> {
@@ -20056,6 +20142,14 @@ impl HlsDeliveryFixture {
         *self
             .session
             .response_projection_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) fn pause_playlist_publication(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .playlist_publication_pause
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
     }
@@ -20562,10 +20656,19 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
-        let dir = crate::test_tempdir().expect("session dir");
+        let root = crate::test_tempdir().expect("fixture root");
+        let session_dir = root.path().join("session");
+        tokio::fs::create_dir(&session_dir)
+            .await
+            .expect("create empty session scratch");
         let session_id = uuid::Uuid::new_v4().to_string();
         let generation = uuid::Uuid::new_v4().to_string();
-        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let fixture = HlsDeliveryFixture::publish_with_separate_state_root(
+            &session_dir,
+            &root.path().join("state"),
+            &session_id,
+        )
+        .await;
         activate_control_route(
             fixture.store.as_ref(),
             &session_id,
@@ -21047,9 +21150,18 @@ mod tests {
 
     #[tokio::test]
     async fn reap_loop_finishes_a_dropped_retirement_with_truthful_cause_and_cleanup() {
-        let dir = crate::test_tempdir().expect("session dir");
+        let root = crate::test_tempdir().expect("fixture root");
+        let session_dir = root.path().join("session");
+        tokio::fs::create_dir(&session_dir)
+            .await
+            .expect("create empty session scratch");
         let session_id = uuid::Uuid::new_v4().to_string();
-        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let fixture = HlsDeliveryFixture::publish_with_separate_state_root(
+            &session_dir,
+            &root.path().join("state"),
+            &session_id,
+        )
+        .await;
         // Model a caller disappearing after the actor committed explicit
         // retirement but before it entered manager teardown. The actor-level
         // regression drops the actual oneshot reply; this exercises the real
@@ -29260,16 +29372,22 @@ mod tests {
 
     #[tokio::test]
     async fn serving_fence_kills_existing_and_transition_racing_children() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
         use plurx_core::store::SqliteStore;
 
         let root = crate::test_tempdir().expect("serving-fence root");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let manager = Arc::new(TranscodeManager::new(
-            store,
-            root.path().join("manager"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
         let existing = watchdog_session(
             &root.path().join("existing"),
             Some(long_running_child()),
@@ -29281,27 +29399,12 @@ mod tests {
             .await
             .insert("existing".to_owned(), Arc::clone(&existing));
 
-        let (serving_tx, serving_rx) =
-            tokio::sync::watch::channel(crate::serving_fence::ServingState {
-                ready: true,
-                loss_generation: 0,
-            });
-        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(serving_rx));
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
         // Publish loss and recovery without yielding. A boolean watch could
         // coalesce this to `true` and preserve the old child; the generation
         // makes the lost authority permanent for generation zero.
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: false,
-                loss_generation: 1,
-            })
-            .expect("publish quorum loss");
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: true,
-                loss_generation: 1,
-            })
-            .expect("publish quorum recovery");
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
                 let stopped = existing.retirement_cleanup_finished.load(Acquire);
@@ -29317,12 +29420,7 @@ mod tests {
         .await
         .expect("existing child must be retired promptly");
 
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: false,
-                loss_generation: 2,
-            })
-            .expect("publish second quorum loss");
+        fence.validation_set_ready(false).await;
         tokio::time::timeout(Duration::from_secs(2), async {
             while manager.serving_ready.load(Acquire) {
                 tokio::task::yield_now().await;
@@ -29347,7 +29445,7 @@ mod tests {
             "the rejected late child must already be reaped and released"
         );
 
-        drop(serving_tx);
+        drop(fence);
         fence_loop.await.expect("serving fence loop");
     }
 

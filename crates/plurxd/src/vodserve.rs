@@ -1107,6 +1107,31 @@ impl VodServe {
         Some(*touch)
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_terminal_detach_pause_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .shared
+            .terminal_detach_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_attached_reader_for_test(&self, session_id: &str) -> bool {
+        let rendition = self
+            .shared
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .and_then(|session| session.rendition.as_ref().map(Arc::clone));
+        let Some(rendition) = rendition else {
+            return false;
+        };
+        let attached = rendition.readers.lock().await.contains_key(session_id);
+        attached
+    }
+
     pub(crate) fn new_cluster(
         base: PathBuf,
         store: Arc<dyn Store>,

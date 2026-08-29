@@ -7242,6 +7242,7 @@ async fn vod_segment_response_before(
                 (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
             let accepted = tokio::select! {
                 biased;
+                Ok(()) = accepted_rx => true,
                 _ = tokio::time::sleep_until(body_deadline) => {
                     fail(
                         std::io::ErrorKind::TimedOut,
@@ -7257,7 +7258,6 @@ async fn vod_segment_response_before(
                     false
                 }
                 () = sender.closed() => false,
-                result = accepted_rx => result.is_ok(),
             };
             if !accepted {
                 return;
@@ -7814,6 +7814,7 @@ async fn segment_local_before(
                 (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
             let accepted = tokio::select! {
                 biased;
+                Ok(()) = accepted_rx => true,
                 _ = tokio::time::sleep_until(body_deadline) => {
                     let error = std::io::Error::new(
                         std::io::ErrorKind::TimedOut,
@@ -7833,7 +7834,6 @@ async fn segment_local_before(
                     false
                 }
                 () = sender.closed() => false,
-                result = accepted_rx => result.is_ok(),
             };
             if !accepted {
                 return;
@@ -8305,7 +8305,13 @@ mod tests {
             delete(State(fixture.state.clone()), AxPath(session_id.clone()),).await,
             StatusCode::NO_CONTENT
         );
-        assert!(!fixture.worker_is_registered(&session_id).await);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.worker_is_registered(&session_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("confirmed durable absence eventually releases the rolling attachment");
     }
 
     #[tokio::test]
@@ -8410,15 +8416,29 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(session_id.clone(), Arc::clone(&pause));
+        let detach_pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_vod_terminal_detach_pause_for_test(Arc::clone(&detach_pause));
         let deletion = tokio::spawn({
             let state = fixture.state.clone();
             let session_id = session_id.clone();
             async move { delete(State(state), AxPath(session_id)).await }
         });
-        pause.wait().await;
+        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
+            .await
+            .expect("VOD cleanup reached its pre-detach seam");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release reached its post-tombstone seam");
         assert!(
-            fixture.worker_is_registered(&session_id).await,
-            "the barrier is specifically inside the tombstone-to-stop gap"
+            fixture
+                .state
+                .transcode
+                .vod_has_attached_reader_for_test(&session_id)
+                .await,
+            "the barrier is specifically inside the tombstone-to-VOD-detach gap"
         );
         let media = playlist(
             State(fixture.state.clone()),
@@ -8439,7 +8459,12 @@ mod tests {
             "the cached durable tombstone must refuse media before actor cleanup"
         );
 
-        pause.wait().await;
+        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
+            .await
+            .expect("release VOD detach");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release durable deletion");
         assert_eq!(
             deletion.await.expect("delete gap task"),
             StatusCode::NO_CONTENT
@@ -9223,7 +9248,7 @@ mod tests {
         ));
     }
 
-    async fn add_http_text_subtitle(fixture: &HlsDeliveryFixture) {
+    async fn add_http_text_subtitle(fixture: &mut HlsDeliveryFixture, session_id: &str) {
         let file = fixture
             .store
             .get_file(fixture.file_id())
@@ -9271,6 +9296,9 @@ mod tests {
             .await
             .expect("updated fixture lookup")
             .expect("updated fixture");
+        fixture
+            .refresh_frozen_presentation_from_store(session_id)
+            .await;
         tokio::fs::create_dir_all(&fixture.state.subs_dir)
             .await
             .expect("subtitle cache");
@@ -9285,18 +9313,35 @@ mod tests {
     #[tokio::test]
     async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
         let dir = crate::test_tempdir().expect("session directory");
-        let fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
-        add_http_text_subtitle(&fixture).await;
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
+        add_http_text_subtitle(&mut fixture, "subtitle-handoff").await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_playlist_publication(Arc::clone(&owner_pause));
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"old-zero")
+            .await
+            .expect("predecessor segment zero");
+        tokio::fs::write(dir.path().join("seg00001.ts"), b"old-one")
+            .await
+            .expect("predecessor segment one");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
+        )
+        .await
+        .expect("predecessor playlist");
         let state = fixture.state.clone();
         let waiting =
             tokio::spawn(
                 async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await },
             );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(
-            !waiting.is_finished(),
-            "subtitle response is waiting on the predecessor's video playlist"
-        );
+        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
+            .await
+            .expect("subtitle request read predecessor playlist");
 
         assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
         tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
@@ -9305,12 +9350,28 @@ mod tests {
         tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
             .await
             .expect("segment one");
+        tokio::fs::write(dir.path().join("seg00002.ts"), b"two")
+            .await
+            .expect("segment two");
         tokio::fs::write(
             dir.path().join("index.m3u8"),
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n#EXTINF:2.000,\nseg00002.ts\n",
         )
         .await
         .expect("successor playlist");
+        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
+            .await
+            .expect("release predecessor playlist publication");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("subtitle response reached the exact-owner commit seam");
+        assert!(
+            !waiting.is_finished(),
+            "subtitle response reached the exact-owner commit seam"
+        );
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release subtitle response commit");
         let response = waiting
             .await
             .expect("subtitle task")
@@ -9320,8 +9381,8 @@ mod tests {
             .expect("subtitle playlist body");
         let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
         assert!(
-            text.lines().any(|line| line == "seg00001.vtt"),
-            "subtitle child playlist must use a relative segment URI: {text}"
+            text.lines().any(|line| line == "seg00002.vtt"),
+            "subtitle child playlist must rebind to successor-relative segment URIs: {text}"
         );
         assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
     }
@@ -9329,8 +9390,8 @@ mod tests {
     #[tokio::test]
     async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
         let dir = crate::test_tempdir().expect("VOD subtitle directory");
-        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
-        add_http_text_subtitle(&fixture).await;
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&mut fixture, "rolling-unused").await;
         let session_id = "vod-subtitle-replaced";
         let _predecessor = install_vod_http_session(&fixture, dir.path(), session_id).await;
         let pause = Arc::new(tokio::sync::Barrier::new(2));
@@ -9615,22 +9676,39 @@ mod tests {
             .await
             .expect("cleanup reached its settlement seam");
 
-        let blocked = tokio::time::timeout(
-            Duration::from_secs(1),
-            fixture
-                .state
-                .transcode
-                .acquire_cluster_takeover_replacement(
-                    &request,
-                    7,
-                    tokio::time::Instant::now() + Duration::from_secs(10),
-                ),
-        );
-        tokio::pin!(blocked);
-        tokio::task::yield_now().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let blocked = tokio::spawn({
+            let state = fixture.state.clone();
+            let request = request.clone();
+            async move {
+                let blocked = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    state.transcode.acquire_cluster_takeover_replacement(
+                        &request,
+                        7,
+                        tokio::time::Instant::now() + Duration::from_secs(10),
+                    ),
+                );
+                tokio::pin!(blocked);
+                let mut entered_tx = Some(entered_tx);
+                std::future::poll_fn(|context| {
+                    let result = std::future::Future::poll(blocked.as_mut(), context);
+                    if result.is_pending() {
+                        if let Some(entered_tx) = entered_tx.take() {
+                            let _ = entered_tx.send(());
+                        }
+                    }
+                    result
+                })
+                .await
+            }
+        });
+        entered_rx
+            .await
+            .expect("replacement waiter registered behind the cleanup-owned gate");
         tokio::time::advance(Duration::from_secs(1)).await;
         assert!(
-            blocked.await.is_err(),
+            blocked.await.expect("replacement waiter task").is_err(),
             "cleanup must retain the replacement gate"
         );
 
@@ -10321,14 +10399,17 @@ mod tests {
                 .len(),
             1_024
         );
+        let partial_delivery = fixture
+            .wait_for_delivery_projection("segment-range", None)
+            .await;
         assert_eq!(fixture.delivered_bytes(), 1_024);
-        assert_eq!(fixture.last_renewal_kind().await, "media-segment");
+        assert_eq!(fixture.last_renewal_kind().await, "segment-range");
         assert_eq!(
             fixture.fetched_segment(),
             -1,
             "a completed byte range proves demand but not a complete segment"
         );
-        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
+        assert_eq!(partial_delivery.fetched_segment, None);
 
         let mut full_span = HeaderMap::new();
         full_span.insert(header::RANGE, "bytes=0-".parse().expect("full range"));
@@ -10352,12 +10433,14 @@ mod tests {
                 .len(),
             body.len()
         );
+        let actor_delivery = fixture
+            .wait_for_delivery_projection("segment-range", Some(4))
+            .await;
         assert_eq!(
             fixture.fetched_segment(),
             4,
             "a Range response that contains every byte advances the frontier"
         );
-        let actor_delivery = fixture.actor_delivery().await;
         assert_eq!(actor_delivery.fetched_segment, Some(4));
         assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
         let mut stale_if_range = HeaderMap::new();

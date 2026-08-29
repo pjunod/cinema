@@ -1,6 +1,6 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-28
+**Updated:** 2026-08-29
 **Merged baseline:** `origin/main` at `253f3200` (through PR #638)
 **Current work:** first actor-owned prepublication recovery cut in
 [#636](https://github.com/pjunod/plurx/pull/636) on branch
@@ -11,7 +11,7 @@ lint repair `355d3309`, and Hiqlite placeholder-order repair `4da3bbde` now
 implement an explicit three-phase activation protocol. Their regression
 evidence is closed through `44947095`; hosted-preflight inventory reconciliation
 `c4a1d96d` updates sixteen reviewed exact-count sentinels changed by those
-repairs:
+repairs, and `c48a9867` carries the first final-Rust reconciliation:
 Prepare commits only a `BLOCKED` route and a starting claim; Confirm atomically
 changes that route to ready or to a finite predecessor boundary while leaving
 the claim starting; Publish resolves the claim only for the exact current,
@@ -27,8 +27,9 @@ and resolved replay freshness are all explicit. Rejected exact head
 `07bb95bc` moves that guard into the detached task through worker/watcher
 handoff. Three independent review lanes approve every repaired source delta
 with no remaining P0–P3 finding. All three also approve the exact inventory
-repair with no remaining P0–P3 finding. The synchronized documentation tip is
-the final exact-head review candidate before push.
+repair with no remaining P0–P3 finding. The current candidate also repairs the
+nine exact failures from hosted run `33230939191`; two independent adversarial
+lanes approve that integrated diff with no remaining P0–P3 finding.
 
 The one allowed full local unit invocation was consumed before tests while
 compiling Store code. The directly affected rerun then executed 641 tests:
@@ -73,6 +74,21 @@ contract, and isolates fair terminal eviction from paused-time Store probes.
 All six exact affected tests pass. Three independent repair reviews report no
 remaining P0–P3 finding; only immutable-tip review, the hosted rerun, and merge
 remain.
+
+Hosted rerun `33230939191` subsequently passed every non-fast-Rust job,
+including the complete replicated Store/topology lane, but fast Rust reported
+eight failures and one cleanup hang. Seven failures and the hang were stale
+fixture ownership/timing assumptions: the repair separates scratch from app
+state, drives the real serving authority, observes the correct rolling or VOD
+registry, waits for detached response projection, refreshes frozen subtitle
+metadata, and rendezvouses exact waiters rather than sleeping. The ninth
+failure found a real close-versus-successful-acknowledgement race in delivered
+byte accounting; successful acknowledgements now win simultaneous receiver
+closure in both VOD and rolling pumps, while canceled acknowledgements preserve
+deadline and disconnect classification. All nine names pass by exact rerun.
+Two adversarial lanes approve the complete repair; no second broad local suite
+was run. Formatting, Clippy, commit, push, a wholly green hosted rerun, and
+merge remain.
 
 The post-rejection work is assembled in three tracks:
 

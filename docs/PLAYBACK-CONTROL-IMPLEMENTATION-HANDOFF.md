@@ -1,15 +1,15 @@
 # Playback control rewrite — implementation handoff
 
-**Updated:** 2026-08-28
+**Updated:** 2026-08-29
 **Merged baseline:** `origin/main` at `253f3200` (through PR #638)
 **Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Current review candidate:** the documentation tip above runtime repairs
-through `4da3bbde`, regression evidence closed through `44947095`, and
-hosted-preflight owner-inventory reconciliation `c4a1d96d`, plus the reviewed
-final-Rust repair exposed by hosted run `33228540108`.
+**Current review candidate:** the PR tip above runtime repairs through
+`4da3bbde`, regression evidence closed through `44947095`, hosted-preflight
+owner-inventory reconciliation `c4a1d96d`, final-Rust repair `c48a9867`, and
+the reviewed hosted-gate repair exposed by run `33230939191`.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -18,8 +18,9 @@ Store, lifecycle, and end-to-end integration reviewers unanimously approved
 every repaired source delta with no remaining P0–P3 finding after exact head
 `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached remote-START
 restart-admission loss and the required cluster gate exposed five Hiqlite
-placeholder-order defects. Immutable review of the docs-bearing exact head is
-next.
+placeholder-order defects. Two independent adversarial lanes approve the
+current hosted-gate repair with no actionable P0–P3 finding. Commit, push, and
+immutable-tip review are next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -85,8 +86,25 @@ path; the latter hangs carried the job to its 30-minute cancellation. Three
 review lanes approved the repair in two rounds. The two Core contracts, the
 software admission contract, both playlist races, and the VOD fairness/
 fail-closed contract now pass by exact name. No broad local suite was rerun.
-Only docs-bearing exact-head review, push, a green hosted rerun, and merge
-remain for PR #636.
+Hosted rerun `33230939191` passed validation scope, mobile release version,
+policy/contract preflight, WAL recovery, cluster daemon contracts, and the
+complete replicated Store/topology lane. Fast Rust then reported eight
+completed failures and one rolling-control test that remained in cleanup until
+the 30-minute job bound. Static review traced seven failures and the hang to
+stale fixture layout/synchronization: scratch and AppState roots overlapped,
+the serving-fence fixture drove a watch mirror instead of the synchronous
+authority, VOD cleanup was asserted through the rolling registry, detached EOF
+projection was observed synchronously, subtitle metadata was frozen before its
+Store update, and two barrier assumptions did not prove waiter ownership. One
+remaining failure exposed a production delivery-accounting race: after the
+body synchronously acknowledged and yielded a chunk, a simultaneous receiver
+close could win the producer select and record zero bytes. The repair gives
+only a successful acknowledgement priority; canceled acknowledgements still
+fall through to body/no-progress deadline or receiver-close classification.
+Both VOD and rolling pumps now share that ordering. Two adversarial lanes
+approve the integrated repair. All nine exact hosted names pass; the complete
+suite has not been rerun locally. Formatting, diff, Clippy, commit, push,
+hosted rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
