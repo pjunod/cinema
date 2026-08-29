@@ -59,6 +59,20 @@ Hosted rerun `33227941555` then stopped solely because the docs-only candidate
 subject matched the corrective-history classifier. Unanimously reviewed mapping
 `9471d129` records that `9ee007a8` changed documentation only; the exact
 `make history-check` rerun passes with 1,100 corrective commits accounted.
+Hosted run `33228540108` then passed validation scope, mobile version, fast
+policy/contract preflight, WAL recovery, daemon contracts, and the complete
+replicated Store/topology lane. Its final fast-Rust job exposed two stale Core
+contracts, two nondeterministic fixture assumptions, and two playlist tests
+whose obsolete barrier wait prevented completion; the job was cancelled at
+its 30-minute bound before libtest could print the latter target's summary.
+The reviewed repair now classifies all 48 SQLite transaction owners, checks
+the actual read-only Hiqlite replay shape, rendezvouses playlist races at the
+actor observation boundary, exercises software admission without a nonexistent
+media source, publishes VOD fixture claims through the complete three-phase
+contract, and isolates fair terminal eviction from paused-time Store probes.
+All six exact affected tests pass. Three independent repair reviews report no
+remaining P0–P3 finding; only immutable-tip review, the hosted rerun, and merge
+remain.
 
 The post-rejection work is assembled in three tracks:
 
@@ -250,10 +264,10 @@ Review and test state for M4:
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
 | Operational projection | **Runtime repairs through `4da3bbde`; evidence closed through `44947095`; inventory reconciliation `c4a1d96d`; documentation tip is the review candidate.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. Remote cluster activation now uses explicit negotiated ownership plus target serving generation, three-phase Prepare/Confirm/Publish-or-Abandon settlement with atomic claim deadlines on both Store backends, and restart admission owned through detached START completion. |
-| Adversarial implementation review | **Every source repair is approved; immutable docs-bearing exact-head review is next.** The final rounds repaired response-publication cleanup, finite handoff renewal/takeover, current-owner replay after takeover, resolved-replay freshness, backend transaction parity, the v17→v18 Hiqlite trigger upgrade, remote START restart-drain ownership, executable trigger syntax, current fixtures, Clippy ownership shape, and five Hiqlite placeholder-order defects. Exact head `032292a1…` was rejected for detached START ownership, and the first cluster gate rejected six SQL bindings; all reviewed repairs now have unanimous approval with no remaining P0–P3 finding. |
+| Adversarial implementation review | **Every source and final-Rust repair is approved; immutable docs-bearing exact-head review is next.** The final rounds repaired response-publication cleanup, finite handoff renewal/takeover, current-owner replay after takeover, resolved-replay freshness, backend transaction parity, the v17→v18 Hiqlite trigger upgrade, remote START restart-drain ownership, executable trigger syntax, current fixtures, Clippy ownership shape, five Hiqlite placeholder-order defects, final transaction inventory/replay assertions, deterministic admission/terminal fixtures, and actor-bound playlist race seams. Exact head `032292a1…` was rejected for detached START ownership; the first cluster gate rejected six SQL bindings; hosted run `33228540108` exposed the last six exact Rust cases. All reviewed repairs now have unanimous approval with no remaining P0–P3 finding. |
 | Format/static inspection | **Green on the repaired tip.** `cargo fmt --all`, `git diff --check`, compiler checks, workspace Clippy, validation catalog, history, 123 operations contracts, 52 benchmark checks, and the web policy/contrast gate pass. The hosted-equivalent Python validation catalog also passes 68/68 after `c4a1d96d`; exact history policy passes after docs-only mapping `9471d129`. |
-| Unit/focused tests | **Green without a second broad run.** The one full `make unit` invocation stopped during compilation and remains the only broad invocation. Historical 641-test accounting is green. On the current repair, the exact activation Store contract, five daemon activation/replay tests, two SQLite migrations, two Hiqlite schema contracts, and the placeholder-order invariant pass. |
-| Full/cluster/hosted gates | **All required local cluster evidence and both repaired hosted-preflight checks are green locally; the actual hosted rerun is next.** Vendor WAL/Hiqlite probes passed. The replicated Store lane passed 61/67 before six exact placeholder failures; after `4da3bbde`, all six failed three-voter names pass. The complete cluster harness, seven activation tests, and two Activity tests pass. Hosted run `33226975369` stopped on the now-repaired sixteen-count inventory mismatch; rerun `33227941555` stopped on the now-mapped docs-only history classification. Merge remains conditional on exact-head approval and every required GitHub check. |
+| Unit/focused tests | **Green without a second broad local run.** The one full `make unit` invocation stopped during compilation and remains the only broad local invocation. Historical 641-test accounting is green. On the current repair, the exact activation Store contract, five daemon activation/replay tests, two SQLite migrations, two Hiqlite schema contracts, the placeholder-order invariant, and all six exact names exposed by hosted fast Rust pass. |
+| Full/cluster/hosted gates | **All required local cluster evidence is green; hosted final-Rust repairs are exact-green and require one fresh hosted run.** Vendor WAL/Hiqlite probes passed. The replicated Store lane passed 61/67 before six exact placeholder failures; after `4da3bbde`, all six failed three-voter names pass. The complete cluster harness, seven activation tests, and two Activity tests pass. Hosted runs `33226975369` and `33227941555` exposed and closed inventory/history preflight findings. Run `33228540108` passed every other selected job, including the 23-minute replicated Store/topology gate, but fast Rust found four failures plus two obsolete-barrier hangs before its 30-minute cancellation. Those six exact names now pass after unanimous repair review. Merge remains conditional on immutable-tip approval and a wholly green hosted rerun. |
 
 ## Watchdog-removal ledger
 
@@ -340,8 +354,8 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Push the locally green prepublication cut, make hosted checks green,
-   merge it, migrate
+1. Freeze and review the exact repair tip, push it, make the hosted checks
+   wholly green, merge it, migrate
    published-lifetime and copy recovery, and prove the old server watchdog/
    replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress

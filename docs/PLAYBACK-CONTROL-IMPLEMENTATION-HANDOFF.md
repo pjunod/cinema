@@ -8,7 +8,8 @@
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Current review candidate:** the documentation tip above runtime repairs
 through `4da3bbde`, regression evidence closed through `44947095`, and
-hosted-preflight owner-inventory reconciliation `c4a1d96d`.
+hosted-preflight owner-inventory reconciliation `c4a1d96d`, plus the reviewed
+final-Rust repair exposed by hosted run `33228540108`.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -70,12 +71,22 @@ Hosted run `33226975369` stopped in fast preflight on sixteen stale exact-count
 sentinels before downstream jobs. Three reviewers independently recomputed and
 approved the inventory-only `c4a1d96d` repair; the two exact failed validation
 methods pass 2/2, catalog lint passes, and the complete hosted-equivalent Python
-validation catalog passes 68/68. Only docs-bearing exact-head review, push, a
-green hosted rerun, and merge remain for PR #636. Hosted rerun `33227941555`
-stopped solely because docs commit `9ee007a8` matched the corrective-history
-classifier; unanimously reviewed mapping `9471d129` records that docs-only
-scope, and the exact history-policy rerun passes with all 1,100 corrective
-commits accounted.
+validation catalog passes 68/68. Hosted rerun `33227941555` stopped solely
+because docs commit `9ee007a8` matched the corrective-history classifier;
+unanimously reviewed mapping `9471d129` records that docs-only scope, and the
+exact history-policy rerun passes with all 1,100 corrective commits accounted.
+Hosted run `33228540108` passed validation scope, mobile release version,
+policy/contract preflight, WAL recovery, cluster daemon contracts, and the
+complete replicated Store/topology lane. Fast Rust exposed two stale Core
+contracts, a software-admission fixture whose nonexistent source let process
+cleanup race its capacity assertion, a paused-time VOD stress fixture, and two
+playlist tests waiting on a barrier no longer reached by the actor observation
+path; the latter hangs carried the job to its 30-minute cancellation. Three
+review lanes approved the repair in two rounds. The two Core contracts, the
+software admission contract, both playlist races, and the VOD fairness/
+fail-closed contract now pass by exact name. No broad local suite was rerun.
+Only docs-bearing exact-head review, push, a green hosted rerun, and merge
+remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -873,13 +884,17 @@ both exact failed methods pass 2/2. The compile repair plus mapping are frozen i
 `dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
 historical fixture construction and completion assertions are frozen in
 `411bf818` and `4d38a084`.
+Hosted run `33228540108` is the third immutable hosted stop: every selected job
+except fast Rust passed. Its exact six Rust cases are repaired, reviewed, and
+green by name on the current worktree; their commit and immutable-tip review
+are the next freeze.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Commit this documentation refresh and obtain unanimous exact-head review of
-   that exact object ID.
-2. Update the PR body, push the reviewed and locally green candidate to PR
+1. Commit the reviewed final-Rust repair and this documentation refresh, then
+   obtain unanimous exact-head review of that exact object ID.
+2. Update the PR body, push the reviewed and exact-green candidate to PR
    #636, require every hosted check green on the exact final head, merge, and
    continue immediately with the published-lifetime watchdog cut.
 

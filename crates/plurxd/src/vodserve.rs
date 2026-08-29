@@ -898,6 +898,7 @@ impl Drop for VodPreparationGuard {
 #[cfg(test)]
 #[derive(Clone, Copy)]
 enum TerminalRouteTestOutcome {
+    Success,
     Timeout,
     Error,
 }
@@ -3154,6 +3155,7 @@ impl Shared {
             // the distinct variants exist so the regression inventory proves
             // both paths without depending on SQLite scheduler timing.
             return match outcome {
+                TerminalRouteTestOutcome::Success => true,
                 TerminalRouteTestOutcome::Timeout | TerminalRouteTestOutcome::Error => false,
             };
         }
@@ -5095,6 +5097,11 @@ mod tests {
             .await
             .expect("confirm route")
             .expect("route confirmed");
+        store
+            .publish_media_session_activation(7, generation, generation, now_ms)
+            .await
+            .expect("publish route")
+            .expect("route published");
     }
 
     async fn activate_ended_route(store: &SqliteStore, session_id: &str, generation: &str) {
@@ -5962,6 +5969,9 @@ mod tests {
                 .terminal_route_test_outcomes
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for session_id in &ended_ids {
+                outcomes.insert(session_id.clone(), TerminalRouteTestOutcome::Success);
+            }
             outcomes.insert(timeout_id.clone(), TerminalRouteTestOutcome::Timeout);
             outcomes.insert(error_id.clone(), TerminalRouteTestOutcome::Error);
         }

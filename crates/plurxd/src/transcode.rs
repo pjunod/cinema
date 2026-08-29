@@ -4387,6 +4387,19 @@ impl Session {
         (*projected_attempt == producer_attempt).then(|| self.playlist_published.load(Relaxed))
     }
 
+    #[cfg(test)]
+    async fn pause_playlist_publication_for_test(&self) {
+        let pause = self
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
+
     async fn publish_compatibility_playlist(
         &self,
         producer_attempt: u64,
@@ -4396,17 +4409,7 @@ impl Session {
             return false;
         }
         #[cfg(test)]
-        {
-            let pause = self
-                .playlist_publication_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .take();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+        self.pause_playlist_publication_for_test().await;
         if tokio::time::Instant::now().into_std() >= deadline {
             return false;
         }
@@ -17984,6 +17987,8 @@ impl TranscodeManager {
                         segs: parse_playlist(&String::from_utf8_lossy(&bytes)),
                         revision: 0,
                     };
+                    #[cfg(test)]
+                    session.pause_playlist_publication_for_test().await;
                     if !session
                         .control
                         .observe_publication_before(
@@ -25247,9 +25252,19 @@ mod tests {
         assert!(String::from_utf8(bytes)
             .expect("playlist text")
             .contains("seg00001.ts"));
+        let delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert!(delivery.playlist_ready);
+        assert_eq!(delivery.published_segment, Some(1));
+        assert_eq!(delivery.published_end_ms, Some(4_000));
         assert_eq!(
             session.compatibility_playlist_published(successor),
-            Some(true)
+            Some(false),
+            "the read-only fixture does not impersonate response authorization"
         );
     }
 
@@ -27600,13 +27615,19 @@ mod tests {
 
     /// The budget is a bound on *joining*, not on existing: a second session
     /// that does not fit is refused with the reason, and space freed by a
-    /// stop is grantable again.
+    /// permit release is grantable again. Exercise the live-admission boundary
+    /// directly: the metadata-only fixture has no source file, so starting
+    /// ffmpeg would make process-exit cleanup race the capacity assertion.
     #[tokio::test]
     async fn the_software_pool_refuses_what_it_cannot_fit() {
-        super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("seeded file");
         let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
@@ -27621,11 +27642,12 @@ mod tests {
             .expect("budget");
 
         let first = mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-a")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
             .expect("first fits an empty pool");
+        assert_eq!(mgr.admissions.software_in_use(), 6);
         let refused = match mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-b")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
         {
             Err(why) => why,
@@ -27633,12 +27655,15 @@ mod tests {
         };
         assert!(refused.contains("software CPU pool"), "{refused}");
 
-        assert!(mgr.stop_session(&first.session_id, "test").await);
+        drop(first);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
         let second = mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-c")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
             .expect("freed weight is grantable again");
-        assert!(mgr.stop_session(&second.session_id, "test").await);
+        assert_eq!(mgr.admissions.software_in_use(), 6);
+        drop(second);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
     }
 
     /// On a tiny box every session is over budget; the empty-pool exception

@@ -2775,8 +2775,14 @@ mod tests {
             "an already-current pointer must not rewrite its update timestamp"
         );
         assert!(
-            source.contains("AND (state != 'resolved' OR response_json != $1)"),
-            "an exactly resolved request must remain read-only"
+            source.contains("OR (state = 'resolved' AND response_json = $9)))"),
+            "an exact resolved request must remain eligible for read-only replay"
+        );
+        assert!(
+            !source.contains("UPDATE media_session_requests")
+                && !source.contains("INSERT INTO media_session_requests")
+                && !source.contains("DELETE FROM media_session_requests"),
+            "activation may validate an existing request but must not mutate it"
         );
         assert!(
             source.contains("changed.iter().all(|affected| *affected == 0)"),
