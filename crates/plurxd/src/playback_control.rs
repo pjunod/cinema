@@ -2156,6 +2156,10 @@ pub(crate) enum RollingResponsePublicationBinding {
     },
     AttemptMedia {
         producer_attempt: u64,
+        /// Exact numeric HLS segment coordinate for media-segment responses.
+        /// `None` is valid only for non-segment media and init-backed range or
+        /// not-modified responses; the actor validates that relationship.
+        media_segment_index: Option<i64>,
     },
     /// Exact-attempt authorization for a typed status response. Unlike media
     /// publication, this neither closes retry nor claims first-media
@@ -2188,10 +2192,17 @@ impl RollingResponsePublication {
         }
     }
 
-    pub(crate) fn attempt_media(object: RollingResponseObject, producer_attempt: u64) -> Self {
+    pub(crate) fn attempt_media(
+        object: RollingResponseObject,
+        producer_attempt: u64,
+        media_segment_index: Option<i64>,
+    ) -> Self {
         Self {
             object,
-            binding: RollingResponsePublicationBinding::AttemptMedia { producer_attempt },
+            binding: RollingResponsePublicationBinding::AttemptMedia {
+                producer_attempt,
+                media_segment_index,
+            },
         }
     }
 
@@ -3277,6 +3288,9 @@ enum RollingControlCommand {
         installed_attempt: Option<u64>,
         reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
     },
+    ExecutorSettled {
+        reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
+    },
     ClassifyProducerExit {
         evidence: RollingProducerCompletionEvidence,
         deadline: Instant,
@@ -3338,6 +3352,7 @@ impl RollingControlCommand {
             Self::AdmitProducerRetry { .. } => Some(12),
             Self::DecisionApplied { .. } => Some(13),
             Self::ClassifyProducerExit { .. } => Some(16),
+            Self::ExecutorSettled { .. } => Some(17),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -3376,7 +3391,7 @@ impl RollingSessionExecutorInbox {
 #[derive(Default)]
 struct RollingExecutorObservation {
     /// 0=unregistered, 1=idle, 2=executing, 3=terminal, 4=lost,
-    /// 5=queued, 6=acknowledged.
+    /// 5=queued, 6=acknowledged, 7=expected-settled.
     state: AtomicU8,
     last_observed_sequence: AtomicU64,
 }
@@ -3390,6 +3405,7 @@ impl RollingExecutorObservation {
             4 => "lost",
             5 => "queued",
             6 => "acknowledged",
+            7 => "settled",
             _ => "unregistered",
         }
     }
@@ -3405,7 +3421,7 @@ impl RollingExecutorObservation {
         let _ = self
             .state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (!matches!(state, 3 | 4)).then_some(5)
+                (!matches!(state, 3 | 4 | 7)).then_some(5)
             });
     }
 
@@ -3413,14 +3429,14 @@ impl RollingExecutorObservation {
         let _ = self
             .state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (!matches!(state, 3 | 4)).then_some(6)
+                (!matches!(state, 3 | 4 | 7)).then_some(6)
             });
     }
 
     fn begin_observing(&self) -> bool {
         self.state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (!matches!(state, 3 | 4)).then_some(2)
+                (!matches!(state, 3 | 4 | 7)).then_some(2)
             })
             .is_ok()
     }
@@ -3443,8 +3459,21 @@ impl RollingExecutorObservation {
         let _ = self
             .state
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
-                (!matches!(state, 3 | 4)).then_some(4)
+                (!matches!(state, 3 | 4 | 7)).then_some(4)
             });
+    }
+
+    fn settle_expected(&self) -> bool {
+        self.state
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |state| {
+                (!matches!(state, 3 | 4 | 7)).then_some(7)
+            })
+            .is_ok()
+            || self.state.load(Ordering::Acquire) == 7
+    }
+
+    fn is_expected_settled(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 7
     }
 }
 
@@ -3538,6 +3567,27 @@ impl RollingDecisionTransport {
         let envelope = self
             .producer_events
             .seal_command(RollingControlCommand::RegisterProducerExecutor { reply });
+        permit.send(envelope);
+        drop(transition);
+        response
+            .await
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
+    }
+
+    async fn settle_executor_expected(&self) -> Result<(), ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        let permit = self
+            .sender
+            .reserve()
+            .await
+            .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        let transition = self
+            .producer_transition
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let envelope = self
+            .producer_events
+            .seal_command(RollingControlCommand::ExecutorSettled { reply });
         permit.send(envelope);
         drop(transition);
         response
@@ -3730,6 +3780,23 @@ impl RollingProducerExecutorRegistration {
                 );
             }
         }
+    }
+
+    /// Close the sole decision consumer after the actor has durably observed
+    /// either successful completion or applied RetainPublished cleanup. The
+    /// actor validates that terminal producer state before changing the shared
+    /// receiver-close verdict from unexpected loss to expected settlement.
+    pub(crate) async fn settle_expected(&mut self) -> Result<(), ProducerAttemptRejection> {
+        if !self.registered {
+            return Err(ProducerAttemptRejection::ExecutorNotRegistered);
+        }
+        let transport = self
+            .transport
+            .upgrade()
+            .ok_or(ProducerAttemptRejection::ControlUnavailable)?;
+        transport.settle_executor_expected().await?;
+        self.registered = false;
+        Ok(())
     }
 }
 
@@ -4802,7 +4869,13 @@ impl RollingControlActor {
     }
 
     fn mark_executor_lost(&mut self, now: Instant) {
-        if self.retired || self.executor_lost {
+        if self.retired
+            || self.executor_lost
+            || self
+                .decision_wake
+                .executor_observation
+                .is_expected_settled()
+        {
             return;
         }
         self.executor_lost = true;
@@ -5548,8 +5621,23 @@ impl RollingControlActor {
                     first_producer_media_publication: false,
                 })
             }
-            RollingResponsePublicationBinding::AttemptMedia { producer_attempt } => {
+            RollingResponsePublicationBinding::AttemptMedia {
+                producer_attempt,
+                media_segment_index,
+            } => {
                 if publication.object == RollingResponseObject::ProtocolResponse {
+                    return Err(ResponsePublicationRejection::InvalidBinding);
+                }
+                let valid_segment_binding = match publication.object {
+                    RollingResponseObject::MediaSegment => {
+                        media_segment_index.is_some_and(|index| index >= 0)
+                    }
+                    RollingResponseObject::ByteRange | RollingResponseObject::NotModified => {
+                        media_segment_index.is_none_or(|index| index >= 0)
+                    }
+                    _ => media_segment_index.is_none(),
+                };
+                if !valid_segment_binding {
                     return Err(ResponsePublicationRejection::InvalidBinding);
                 }
                 if producer_attempt != self.delivery.producer_attempt {
@@ -5575,6 +5663,15 @@ impl RollingControlActor {
                 // status instead of replaying a partial EVENT playlist.
                 if publication.object == RollingResponseObject::VideoMediaPlaylist
                     && self.has_published_producer_failure_proposal()
+                {
+                    return Err(ResponsePublicationRejection::DecisionCommitted);
+                }
+                if self.has_published_producer_failure_proposal()
+                    && media_segment_index.is_some_and(|index| {
+                        self.delivery
+                            .published_segment
+                            .is_none_or(|published| index > published)
+                    })
                 {
                     return Err(ResponsePublicationRejection::DecisionCommitted);
                 }
@@ -5779,6 +5876,55 @@ impl RollingControlActor {
             self.producer_process_exit_due = None;
         }
         self.decision_wake.executor_observation.acknowledge();
+        Ok(())
+    }
+
+    fn settle_executor_expected_at(&mut self) -> Result<(), ProducerAttemptRejection> {
+        if self.retired {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
+        if self.executor_lost {
+            return Err(ProducerAttemptRejection::ExecutorLost);
+        }
+        let control = self
+            .prepublication
+            .as_ref()
+            .ok_or(ProducerAttemptRejection::DecisionMismatch)?;
+        if !control.executor_registered
+            || self.pending_decision.is_some()
+            || control.pending_probe.is_some()
+        {
+            return Err(ProducerAttemptRejection::DecisionMismatch);
+        }
+        let applied_published_failure = control.producer_media_published
+            && control.failure_applied
+            && control.decision_applied.is_some_and(|applied| {
+                self.last_decision.as_ref().is_some_and(|decision| {
+                    decision.decision_sequence() == applied.decision_sequence
+                        && matches!(
+                            decision.as_ref(),
+                            ProducerDecision::Fail {
+                                proposal: Some(_),
+                                cleanup: ProducerFailureCleanup {
+                                    cleanup_policy: CleanupPolicy::RetainPublished,
+                                    ..
+                                },
+                                ..
+                            }
+                        )
+                })
+            });
+        let completed = !matches!(control.completion, ProducerCompletionState::Incomplete);
+        if !applied_published_failure && !completed {
+            return Err(ProducerAttemptRejection::DecisionMismatch);
+        }
+        if !self
+            .decision_wake
+            .executor_observation
+            .settle_expected()
+        {
+            return Err(ProducerAttemptRejection::ExecutorLost);
+        }
         Ok(())
     }
 
@@ -6217,6 +6363,9 @@ impl RollingControlActor {
                     let _ =
                         reply.send(self.decision_applied_at(decision_sequence, installed_attempt));
                 }
+                RollingControlCommand::ExecutorSettled { reply } => {
+                    let _ = reply.send(self.settle_executor_expected_at());
+                }
                 RollingControlCommand::ClassifyProducerExit {
                     evidence,
                     deadline,
@@ -6475,7 +6624,8 @@ impl RollingControlActor {
                         self.handle_command(command).await;
                     }
                 }
-                _ = executor_wake.closed(), if !self.executor_lost => {
+                _ = executor_wake.closed(), if !self.executor_lost
+                    && !self.decision_wake.executor_observation.is_expected_settled() => {
                     // Executor loss has no sender-side mailbox envelope, so
                     // capture its exact cutoff under the same publication
                     // fence. Commands already sealed before this coordinate,
@@ -7648,7 +7798,7 @@ static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] =
     [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 17] = [const { AtomicU64::new(0) }; 17];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 18] = [const { AtomicU64::new(0) }; 18];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -7935,6 +8085,7 @@ pub(crate) fn prometheus() -> String {
         "commit_generation_metadata",
         "bind_response_publication_contract",
         "classify_producer_exit",
+        "executor_settled",
     ]
     .iter()
     .enumerate()
@@ -11834,7 +11985,11 @@ mod tests {
         assert_eq!(
             actor.authorize_response_publication_at(
                 started,
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    0,
+                    Some(0),
+                ),
             ),
             Err(ResponsePublicationRejection::ProducerNotAdmitted)
         );
@@ -11871,7 +12026,11 @@ mod tests {
         assert!(actor
             .authorize_response_publication_at(
                 started + Duration::from_millis(1),
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    0,
+                    Some(0),
+                ),
             )
             .is_ok());
 
@@ -11879,7 +12038,11 @@ mod tests {
         assert_eq!(
             actor.authorize_response_publication_at(
                 started + Duration::from_millis(2),
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 0,),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    0,
+                    Some(0),
+                ),
             ),
             Err(ResponsePublicationRejection::SessionEnded),
             "a compatibility failure ordered first must close actor publication"
@@ -11910,6 +12073,18 @@ mod tests {
             Ok(1)
         );
         let deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        assert!(actor.observe_publication_at(
+            deadline - Duration::from_millis(1),
+            RollingPublicationObservation {
+                producer_attempt: 1,
+                playlist_ready: true,
+                published_segment: Some(0),
+                published_end_ms: Some(6_000),
+                next_media_sequence: 1,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            },
+        ));
         let handoff = RollingFirstMediaPublicationHandoff::new();
         let handoff_result = handoff.waiter();
         let (reply, response) = tokio::sync::oneshot::channel();
@@ -11923,6 +12098,7 @@ mod tests {
                     publication: RollingResponsePublication::attempt_media(
                         RollingResponseObject::VideoMediaPlaylist,
                         1,
+                        None,
                     ),
                     handoff: Some(handoff),
                     deadline: rolling_now() + Duration::from_secs(1),
@@ -11978,7 +12154,11 @@ mod tests {
         assert!(actor
             .authorize_response_publication_at(
                 deadline + Duration::from_secs(3),
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 1,),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(0),
+                ),
             )
             .is_ok());
         assert!(actor
@@ -12033,12 +12213,25 @@ mod tests {
             .producer_progress_deadline
             .expect("advancing deadline before publication");
         assert_eq!(advancing.mode, ProducerProgressDeadlineMode::Advancing);
+        assert!(actor.observe_publication_at(
+            published_at - Duration::from_millis(1),
+            RollingPublicationObservation {
+                producer_attempt: 1,
+                playlist_ready: true,
+                published_segment: Some(1),
+                published_end_ms: Some(12_000),
+                next_media_sequence: 2,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            },
+        ));
         assert!(actor
             .authorize_response_publication_at(
                 published_at,
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
+                    None,
                 ),
             )
             .is_ok());
@@ -12074,10 +12267,57 @@ mod tests {
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
+                    None,
                 ),
             ),
             Err(ResponsePublicationRejection::DecisionCommitted),
             "new playlist demand must lose to the retained producer verdict"
+        );
+        for object in [
+            RollingResponseObject::MediaSegment,
+            RollingResponseObject::ByteRange,
+            RollingResponseObject::NotModified,
+        ] {
+            assert_eq!(
+                actor.authorize_response_publication_at(
+                    advancing.instant + Duration::from_millis(1),
+                    RollingResponsePublication::attempt_media(object, 1, Some(2)),
+                ),
+                Err(ResponsePublicationRejection::DecisionCommitted),
+                "numeric media beyond the frozen frontier must lose atomically"
+            );
+        }
+        assert!(actor
+            .authorize_response_publication_at(
+                advancing.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::InitializationSegment,
+                    1,
+                    None,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                advancing.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    None,
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                advancing.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::SubtitleSegment,
+                    1,
+                    Some(0),
+                ),
+            ),
+            Err(ResponsePublicationRejection::InvalidBinding)
         );
         assert!(actor
             .authorize_response_publication_at(
@@ -12085,6 +12325,7 @@ mod tests {
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::MediaSegment,
                     1,
+                    Some(0),
                 ),
             )
             .is_ok());
@@ -12097,6 +12338,18 @@ mod tests {
         );
         assert!(!actor.producer_signal_authorized);
         assert!(actor.authorized_install.is_none());
+        assert_eq!(
+            actor.settle_executor_expected_at(),
+            Err(ProducerAttemptRejection::DecisionMismatch),
+            "an unexecuted RetainPublished decision cannot suppress executor loss"
+        );
+        assert_eq!(actor.decision_applied_at(1, None), Ok(()));
+        assert_eq!(actor.settle_executor_expected_at(), Ok(()));
+        actor.mark_executor_lost(advancing.instant + Duration::from_secs(1));
+        let settled = actor.producer_operational_snapshot_at(advancing.instant);
+        assert_eq!(settled.executor_state, "settled");
+        assert_eq!(settled.executor_last_action_failure, None);
+        assert!(!actor.executor_lost);
     }
 
     #[test]
@@ -12126,6 +12379,7 @@ mod tests {
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
+                    None,
                 ),
             )
             .is_ok());
@@ -12207,6 +12461,12 @@ mod tests {
                 .last_probe_outcome,
             "published"
         );
+        assert_eq!(actor.settle_executor_expected_at(), Ok(()));
+        actor.mark_executor_lost(exit_at + Duration::from_secs(2));
+        let settled = actor.producer_operational_snapshot_at(exit_at + Duration::from_secs(2));
+        assert_eq!(settled.executor_state, "settled");
+        assert_eq!(settled.executor_last_action_failure, None);
+        assert!(!actor.executor_lost);
     }
 
     #[test]
@@ -12230,6 +12490,7 @@ mod tests {
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
+                    None,
                 ),
             )
             .is_ok());
@@ -12293,6 +12554,7 @@ mod tests {
                 RollingResponsePublication::attempt_media(
                     RollingResponseObject::VideoMediaPlaylist,
                     1,
+                    None,
                 ),
             )
             .is_ok());
@@ -12419,6 +12681,7 @@ mod tests {
                     publication: RollingResponsePublication::attempt_media(
                         RollingResponseObject::VideoMediaPlaylist,
                         1,
+                        None,
                     ),
                     handoff: Some(handoff),
                     deadline: rolling_now() + Duration::from_secs(1),
@@ -12592,6 +12855,7 @@ mod tests {
                     RollingResponsePublication::attempt_media(
                         RollingResponseObject::VideoMediaPlaylist,
                         1,
+                        None,
                     ),
                     Some(follower_handoff),
                     rolling_now() + Duration::from_secs(1),
@@ -12720,6 +12984,7 @@ mod tests {
                     publication: RollingResponsePublication::attempt_media(
                         RollingResponseObject::VideoMediaPlaylist,
                         1,
+                        None,
                     ),
                     handoff: Some(handoff),
                     deadline: rolling_now() + Duration::from_secs(1),
@@ -12837,7 +13102,11 @@ mod tests {
         assert_eq!(
             decision_first.authorize_response_publication_at(
                 deadline,
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(0),
+                ),
             ),
             Err(ResponsePublicationRejection::DecisionCommitted)
         );
@@ -12853,7 +13122,11 @@ mod tests {
         assert_eq!(
             publication_late.authorize_response_publication_at(
                 deadline + Duration::from_nanos(1),
-                RollingResponsePublication::attempt_media(RollingResponseObject::MediaSegment, 1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(0),
+                ),
             ),
             Err(ResponsePublicationRejection::DecisionCommitted)
         );
