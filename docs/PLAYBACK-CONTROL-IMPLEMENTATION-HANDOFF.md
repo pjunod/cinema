@@ -6,10 +6,12 @@
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Current review candidate:** the PR tip above runtime repairs through
-`4da3bbde`, regression evidence closed through `44947095`, hosted-preflight
-owner-inventory reconciliation `c4a1d96d`, final-Rust repair `c48a9867`, and
-the reviewed hosted-gate repair exposed by run `33230939191`.
+**Current review candidate:** the local committed tip above runtime repairs
+through `4da3bbde`, regression evidence closed through `44947095`,
+hosted-preflight owner-inventory reconciliation `c4a1d96d`, final-Rust repair
+`c48a9867`, hosted-gate repair `600a95aa`, and evidence mapping `700bcdd9`.
+The remote PR still points to `c48a9867` until this corrected documentation tip
+passes immutable review and is pushed.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -18,9 +20,10 @@ Store, lifecycle, and end-to-end integration reviewers unanimously approved
 every repaired source delta with no remaining P0–P3 finding after exact head
 `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached remote-START
 restart-admission loss and the required cluster gate exposed five Hiqlite
-placeholder-order defects. Two independent adversarial lanes approve the
-current hosted-gate repair with no actionable P0–P3 finding. Commit, push, and
-immutable-tip review are next.
+placeholder-order defects. Two independent adversarial lanes approve the code
+and evidence with no actionable P0–P3 finding. Review of exact head `993a67a5`
+requested only this operational-handoff correction. Immutable review of the
+corrected documentation tip, push, hosted rerun, and merge are next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -32,8 +35,9 @@ assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
 cleanup through `77e292d1`; historical-schema fixture and completion proof
 `411bf818` through `4d38a084`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
-**Current candidate identity:** the PR tip containing this handoff; PR #636's
-body pins the exact full object ID because a commit cannot contain its own hash.
+**Current candidate identity:** the local tip containing this handoff; after
+push, PR #636's body pins the exact full object ID because a commit cannot
+contain its own hash.
 **Runtime review state before the serving-fence repair:** exact runtime head
 `b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
 `77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
@@ -892,7 +896,10 @@ gaps described at the top of this handoff. The final three-phase repair is
 frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
 migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
 placeholder-order repair `4da3bbde`. Regression evidence is closed through
-`44947095`; the documentation tip is the immutable review candidate.
+`44947095`; hosted-gate behavior is committed at `600a95aa` and mapped through
+`700bcdd9`. Exact head `993a67a5` was rejected only because this continuation
+section still described the prior six-case state; the current documentation
+tip is the corrected immutable review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; historical owner-inventory corrections are
 frozen in `8af50d8d` and superseded for the current source by unanimously
@@ -902,18 +909,19 @@ both exact failed methods pass 2/2. The compile repair plus mapping are frozen i
 `dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
 historical fixture construction and completion assertions are frozen in
 `411bf818` and `4d38a084`.
-Hosted run `33228540108` is the third immutable hosted stop: every selected job
-except fast Rust passed. Its exact six Rust cases are repaired, reviewed, and
-green by name on the current worktree; their commit and immutable-tip review
-are the next freeze.
+Hosted run `33228540108` exposed six exact Rust cases repaired at `c48a9867`.
+Run `33230939191` then passed every selected job except fast Rust, which exposed
+eight completed failures and one cleanup hang. The integrated repair is
+committed at `600a95aa`, mapped through `700bcdd9`, approved by both adversarial
+lanes, and green for all nine exact names. Package Clippy, formatting, diff,
+catalog, and history gates pass. No broad local suite was rerun.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Commit the reviewed final-Rust repair and this documentation refresh, then
-   obtain unanimous exact-head review of that exact object ID.
-2. Update the PR body, push the reviewed and exact-green candidate to PR
-   #636, require every hosted check green on the exact final head, merge, and
+1. Obtain unanimous exact-head review of the corrected documentation tip.
+2. Push the reviewed and exact-green candidate, update PR #636's body to pin
+   that full object ID, require every hosted check green, merge, and
    continue immediately with the published-lifetime watchdog cut.
 
 Do not skip the adversarial-review gate because an automatically started
