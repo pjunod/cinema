@@ -9,6 +9,7 @@
 (hosted run `33243486511` fully green; merge
 `32af5fa997459174e6b0bfe69bddd72473a1d5f6`)
 **Active branch:** `codex/playback-control-m4-copy-lifetime`
+**Active PR:** [#642](https://github.com/pjunod/plurx/pull/642)
 **Current candidate implementation head:**
 `36f27dd88625c021945978762635937cb3d3fccc`; the copy actor/executor runtime and
 ownership-inventory changes are committed on the active disposable clone.
@@ -969,7 +970,7 @@ preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Freeze the current copy actor/executor and owner-inventory candidate.
+1. Adversarially review exact PR #642 head, then freeze any required repair.
 2. Obtain adversarial review of typed reader/process ordering, the
    `Unsupported`-only retry, direct/takeover immediate classification,
    completion/process rendezvous, cancellation, and exact cleanup ownership.
