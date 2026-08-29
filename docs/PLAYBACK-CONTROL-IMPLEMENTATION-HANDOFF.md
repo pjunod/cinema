@@ -107,8 +107,8 @@ only a successful acknowledgement priority; canceled acknowledgements still
 fall through to body/no-progress deadline or receiver-close classification.
 Both VOD and rolling pumps now share that ordering. Two adversarial lanes
 approve the integrated repair. All nine exact hosted names pass; the complete
-suite has not been rerun locally. Formatting, diff, Clippy, commit, push,
-hosted rerun, and merge remain for PR #636.
+suite has not been rerun locally. Corrected-tip review, push, hosted rerun, and
+merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -897,9 +897,10 @@ frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
 migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
 placeholder-order repair `4da3bbde`. Regression evidence is closed through
 `44947095`; hosted-gate behavior is committed at `600a95aa` and mapped through
-`700bcdd9`. Exact head `993a67a5` was rejected only because this continuation
-section still described the prior six-case state; the current documentation
-tip is the corrected immutable review candidate.
+`700bcdd9`. Exact head `993a67a5` was rejected only because synchronized
+candidate and continuation wording still described the prior uncommitted,
+six-case state; the current documentation tip is the corrected immutable
+review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; historical owner-inventory corrections are
 frozen in `8af50d8d` and superseded for the current source by unanimously
