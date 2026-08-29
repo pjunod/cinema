@@ -158,7 +158,7 @@ pub(crate) async fn start(
 ) -> Result<Response, RemoteStartError> {
     let start_deadline = tokio::time::Instant::now() + START_DEADLINE;
     authorize(&state, &headers, START_PATH, &body).await?;
-    let _restart_admission = state
+    let restart_admission = state
         .serving
         .try_restart_admission()
         .await
@@ -184,6 +184,7 @@ pub(crate) async fn start(
     // this HTTP future cannot strand the worker before the watcher is armed.
     let start_state = state.clone();
     let start_task = tokio::spawn(async move {
+        let _restart_admission = restart_admission;
         let started = start_state
             .transcode
             .create_cluster_session(
