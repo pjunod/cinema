@@ -563,17 +563,17 @@ expected_occurrences = 8
 [[module_symbols]]
 id = "m4-serving-authority-projection"
 pattern = "ServingAuthority"
-expected_occurrences = 7
+expected_occurrences = 14
 
 [[module_symbols]]
 id = "m4-serving-authority-commit-guard"
 pattern = "commit_guard_before"
-expected_occurrences = 3
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "m4-serving-authority-admission-token"
 pattern = "admitted_serving_generation"
-expected_occurrences = 12
+expected_occurrences = 24
 
 [[module_symbols]]
 id = "m4-owner-bound-status-publication"
@@ -603,7 +603,7 @@ expected_occurrences = 2
 [[module_symbols]]
 id = "m4-exact-activation-handoff-arm"
 pattern = "arm_media_session_handoff"
-expected_occurrences = 2
+expected_occurrences = 1
 
 [[module_symbols]]
 id = "m4-durable-projection-completion-proof"
@@ -613,7 +613,7 @@ expected_occurrences = 18
 [[module_symbols]]
 id = "m4-activation-handoff-proof"
 pattern = "(?:ActivationHandoffVerdict|complete_activation_handoff_until|project_activation_predecessor_until)"
-expected_occurrences = 18
+expected_occurrences = 22
 
 [[module_symbols]]
 id = "m4-durable-release-proof"
@@ -633,22 +633,22 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-activation-publication-handoff-fence"
 pattern = "publication_ready_at_ms"
-expected_occurrences = 43
+expected_occurrences = 68
 
 [[module_symbols]]
 id = "m4-durable-projection-safety-window"
 pattern = "MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS"
-expected_occurrences = 2
+expected_occurrences = 3
 
 [[module_symbols]]
 id = "m4-durable-publication-blocked-sentinel"
 pattern = "MEDIA_SESSION_PUBLICATION_BLOCKED"
-expected_occurrences = 6
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-terminal-projection-safety-window"
 pattern = "TERMINAL_PROJECTION_SAFETY_WINDOW"
-expected_occurrences = 10
+expected_occurrences = 9
 
 [[module_symbols]]
 id = "m4-cluster-make-before-break"
@@ -733,7 +733,7 @@ expected_occurrences = 10
 [[module_symbols]]
 id = "m4-durable-terminal-cause"
 pattern = "terminal_reason"
-expected_occurrences = 17
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-release-terminal-cause"
@@ -873,7 +873,7 @@ expected_occurrences = 14
 [[module_symbols]]
 id = "m4-vod-preparing-owner"
 pattern = "(?:VodPreparationGuard|preparing_sessions|begin_preparing_session|owns_or_preparing|live_or_preparing_session_ids|begin_vod_preparation)"
-expected_occurrences = 28
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-cancellation-independent-vod-build-owner"
@@ -926,12 +926,12 @@ expected_occurrences = 9
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 349
+expected_occurrences = 355
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 38
+expected_occurrences = 40
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -941,7 +941,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 478
+expected_occurrences = 494
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -964,7 +964,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 174
+expected_occurrences = 177
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -979,7 +979,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 306
+expected_occurrences = 312
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
