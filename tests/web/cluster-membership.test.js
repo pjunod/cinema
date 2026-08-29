@@ -68,6 +68,15 @@ const BORROWED = [
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
+  "clusterDatabaseStatus",
+  "clusterCapacityText",
+  "clusterDatabaseHealth",
+  "clusterHealthPill",
+  "clusterDatabaseRows",
+  "clusterDatabasePanel",
+  "clusterTabButton",
+  "clusterDiagnosticsFacts",
+  "clusterTroubleshootingPanel",
   "joinPanel",
   "leavePanel",
   "joinTokenHtml",
@@ -893,7 +902,8 @@ test("the healthy cluster layout combines node membership and operations evidenc
   assert.match(html, /WAL, snapshot, and protocol details/);
   assert.match(html, /class="clcontextfact">[\s\S]*Watch state/);
   assert.match(html, /class="clcontextfact">[\s\S]*Capacity/);
-  assert.match(html, /<h3>Maintenance &amp; leadership<\/h3>/);
+  assert.match(html, /<h3>Maintenance<\/h3>/);
+  assert.match(html, /<h3>Planned work<\/h3>/);
   assert.match(html, /Enter maintenance/);
   assert.match(html, /Force election/);
   assert.match(html, /Danger zone · membership changes/);
@@ -1340,6 +1350,158 @@ test("the typed refusal code survives the fetch helper", () => {
   const api = shippedSource("api");
   assert.match(api, /code=b\.code\|\|null/);
   assert.match(api, /error\.code=code/);
+});
+
+// ---- the replicated database section --------------------------------------
+// The store used to have no section of its own: one run-on sentence between the
+// node cards, and everything else about Raft either inside a node's evidence or
+// only in /metrics. These pin the section, and pin where each reading comes
+// from — a wrong source here reads as a plausible number, which is worse than a
+// blank.
+
+test("the replicated database is its own section with the store's own readings", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({
+    cluster,
+    clusterOps: operationStatus(cluster),
+    sys: { replication: REPLICATION },
+  });
+  assert.match(html, /<h3>Replicated database<\/h3>/);
+  assert.match(html, /id="cluster-database"/);
+  assert.match(html, /<dt>Quorum commit<\/dt><dd class="num">482191<\/dd>/);
+  assert.match(html, /<dt>Term<\/dt><dd class="num">81<\/dd>/);
+  assert.match(html, /<dt>Apply lag<\/dt><dd class="num">0 entries<\/dd>/);
+  assert.match(html, /<dt>Protocol<\/dt><dd class="num">5–6<\/dd>/);
+  assert.match(html, /<dt>Snapshots<\/dt><dd class="num">build 9 ok \/ 0 error · install 2 ok \/ 0 error<\/dd>/);
+  assert.match(html, /<dt>Applied here<\/dt><dd class="num">912/);
+  // The store's facts sit in the store's column: watch state must reach the
+  // page before the node roster, not inside it.
+  assert.ok(
+    html.indexOf("Watch state") < html.indexOf("<h3>Cluster nodes</h3>"),
+    "watch state is still rendered inside the node card",
+  );
+});
+
+test("the database section states its health in the header", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const html = ui.clusterPanel({ cluster, clusterOps: ops, sys: { replication: REPLICATION } });
+  assert.match(html, /class="pill"[^>]*>In sync</);
+});
+
+test("the quorum watermark is the quorum's, not this node's applied index", () => {
+  // The fixture above has commit == applied, which would let the watermark be
+  // read from the wrong field and still look right. Separate them: a follower
+  // that is four entries behind must show the quorum's commit, its own applied
+  // index, and the gap between them.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const behind = operationStatus(cluster);
+  const local = behind.nodes.find((row) => row.membership.node_id === cluster.local_node_id);
+  local.status.raft.commit_index = 482195;
+  local.status.raft.applied_index = 482191;
+  local.status.raft.apply_lag_entries = 4;
+  const rows = new Map(
+    ui.clusterDatabaseRows(cluster, { ...REPLICATION, last_applied_index: 482191, behind_by: 4 }, behind)
+      .map((row) => [row[0], row[1]]),
+  );
+  assert.equal(rows.get("Quorum commit"), "482195");
+  assert.match(rows.get("Applied here"), /^482191/);
+  assert.equal(rows.get("Apply lag"), "4 entries");
+  assert.equal(rows.get("Behind by"), "4 changes");
+});
+
+test("database readings say unknown instead of inventing a number", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
+  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
+  assert.equal(rows.get("Term"), "unknown");
+  assert.equal(rows.get("Quorum commit"), "unknown");
+  assert.equal(rows.get("Apply lag"), "unknown");
+  assert.equal(rows.get("Protocol"), "unknown");
+  // The membership projection is a different source and is still present, so
+  // the applied index must not be blanked along with the direct sample.
+  assert.match(rows.get("Applied here"), /^912/);
+  assert.match(rows.get("Reading age"), /stale or incomplete proof/);
+});
+
+test("a single-node install reads as one node, never as redundancy", () => {
+  const ui = sandbox();
+  const sqlite = {
+    backend: "sqlite",
+    health: "healthy",
+    clustered: false,
+    explanation: "Watch state is stored on this server only.",
+  };
+  const html = ui.clusterPanel({
+    cluster: { unavailable: true, code: "membership_unavailable", nodes: [] },
+    sys: { replication: sqlite },
+  });
+  assert.match(html, /<h3>Replicated database<\/h3>/);
+  assert.match(html, /SQLite single-node/);
+  assert.match(html, /class="pill"[^>]*>Single node</);
+  assertNoRedundancyClaim(html, "the single-node database section");
+});
+
+
+
+
+
+
+// ---- troubleshooting -------------------------------------------------------
+
+test("troubleshooting is one section with exactly one visible pane", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({
+    cluster,
+    clusterOps: operationStatus(cluster),
+    sys: { replication: REPLICATION },
+  });
+  assert.match(html, /<h3>Troubleshooting<\/h3>/);
+  assert.equal((html.match(/role="tab"/g) || []).length, 3);
+  // The log pane is the open one; the other two ship hidden so exactly one
+  // answer is on screen at a time.
+  assert.match(html, /id="cltab-log" aria-selected="true"/);
+  assert.match(html, /id="clpane-log" role="tabpanel"[^>]*>/);
+  assert.match(html, /id="clpane-readings"[^>]*hidden/);
+  assert.match(html, /id="clpane-refusals"[^>]*hidden/);
+  assert.match(html, /id="cllogbox"/);
+  assert.match(html, /Heartbeat quorum/);
+  assert.match(html, /2 of 3 voters must agree on every write/);
+});
+
+test("a refusal is kept in troubleshooting, not spent on a toast", () => {
+  const ui = sandbox({
+    refusal: { node_id: "node-b", code: "node_owns_offline_work", message: "" },
+  });
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
+  const pane = html.slice(html.indexOf('id="clpane-refusals"'));
+  assert.match(pane, /Cluster operation for node-b was refused/);
+  assert.match(pane, /offline download/i);
 });
 
 process.exit(failures ? 1 : 0);
