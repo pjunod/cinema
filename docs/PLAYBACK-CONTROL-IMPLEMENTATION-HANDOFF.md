@@ -7,7 +7,7 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Current review candidate:** the documentation tip above runtime repairs
-through `4da3bbde`, with regression evidence closed through `c8467a9a`.
+through `4da3bbde`, with regression evidence closed through `44947095`.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -853,7 +853,7 @@ gaps described at the top of this handoff. The final three-phase repair is
 frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
 migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
 placeholder-order repair `4da3bbde`. Regression evidence is closed through
-`c8467a9a`; the documentation tip is the immutable review candidate.
+`44947095`; the documentation tip is the immutable review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
 `8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
