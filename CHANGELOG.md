@@ -23,7 +23,10 @@ bump may break compatibility and a **patch** bump never does.
   **Maintenance** collects the restart-readiness verdict, planned work, and
   the Danger zone, and **Troubleshooting** collects the cluster log, the
   quorum and sample readings, and the last refusal behind one tab strip.
-  Missing readings say `unknown` rather than borrowing a neighbouring field.
+  Missing readings say `unknown` rather than borrowing a neighbouring field, a
+  proven-unavailable store says so instead, and a machine that is not in a
+  cluster gets the short version of the tab rather than a roster, a
+  restart-safety verdict and a ledger of unknowns for a Raft it does not run.
 
 - **The Cluster tab remembers what you folded.** The database section and each
   node card fold; a folded database keeps its health pill and a one-line

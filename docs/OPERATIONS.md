@@ -328,13 +328,23 @@ Danger zone that mints join tokens and removes members. **Troubleshooting**
 holds the cluster log, the quorum and sample readings, and the last refusal,
 one tab at a time.
 
+A machine that is not in a cluster gets a shorter version of the same tab:
+the banner, a **Replicated database** section that names the backend and says
+there are no peers, and **Troubleshooting**. There is no roster, no
+restart-readiness verdict and no maintenance section, because none of them
+describe a single machine — and eleven `unknown` rows would read as a failed
+read rather than as an install with no Raft in it.
+
 Both **Replicated database** and the node cards fold. The database section
 keeps its health pill and a one-line summary — leader, term, commit, applied,
 lag, last converged — when it is collapsed, so folding hides the detail and
 never the verdict. What is folded is remembered in this browser and nowhere
 else, keyed by node id rather than by row, so a node leaving the cluster does
 not collapse whichever card takes its place. A browser with site data blocked
-simply gets the defaults: everything expanded.
+simply gets the defaults: everything expanded. The selected Troubleshooting tab
+is remembered the same way, because an operational change repaints this panel
+and would otherwise snap you back to the log every few seconds while you watch
+a node drain.
 
 The cluster-wide operational verdict and its quorum/build/sample facts sit in
 **Maintenance** rather than beside the roster, because they authorize one
