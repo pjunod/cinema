@@ -72,11 +72,21 @@ const BORROWED = [
   "clusterCapacityText",
   "clusterDatabaseHealth",
   "clusterHealthPill",
+  "clusterDatabaseSummary",
   "clusterDatabaseRows",
   "clusterDatabasePanel",
   "clusterTabButton",
   "clusterDiagnosticsFacts",
   "clusterTroubleshootingPanel",
+  "clusterFoldKey",
+  "clusterFoldRead",
+  "clusterFoldWrite",
+  "clusterNodeFoldId",
+  "clusterNodeFoldLater",
+  "clusterNodeFoldSave",
+  "applyClusterFolds",
+  "setClusterDatabaseFold",
+  "toggleClusterDatabase",
   "joinPanel",
   "leavePanel",
   "joinTokenHtml",
@@ -1387,7 +1397,7 @@ test("the replicated database is its own section with the store's own readings",
   );
 });
 
-test("the database section states its health in the header", () => {
+test("the database section is foldable and keeps its verdict folded", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
@@ -1396,6 +1406,17 @@ test("the database section states its health in the header", () => {
   ]);
   const ops = operationStatus(cluster);
   const html = ui.clusterPanel({ cluster, clusterOps: ops, sys: { replication: REPLICATION } });
+  // Ships open; the summary is the folded state and is hidden until then.
+  assert.match(html, /id="cldb-toggle"[^>]*aria-expanded="true"[^>]*>Hide</);
+  assert.match(html, /id="cluster-database-summary" hidden/);
+  // Folding hides the detail, never the verdict: the pill stays in the header
+  // and the summary keeps the readings somebody checks before expanding again.
+  const summary = ui.clusterDatabaseSummary(cluster, REPLICATION, ops);
+  assert.match(summary, /leader <b>node-a<\/b>/);
+  assert.match(summary, /term <b>81<\/b>/);
+  assert.match(summary, /commit <b>482191<\/b>/);
+  assert.match(summary, /applied <b>912<\/b>/);
+  assert.match(summary, /lag <b>0<\/b>/);
   assert.match(html, /class="pill"[^>]*>In sync</);
 });
 
@@ -1457,10 +1478,159 @@ test("a single-node install reads as one node, never as redundancy", () => {
   assertNoRedundancyClaim(html, "the single-node database section");
 });
 
+// ---- folding, and remembering it ------------------------------------------
+// The fold is a per-browser convenience. These pin the two properties that
+// matter: it is keyed by node id rather than by row, and a browser that refuses
+// storage still gets a working panel.
 
+function foldDom({ cards = [], toggle = null, database = null } = {}) {
+  const byId = {};
+  if (toggle) byId["clnodes-toggle"] = toggle;
+  if (database) Object.assign(byId, database);
+  return {
+    querySelectorAll: () => cards,
+    getElementById: (id) => byId[id] || null,
+  };
+}
 
+function foldCard(nodeId, open) {
+  return {
+    open,
+    querySelector: () => ({ getAttribute: () => nodeId }),
+  };
+}
 
+function withDom(document, localStorage, run) {
+  const priorDocument = global.document;
+  const priorStorage = Object.getOwnPropertyDescriptor(global, "localStorage");
+  global.document = document;
+  if (localStorage === "blocked") {
+    Object.defineProperty(global, "localStorage", {
+      configurable: true,
+      get() {
+        throw new Error("site data is blocked in this browser");
+      },
+    });
+  } else {
+    Object.defineProperty(global, "localStorage", { configurable: true, value: localStorage });
+  }
+  try {
+    return run();
+  } finally {
+    global.document = priorDocument;
+    delete global.localStorage;
+    if (priorStorage) Object.defineProperty(global, "localStorage", priorStorage);
+  }
+}
 
+function fakeStorage(seed = {}) {
+  const map = new Map(Object.entries(seed));
+  return {
+    getItem: (key) => (map.has(key) ? map.get(key) : null),
+    setItem: (key, value) => map.set(key, String(value)),
+    read: (key) => map.get(key),
+  };
+}
+
+test("a collapsed node is remembered by node id, not by its row", () => {
+  const ui = sandbox();
+  const storage = fakeStorage();
+  const toggle = { textContent: "Collapse all", setAttribute() {}, focus() {} };
+  const cards = [foldCard("node-a", true), foldCard("node-b", false), foldCard("node-c", true)];
+  withDom(foldDom({ cards, toggle }), storage, () => ui.clusterNodeFoldSave());
+  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { nodes_closed: ["node-b"] });
+
+  // node-b has since left the cluster and node-d has joined. The stored set is
+  // keyed by id, so node-d does not inherit node-b's collapsed row.
+  const next = [foldCard("node-a", true), foldCard("node-d", true), foldCard("node-c", true)];
+  withDom(foldDom({ cards: next, toggle }), storage, () => ui.applyClusterFolds());
+  assert.deepEqual(
+    next.map((card) => card.open),
+    [true, true, true],
+  );
+
+  const again = [foldCard("node-a", true), foldCard("node-b", true)];
+  withDom(foldDom({ cards: again, toggle }), storage, () => ui.applyClusterFolds());
+  assert.deepEqual(
+    again.map((card) => card.open),
+    [true, false],
+  );
+});
+
+test("a browser that refuses storage still gets the shipped defaults", () => {
+  const ui = sandbox();
+  const toggle = { textContent: "Collapse all", setAttribute() {}, focus() {} };
+  const cards = [foldCard("node-a", true), foldCard("node-b", false)];
+  withDom(foldDom({ cards, toggle }), "blocked", () => {
+    // Neither the restore nor the save may throw, and neither may rewrite the
+    // markup's own defaults on the way past.
+    ui.applyClusterFolds();
+    ui.clusterNodeFoldSave();
+    assert.equal(ui.clusterFoldRead(), null);
+  });
+  assert.deepEqual(
+    cards.map((card) => card.open),
+    [true, false],
+  );
+});
+
+test("folding the database flips its control and is remembered", () => {
+  const ui = sandbox();
+  const storage = fakeStorage();
+  const body = { hidden: false };
+  const summary = { hidden: true };
+  const button = {
+    textContent: "Hide",
+    attrs: {},
+    setAttribute(name, value) {
+      this.attrs[name] = value;
+    },
+    focus() {},
+  };
+  const dom = foldDom({
+    database: {
+      "cluster-database": body,
+      "cluster-database-summary": summary,
+      "cldb-toggle": button,
+    },
+  });
+  withDom(dom, storage, () => ui.toggleClusterDatabase(button));
+  assert.equal(body.hidden, true);
+  assert.equal(summary.hidden, false);
+  assert.equal(button.textContent, "Show");
+  assert.equal(button.attrs["aria-expanded"], "false");
+  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { database: false });
+
+  withDom(dom, storage, () => ui.toggleClusterDatabase(button));
+  assert.equal(body.hidden, false);
+  assert.equal(summary.hidden, true);
+  assert.equal(button.textContent, "Hide");
+  assert.equal(button.attrs["aria-expanded"], "true");
+  assert.deepEqual(JSON.parse(storage.read("plurx.cluster.fold")), { database: true });
+});
+
+test("a page load cannot overwrite the remembered folds", () => {
+  // Chrome fires one `toggle` per <details open> while the panel is parsed, so
+  // persisting from `ontoggle` overwrites the stored set with "everything open"
+  // on every visit. Measured in a real browser, not assumed. The card persists
+  // from a click — a real gesture — and `ontoggle` stays presentational.
+  const row = shippedSource("clusterNodeRow");
+  assert.match(row, /ontoggle="syncClusterNodeToggle\(\)"/);
+  assert.doesNotMatch(row, /ontoggle="[^"]*clusterNodeFoldSave/);
+  assert.match(row, /onclick="clusterNodeFoldLater\(\)"/);
+  // And the click saves after the card's open state has actually flipped.
+  assert.match(shippedSource("clusterNodeFoldLater"), /setTimeout\(clusterNodeFoldSave,0\)/);
+});
+
+test("the fold never carries anything but the fold", () => {
+  // The panel holds a live join credential in memory. The fold is the one thing
+  // on this screen that is allowed to reach browser storage, so pin its shape.
+  const write = shippedSource("clusterFoldWrite");
+  assert.match(write, /localStorage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
+  assert.match(shippedSource("clusterNodeFoldSave"), /nodes_closed/);
+  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldWrite\(\{database:open\}\)/);
+  assert.doesNotMatch(shippedSource("clusterDatabasePanel"), /localStorage/);
+});
 
 // ---- troubleshooting -------------------------------------------------------
 
