@@ -2,7 +2,7 @@
 
 **Status:** implementation contract; copy-lifetime cut frozen at
 PR [#642](https://github.com/pjunod/plurx/pull/642), candidate
-implementation `36f27dd88625c021945978762635937cb3d3fccc`, awaiting final validation
+implementation checkpoint `73f04d06c2870dabbea5cf5f45d423937ebc8858`, awaiting final hosted validation
 **Contract baseline:** `9063bb1e` (PR #626)
 **Current merged baseline:** `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
 (PR #641)
@@ -62,11 +62,11 @@ retry.
 
 This cut changes no client wire and continues to return `action:none`. The
 compatible server must deploy before separate passive Apple and Android
-reporter PRs; active mobile action consumption follows later. No broad unit
-suite has run. Compile-only
-`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds,
-and the ownership recount has zero mismatches across 32 source symbols and
-seven entrypoints. The first adversarial pass found a P2 `Unsupported`/EPIPE
+reporter PRs; active mobile action consumption follows later. The one broad
+unit run is consumed and all five failures pass by exact name. Compile-only
+`cargo check --locked -p plurxd --features live-hls-recovery --tests`, the
+complete static gates, the ownership recount, and unrestricted cluster
+validation succeed. The first adversarial pass found a P2 `Unsupported`/EPIPE
 ordering race; the repair retains `ChildStdout` through typed actor
 classification and adds a both-order actor test. A second independent review
 found a P2 where local `SessionDir.started`/playlist existence downgraded
@@ -86,8 +86,12 @@ current-worktree reviews formally approve all three runtime fixes with no
 actionable P0–P3. Corrected `fmp4`/`copyseg` comments
 state that malformed input is a reader failure, structural `Unsupported` is
 actor/publication-gated, and odd-track handling is not an unconditional
-fallback. The one broad unit run, remaining static checks, cluster/hosted
-gates, PR, and merge remain.
+fallback. Hosted run `33253810937` later exposed a loaded-runner post-CAS
+freshness misclassification in the cluster harness; its fast Rust job was
+cancelled after that failure and must complete in the replacement run. Reviewed
+`cf3bdcb9` keeps fresh-quorum mutation admission and exact leader/term fencing,
+adds a focused regression, and passes the complete local cluster harness. A
+final exact pushed-head review, wholly green hosted rerun, and merge remain.
 
 ## 2. Existing owners and their replacement
 
@@ -1006,32 +1010,32 @@ misclassified as a watchdog.
 
 ## 10. Verification order
 
-Per the delivery instruction, implementation is reviewed adversarially before
-unit tests run. Steps 1–5 are represented in the active candidate
-tree; their correctness and owner counts are not accepted until step 7. No
-broad unit run has occurred. Compile-only
-`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds
-without executing tests, and the static ownership recount is clean at 32
-source symbols and seven entrypoints, including 15 `RetainPublished` owners.
+Per the delivery instruction, implementation was reviewed adversarially before
+the one broad local unit run. Steps 1–10 are complete locally. That run is
+consumed and must not be repeated: its five failures all pass by exact name
+after reviewed repairs. The checked owner catalog, compile/static gates, and
+one unrestricted cluster run are green; the later hosted cluster correction
+also passes its exact regression and complete focused cluster harness.
 
-1. Generate the checked source catalog of every child/recovery/failure owner
-   and map each current `child_transition` invariant.
-2. Implement actor state, exact deadline, decision channel, and model tests.
-3. Implement the process executor and migrate transcode/copy paths.
-4. Delete the old tasks, locks, atomics, and replacement helpers.
-5. Add status, metrics, and the repository ownership check.
-6. Open or update the implementation PR at the frozen cumulative head.
-7. Obtain adversarial review of that exact PR head; fix every finding and
-   repeat exact-head review before running unit tests.
-8. Run the full local unit suite once on that reviewed merge candidate. If it
-   fails, repair the cause and rerun only the failed or directly affected
-   tests; do not restart the full suite.
-9. Review every behavioral repair and restore exact-head approval.
-10. Run the required non-unit cluster/integration gate because terminal,
-    owner-fence, and producer-action ordering cross cluster ownership.
-11. Require every hosted job to pass and merge only while the reviewed head is
-    unchanged. Hosted PR validation remains required and is distinct from the
-    single local full-suite run.
+1. **Complete:** generate the checked source catalog and map every current
+   child/recovery/failure owner and `child_transition` invariant.
+2. **Complete:** implement actor state, exact deadline, decision channel, and
+   model tests.
+3. **Complete:** implement the process executor and migrate transcode/copy
+   paths.
+4. **Complete:** delete the old tasks, locks, atomics, and replacement helpers.
+5. **Complete:** add status, metrics, and the repository ownership check.
+6. **Complete:** open PR #642 at the cumulative branch head.
+7. **Complete for the unit boundary:** obtain adversarial review before the
+   broad run and review every later behavioral repair by exact delta.
+8. **Consumed:** run the broad local unit suite once; repair and rerun only the
+   five failed or directly affected names.
+9. **Complete locally:** restore approval for every behavioral repair and
+   validation correction. A cumulative final-PR-head review remains required.
+10. **Complete locally:** run the non-unit cluster/integration gate because
+    terminal, owner-fence, and producer-action ordering cross cluster ownership.
+11. **Pending:** require cumulative exact-head approval and every hosted job to
+    pass, then merge only while that reviewed head is unchanged.
 
 ## 11. Acceptance
 

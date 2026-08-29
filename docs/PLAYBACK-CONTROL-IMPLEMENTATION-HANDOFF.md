@@ -11,38 +11,46 @@
 **Active branch:** `codex/playback-control-m4-copy-lifetime`
 **Active PR:** [#642](https://github.com/pjunod/plurx/pull/642)
 **Validated implementation checkpoint immediately before this status commit:**
-`0f7a2818b21612a728d4a56bfb68667f6c02529c` in the disposable clone at
+`73f04d06c2870dabbea5cf5f45d423937ebc8858` in the disposable clone at
 `/private/tmp/plurx-playback-control-clone`.
 **Remote PR head when this update was authored:**
-`b97daae5e4205278b68ec3719d7f1937e91b0407`. The two locally committed changes
-to push with this status update are:
+`330eac509bfac0c499b6589f636503a5b9860348`. The two locally committed cluster
+gate corrections to push with this status update are:
 
 ```text
-e56161b8 test(playback): exercise client fetch response lifecycle
-0f7a2818 chore(validation): map PR 642 playback evidence
+cf3bdcb9 fix(cluster): distinguish quorum age from topology change
+73f04d06 chore(validation): bind cluster CAS topology evidence
 ```
 
-The status commit containing this update is intended to be pushed with both.
-If this document is visible on PR #642, use that branch tip and verify its
-ancestry includes the hashes above.
+Hosted run `33253810937` for `330eac50` passed validation scope, mobile
+version, policy/contract preflight, WAL recovery, and cluster daemon contracts.
+Its replicated Store contract passed 67/67, but the live membership harness
+misclassified an aged one-second quorum-freshness observation as a topology
+change after an already acknowledged artwork-generation CAS. Commit
+`cf3bdcb9` keeps the fresh-quorum mutating admission and exact leader/term
+proof, ignores only that post-CAS observation age, and adds an exact regression
+for fresh/aged identity plus changed/missing leader and changed term. An
+independent adversarial review approved the correction with no P0–P3 finding.
+The exact regression passed 1/1 and the complete unrestricted
+`make cluster-harness-check` passed compacted growth, membership 1→3→2,
+self-leave, learner, singleton, serving partition, failure drills, and
+three/four-voter topology. `make history-check`, `make validation-lint`,
+formatting, and diff inspection are green.
 
-Hosted run `33252387209` for `b97daae5` stopped in `history-check` because
-corrective test commit `f94b82da` lacked its own append-only regression
-mapping. Commit `0f7a2818` adds the reviewed mapping; local
-`make validation-lint` and `make history-check` are green. No hosted run covers
-`e56161b8` or `0f7a2818` yet.
+The same hosted run's fast Rust job was cancelled after the cluster lane
+failed. It did not provide unit evidence and must finish successfully in the
+replacement run.
 
-At local head `0f7a2818`, the only intended tracked worktree change is this
-status update. The preserved, unrelated build artifacts at
+All five failures from the one consumed broad unit run pass by exact name. The
+complete static gate set and one unrestricted `make cluster-check` also passed
+at the preceding `330eac50` candidate. Do not repeat the broad local suite.
+The only remaining gate is to push this documentation snapshot with the two
+cluster commits, obtain final exact-head approval, require the replacement
+hosted run to finish wholly green, and merge PR #642.
+
+The preserved, unrelated build artifacts at
 `vendor/hiqlite/target/` and `vendor/hiqlite-wal/target/` remain untracked. Do
 not delete or commit them.
-
-> **Stale-artifact warning:** `PLAYBACK-CONTROL-STATUS.md`,
-> `PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`, and `STATUS.html` still
-> say the active cut has not consumed its broad unit run and may instruct a
-> successor to run it. That is false. Treat this handoff as authoritative until
-> those three artifacts are synchronized during the remaining final gates. Do
-> not repeat the broad suite.
 
 ## Opus continuation checkpoint
 
@@ -128,26 +136,13 @@ from the consumed broad run are therefore accounted green by exact name.
 
 ### Gates remaining
 
-1. Refresh this handoff, `PLAYBACK-CONTROL-STATUS.md`,
-   `PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`, and `STATUS.html` with
-   the final local head and validation facts.
-2. Run `cargo fmt --all`, `git diff --check`, `make validation-lint`,
-   `make history-check`, `make operations-check`, `make benchmark-check`,
-   `make fmt-check`, `make lint`, and `make web-check`. These are the intended
-   non-broad gates. If history classifies a later corrective or docs commit,
-   add an append-only `validation/regressions.d` record; never rewrite an
-   existing mapping.
-3. Run `make cluster-check` once on an unrestricted idle host. It binds
-   loopback ports, starts child voters/daemons, and writes validation artifacts;
-   sandbox bind denial is environmental, not product evidence.
-4. Push the final fixture/docs/gate commits to
-   `codex/playback-control-m4-copy-lifetime` and verify PR #642 points to the
-   exact local candidate. All earlier repair, validation, and handoff commits
-   should already be present as its ancestry; do not omit or rewrite them.
-5. Obtain fresh independent exact-head adversarial approval of that pushed PR
+1. Commit and push this four-document status synchronization with `cf3bdcb9`
+   and `73f04d06`; verify PR #642 points to the exact local branch tip.
+2. Obtain fresh independent exact-head adversarial approval of that pushed PR
    head. Resolve every P0–P3 and repeat exact review after any change.
-6. Require every hosted check green, then merge PR #642. Do not merge a red,
-   skipped, unreviewed, or locally divergent head.
+3. Monitor every required hosted check. Diagnose and correct any failure by
+   its exact name; do not repeat the broad local unit suite.
+4. Merge PR #642 only when the exact reviewed head is wholly green.
 
 After #642 merges, keep the server-first rollout: old mobile apps continue on
 compatible HLS/status behavior. Implement passive Apple and Android protocol
@@ -1014,13 +1009,15 @@ preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Push `e56161b8`, `0f7a2818`, and this status update. Confirm PR #642 points
-   at the exact branch tip and its new hosted run starts.
-2. Refresh the other three status/contract artifacts, then run only the named
-   static/non-unit gates plus one unrestricted `make cluster-check`.
-3. Obtain fresh exact-PR-head adversarial approval. Resolve every P0–P3 before
-   treating the candidate as frozen.
-4. Require every hosted check green, then merge #642.
+1. Finish this four-document synchronization, then rerun only its affected
+   non-unit checks: formatting/diff, history/catalog, and web policy. Do not
+   repeat the broad unit or unrestricted cluster gates.
+2. Commit and push the synchronized head with `cf3bdcb9` and `73f04d06`.
+   Confirm PR #642 points at that exact branch tip and a new hosted run starts.
+3. Obtain a cumulative exact-PR-head adversarial review across the complete
+   branch, not merely the latest delta. Resolve every P0–P3 before freezing it.
+4. Monitor every hosted check, diagnose any exact failure, and merge #642 only
+   when the reviewed head is wholly green.
 
 Do not skip the adversarial-review gate even if a future automatically started
 hosted workflow is green. The user explicitly ordered adversarial
@@ -1374,10 +1371,9 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After merged PR #641, the remaining work is:
 
-1. Complete #642's remaining static, unrestricted cluster, exact-head, and
-   hosted gates. Its production-faithful real-FFmpeg lifecycle fixture is green
-   by exact name; the active cut's one broad unit run is already consumed and
-   must not be repeated.
+1. Complete #642's final cumulative exact-head review and replacement hosted
+   run. Its static, exact-failure, and unrestricted cluster gates are complete;
+   the active cut's one broad unit run is consumed and must not be repeated.
 2. Merge #642 only from a pushed, unanimously reviewed, wholly green exact
    head. The candidate already removes the legacy copy watchdog,
    request-side exit inference, and in-place copy policy owner while keeping
