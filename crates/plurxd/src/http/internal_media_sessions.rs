@@ -875,8 +875,8 @@ mod tests {
     #[tokio::test]
     async fn remote_start_requires_current_local_serving_authority() {
         let (_app, state) = super::super::tests::test_app_with_state();
-        let (_, first_generation) =
-            admit_remote_start_serving_authority(&state).expect("initial serving authority");
+        let (_, first_generation) = admit_remote_start_serving_authority(&state)
+            .unwrap_or_else(|_| panic!("initial serving authority"));
 
         state.serving.validation_set_ready(false).await;
         assert!(matches!(
@@ -891,8 +891,8 @@ mod tests {
         );
 
         state.serving.validation_set_ready(true).await;
-        let (authority, recovered_generation) =
-            admit_remote_start_serving_authority(&state).expect("recovered serving authority");
+        let (authority, recovered_generation) = admit_remote_start_serving_authority(&state)
+            .unwrap_or_else(|_| panic!("recovered serving authority"));
         assert_ne!(recovered_generation, first_generation);
         assert!(authority.is_current(recovered_generation));
         assert!(!authority.is_current(first_generation));

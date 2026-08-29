@@ -85,7 +85,7 @@ const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
          AND playback_id = NEW.playback_id
          AND owner_node_id = NEW.owner_node_id
          AND state = 'starting';
-    END";
+    END;";
 
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{

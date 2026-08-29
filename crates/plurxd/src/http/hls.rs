@@ -9697,17 +9697,20 @@ mod tests {
             let authority = authority.clone();
             let entered = Arc::clone(&entered);
             async move {
-                commit_before_serving_loss(
-                    &authority,
-                    generation,
-                    tokio::time::Instant::now() + Duration::from_secs(5),
-                    async move {
-                        entered.wait().await;
-                        release_rx.await.expect("release activation commit");
-                        7_u8
-                    },
-                )
-                .await
+                let transition = authority
+                    .commit_guard_before(
+                        generation,
+                        std::time::Instant::now() + Duration::from_secs(5),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "authority admitted commit could not acquire transition".to_owned(),
+                        )
+                    })?;
+                entered.wait().await;
+                release_rx.await.expect("release activation commit");
+                Ok::<_, ApiError>((7_u8, transition))
             }
         });
         entered.wait().await;
@@ -9724,31 +9727,23 @@ mod tests {
             "serving loss waits until the bounded activation commit ends"
         );
         release_tx.send(()).expect("release commit");
-        let committed = commit
+        let (result, transition) = commit
             .await
             .expect("commit task")
             .expect("authority admitted commit");
-        assert_eq!(committed.result, 7);
-        drop(committed.transition);
+        assert_eq!(result, 7);
+        drop(transition);
         loss.await.expect("serving loss task");
 
-        let polled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let stale = commit_before_serving_loss(
-            &authority,
-            generation,
-            tokio::time::Instant::now() + Duration::from_secs(1),
-            {
-                let polled = Arc::clone(&polled);
-                async move {
-                    polled.store(true, std::sync::atomic::Ordering::Release);
-                }
-            },
-        )
-        .await;
-        assert!(matches!(stale, Err(ApiError::ServiceUnavailable(_))));
+        let stale = authority
+            .commit_guard_before(
+                generation,
+                std::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
         assert!(
-            !polled.load(std::sync::atomic::Ordering::Acquire),
-            "a stale activation future is never polled"
+            stale.is_none(),
+            "a stale activation cannot acquire a commit guard"
         );
     }
 
