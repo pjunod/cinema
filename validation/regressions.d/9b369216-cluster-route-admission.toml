@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9b369216"]
+points = ["cluster.membership"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "catalog-contract", "history-regressions"]
+reason = "The local route-admission refresh published Fenced before its two awaited reads, so the request gate answered 503 for everything but /healthz and /metrics until they returned — once per heartbeat, on a healthy node. Publication now happens once, at the end, through a guard whose Drop publishes Fenced, so an early return, panic, or cancellation still fails closed while the success path never fences. Three unit tests cover the guard: the slot is untouched until commit, an uncommitted drop fences, and a committed publication survives its own drop. A source-level contract pins the call site, because a correct guard can still be published around; reintroducing the up-front store fails it."
