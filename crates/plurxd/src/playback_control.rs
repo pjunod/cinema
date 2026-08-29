@@ -2255,10 +2255,7 @@ struct ProducerFlowIntention {
 pub(crate) enum ProducerFlowIntentionOutcome {
     /// The desire was accepted and no signal is outstanding, so the caller
     /// owns issuing exactly this one.
-    Issue {
-        revision: u64,
-        hold: bool,
-    },
+    Issue { revision: u64, hold: bool },
     /// Accepted and recorded, but a signal for an earlier revision is still
     /// outstanding. The contract coalesces here: its acknowledgement is
     /// applied first, and the actor issues again only if the desire still
@@ -10485,7 +10482,10 @@ mod tests {
             },
         );
         assert_eq!(actor.producer_progress_deadline, armed);
-        assert_eq!(actor.producer_physical_flow, ProducerPhysicalFlowState::Running);
+        assert_eq!(
+            actor.producer_physical_flow,
+            ProducerPhysicalFlowState::Running
+        );
     }
 
     #[test]
