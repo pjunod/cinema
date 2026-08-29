@@ -13277,14 +13277,12 @@ mod tests {
             instant: successor_deadline,
         });
         assert_eq!(
-            actor.producer_progress_deadline,
-            expected_successor_deadline,
+            actor.producer_progress_deadline, expected_successor_deadline,
             "the successor owns its startup clock while Retry remains pending"
         );
         assert_eq!(actor.decision_applied_at(1, Some(2)), Ok(()));
         assert_eq!(
-            actor.producer_progress_deadline,
-            expected_successor_deadline,
+            actor.producer_progress_deadline, expected_successor_deadline,
             "DecisionApplied must preserve the admitted successor clock"
         );
         assert!(actor.settle_due_deadlines_at(successor_deadline).is_some());
