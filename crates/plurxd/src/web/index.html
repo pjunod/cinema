@@ -668,6 +668,21 @@
      shared grid lines them all up on the longest path. */
   .stgtable{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 14px;align-items:baseline;line-height:1.7}
   .stgpath{font-weight:600;white-space:nowrap}
+  /* Storage paths can be much longer than the whole System card. Give the
+     rate a stable right-hand column and let only the path column wrap; the
+     previous max-content path track pushed the numbers to the card edge (or
+     beyond it) as soon as one mount listed several library roots. */
+  .storage-table{grid-template-columns:minmax(0,1fr) max-content;gap:3px 18px}
+  .storage-table .stgpath{min-width:0;white-space:normal;overflow-wrap:anywhere}
+  .storage-table .stgrate{white-space:nowrap}
+  .system-now{display:grid;gap:4px}
+  .system-now-counts{color:var(--text);font-weight:600}
+  .system-now-watch{max-width:76ch;color:var(--muted);line-height:1.55}
+  .system-now-watch b{color:var(--text);font-weight:600}
+  @media(max-width:640px){
+    .storage-table{grid-template-columns:minmax(0,1fr);gap:0}
+    .storage-table .stgrate{margin-bottom:6px;white-space:normal}
+  }
   /* Phones: a wide settings table (libraries/users) overflows the viewport,
      which used to push the sticky header out of alignment. Reflow each row into
      a self-contained card — name as a heading, labeled cells, action buttons
@@ -1178,6 +1193,26 @@
   :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn):hover{
     background:var(--accent);color:var(--btn-ink);border-color:var(--accent);box-shadow:0 0 16px var(--glow)
   }
+  /* Settings tabs are navigation, not six equal primary actions. Their old
+     paint went through the generic button rule above, leaving every tab with
+     the same accent wash and border. Keep inactive tabs neutral; the current
+     one has a solid fill, heavier type and a contrasting inset marker, so the
+     state remains obvious without relying on hue alone. */
+  :is([data-theme=panoptic],[data-theme=redline]) .settabs{gap:6px;border-bottom-color:var(--hairline)}
+  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab:not(.ghost):not(.pbtn){
+    background:rgba(255,255,255,.025);color:var(--muted);border:1px solid var(--hairline);
+    border-bottom:3px solid transparent;box-shadow:none;letter-spacing:.01em
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab:not(.active):not(.ghost):not(.pbtn):hover{
+    background:color-mix(in srgb,var(--accent) 9%,transparent);color:var(--text);
+    border-color:color-mix(in srgb,var(--accent) 48%,transparent);box-shadow:none
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab.active:not(.ghost):not(.pbtn),
+  :is([data-theme=panoptic],[data-theme=redline]) .settabs>button.settab.active:not(.ghost):not(.pbtn):hover{
+    background:var(--accent);color:var(--btn-ink);border-color:var(--accent);
+    border-bottom-color:var(--btn-ink);font-weight:700;
+    box-shadow:0 0 18px var(--glow),inset 0 -2px var(--btn-ink)
+  }
   :is([data-theme=panoptic],[data-theme=redline]) button.ghost{
     background:rgba(255,255,255,.035);border-color:var(--hairline);color:var(--text)
   }
@@ -1195,10 +1230,28 @@
   :is([data-theme=panoptic],[data-theme=redline]) .vbadge,
   :is([data-theme=panoptic],[data-theme=redline]) .missbadge,
   :is([data-theme=panoptic],[data-theme=redline]) .specs,
-  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid,
   :is([data-theme=panoptic],[data-theme=redline]) .activity{
     font-family:var(--font-mono);letter-spacing:.045em;text-transform:uppercase
   }
+  /* Cockpit labels benefit from terse uppercase instrumentation; values and
+     operator explanations do not. Applying tracking and text-transform to the
+     whole definition list produced the spaced all-caps paragraph in System's
+     "Right now" row and encouraged mid-word wrapping. */
+  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid{font-family:var(--font-mono)}
+  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid dt{
+    font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid dd{
+    line-height:1.55;letter-spacing:0;text-transform:none;word-break:normal;overflow-wrap:anywhere
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .system-grid{
+    grid-template-columns:minmax(108px,max-content) minmax(0,1fr);gap:0 20px
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>dt,
+  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>dd{
+    padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--hairline) 72%,transparent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline]) .system-grid>:nth-last-child(-n+2){border-bottom:0}
   :is([data-theme=panoptic],[data-theme=redline]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
   :is([data-theme=panoptic],[data-theme=redline]) .poster:hover{
     transform:none;border-color:color-mix(in srgb,var(--accent) 62%,var(--line));
@@ -10209,18 +10262,18 @@ function storageHtml(st){
   const rows=(st.mounts||[]).map(m=>{
     const roots=esc((m.roots||[]).join(", "));
     if(m.read_bps==null){
-      return `<span class="stgpath">${roots}</span><span style="color:var(--bad)">${esc(m.note||"not measured")}</span>`;
+      return `<span class="stgpath">${roots}</span><span class="stgrate" style="color:var(--bad)">${esc(m.note||"not measured")}</span>`;
     }
     // MB/s alongside Mb/s because the two get confused constantly and every
     // other tool an operator reaches for (dd, iostat) reports bytes.
     const rate=`${(m.read_bps/1e6).toFixed(0)} Mb/s <span class="muted">(${(m.read_bps/8e6).toFixed(0)} MB/s)</span>`;
     const seek=m.seek_ms!=null?` <span class="muted">· seek ${m.seek_ms.toFixed(1)} ms</span>`:"";
     const warn=m.cache_suspect?`<span class="stgpath"></span><span class="muted" style="color:var(--warn,#fbbf24)">${esc(m.note||"")}</span>`:"";
-    return `<span class="stgpath">${roots}</span><span>${rate}${seek}</span>${warn}`;
+    return `<span class="stgpath">${roots}</span><span class="stgrate">${rate}${seek}</span>${warn}`;
   }).join("");
   const hint=rows?`<div class="muted" style="font-size:12px;margin-top:4px">A remux or direct play needs its own bitrate sustained from here.</div>`:"";
   const when=st.measured_at?`<span class="muted" style="font-size:12px">measured ${fmtAgo(st.measured_at)}</span>`:"";
-  return `${rows?`<div class="stgtable">${rows}</div>`:`<span class="muted">no libraries to measure</span>`}${hint}
+  return `${rows?`<div class="stgtable storage-table">${rows}</div>`:`<span class="muted">no libraries to measure</span>`}${hint}
     <div class="row" style="margin-top:8px;gap:10px;align-items:center">
       <button class="ghost sm" onclick="remeasureStorage(this)">Re-measure</button>${when}</div>`;
 }
@@ -10270,7 +10323,7 @@ function systemPanel(sys,playbackEvents){
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
   return `<div class="card"><h2 class="section" style="margin-top:0">Server</h2>
-      <dl class="kvgrid">
+      <dl class="kvgrid system-grid">
         <dt>Server</dt><dd>${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}</dd>
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
@@ -10278,7 +10331,10 @@ function systemPanel(sys,playbackEvents){
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
         <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
-        <dt>Right now</dt><dd>${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'} · Watch state: ${replicationText(sys.replication)}</dd>
+        <dt>Right now</dt><dd><div class="system-now">
+          <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
+          <div class="system-now-watch"><b>Watch state</b> · ${replicationText(sys.replication)}</div>
+        </div></dd>
       </dl></div>
     <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
     <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>
