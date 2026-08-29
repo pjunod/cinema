@@ -37,6 +37,7 @@ SCOPE_KEYS = (
 # builds still receive their full proof on merge_group and nightly runs.
 CI_ROUTING_PATHS = (
     ".github/workflows/ci.yml",
+    ".github/workflows/effort-ci.yml",
     ".github/workflows/lint.yml",
     "validation/ci_scope.py",
     "validation/points.toml",
@@ -214,11 +215,12 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
 
 
 def resolve_scope(event: str, base: str | None) -> dict[str, bool]:
-    """Scope pull requests; run everything for merge_group, push, and tags.
+    """Scope ordinary PRs; run everything for qualification and release events.
 
-    The merge queue is the enforcement point: a `merge_group` event lands here
-    with a non-PR event name and fails open into `all_scope()`, so the full
-    cross-surface fan-out always runs between a green PR and main.
+    `effort_qualification`, merge-group, push, and tag events all have non-PR
+    names and fail open into `all_scope()`. A final effort-to-main candidate
+    therefore proves every platform even while task PRs use effort-ci.yml's
+    compile-only lane.
     """
 
     if event != "pull_request":

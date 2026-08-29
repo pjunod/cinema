@@ -47,6 +47,7 @@ make validate-staged # validate only the staged change (normal local loop)
 make validate   # commit profile for every functionality point
 make validate-full # browser + client + packaging checks where tools exist
 make test       # just the tests
+make effort-rust-check # compile every Rust target; execute no Rust tests
 make coverage   # line coverage via cargo-llvm-cov → lcov.info
 make hooks      # validate points selected by each staged commit
 make docker     # build the container image
@@ -60,6 +61,18 @@ selection, evidence, and why the UI “golden” is a reviewed structural answer
 key rather than a screenshot. Pushing a version tag
 (`git tag v0.1.0 && git push --tags`) builds and publishes a multi-arch image
 to `ghcr.io/pjunod/plurx`.
+
+Large projects use one temporary integration branch so each task pays for
+compilation rather than release qualification. The full operating contract is
+in [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md).
+
+```bash
+git switch -c effort/<project>             # create the project's integration line
+git push -u origin effort/<project>         # task PRs use this as their base
+gh pr create --base effort/<project>        # compile-only Effort development gate
+PLURX_EFFORT_COMMIT=1 git commit             # compile-only local hook for an effort task
+gh pr create --base main                    # from effort/**: complete qualification
+```
 
 ## 3. When something's off (quick triage)
 

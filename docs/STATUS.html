@@ -315,12 +315,12 @@
 
   <!-- ══════════ Delivery pipeline ══════════ -->
   <section>
-    <h2>Delivery pipeline — two-tier CI <span class="chip prog">🚧 queue flip pending</span> <span class="ev">VALIDATION.md · ci.yml + lint.yml · 2026-08-09</span></h2>
-    <p class="blurb">PR pushes now run a diff-scoped fast lane; every merge-queue run fails open into the full cross-surface fan-out, so the impact graph's server→client net moved from every push to the last gate before <code>main</code>. Measured before the change: a server PR's lane was ~10.5 min end to end (Apple sims 8m20 · Android emulator 8m29 · web layout 6m45 · cargo check 4m50), paid again on every push.</p>
+    <h2>Delivery pipeline — effort train <span class="chip done">✓ convention active</span> <span class="ev">DEVELOPMENT_PIPELINE.md · ci.yml + effort-ci.yml · 2026-08-29</span></h2>
+    <p class="blurb">Large projects now integrate task PRs on <code>effort/**</code> behind compile-only policy, Rust, web, Apple, and Android evidence. The frozen effort then opens one PR to <code>main</code>, where every release surface runs against the exact merge tree and emits a qualification receipt. The private repository remains on the current account plan, so Paul owns the final no-red-or-stale-merge invariant.</p>
     <ul class="items">
-      <li class="done-item"><span class="m done">✓ shipped</span><span class="t">Client-only diffs skip the cargo lane and server diffs defer client suites to the queue; iOS compiles once and iPhone+iPad replay the products; the Android SDK image pulls from GHCR by Dockerfile hash; Gradle, AVD-snapshot, Playwright, spike-target, DerivedData, and docker-layer caches are wired; Argon2 test hashing is optimized; the coalescer trailing-flush assert is deterministic under load</span></li>
-      <li><span class="m you">👤 Paul</span><span class="t">Flip the repo settings: enable the merge queue on <code>main</code> with <b>PR validation gate</b> as the required check (it reports on both <code>pull_request</code> and <code>merge_group</code>) and turn on auto-merge — the workflows are already queue-ready, and enabling the queue before this change merges would deadlock nothing since the gate now fires on merge_group</span></li>
-      <li><span class="m todo">○ measure</span><span class="t">After the flip, pull two or three PR-lane and queue runs through <code>scripts/ci-flake-report</code> and record the new per-job baselines here</span></li>
+      <li class="done-item"><span class="m done">✓ shipped</span><span class="t">Ordinary main-bound PRs keep diff-scoped validation; effort task PRs use compile-only integration evidence; final effort promotion forces every release surface. iOS compiles once before simulator replay, the Android SDK image pulls from GHCR by Dockerfile hash, and Gradle, AVD-snapshot, Playwright, spike-target, DerivedData, and Docker-layer caches remain wired.</span></li>
+      <li class="done-item"><span class="m done">✓ decided</span><span class="t">Keep the repository private for self-hosted runner isolation. Until the account plan exposes private branch protection, treat <b>Effort development gate</b> and <b>Main promotion gate</b> as the documented “pretty please” checks; do not merge a pending, red, or stale qualification.</span></li>
+      <li><span class="m todo">○ measure</span><span class="t">After two or three effort task runs and one complete qualification, run <code>scripts/ci-flake-report</code> and record the new per-job baselines here</span></li>
     </ul>
   </section>
 

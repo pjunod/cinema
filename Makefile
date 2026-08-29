@@ -52,6 +52,14 @@ test-full: ## Run every Rust test, including replicated and daemon contracts
 fmt-check: ## Verify formatting without changing files
 	$(CARGO) fmt --all --check
 
+# Effort branches optimize for integration feedback rather than release
+# evidence. Compile every target so production and test-only code must remain
+# type-correct, but leave execution to focused local checks and the final
+# effort-to-main qualification run.
+.PHONY: effort-rust-check
+effort-rust-check: fmt-check ## Compile every Rust target without running the test suite
+	$(CARGO) check --workspace --locked --all-targets
+
 .PHONY: lint
 lint: ## Clippy across the workspace, warnings are errors
 	$(CARGO) clippy --workspace --all-targets -- -D warnings
@@ -450,6 +458,18 @@ apple-build-bump: ## Claim the next Apple build number across every generated su
 # waste. The shared DerivedData lives at clients/apple/build/DerivedData so CI
 # can cache it between runs; a stale or absent cache only costs a rebuild.
 APPLE_DERIVED_DATA := build/DerivedData
+
+.PHONY: apple-build
+apple-build: ## Compile iOS and tvOS without running simulator tests
+	cd clients/apple && xcodegen generate
+	cd clients/apple && xcodebuild -project plurx.xcodeproj -scheme plurx-iOS \
+	  -destination "generic/platform=iOS Simulator" \
+	  -derivedDataPath "$(APPLE_DERIVED_DATA)" \
+	  CODE_SIGNING_ALLOWED=NO build
+	cd clients/apple && xcodebuild -project plurx.xcodeproj -scheme plurx-tvOS \
+	  -destination "generic/platform=tvOS Simulator" \
+	  -derivedDataPath "$(APPLE_DERIVED_DATA)" \
+	  CODE_SIGNING_ALLOWED=NO build
 
 .PHONY: apple-test
 apple-test: ## Generate the Xcode project, build each platform once, test every destination

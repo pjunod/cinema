@@ -348,7 +348,10 @@ class OperationsContractCase(unittest.TestCase):
             workflow.index("name: Audit corrective-history evidence"),
             workflow.index("name: Check validation catalog and contract unit tests"),
         )
-        self.assertIn("name: PR validation gate", workflow)
+        self.assertIn("name: Main promotion gate", workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("scope_event=effort_qualification", workflow)
+        self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
             "\n  cluster_auth:", 1
         )[0]
@@ -492,10 +495,12 @@ class OperationsContractCase(unittest.TestCase):
             workflow,
         )
 
-    def test_the_merge_queue_is_the_full_fan_out_and_prs_are_the_fast_lane(self):
+    def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
+        effort = read(".github/workflows/effort-ci.yml")
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
+        precommit = read("scripts/pre-commit")
 
         # The single required aggregate workflow must fire on merge_group.
         # The badge-only lint workflow runs after merge; Clippy already belongs
@@ -509,9 +514,34 @@ class OperationsContractCase(unittest.TestCase):
         )
         # Queue runs must never be cancelled by a later PR push.
         self.assertIn(
-            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
             workflow,
         )
+
+        # Task PRs target effort/** and get one always-present aggregate. The
+        # lane compiles every affected language but executes none of the slow
+        # release suites; an effort/** -> main PR is expanded above instead.
+        self.assertIn('      - "effort/**"', effort)
+        self.assertIn("name: Effort development gate", effort)
+        self.assertIn("run: make effort-rust-check", effort)
+        self.assertIn("run: make apple-build", effort)
+        self.assertIn("run: make android", effort)
+        self.assertIn("run: make web-check", effort)
+        self.assertNotIn("make ci-rust-gate", effort)
+        self.assertNotIn("make cluster-", effort)
+        self.assertNotIn("make apple-test", effort)
+        self.assertNotIn("make android-test", effort)
+        self.assertNotIn("android-instrumentation", effort)
+        self.assertNotIn("ui-check", effort)
+        self.assertNotIn("playback-lab", effort)
+        self.assertNotIn("docker/build-push-action", effort)
+        self.assertIn("$(CARGO) check --workspace --locked --all-targets", makefile)
+        self.assertIn('"${PLURX_EFFORT_COMMIT:-}" = "1"', precommit)
+        self.assertIn(
+            "make history-check validation-lint operations-check effort-rust-check",
+            precommit,
+        )
+        self.assertIn("scripts/validate run --profile commit --staged", precommit)
 
         # Exactly four Rust test lanes own the PR: the fast gate plus three
         # independently selected replicated/daemon jobs.
@@ -642,21 +672,37 @@ class OperationsContractCase(unittest.TestCase):
     def test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries(self):
         workflow = read(".github/workflows/ci.yml")
 
-        # Every artifact emitted by the high-frequency CI workflow expires
-        # quickly; durable release evidence belongs to publish-release.yml.
+        # Every artifact has an explicit bound. Only the tiny qualification
+        # receipt outlives the one-day diagnostic binaries.
         self.assertEqual(
             workflow.count("uses: actions/upload-artifact@v4"),
-            workflow.count("retention-days: 1"),
+            workflow.count("retention-days:"),
         )
+        self.assertIn("retention-days: 14", workflow)
 
-        # PR and merge-queue builds prove both release targets compile, but no
-        # downstream job consumes those binaries. Only push/tag runs retain
-        # them, avoiding two large duplicate artifacts on every validation.
+        # Ordinary PRs prove both release targets compile but retain no large
+        # artifacts. Final effort qualifications retain the exact binaries and
+        # checksums so the tested candidate can be inspected or staged.
         build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
-        self.assertIn("name: Retain release binary for push and tag runs", build)
-        self.assertIn("if: github.event_name == 'push'", build)
-        self.assertIn("continue-on-error: true", build)
+        self.assertIn(
+            "name: Retain release binary for push, tag, and qualification runs",
+            build,
+        )
+        self.assertIn("needs.scope.outputs.qualification == 'true'", build)
+        self.assertIn("plurxd.sha256", build)
+        self.assertIn(
+            "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
+            build,
+        )
         self.assertIn("name: plurxd-${{ matrix.target }}", build)
+
+        gate = workflow.split("  pr_gate:", 1)[1]
+        self.assertIn("python3 -m validation.qualification", gate)
+        self.assertIn("qualification-receipt.json", gate)
+        self.assertIn(
+            "name: effort-qualification-${{ github.event.pull_request.number }}",
+            gate,
+        )
 
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
@@ -678,6 +724,7 @@ class OperationsContractCase(unittest.TestCase):
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
             ".github/workflows/lint.yml",
             ".github/workflows/publish-release.yml",
             ".github/workflows/release-readiness.yml",
@@ -733,6 +780,7 @@ class OperationsContractCase(unittest.TestCase):
 
         for path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
             ".github/workflows/release-readiness.yml",
@@ -745,7 +793,12 @@ class OperationsContractCase(unittest.TestCase):
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if path == ".github/workflows/ci.yml" and name == "apple":
+                if (
+                    path == ".github/workflows/ci.yml" and name == "apple"
+                ) or (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "apple_compile"
+                ):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
                     "cluster_daemon",
@@ -761,10 +814,20 @@ class OperationsContractCase(unittest.TestCase):
                     "docker",
                 }:
                     expected = high_cpu
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "rust_compile"
+                ):
+                    expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
                 }:
+                    expected = android
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "android_compile"
+                ):
                     expected = android
                 elif (
                     path == ".github/workflows/validation-nightly.yml"
