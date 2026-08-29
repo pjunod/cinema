@@ -886,6 +886,7 @@
      machines carrying it, so a number on this screen always belongs to
      exactly one of them. */
   .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
+  .cluster-board.clsolo{grid-template-columns:1fr}
   .clcolumn{min-width:0}
   /* What a folded database section still says. Collapsing hides the detail,
      never the verdict: the health pill stays in the header and this line keeps
@@ -11375,7 +11376,7 @@ function clusterStateView(cluster){
     return {tone:"warn", title:"Cluster status unavailable",
       body:"The current membership roster could not be read. This does not mean this server has left its "+
         "cluster. Keep the available nodes running and retry the roster; if it still fails, read the "+
-        "replication status on the System tab and inspect the server logs before restarting anything."};
+        "replicated database section below and inspect the server logs before restarting anything."};
   const nodes=cluster.nodes||[];
   const voters=nodes.filter(n=>n.is_voter).length;
   const learnerNodes=nodes.filter(n=>n.role==="learner"&&!n.is_voter);
@@ -11853,6 +11854,15 @@ async function downloadClusterSupportBundle(btn){
 // node cards already render. Laid out as a ledger, they answer the question
 // the sentence could not: is a write that lands here durable, and how far
 // behind is this machine.
+// `sys` is not in the Cluster tab's manifest, so a cold load straight into
+// this tab has no replication projection to read. `membership_unavailable` is
+// the server saying this process is not running a replicated store, which is
+// the same fact the projection would have carried, so the panel states it
+// rather than reporting its own missing request as a cluster problem.
+function clusterSqliteReplication(){
+  return {backend:"sqlite",health:"healthy",clustered:false,
+    explanation:"Watch state is stored on this server only."};
+}
 function clusterDatabaseStatus(cluster,ops){
   const row=clusterDirectOperationRow(ops,cluster&&cluster.local_node_id);
   return row&&row.observation==="answered"&&row.status?row.status:null;
@@ -11900,15 +11910,48 @@ function clusterDatabaseSummary(cluster,replication,ops){
     parts.push(`converged <b>${esc(fmtAgo(replication.last_converged_at))}</b>`);
   return parts.join(" · ");
 }
+// The WAL says one of three things: it was never observed, it is proven
+// unavailable, or it answered — and an answer that is `open` with a live error
+// or unflushed entries is a fault, which is exactly the predicate the node
+// badge already uses.
+// Every age in the direct status is computed on the server and frozen into
+// the response, while this panel keeps rendering from that one fetch for as
+// long as the tab is open. Without the time since the aggregate was taken, the
+// freshness row says "now" indefinitely.
+function clusterSampleAge(ops,millis){
+  if(millis===null||millis===undefined) return null;
+  const taken=ops&&ops.observed_at_unix_ms;
+  return taken?millis+Math.max(0,Date.now()-taken):millis;
+}
+function clusterDatabaseWal(status){
+  if(!status) return "unknown";
+  const wal=status.wal&&status.wal.snapshot;
+  if(!wal) return `<span style="color:var(--bad)">unavailable${
+    status.wal&&status.wal.reason?` · ${esc(clusterOperationReason(status.wal.reason))}`:""}</span>`;
+  const healthy=wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  const durable=wal.last_durable_index===null||wal.last_durable_index===undefined
+    ? "unknown":esc(String(wal.last_durable_index));
+  const fault=wal.last_error?` · ${esc(wal.last_error.message||"error")}`
+    :!wal.lock_owned?" · lock not held"
+    :wal.last_log_index!==wal.last_durable_index?` · ${esc(String(wal.last_log_index))} logged, ${durable} durable`:"";
+  return `<span style="color:var(--${healthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · durable ${durable}${fault}`;
+}
 function clusterDatabaseRows(cluster,replication,ops){
+  if(replication&&replication.backend==="sqlite")
+    return [["Backend","SQLite · single node",false],
+      ["Peers","none — watch state is durable here and has nowhere to fall behind",false]];
   const status=clusterDatabaseStatus(cluster,ops);
   const raft=(status&&status.raft)||{}, snap=(status&&status.snapshot)||{};
   const wal=status&&status.wal&&status.wal.snapshot;
   const leader=(cluster.nodes||[]).find(n=>n.is_leader);
   const num=value=>(value===null||value===undefined)?"unknown":esc(String(value));
-  const applied=replication&&replication.last_applied_index!==null&&replication.last_applied_index!==undefined
-    ? esc(String(replication.last_applied_index)):num(raft.applied_index);
-  const behind=replication?Number(replication.behind_by||0):null;
+  const sampled=raft.applied_index!==null&&raft.applied_index!==undefined;
+  const applied=sampled?esc(String(raft.applied_index))
+    :(replication&&replication.last_applied_index!==null&&replication.last_applied_index!==undefined
+      ? esc(String(replication.last_applied_index)):"unknown");
+  const behindKnown=replication&&(replication.behind_by!==null&&replication.behind_by!==undefined
+    ? true:replication.health!=="degraded");
+  const behind=behindKnown?Number(replication.behind_by||0):null;
   const lag=raft.apply_lag_entries===null||raft.apply_lag_entries===undefined
     ? "unknown":`${esc(String(raft.apply_lag_entries))} entr${raft.apply_lag_entries===1?"y":"ies"}`;
   return [
@@ -11916,16 +11959,18 @@ function clusterDatabaseRows(cluster,replication,ops){
     ["Leader",leader?`${esc(leader.hostname||leader.node_id)}${leader.node_id===cluster.local_node_id?' <span class="muted">this node</span>':""}`:"none elected",false],
     ["Term",num(raft.current_term),true],
     ["Quorum commit",num(raft.commit_index),true],
-    ["Applied here",`${applied}${replication&&replication.last_applied_term!==null&&replication.last_applied_term!==undefined?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""}`,true],
+    ["Applied here",`${applied}${!sampled&&replication&&replication.last_applied_term!==null&&replication.last_applied_term!==undefined?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""}`,true],
     ["Apply lag",lag,true],
     ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
     ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
-    ["Snapshots",snap.available===false?"unavailable"
-      :`build ${num(snap.build_ok_count||0)} ok / ${num(snap.build_error_count||0)} error · install ${num(snap.install_ok_count||0)} ok / ${num(snap.install_error_count||0)} error`,true],
-    ["WAL",wal?`${esc(clusterOperationReason(wal.state))} · durable ${num(wal.last_durable_index)}`:"unknown",true],
+    ["Snapshots",status?(snap.available
+      ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
+      : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
+    ["WAL",clusterDatabaseWal(status),true],
     ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],
-    ["Reading age",raft.sample_valid&&raft.watermark_valid
-      ? `local ${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))} · watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}`
+    ["Reading age",!status?"unknown":raft.sample_valid&&raft.watermark_valid
+      ? `local ${esc(clusterOperationAge(clusterSampleAge(ops,(raft.sample_age_seconds||0)*1000)))} · `+
+        `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`
       : `<span style="color:var(--bad)">stale or incomplete proof</span>`,false],
   ];
 }
@@ -11935,13 +11980,14 @@ function clusterDatabasePanel(cluster,replication,capacity,ops){
   const rows=clusterDatabaseRows(cluster,replication,ops)
     .map(([label,value,numeric])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}>${value}</dd>`).join("");
   return `<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Replicated database</h3>
-      <p>Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up.</p></div>
+      <p>${replication&&replication.backend==="sqlite"?"Where watch state is stored on this machine."
+        :"Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up."}</p></div>
       <div class="row">${clusterHealthPill(health.tone,health.label)}<button class="ghost sm" id="cldb-toggle"
         aria-controls="cluster-database" aria-expanded="true" onclick="toggleClusterDatabase(this)">Hide</button></div></div>
     <div class="cldbsumm" id="cluster-database-summary" hidden>${clusterDatabaseSummary(cluster,replication,ops)}</div>
     <div id="cluster-database"><div class="clcontextfacts">
       <div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>The one authoritative reading; the System tab no longer repeats it.</small></div>
-      <div class="clcontextfact"><span>Capacity</span><b>${esc(cap.headline)}</b><small>${esc(cap.detail)}</small></div></div>
+      ${capacity?`<div class="clcontextfact"><span>Capacity</span><b>${esc(cap.headline)}</b><small>${esc(cap.detail)}</small></div>`:""}</div>
       <dl class="cldbledger">${rows}</dl></div></section>`;
 }
 // ---- folding, and remembering it -----------------------------------------
@@ -11960,7 +12006,12 @@ function clusterFoldRead(){
     const raw=localStorage.getItem(clusterFoldKey());
     if(!raw) return null;
     const state=JSON.parse(raw);
-    return state&&typeof state==="object"?state:null;
+    if(!state||typeof state!=="object"||Array.isArray(state)) return null;
+    const kept={};
+    if(typeof state.database==="boolean") kept.database=state.database;
+    if(Array.isArray(state.nodes_closed)) kept.nodes_closed=state.nodes_closed.filter(id=>typeof id==="string");
+    if(typeof state.tab==="string") kept.tab=state.tab;
+    return kept;
   }catch(e){ return null; }
 }
 function clusterFoldWrite(patch){
@@ -12013,6 +12064,7 @@ function applyClusterFolds(){
   try{
     const state=clusterFoldRead();
     if(state&&typeof state.database==="boolean") setClusterDatabaseFold(state.database);
+    if(state&&typeof state.tab==="string"&&document.getElementById("cltab-"+state.tab)) showClusterTab(state.tab);
     if(state&&Array.isArray(state.nodes_closed)){
       [...document.querySelectorAll("#cluster-node-list>.clnode")].forEach(card=>{
         const id=clusterNodeFoldId(card);
@@ -12032,6 +12084,10 @@ function clusterTabButton(id,label,selected){
     aria-controls="clpane-${id}" onclick="selectClusterTab('${id}')">${esc(label)}</button>`;
 }
 function selectClusterTab(id){
+  showClusterTab(id);
+  clusterFoldWrite({tab:id});
+}
+function showClusterTab(id){
   const tabs=[...document.querySelectorAll(".cltabs>.cltab")];
   tabs.forEach(tab=>{
     const mine=tab.id==="cltab-"+id;
@@ -12047,8 +12103,11 @@ function clusterDiagnosticsFacts(cluster,ops){
   const fresh=voters.filter(n=>n.reachable).length;
   const q=clusterQuorum(voters.length);
   const pending=nodes.filter(n=>n.removal_pending).length;
-  const oldest=ops&&!ops.unavailable
-    ? (ops.nodes||[]).reduce((age,row)=>Math.max(age,row.sample_age_ms||0),0):null;
+  const ages=ops&&!ops.unavailable
+    ? (ops.nodes||[]).map(row=>row.sample_age_ms).filter(age=>age!==null&&age!==undefined):[];
+  const oldest=ages.length?clusterSampleAge(ops,Math.max(...ages)):null;
+  if(!voters.length) return `<dl class="cldbledger"><dt>Voter roster</dt>
+    <dd>No committed voter roster is readable from this node, so there is no quorum arithmetic to state.</dd></dl>`;
   return `<dl class="cldbledger"><dt>Heartbeat quorum</dt><dd>${fresh>=q.majority
       ? `<span style="color:var(--good)">available</span> — ${fresh} of ${voters.length} voters fresh`
       : `<span style="color:var(--bad)">unavailable</span> — ${fresh} of ${voters.length} voters fresh`}</dd>
@@ -12094,7 +12153,8 @@ function clusterPanel(d){
   const nodes=clustered?(cluster.nodes||[]):[];
   // One lag answer, not a second competing one. The replicated database panel
   // below is now the only place in Cinema that reports it.
-  const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
+  const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication)
+    ||(cluster.code==="membership_unavailable"?clusterSqliteReplication():null);
   const capacity=clustered&&cluster.capacity;
   const maintenanceActive=nodes.some(node=>node.maintenance);
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
@@ -12104,6 +12164,9 @@ function clusterPanel(d){
         return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
       }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
+  // A failed roster read still belongs to a cluster, so the roster column and
+  // its retry stay; only a machine that has never joined loses them.
+  const roomForRoster=clustered||statusFailure;
   const recovery=clustered?clusterRecoveryState(cluster):null;
   const recoveryRequired=Boolean(recovery&&recovery.required);
   // Two components, two columns, and each one keeps its own facts: the store on
@@ -12114,19 +12177,20 @@ function clusterPanel(d){
   const leader=nodes.find(n=>n.is_leader);
   const reachable=nodes.filter(n=>n.reachable).length;
   return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recoveryRequired?'warn':state.tone}"><h3>${esc(recoveryRequired?'Recovery required':state.title)}</h3><p>${esc(recoveryRequired?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
-    <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
-    <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
-    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
+    ${clustered?`<div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
+    <div class="clmetric"><strong>${reachable} / ${nodes.length}</strong><span>Fresh heartbeats</span></div>
+    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div>`:""}</div>
     ${recoveryRequired?operations:""}
-    <div class="cluster-board">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
-      <section class="cluster-card clcolumn"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+    <div class="cluster-board${roomForRoster?"":" clsolo"}">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
+      ${roomForRoster?`<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
         <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
-        ${roster}${statusFailure?`<div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section></div>
-    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
+        ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
+        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>`:""}</div>
+    ${clustered?`<div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
         <p>Restart readiness, planned work, and the membership changes that need a credential.</p></div></div>
         <div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>
         ${recoveryRequired?"":operations}
-        ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details>`:""}</section></div>
+        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section></div>`:""}
     ${clusterTroubleshootingPanel(cluster,d.clusterOps)}</div>`;
 }
 function toggleClusterNodes(btn){
