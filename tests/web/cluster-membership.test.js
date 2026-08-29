@@ -68,6 +68,10 @@ const BORROWED = [
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
+  "clusterRailBlocker",
+  "clusterRailRow",
+  "clusterOperationRows",
+  "clusterOperationsRail",
   "clusterSqliteReplication",
   "clusterSampleAge",
   "clusterDatabaseWal",
@@ -918,9 +922,11 @@ test("the healthy cluster layout combines node membership and operations evidenc
   assert.match(html, /class="clcontextfact">[\s\S]*Watch state/);
   assert.match(html, /class="clcontextfact">[\s\S]*Capacity/);
   assert.match(html, /<h3>Maintenance<\/h3>/);
-  assert.match(html, /<h3>Planned work<\/h3>/);
-  assert.match(html, /Enter maintenance/);
-  assert.match(html, /Force election/);
+  // Planned work is now the rail, which states the same two actions with
+  // their preconditions filled in rather than as prose.
+  assert.match(html, /class="clrail"/);
+  assert.match(html, /Enter maintenance on node-a/);
+  assert.match(html, /Force a leader election/);
   assert.match(html, /Danger zone · membership changes/);
   assert.equal(html.includes("<table"), false);
 });
@@ -1752,11 +1758,11 @@ test("a page load cannot overwrite the remembered folds", () => {
   const row = shippedSource("clusterNodeRow");
   assert.match(row, /ontoggle="syncClusterNodeToggle\(\)"/);
   assert.doesNotMatch(row, /ontoggle="[^"]*clusterNodeFoldSave/);
-  assert.match(row, /onclick="clusterNodeFoldLater\(\)"/);
+  assert.match(row, /onclick="clusterNodeFoldLater\(this\)"/);
   // And the card carries the id the fold is keyed by, where the reader looks.
   assert.match(row, /<div class="clnodebody" data-node="\$\{esc\(n\.node_id\)\}">/);
   // And the click saves after the card's open state has actually flipped.
-  assert.match(shippedSource("clusterNodeFoldLater"), /setTimeout\(clusterNodeFoldSave,0\)/);
+  assert.match(shippedSource("clusterNodeFoldLater"), /setTimeout\(\(\)=>\{\s*clusterNodeFoldSave\(\);/);
 });
 
 test("the fold is restored where the panel is written, and saved by every control", () => {
@@ -1872,6 +1878,389 @@ test("a refusal is kept in troubleshooting, not spent on a toast", () => {
   const pane = html.slice(html.indexOf('id="clpane-refusals"'));
   assert.match(pane, /Cluster operation for node-b was refused/);
   assert.match(pane, /offline download/i);
+});
+
+// ---- the operations rail ---------------------------------------------------
+// The rail's whole claim is that a refusal is readable before the click. These
+// pin two halves of that: the precondition is stated, and the control is
+// actually disabled when it does not hold — a row that says "Blocked" beside a
+// live button is worse than no row at all.
+
+function railRows(ui, cluster, ops) {
+  return new Map(
+    ui.clusterOperationRows(cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
+  );
+}
+
+test("every action on the rail carries its precondition", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: true, voter_storage_ready: false,
+      storage_headroom_bytes: 22 * 1000 * 1000 * 1000 }),
+  ]);
+  const rows = railRows(ui, cluster, operationStatus(cluster));
+  assert.ok(rows.has("Add a node"));
+  assert.equal(rows.get("Add a node").blocked, undefined);
+
+  // The learner is caught up but its filesystem has not proved the reserve, so
+  // the row says which of the two preflights failed and what to do about it —
+  // before the promotion is attempted and refused.
+  const promote = rows.get("Promote node-d to voter");
+  assert.equal(promote.blocked, true);
+  assert.match(promote.reason, /durable free-space reserve/);
+  assert.match(promote.reason, /20 GB free/);
+  assert.match(promote.action, /disabled/);
+
+  // Leaving is always available and always permanent; it is never "ready".
+  const leave = rows.get("Leave this cluster");
+  assert.equal(leave.destructive, true);
+  assert.match(leave.reason, /fresh data directory/);
+});
+
+test("a learner that has proved both preflights is offered promotion", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: true, voter_storage_ready: true }),
+  ]);
+  const promote = railRows(ui, cluster, operationStatus(cluster)).get("Promote node-d to voter");
+  assert.equal(promote.blocked, false);
+  assert.doesNotMatch(promote.action, /disabled/);
+  assert.match(promote.action, /promoteNode\(&quot;node-d&quot;\)/);
+
+  // Catch-up is the other half, and it names the badge to wait for.
+  const catching = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: false, voter_storage_ready: true }),
+  ]);
+  const waiting = railRows(ui, catching, operationStatus(catching)).get("Promote node-d to voter");
+  assert.equal(waiting.blocked, true);
+  assert.match(waiting.reason, /zero-lag apply proof/);
+  assert.match(waiting.action, /disabled/);
+});
+
+test("the rail never offers what the server would refuse", () => {
+  const ui = sandbox();
+  // Two voters: removal drops to one and is refused, and the rail says so
+  // instead of leaving it to the failed attempt.
+  const pair = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const two = railRows(ui, pair, operationStatus(pair)).get("Remove a node permanently");
+  assert.equal(two.blocked, true);
+  // The server's bar is three voters, not "not two": one voter is refused as
+  // well, and so is a roster whose other members are still joining.
+  assert.match(two.reason, /at least three voters and this cluster has 2/);
+
+  // A membership change in flight locks the rest of the lifecycle.
+  const fenced = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { maintenance: true, maintenance_acknowledged: true }),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: true, voter_storage_ready: true }),
+  ]);
+  const locked = railRows(ui, fenced, operationStatus(fenced));
+  assert.equal(locked.get("Add a node").blocked, true);
+  assert.match(locked.get("Add a node").reason, /already in flight on node-b/);
+  assert.equal(locked.get("Promote node-d to voter").blocked, true);
+  assert.equal(locked.get("Force a leader election").blocked, true);
+  // The fenced node's own resume replaces the maintenance row, and it is only
+  // offered from the node that owns the fence.
+  assert.ok(!locked.has("Enter maintenance on node-a"));
+  const resume = locked.get("Resume service on node-b");
+  assert.equal(resume.blocked, true);
+  assert.match(resume.reason, /Open node-b directly/);
+});
+
+test("the rail routes to the credential rather than minting a second one", () => {
+  // A join token is shown exactly once. Two places that mint one is two places
+  // to leak it, so these rows open the panel that owns it.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const rows = railRows(ui, cluster, operationStatus(cluster));
+  assert.match(rows.get("Add a node").action, /openClusterDanger\(\)/);
+  assert.match(rows.get("Leave this cluster").action, /openClusterDanger\(\)/);
+  assert.doesNotMatch(ui.clusterOperationsRail(cluster, operationStatus(cluster)), /mintJoinToken|leaveCluster\(/);
+  assert.doesNotMatch(shippedSource("clusterOperationRows"), /localStorage/);
+});
+
+test("a stale roster cannot make the rail claim a verdict", () => {
+  // With no direct status there is no restart verdict to report, so the row is
+  // absent rather than guessing at safety.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const rows = railRows(ui, cluster, null);
+  assert.ok(!rows.has("Prepare this voter for restart"));
+  // And maintenance is refused while the preflight has not answered.
+  const maintain = rows.get("Enter maintenance on node-a");
+  assert.equal(maintain.blocked, true);
+  assert.match(maintain.reason, /preflight has not answered/);
+});
+
+// ---- the layout holding still ----------------------------------------------
+
+test("the roster is a fixed-height scroller once there are nodes to fill it", () => {
+  // Opening a node card used to move every section below it — measured at
+  // 1259px on a four-node cluster. The list gets a fixed height so its own
+  // size no longer depends on what is expanded; a maximum would still shrink
+  // when everything is collapsed and move the page the other way.
+  const ui = sandbox();
+  const three = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  assert.match(ui.clusterPanel({ cluster: three, sys: { replication: REPLICATION } }),
+    /class="clnodes clnodes-capped" id="cluster-node-list"/);
+
+  // Two nodes cannot fill it, and an empty box below the last card is worse
+  // than a list that grows a little.
+  const pair = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  assert.match(ui.clusterPanel({ cluster: pair, sys: { replication: REPLICATION } }),
+    /class="clnodes" id="cluster-node-list"/);
+
+  // The height and the scroller belong to the same rule, and it is scoped to
+  // windows with room for it.
+  assert.match(SHIPPED_UI, /@media\(min-width:1100px\) and \(min-height:720px\)\{[\s\S]*?\.clnodes\.clnodes-capped\{display:flex/);
+  // `height`, not `max-height`: the substring would match either, and a
+  // maximum is exactly the bug this rule replaced.
+  // The box is the size of the list when every card is closed, capped by the
+  // viewport — a fixed fraction of the window left a three-node roster with
+  // 394px of nothing under the last card, which is the void this rule exists
+  // to avoid. `height`, not `max-height`: a maximum shrinks when everything is
+  // collapsed and moves the page the other way.
+  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*[;\s]height:min\(var\(--clnodes-h[^}]*overflow-y:auto/);
+  assert.doesNotMatch(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*max-height:/);
+  // And the viewport cap keeps a floor: a scroller shorter than a card is not
+  // a list, it is a keyhole.
+  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped\{[^}]*max\(360px,calc\(100vh - 330px\)\)/);
+  assert.match(SHIPPED_UI, /\.clnodes\.clnodes-capped>\.clnode\{[^}]*flex:0 0 auto/);
+  const sized = ui.clusterPanel({ cluster: three, sys: { replication: REPLICATION } });
+  assert.match(sized, /id="cluster-node-list" style="--clnodes-h:312px"/);
+});
+
+test("the rail's verdict reaches the markup, not just the model", () => {
+  // The chips are the feature. Every precondition in clusterOperationRows can
+  // be correct while clusterRailRow paints them all green, so pin the rendered
+  // row rather than only the object behind it.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+    node("node-d", 4, "learner", { bounded_read_ready: false, voter_storage_ready: false }),
+  ]);
+  const html = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  const rowOf = (title) => {
+    const at = html.indexOf(title);
+    assert.notEqual(at, -1, `no row titled ${title}`);
+    const start = html.lastIndexOf('<div class="clrailrow', at);
+    return html.slice(start, html.indexOf('<div class="clrailrow', at + 1) === -1 ? undefined : html.indexOf('<div class="clrailrow', at + 1));
+  };
+  const promote = rowOf("Promote node-d to voter");
+  assert.match(promote, /class="clrailrow blocked"/);
+  assert.match(promote, />Blocked</);
+  assert.doesNotMatch(promote, />Ready</);
+  const add = rowOf("Add a node");
+  assert.match(add, /class="clrailrow ready"/);
+  assert.match(add, />Ready</);
+  const leave = html.slice(html.indexOf("Leave this cluster"));
+  assert.match(leave, />Permanent</);
+  assert.match(html, /class="clrailrow destructive"/);
+});
+
+test("entering maintenance is offered only when the preflight approved it", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const approved = operationStatus(cluster);
+  const ok = railRows(ui, cluster, approved).get("Enter maintenance on node-a");
+  assert.equal(ok.blocked, false);
+  assert.doesNotMatch(ok.action, /disabled/);
+
+  // safe_to_enter is false for a dozen different reasons and the verdict ships
+  // the one it hit. Substituting a plausible reason — quorum, say — sends the
+  // operator after a voter that is not missing.
+  const refused = operationStatus(cluster);
+  refused.maintenance = refused.maintenance.map((entry) => ({
+    ...entry,
+    safe_to_enter: false,
+    blockers: [{ code: "restart_preparation_active", node_id: "node-b", message: "" }],
+  }));
+  const no = railRows(ui, cluster, refused).get("Enter maintenance on node-a");
+  assert.equal(no.blocked, true);
+  assert.match(no.reason, /restart preparation active on node-b/);
+  assert.doesNotMatch(no.reason, /quorum/);
+  assert.match(no.action, /disabled/);
+});
+
+test("restart preparation is offered only on the node the server named", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  // operationStatus names nodes[1] as the candidate, and the local node is
+  // nodes[0]: preparing here is refused as a candidate mismatch.
+  const elsewhere = railRows(ui, cluster, operationStatus(cluster)).get("Prepare this voter for restart");
+  assert.equal(elsewhere.blocked, true);
+  assert.match(elsewhere.reason, /candidate is node-b/);
+  assert.match(elsewhere.action, /disabled/);
+
+  const here = operationStatus(cluster);
+  here.verdict.candidate_node_id = cluster.local_node_id;
+  const mine = railRows(ui, cluster, here).get("Prepare this voter for restart");
+  assert.equal(mine.blocked, false);
+  assert.match(mine.action, /prepareLocalRestart/);
+  assert.doesNotMatch(mine.action, /disabled/);
+});
+
+test("an election is offered only with a quorum and a caught-up follower", () => {
+  const ui = sandbox();
+  const base = () => [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ];
+  const healthy = status("high_availability", base());
+  assert.equal(railRows(ui, healthy, operationStatus(healthy)).get("Force a leader election").blocked, false);
+
+  // No follower is both reachable and fully applied, so nobody can campaign.
+  const behind = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { apply_lag_entries: 91 }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  const stale = railRows(ui, behind, operationStatus(behind)).get("Force a leader election");
+  assert.equal(stale.blocked, true);
+  assert.match(stale.reason, /caught-up follower/);
+
+  // And an election cannot manufacture the majority it needs.
+  const lost = status("high_availability", base());
+  lost.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 2, leader_elected: false };
+  const noQuorum = railRows(ui, lost, operationStatus(lost)).get("Force a leader election");
+  assert.equal(noQuorum.blocked, true);
+  assert.match(noQuorum.reason, /cannot bypass quorum/);
+});
+
+test("recovery locks the membership changes it cannot commit", () => {
+  // The banner above the rail says membership changes are locked; the rows
+  // underneath it must not read Ready.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { reachable: false }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  cluster.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 2, leader_elected: false };
+  const rows = railRows(ui, cluster, operationStatus(cluster));
+  for (const title of ["Add a node", "Remove a node permanently"]) {
+    assert.equal(rows.get(title).blocked, true, `${title} still reads ready under recovery`);
+    assert.match(rows.get(title).reason, /elected leader and a reachable voter majority/);
+  }
+});
+
+test("a learner can be removed from a cluster too small to lose a voter", () => {
+  // The server holds voter removal to three voters and sends a learner down a
+  // different path, so blocking both would refuse something that works.
+  const ui = sandbox();
+  const small = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "learner", { bounded_read_ready: true }),
+  ]);
+  const rows = railRows(ui, small, operationStatus(small));
+  assert.equal(rows.get("Remove a node permanently").blocked, true);
+  const learnerOnly = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-c", 3, "learner", { bounded_read_ready: true }),
+  ]);
+  const only = railRows(ui, learnerOnly, operationStatus(learnerOnly)).get("Remove a node permanently");
+  assert.equal(only.blocked, false);
+  // The same roster read from the learner: now a voter is the removable one,
+  // and one voter is below the server's bar just as two is.
+  const fromLearner = status("degraded_reconfiguration", [
+    node("node-c", 3, "learner", { bounded_read_ready: true }),
+    node("node-a", 1, "voter", { is_leader: true }),
+  ]);
+  const single = railRows(ui, fromLearner, operationStatus(fromLearner)).get("Remove a node permanently");
+  assert.equal(single.blocked, true);
+  assert.match(single.reason, /at least three voters and this cluster has 1/);
+  // And the leader's own removal is refused from anywhere but its own screen.
+  const remote = status("high_availability", [
+    node("node-a", 1, "voter"),
+    node("node-b", 2, "voter", { is_leader: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  assert.match(railRows(ui, remote, operationStatus(remote)).get("Remove a node permanently").reason,
+    /node-b is the current leader and can only leave from its own screen/);
+});
+
+test("the two components stay in their own columns, and the rail with the cluster", () => {
+  // The layout is the deliverable here: asserting the headings exist would
+  // pass with every card back in one flow, which is what this replaced.
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const html = ui.clusterPanel({ cluster, clusterOps: operationStatus(cluster), sys: { replication: REPLICATION } });
+  const columns = html.split('<div class="clcolumn">');
+  assert.equal(columns.length, 3, "expected exactly two columns in the board");
+  const [, left, right] = columns;
+  assert.match(left, /<h3>Replicated database<\/h3>/);
+  assert.match(left, /<h3>Maintenance<\/h3>/);
+  assert.match(left, /class="clrail"/);
+  assert.match(left, /Danger zone · membership changes/);
+  assert.doesNotMatch(left, /id="cluster-node-list"/);
+  assert.match(right, /<h3>Cluster nodes<\/h3>/);
+  assert.match(right, /id="cluster-node-list"/);
+  // The restart verdict names one of these machines, so it sits under them.
+  assert.match(right, /id="cluster-operations"/);
+  assert.doesNotMatch(left, /id="cluster-operations"/);
+  // One election dialog, once: the recovery panel ships its own.
+  assert.equal((html.match(/id="clelection"/g) || []).length, 1);
+  const recovering = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { reachable: false }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  recovering.recovery = { required: true, quorum_available: true, reachable_voters: 2, required_voters: 2, leader_elected: false };
+  const lost = ui.clusterPanel({ cluster: recovering, sys: { replication: REPLICATION } });
+  assert.equal((lost.match(/id="clelection"/g) || []).length, 1);
+});
+
+test("the controls the rail routes to actually do something", () => {
+  // Both of these are one line each and both were deletable with the suite
+  // green: the credential panel would never open, and a card opened near the
+  // bottom of the scroller would open below the fold.
+  assert.match(shippedSource("openClusterDanger"), /querySelector\("\.cldanger"\)/);
+  assert.match(shippedSource("openClusterDanger"), /zone\.open=true/);
+  assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
 });
 
 process.exit(failures ? 1 : 0);
