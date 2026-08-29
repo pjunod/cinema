@@ -697,21 +697,24 @@ the child.
 
 ### 4.3 Copy and exit classification
 
-Copy sessions register `exit_classifier=copy_reader`. Their supervisor always
-publishes the exact process exit fact, but the actor does not turn that fact
-into a decision while the copy reader classification is outstanding. The
+Copy exit classification is frozen per attempt. A custom-segmenter attempt
+registers `exit_classifier=copy_reader`; a direct or fallback HLS-muxer attempt
+registers `exit_classifier=immediate`. Every supervisor publishes the exact
+process exit fact. For `copy_reader`, the actor retains that fact until the
 reader publishes exactly one of `unsupported`, `invalid_configuration`,
 `reader_failed`, or `completed` through the same sequenced ingress; every
-current direct `Session::fail` in that task is removed.
+current direct `Session::fail` in that task is removed. For `immediate`, a
+non-success exit is decisive, while a zero exit still requires the same
+ENDLIST/frontier completion proof as every other managed producer.
 
 `unsupported` and invalid/reader failure are decisive even if the process exit
 arrives later. If exit arrives first, it is retained until the classifier fact.
 If the reader task exits or panics without classifying, its join monitor
-publishes `reader_failed`. Exact exit immediately starts the one-shot probe and
-the five-second `classifying_exit` mode of `ProducerProgressDeadline`. That
-deadline can win only if no classification was published at or before its
-armed instant. A late generic
-exit cannot consume a retry or replace the typed reason. Model tests cover all
+publishes `reader_failed`. The first exact fact among `completed` and process
+exit starts one five-second `classifying_exit` rendezvous. Both facts must
+arrive within it before the actor asks for the one-shot completion probe;
+missing either fact yields `exit_classification_deadline`. A late generic exit
+cannot consume a retry or replace the typed reason. Model tests cover all
 orderings of successful and non-success exit, every copy outcome, completion
 probe, and the producer deadline.
 
@@ -742,13 +745,15 @@ proposal into a bounded wire action with an action UUID, successor, boundary,
 strict relay validation, passive parsing, and exact-sequence replay before it
 can be emitted.
 
-The already-published playlist and admitted objects remain readable. The actor
-uses distinct `prepublication_failed` and `producer_ended_with_proposal`
+An already-authorized response body may finish, and init plus numeric media at
+or behind the frozen committed frontier remain readable. The actor uses
+distinct `prepublication_failed` and `producer_ended_with_proposal`
 dispositions. Only the former projects `Session::failed`. In the latter state,
-playlist and already-admitted object reads continue; a request beyond the
-published frontier fails promptly with typed `producer_ended` instead of
-waiting for bytes that can no longer appear. M4 must not point the generation
-at another child, reset its sequence, or overwrite its scratch directory.
+every fresh video-playlist authorization is rejected, as are full, range, and
+conditional media requests beyond the frozen frontier; each fails promptly
+with typed `producer_ended` instead of waiting for bytes that can no longer
+appear. M4 must not point the generation at another child, reset its sequence,
+or overwrite its scratch directory.
 
 Successful natural exit is not completion by itself. Its immediate one-shot
 probe must publish a parsed exact-attempt `#EXT-X-ENDLIST`, an indexed final

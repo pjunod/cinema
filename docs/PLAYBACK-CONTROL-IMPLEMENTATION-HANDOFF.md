@@ -2,17 +2,16 @@
 
 **Updated:** 2026-08-29
 **Merged baseline:** `origin/main` at
-`a48884906da351ca0c72dc99c227aa169911d089`
-**Last merged PR:** [#636](https://github.com/pjunod/plurx/pull/636)
+`32af5fa997459174e6b0bfe69bddd72473a1d5f6`
+**Last merged PR:** [#641](https://github.com/pjunod/plurx/pull/641)
 **Last merged exact head:**
-`d1b117bf2bddba600c659f2b2354ea50ee10830a`
-(hosted run `33236731526` fully green; merge
-`a48884906da351ca0c72dc99c227aa169911d089`)
-**Active branch:** `codex/playback-control-m4-published-lifetime`
-**Current runtime/evidence heads:**
-`b683b600a6dea69803c621018f5263b697c96a40` / `9540e768`.
-Published-lifetime implementation, frozen-frontier repair, exact owner
-inventory, and regression mapping are committed.
+`e64e8c1a32b7bda2b48087ab841a9a7f4590d737`
+(hosted run `33243486511` fully green; merge
+`32af5fa997459174e6b0bfe69bddd72473a1d5f6`)
+**Active branch:** `codex/playback-control-m4-copy-lifetime`
+**Current runtime/evidence heads:** none beyond merged `main`; the copy
+watchdog/replacement inventory and actor/executor cut are in design review
+before implementation.
 **Earlier exact candidate:**
 `f151b9788213474c3382c3a2494a6259b71bc216` received three formal exact-head
 adversarial approvals with no actionable P0–P3 finding. Later full-tip review
@@ -30,11 +29,11 @@ assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
 cleanup through `77e292d1`; historical-schema fixture and completion proof
 `411bf818` through `4d38a084`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
-**Current candidate identity:** runtime behavior was first frozen and approved
+**Last candidate identity:** runtime behavior was first frozen and approved
 at `f151b978`, then repaired at `b683b600` after the final review found a late-
-observation frontier race and stale owner inventory. Mapping is current at
-`9540e768`. The immutable review target is the final PR branch tip, not an
-embedded self-referential documentation hash.
+observation frontier race and stale owner inventory. Mapping completed at
+`9540e768`; final evidence head `e64e8c1` received three exact-head approvals
+and is merged through #641.
 **Runtime review state before the serving-fence repair:** exact runtime head
 `b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
 `77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
@@ -45,15 +44,15 @@ passed by exact name with loopback access.
 **Current implementation:** #636 owns actor-managed transcode prepublication,
 exact response admission, cancellation-safe process/resource settlement,
 authoritative local/remote routing, bounded relay ownership, three-phase
-cluster activation, and VOD lifecycle ownership. The active cut now extends
-only actor-managed transcodes across the first-media boundary. It retains the
+cluster activation, and VOD lifecycle ownership. #641 extends actor-managed
+transcodes across the first-media boundary. It retains the
 actor deadline, emits one stable postpublication decision, applies
 `CleanupPolicy::RetainPublished`, surfaces typed `producer_ended` beyond the
 committed frontier, and removes the actor-managed published-transcode progress
 watcher. Copy watchdog and replacement owners remain deliberately active until
-the separate copy cut.
-**Active-cut validation:** the one permitted broad local `make unit` run has
-already occurred and must not be repeated locally. `plurxd` reported 1,243
+the active copy cut replaces them.
+**Last-cut validation:** PR #641's one permitted broad local `make unit` run
+already occurred and must not be repeated for that merged cut. `plurxd` reported 1,243
 passed, 55 failed, and three ignored tests. One directly affected actor test
 found a real retry-successor deadline regression; that repair and its
 startup, advancing, nonzero-exit, and successful-exit classification coverage
@@ -65,11 +64,12 @@ the exact owner inventory (7/7) pass by exact name. Formatting, lint,
 validation lint (23 points / 27 checks), history (1,121/769/663/80/78), 123
 operations contracts, 52 benchmark checks, web policy, and diff inspection are
 green.
-Unrestricted `make cluster-check` also passes its vendor recovery, 67-test
+Unrestricted `make cluster-check` also passed its vendor recovery, 67-test
 replicated Store contract, real
 membership/failover/topology drills, seven daemon activation tests, and two
-cluster activity tests. Immutable final branch-tip review, wholly green hosted
-CI, and merge remain. A later accidental duplicate invocation stopped before
+cluster activity tests. Three exact-head reviews approved `e64e8c1`, hosted run
+`33243486511` passed every required job, and #641 merged as `32af5fa9`. A later
+accidental duplicate invocation stopped before
 the cluster workload when macOS platform certificates reported no available
 keychain; it reached no product assertion and is not being retried locally.
 
@@ -930,24 +930,26 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-PR #636 is merged from exact head
-`d1b117bf2bddba600c659f2b2354ea50ee10830a`. Hosted run `33236731526`
+PR #641 is merged from exact head
+`e64e8c1a32b7bda2b48087ab841a9a7f4590d737`. Hosted run `33243486511`
 passed every required job, and merge commit
-`a48884906da351ca0c72dc99c227aa169911d089` is the active branch base. The
+`32af5fa997459174e6b0bfe69bddd72473a1d5f6` is the active branch base. The
 preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Commit this evidence update, then obtain immutable final review of the
-   resulting exact branch tip. Runtime and evidence are frozen through
-   `b683b600` / `9540e768`; the unrestricted cluster gate is green.
-2. Push the reviewed head, require wholly green hosted CI, and merge.
+1. Commit the merged-state evidence update.
+2. Implement the copy actor/executor cut from the independently reviewed
+   source inventory and race contract.
+3. Obtain adversarial review before the active cut's single broad unit run,
+   then run final static/cluster/hosted gates and merge only when wholly green.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
 review before local unit tests, one full local unit-suite invocation only, and
-full required verification before merge. That one broad invocation is already
-consumed; do not run `make unit` again locally.
+full required verification before merge. PR #641's broad invocation is already
+consumed. The active copy cut gets one new broad invocation, only after
+adversarial review and immediately before its merge gates.
 
 The protocol rollout is backward compatible. The server transport and session
 state can deploy before the HLS refactor and before either mobile app changes;
@@ -958,14 +960,11 @@ only the no-action response and leaves every legacy player recovery path in
 place. Later client cuts consume prepared quality, HDR/Dolby Vision, track, and
 node-handoff actions after their server contracts are separately proven.
 
-### Active published-lifetime cut boundaries
+### Merged published-lifetime boundary and active copy cut
 
-Implementation and regression mapping are committed through `b683b600` /
-`9540e768`. The earlier runtime head `f151b978` had three formal exact-head
-approvals; later full-tip findings are repaired and the static and unrestricted
-cluster gates named above are green. Final immutable branch-tip review, hosted
-CI, and merge remain. The cut owns actor-managed live transcodes only, after
-first media has committed:
+#641 is merged from final approved head `e64e8c1`; its runtime, static,
+unrestricted cluster, and hosted gates are complete. It owns actor-managed
+live transcodes after first media has committed:
 
 - first media keeps or rearms the actor's existing
   `ProducerProgressDeadline`; it must not start a second polling owner;
@@ -984,13 +983,14 @@ first media has committed:
 - actor snapshot, metrics, logs, and events expose the postpublication
   disposition, proposal identity, completion proof, and cleanup result.
 
-Copy is a deliberate non-goal for this cut. Copy-owned `SOFTWARE_GRACE`,
-`PROGRESS_STALL`, `WATCHDOG_POLL`, `watch_for_stall*`, `watchdog_active`,
-`begin_copy_child_replacement`, `replacing_child`, and the copy-relevant
-`child_transition` ownership remain until the later copy cut. Their
-actor-managed published-transcode owners are removed. Generic copy actor
-observation stays passive because copy has no production decision executor
-yet.
+Copy was a deliberate non-goal for #641. The active cut removes copy-owned
+`SOFTWARE_GRACE`, `WATCHDOG_POLL`, `watch_for_stall*`, `watchdog_active`, and
+`begin_copy_child_replacement`; `PROGRESS_STALL` becomes only the actor's
+progress budget. Per-attempt actor classification and a registered executor
+replace the copy policy duties of `replacing_child` and `child_transition`.
+Generic replacement/lifecycle serialization remains where non-copy response,
+flow, retirement, retention, and cleanup paths still require it. The public
+control response remains `action:none`.
 
 It also retains `PREPUBLICATION_REAP_RETRY` and
 `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` solely as lifecycle cleanup bounds. Each
@@ -1276,18 +1276,20 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After merged PR #636, the remaining work is:
+After merged PR #641, the remaining work is:
 
-1. Complete immutable final branch-tip review, wholly green hosted CI, and
-   merge for the implemented actor-managed transcode published-lifetime cut.
-   Do not repeat the consumed broad local unit run.
-2. Convert copy startup/exit classification and fallback to actor decisions.
+1. Convert copy startup, per-attempt exit classification, reader outcomes, and
+   the sole prepublication `Unsupported` fallback to actor decisions. Keep the
+   public action `none`; this cut changes no client wire.
+2. Remove the copy stall watcher, direct reader verdicts, request-side child
+   exit decisions, and in-place replacement owner only after exact actor/
+   executor ownership is proved.
 3. Add desired physical hold/resume command/intention barriers to the shared
    actor sequence; retain the successful physical acknowledgements already in
    producer ingress.
-4. Delete detached recovery loops, request-side exit verdicts, in-place
-   replacement, `child_transition`, `watchdog_active`, and `replacing_child`;
-   drive every legacy catalog sentinel to zero.
+4. Delete remaining detached recovery loops and legacy catalog sentinels.
+   Retain any `child_transition` use that still serializes non-copy lifecycle,
+   retirement, retention, or cleanup until its own replacement is proved.
 5. Complete M5 client action ownership for web, Apple, and Android.
 6. Implement prepared/commit/abort handoff for transparent quality,
    resolution, codec, HDR/Dolby Vision, audio, subtitle, and node changes.
