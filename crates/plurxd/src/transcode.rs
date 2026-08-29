@@ -27450,6 +27450,8 @@ mod tests {
     async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
+        use tokio::io::AsyncReadExt as _;
+
         let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("clip.mp4");
         write_real_video(&src, 60);
@@ -27579,6 +27581,46 @@ mod tests {
                 "published media with an unmoved frontier is reserve; measured {ffmpeg_build}"
             );
 
+            // Publish the playlist through the same owner/authorization/EOF
+            // transaction as HTTP. The first-media handoff must happen here;
+            // neither a scratch-file refresh nor a later segment read may
+            // infer that a player has observed this generation.
+            let (playlist_bytes, playlist_owner) =
+                match mgr.playlist_with_owner(&info.session_id).await {
+                    Ok(publication) => publication,
+                    Err(_) => panic!("playlist publication failed"),
+                };
+            let playlist = std::str::from_utf8(&playlist_bytes).expect("UTF-8 playlist");
+            let newest = playlist
+                .lines()
+                .map(str::trim)
+                .filter(|line| is_safe_segment(line) && segment_index(line).is_some())
+                .next_back()
+                .expect("advertised media segment")
+                .to_owned();
+            let playlist_deadline = Instant::now() + Duration::from_secs(5);
+            let playlist_authorization = mgr
+                .authorize_response_publication(
+                    &info.session_id,
+                    &playlist_owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    playlist_deadline,
+                )
+                .await
+                .expect("playlist response admission");
+            mgr.commit_authorized_media(playlist_authorization, true, playlist_deadline)
+                .await
+                .expect("playlist response EOF commit");
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert!(actor_delivery.playlist_ready);
+            assert!(session.first_media_handoff_applied.load(Acquire));
+            assert!(!session.actor_prepublication_producer.load(Acquire));
+
             // A window it has already exceeded suspends it, and a suspended
             // encoder stops advancing — which is the property actor progress relies
             // on being able to tell apart from a wedge.
@@ -27601,34 +27643,42 @@ mod tests {
             // Fetch the newest published segment through the real request path.
             // That advances the download frontier, re-evaluates the same configured
             // limit, sends SIGCONT, and restarts actual encoder progress.
-            let newest = session
-                .segments
-                .lock()
+            let opened = match mgr
+                .segment_for_publication(&info.session_id, &newest)
                 .await
-                .segs
-                .last()
-                .expect("published segment")
-                .name
-                .clone();
-            assert!(mgr
-                .segment(&info.session_id, &newest)
-                .await
-                .expect("segment admission")
-                .is_some());
-            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
-                producer_attempt: session.control.current_producer_attempt(),
-                session: Arc::clone(&session),
-            });
-            assert!(
-                mgr.commit_resolved_media(
+                .expect("segment resolution")
+            {
+                SegmentPublication::Ready(opened) => opened,
+                _ => panic!("advertised segment was not ready"),
+            };
+            let segment_owner = opened.response_owner();
+            let segment_authorization_deadline = Instant::now() + Duration::from_secs(5);
+            let segment_authorization = mgr
+                .authorize_response_publication(
                     &info.session_id,
-                    &owner,
-                    "test-segment",
-                    Some(&newest),
-                    true,
+                    &segment_owner,
+                    MediaResponsePublication::attempt_media("media-segment", Some(&newest)),
+                    segment_authorization_deadline,
                 )
                 .await
-            );
+                .expect("segment response admission");
+            let SegmentFile {
+                mut file,
+                len,
+                mut delivery,
+            } = opened;
+            let started = Instant::now();
+            let mut bytes = Vec::with_capacity(usize::try_from(len).expect("segment length"));
+            file.read_to_end(&mut bytes)
+                .await
+                .expect("read advertised segment");
+            delivery.note_read(bytes.len() as u64, started.elapsed());
+            assert_eq!(bytes.len() as u64, len, "read through advertised EOF");
+            assert!(delivery.finish(), "segment delivery reached exact EOF");
+            let segment_completion_deadline = Instant::now() + Duration::from_secs(5);
+            mgr.commit_authorized_media(segment_authorization, true, segment_completion_deadline)
+                .await
+                .expect("segment response EOF commit");
             let fetched_index = segment_index(&newest).expect("numbered segment");
             let fetched_end_ms = session
                 .segments
