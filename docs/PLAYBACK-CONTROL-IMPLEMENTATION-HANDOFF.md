@@ -9,24 +9,29 @@
 **Current review candidate:** the local committed tip above runtime repairs
 through `4da3bbde`, regression evidence closed through `44947095`,
 hosted-preflight owner-inventory reconciliation `c4a1d96d`, final-Rust repair
-`c48a9867`, hosted-gate repair `600a95aa`, evidence mapping `700bcdd9`, and
-hosted structural-inventory reconciliation `c94cdcf3` mapped through
-`4ad4a4da`. The remote PR points to reviewed head `cdc27aa8`; the local
-candidate is ahead only by the inventory repair and this synchronized ledger.
-That source implements
-three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
-transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
-takeover, current-owner retry publication, and resolved-replay freshness.
-Store, lifecycle, and end-to-end integration reviewers unanimously approved
-every repaired source delta with no remaining P0–P3 finding after exact head
-`032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached remote-START
-restart-admission loss and the required cluster gate exposed five Hiqlite
-placeholder-order defects. Two independent adversarial lanes approve the code
-and evidence with no actionable P0–P3 finding. Corrected behavior/docs head
-`cdc27aa8` passed exact review and was pushed; run `33234021296` then exposed
-only the three test-shape inventory counts reconciled at `c94cdcf3` and mapped
-through `4ad4a4da`. Exact review of the inventory-reconciled local tip, push,
-hosted rerun, and merge are next.
+`c48a9867`, hosted-gate repair `600a95aa`, evidence mapping `700bcdd9`, hosted
+structural-inventory reconciliation `c94cdcf3` mapped through `4ad4a4da`, and
+hosted lifecycle-fixture repair `4b76a34e` mapped through `7dc30a42`. The
+remote PR points to reviewed head `37b8cc43`; the local candidate adds the
+seven-test repair, its evidence mapping, and this synchronized ledger. That
+source implements three-phase Prepare/Confirm/Publish-or-Abandon activation,
+atomic claim transitions through SQLite v36 and Hiqlite v18, finite-handoff
+renewal and takeover, current-owner retry publication, and resolved-replay
+freshness. Store, lifecycle, and end-to-end integration reviewers unanimously
+approved every repaired source delta with no remaining P0–P3 finding after
+exact head `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached
+remote-START restart-admission loss and the required cluster gate exposed five
+Hiqlite placeholder-order defects. Two independent adversarial lanes approve
+the earlier code and evidence with no actionable P0–P3 finding. Corrected
+behavior/docs head `cdc27aa8` passed exact review and was pushed; run
+`33234021296` then exposed only the three test-shape inventory counts
+reconciled at `c94cdcf3` and mapped through `4ad4a4da`. Run `33234420211`
+passed every non-fast-Rust job and completed the one allowed broad suite with
+1,281 passing, seven failing, and three ignored tests. Repair `4b76a34e`
+closes all seven stale lifecycle fixtures by exact name, and `7dc30a42` maps
+the evidence. Three source reviews and one mapped-tip review approve those
+commits with no actionable P0–P3 finding. Documentation review, push, one
+fresh hosted rerun, and merge are next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -116,8 +121,21 @@ test-only synchronization shapes. Two reviewers independently proved the exact
 net additions: one joined waiter task, nine bounded fixture timers, and six
 Barrier `wait` tokens conservatively matched as process-shaped; no production
 owner changed. Repair `c94cdcf3` changes only those three exact expectations,
-the exact validation method passes, and `4ad4a4da` maps the evidence.
-Exact-head review, push, hosted rerun, and merge remain for PR #636.
+the exact validation method passes, and `4ad4a4da` maps the evidence. Hosted
+run `33234420211` then passed validation scope, mobile-version policy,
+contract preflight, WAL recovery, every daemon contract, and the complete
+replicated Store/topology lane. Its one broad fast-Rust run completed with
+1,281 passes, seven failures, and three ignored tests. All seven failures were
+stale fixture assumptions: actor time coordinates, read-only playlist
+publication, playlist-owner retention, status-poll idle baselines, hardware
+capacity setup, request-claim coalescing, and first-playlist ownership.
+`4b76a34e` repairs those fixtures without changing production behavior, and
+all seven pass by exact name. Three source reviews approve the repair with no
+actionable P0–P3 finding; `7dc30a42` maps it and has an independent exact-head
+approval. Package Clippy with warnings denied, formatting, diff inspection,
+the exact ownership inventory, validation lint, and history are green. No
+second broad unit run occurred. Documentation review, push, one fresh hosted
+rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -928,13 +946,15 @@ catalog, and history gates pass. No broad local suite was rerun.
 Run `33234021296` stopped in preflight on the three structural counts changed
 by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
 `4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
-equality assertions; its exact failed validation method passes.
+equality assertions; its exact failed validation method passes. Run
+`33234420211` passed every non-fast-Rust lane and completed the broad suite;
+all seven stale fixture failures are exact-green at reviewed repair
+`4b76a34e`, mapped through `7dc30a42`. No second broad suite was run.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Obtain unanimous exact-head review of the inventory-reconciled documentation
-   tip.
+1. Obtain unanimous exact-head review of the synchronized documentation tip.
 2. Push the reviewed and exact-green candidate, update PR #636's body to pin
    that full object ID, require every hosted check green, merge, and
    continue immediately with the published-lifetime watchdog cut.
@@ -943,6 +963,15 @@ Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
 review before local unit tests, one full local unit-suite invocation only, and
 full required verification before merge.
+
+The protocol rollout is backward compatible. The server transport and session
+state can deploy before the HLS refactor and before either mobile app changes;
+old clients continue on the existing HLS/status paths. Apple and Android must
+then add one coalescing per-session reporter for position, buffer, delivery
+rate, player state, and track/capability facts. The first client cut accepts
+only the no-action response and leaves every legacy player recovery path in
+place. Later client cuts consume prepared quality, HDR/Dolby Vision, track, and
+node-handoff actions after their server contracts are separately proven.
 
 ### Active cut boundaries
 
