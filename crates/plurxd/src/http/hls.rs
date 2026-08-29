@@ -4388,6 +4388,10 @@ fn response_publication_rejection(
             "response_state_changed",
             "the stream changed state while the response was prepared; retry shortly",
         ),
+        crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason) => {
+            let error = PlaylistError::ProducerEnded(reason);
+            ApiError::typed(StatusCode::BAD_GATEWAY, error.code(), error.message())
+        }
     }
 }
 
@@ -4398,7 +4402,7 @@ async fn response_publication_rejection_before(
     deadline: Instant,
 ) -> ApiError {
     if !matches!(
-        rejection,
+        &rejection,
         crate::transcode::MediaResponsePublicationRejection::OwnerGone
     ) {
         return response_publication_rejection(rejection);
@@ -5044,6 +5048,12 @@ async fn admitted_playlist_error(
                     deadline,
                 )
                 .await);
+            }
+            Err(crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason)) => {
+                return Ok(playlist_error(
+                    session,
+                    PlaylistError::ProducerEnded(reason),
+                ));
             }
         }
     }
@@ -7982,6 +7992,23 @@ mod tests {
                 code: "response_state_changed",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn beyond_frontier_publication_rejection_is_typed_producer_ended() {
+        let error = response_publication_rejection(
+            crate::transcode::MediaResponsePublicationRejection::ProducerEnded(
+                "process_exit".to_owned(),
+            ),
+        );
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::BAD_GATEWAY,
+                code: "producer_ended",
+                ref message,
+            } if message.contains("process_exit")
         ));
     }
 

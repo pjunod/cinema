@@ -3136,12 +3136,26 @@ async fn execute_prepublication_retry(
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrepublicationExecutorExit {
     ActorTerminal,
     SessionGone,
-    FailedClosed,
+    FailedClosed { producer_attempt: u64 },
     ActorFailureApplied,
     ActorCompletionApplied,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationExecutorExit {
+    fn monitor_cleanup_attempt(self) -> Option<u64> {
+        match self {
+            Self::FailedClosed { producer_attempt } => Some(producer_attempt),
+            Self::ActorTerminal
+            | Self::SessionGone
+            | Self::ActorFailureApplied
+            | Self::ActorCompletionApplied => None,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -3281,7 +3295,9 @@ async fn run_prepublication_transcode_executor(
                                     ?error,
                                     "completed producer reaped but executor settlement was rejected"
                                 );
-                                return PrepublicationExecutorExit::FailedClosed;
+                                return PrepublicationExecutorExit::FailedClosed {
+                                    producer_attempt: probe.producer_attempt,
+                                };
                             }
                             return PrepublicationExecutorExit::ActorCompletionApplied;
                         }
@@ -3295,7 +3311,9 @@ async fn run_prepublication_transcode_executor(
                                 disposition = ?disposition,
                                 "completed producer cleanup owner ended without settlement"
                             );
-                            return PrepublicationExecutorExit::FailedClosed;
+                            return PrepublicationExecutorExit::FailedClosed {
+                                producer_attempt: probe.producer_attempt,
+                            };
                         }
                     }
                 }
@@ -3334,7 +3352,7 @@ async fn run_prepublication_transcode_executor(
                                 format!("prepublication recovery failed after {reason:?}: {error}"),
                             )
                             .await;
-                            return PrepublicationExecutorExit::FailedClosed;
+                            return PrepublicationExecutorExit::ActorFailureApplied;
                         }
                     }
                     crate::playback_control::ProducerDecision::Fail {
@@ -3370,7 +3388,9 @@ async fn run_prepublication_transcode_executor(
                                             ?error,
                                             "published producer failure reaped but executor settlement was rejected"
                                         );
-                                        return PrepublicationExecutorExit::FailedClosed;
+                                        return PrepublicationExecutorExit::FailedClosed {
+                                            producer_attempt: *failed_attempt,
+                                        };
                                     }
                                     return PrepublicationExecutorExit::ActorFailureApplied;
                                 }
@@ -3386,7 +3406,9 @@ async fn run_prepublication_transcode_executor(
                                         cleanup_policy = "retain_published",
                                         "published producer cleanup owner ended without settlement"
                                     );
-                                    return PrepublicationExecutorExit::FailedClosed;
+                                    return PrepublicationExecutorExit::FailedClosed {
+                                        producer_attempt: *failed_attempt,
+                                    };
                                 }
                             }
                         }
@@ -3448,6 +3470,7 @@ async fn run_prepublication_transcode_executor(
             }
             crate::playback_control::RollingProducerExecutorPoll::Unavailable => {
                 if let Some(session) = session.upgrade() {
+                    let producer_attempt = session.control.current_producer_attempt();
                     if session.actor_prepublication_transcode.load(Acquire) {
                         fail_prepublication_transaction(
                             &session,
@@ -3459,9 +3482,11 @@ async fn run_prepublication_transcode_executor(
                             session = %session_log_id(&sid),
                             "producer decision observer became unavailable after first-media handoff; actor lifetime fence retained"
                         );
+                        return PrepublicationExecutorExit::FailedClosed { producer_attempt };
                     }
+                    return PrepublicationExecutorExit::ActorFailureApplied;
                 }
-                return PrepublicationExecutorExit::FailedClosed;
+                return PrepublicationExecutorExit::SessionGone;
             }
         }
     }
@@ -6019,10 +6044,11 @@ impl MediaResponseOwner {
 /// Why exact response publication could not linearize. HTTP must distinguish
 /// a reusable capability whose owner disappeared from a live incarnation that
 /// merely changed attempt/decision state while the response was prepared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MediaResponsePublicationRejection {
     OwnerGone,
     StateChanged,
+    ProducerEnded(String),
 }
 
 /// Frozen presentation facts resolved without erasing the distinction between
@@ -14865,7 +14891,19 @@ impl TranscodeManager {
                 executor_retry,
                 executor_sid,
             ));
-            if let Err(join_error) = worker.await {
+            let unexpected_exit = match worker.await {
+                Err(join_error) => Some((
+                    format!("executor task failed: {join_error}"),
+                    None,
+                )),
+                Ok(exit) => exit.monitor_cleanup_attempt().map(|producer_attempt| {
+                    (
+                        "executor returned failed-closed".to_owned(),
+                        Some(producer_attempt),
+                    )
+                }),
+            };
+            if let Some((unexpected_exit, exact_attempt)) = unexpected_exit {
                 if let Some(session) = executor_monitor_session.upgrade() {
                     let actor_still_owns_prepublication = match session.control.snapshot().await {
                         Some(snapshot) => {
@@ -14880,12 +14918,13 @@ impl TranscodeManager {
                         fail_prepublication_transaction(
                             &session,
                             format!(
-                                "prepublication executor stopped without cleanup: {join_error}"
+                                "prepublication executor stopped without cleanup: {unexpected_exit}"
                             ),
                         )
                         .await;
                     } else {
-                        let producer_attempt = session.control.current_producer_attempt();
+                        let producer_attempt = exact_attempt
+                            .unwrap_or_else(|| session.control.current_producer_attempt());
                         // Registration loss makes the actor fail closed, but
                         // it cannot reap a process. Transfer that exact child
                         // to a detached owner before this monitor returns so
@@ -14899,7 +14938,7 @@ impl TranscodeManager {
                         tracing::error!(
                             session = %session_log_id(&executor_monitor_sid),
                             producer_attempt,
-                            %join_error,
+                            reason = %unexpected_exit,
                             "producer executor stopped after actor lifetime ownership activated; exact cleanup owner retained admitted media"
                         );
                     }
@@ -17394,6 +17433,7 @@ impl TranscodeManager {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
             let object = publication.rolling_object();
+            let media_segment_index = publication.rolling_media_segment_index(object);
             let mut rolling_generation_metadata_fingerprint = None;
             let actor_publication = match publication.binding {
                 MediaResponsePublicationBinding::GenerationMetadata => {
@@ -17413,8 +17453,6 @@ impl TranscodeManager {
                             frozen.contract_fingerprint.clone(),
                         )
                     } else {
-                        let media_segment_index =
-                            publication.rolling_media_segment_index(object);
                         crate::playback_control::RollingResponsePublication::attempt_media(
                             object,
                             *producer_attempt,
@@ -17423,7 +17461,6 @@ impl TranscodeManager {
                     }
                 }
                 MediaResponsePublicationBinding::AttemptMedia => {
-                    let media_segment_index = publication.rolling_media_segment_index(object);
                     crate::playback_control::RollingResponsePublication::attempt_media(
                         object,
                         *producer_attempt,
@@ -17466,8 +17503,58 @@ impl TranscodeManager {
             let actor_authorization = session
                 .control
                 .authorize_response_publication(actor_publication, actor_handoff, deadline)
-                .await
-                .map_err(|_| MediaResponsePublicationRejection::StateChanged)?;
+                .await;
+            let actor_authorization = match actor_authorization {
+                Ok(authorization) => authorization,
+                Err(_) => {
+                    // Authorization is the final byte-publication fence. Only
+                    // after it rejects may a second exact actor snapshot
+                    // classify an already-open numeric segment as beyond the
+                    // immutable retained frontier. This preserves the typed
+                    // ProducerEnded response without a stale pre-check ever
+                    // replacing actor authorization.
+                    if attempt_media_publication {
+                        if let Some(requested_segment) = media_segment_index {
+                            require_publication_authority!();
+                            if let Some((PlaylistError::ProducerEnded(reason), published_segment)) =
+                                session
+                                    .published_producer_ended_before(*producer_attempt, deadline)
+                                    .await
+                            {
+                                require_publication_authority!();
+                                if producer_request_beyond_frontier(
+                                    Some(requested_segment),
+                                    published_segment,
+                                ) {
+                                    let current = tokio::time::timeout_at(
+                                        tokio::time::Instant::from_std(deadline),
+                                        self.sessions.lock(),
+                                    )
+                                    .await
+                                    .map_err(|_| {
+                                        MediaResponsePublicationRejection::StateChanged
+                                    })?
+                                    .get(session_id)
+                                    .cloned();
+                                    require_publication_authority!();
+                                    if !current
+                                        .as_ref()
+                                        .is_some_and(|current| Arc::ptr_eq(current, session))
+                                    {
+                                        return Err(
+                                            MediaResponsePublicationRejection::OwnerGone,
+                                        );
+                                    }
+                                    return Err(
+                                        MediaResponsePublicationRejection::ProducerEnded(reason),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+            };
             require_publication_authority!();
             if actor_authorization.first_producer_media_publication {
                 let Some(applied) = first_media_applied else {
@@ -22154,6 +22241,25 @@ mod tests {
         ] {
             let evidence = completion_playlist_evidence(8, 4, Some(partial));
             assert!(!evidence.end_list);
+        }
+    }
+
+    #[test]
+    fn only_failed_closed_executor_exits_request_monitor_cleanup() {
+        assert_eq!(
+            PrepublicationExecutorExit::FailedClosed {
+                producer_attempt: 7,
+            }
+            .monitor_cleanup_attempt(),
+            Some(7)
+        );
+        for settled in [
+            PrepublicationExecutorExit::ActorTerminal,
+            PrepublicationExecutorExit::SessionGone,
+            PrepublicationExecutorExit::ActorFailureApplied,
+            PrepublicationExecutorExit::ActorCompletionApplied,
+        ] {
+            assert_eq!(settled.monitor_cleanup_attempt(), None, "{settled:?}");
         }
     }
 
@@ -28944,7 +29050,7 @@ mod tests {
         .await
         .expect("actor must commit the retained published failure");
 
-        assert!(matches!(
+        assert_eq!(
             manager
                 .authorize_response_publication(
                     "published-frontier",
@@ -28956,8 +29062,29 @@ mod tests {
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::StateChanged)
-        ));
+            Err(MediaResponsePublicationRejection::ProducerEnded(
+                "process_exit".to_owned()
+            ))
+        );
+        for response_kind in ["segment-range", "segment-not-modified"] {
+            assert_eq!(
+                manager
+                    .authorize_response_publication(
+                        "published-frontier",
+                        &beyond.response_owner(),
+                        MediaResponsePublication::attempt_media(
+                            response_kind,
+                            Some("seg00001.ts"),
+                        ),
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await,
+                Err(MediaResponsePublicationRejection::ProducerEnded(
+                    "process_exit".to_owned()
+                )),
+                "{response_kind} must preserve the numeric segment coordinate"
+            );
+        }
         assert!(manager
             .authorize_response_publication(
                 "published-frontier",
