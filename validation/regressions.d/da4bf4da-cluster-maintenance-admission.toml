@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["c7176bb7"]
+commits = ["da4bf4da"]
 points = ["cluster.membership", "cluster.operations"]
 checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "operations-contract", "catalog-contract", "history-regressions"]
 reason = "The local maintenance refresh closed the first gate cluster_capacity_gate consults, before its awaited read, on every heartbeat of a node nobody had asked to drain. Its allow-list is an explicit route enumeration, so the window refused more than the serving-role window did — every ordinary API call the web app makes among them, which is the likelier source of the observed capture refusal. Publication now happens once through a guard whose Drop closes the gate, so a transient read error still fails closed. Three unit tests cover the guard and a source contract pins both call sites: the module may not write either slot by name, so extracting the store into a helper fails it too. The scope table now selects the replicated lane for membership changes, because that evidence was being claimed without running."
