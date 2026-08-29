@@ -26,7 +26,7 @@ the earlier code and evidence with no actionable P0–P3 finding. Corrected
 behavior/docs head `cdc27aa8` passed exact review and was pushed; run
 `33234021296` then exposed only the three test-shape inventory counts
 reconciled at `c94cdcf3` and mapped through `4ad4a4da`. Run `33234420211`
-passed every non-fast-Rust job and completed the one allowed broad suite with
+passed every non-fast-Rust job and completed its hosted broad suite with
 1,281 passing, seven failing, and three ignored tests. Repair `4b76a34e`
 closes all seven stale lifecycle fixtures by exact name, and `7dc30a42` maps
 the evidence. Three source reviews and one mapped-tip review approve those
@@ -134,8 +134,9 @@ all seven pass by exact name. Three source reviews approve the repair with no
 actionable P0–P3 finding; `7dc30a42` maps it and has an independent exact-head
 approval. Package Clippy with warnings denied, formatting, diff inspection,
 the exact ownership inventory, validation lint, and history are green. No
-second broad unit run occurred. Documentation review, push, one fresh hosted
-rerun, and merge remain for PR #636.
+second manual/local broad unit run occurred. The required hosted rerun will
+execute its normal fast-Rust gate. Documentation review, push, one fresh
+hosted rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -947,9 +948,10 @@ Run `33234021296` stopped in preflight on the three structural counts changed
 by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
 `4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
 equality assertions; its exact failed validation method passes. Run
-`33234420211` passed every non-fast-Rust lane and completed the broad suite;
+`33234420211` passed every non-fast-Rust lane and completed its hosted broad suite;
 all seven stale fixture failures are exact-green at reviewed repair
-`4b76a34e`, mapped through `7dc30a42`. No second broad suite was run.
+`4b76a34e`, mapped through `7dc30a42`. No second manual/local broad suite was
+run; the required hosted rerun will execute its normal fast-Rust gate.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:

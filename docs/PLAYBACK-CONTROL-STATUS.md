@@ -55,7 +55,7 @@ passed on exact rerun. The complete cluster harness, seven real-daemon activatio
 and two Activity tests pass. Formatting, workspace Clippy, validation catalog,
 history, 123 operations contracts, 52 benchmark checks, and the web policy
 gate also pass. Every local result is therefore accounted green without a
-second broad-suite run. Hosted run `33226975369` stopped in fast preflight on
+second manual/local broad-suite run. Hosted run `33226975369` stopped in fast preflight on
 sixteen stale ownership-inventory counts before every downstream job. After
 unanimous review, the two exact failed methods pass 2/2, `make
 validation-lint` passes, and the complete hosted-equivalent Python validation
@@ -106,7 +106,7 @@ task, timer, process action, watchdog, or recovery owner changed. Repair
 the exact failed validation method passes, and `4ad4a4da` maps the evidence.
 Hosted run `33234420211` then passed validation scope, mobile-version policy,
 contract preflight, WAL recovery, every daemon contract, and the complete
-replicated Store/topology lane. Fast Rust ran the one allowed broad suite to
+replicated Store/topology lane. Fast Rust ran its hosted broad suite to
 completion: 1,281 passed, three were ignored, and seven stale fixture
 assumptions failed. Repair `4b76a34e` now compares actor delivery at one fixed
 coordinate, keeps read-only playlist observation separate from response
@@ -117,7 +117,8 @@ claim state machine. All seven failed names pass by exact rerun. Package
 Clippy, formatting, diff inspection, the exact ownership inventory,
 validation lint, and history pass; `7dc30a42` records the regression evidence.
 Three source reviews and an exact mapped-head review approve the repair with no
-actionable P0–P3 finding. No second broad unit suite was run. Documentation
+actionable P0–P3 finding. No second manual/local broad unit suite was run.
+The required hosted rerun will execute its normal fast-Rust gate. Documentation
 review, push, one fresh hosted run, and merge remain.
 
 The post-rejection work is assembled in three tracks:
@@ -184,7 +185,8 @@ The unchanged pre-rebase content was locally validated. Rebased runtime head
 adversarial approvals; the current serving-authority source repair is under a
 fresh exact-head review.
 The one allowed full local unit invocation has been consumed; every failed or
-directly affected name now passes, and no broad unit target will run again.
+directly affected name now passes, and no second manual/local broad unit target
+will run. Required hosted workflows still execute their normal broad gates.
 PR #626's runtime commits
 `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
@@ -312,7 +314,7 @@ Review and test state for M4:
 | Operational projection | **Runtime repairs through `4da3bbde`; evidence closed through `44947095`; inventory reconciliation `c4a1d96d`; final-Rust repair `c48a9867`; hosted-gate repair `600a95aa` mapped through `700bcdd9`; test-shape inventory repair `c94cdcf3` mapped through `4ad4a4da`; hosted lifecycle-fixture repair `4b76a34e` mapped through `7dc30a42`; the synchronized documentation tip is the review candidate.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. Remote cluster activation now uses explicit negotiated ownership plus target serving generation, three-phase Prepare/Confirm/Publish-or-Abandon settlement with atomic claim deadlines on both Store backends, and restart admission owned through detached START completion. |
 | Adversarial implementation review | **Every source, hosted-gate, inventory, and lifecycle-fixture repair through `7dc30a42` is approved.** The final rounds repaired response-publication cleanup, finite handoff renewal/takeover, current-owner replay after takeover, resolved-replay freshness, backend transaction parity, the v17→v18 Hiqlite trigger upgrade, remote START restart-drain ownership, executable trigger syntax, current fixtures, Clippy ownership shape, five Hiqlite placeholder-order defects, final transaction inventory/replay assertions, deterministic admission/terminal fixtures, actor-bound playlist race seams, exact VOD/rolling cleanup observation, successful-ack delivery accounting, and the seven hosted lifecycle fixtures. Exact head `032292a1…` was rejected for detached START ownership; the first cluster gate rejected six SQL bindings; hosted runs `33228540108`, `33230939191`, and `33234420211` exposed six, nine, and seven exact Rust cases respectively. All resulting source and evidence repairs have unanimous approval with no remaining P0–P3 finding. Documentation-only exact-head review remains before push. |
 | Format/static inspection | **Green on mapped repair `7dc30a42`.** `cargo fmt --all -- --check`, `git diff --check`, package Clippy with warnings denied, the exact ownership inventory, validation catalog, and history pass. Earlier required evidence also includes workspace compiler checks, 123 operations contracts, 52 benchmark checks, and the web policy/contrast gate. The hosted-equivalent Python validation catalog passes 68/68 after `c4a1d96d`; exact history policy passes after docs-only mapping `9471d129`. |
-| Unit/focused tests | **Green without a second broad run.** The one allowed broad suite completed in hosted run `33234420211`: 1,281 passed, seven failed, and three were ignored. All seven failures were repaired at `4b76a34e` and now pass by exact name. Historical 641-test accounting, the activation Store contract, five daemon activation/replay tests, two SQLite migrations, two Hiqlite schema contracts, the placeholder-order invariant, all six names from run `33228540108`, and all nine names from run `33230939191` also remain accounted green. |
+| Unit/focused tests | **Green without a second manual/local broad run.** Hosted run `33234420211` completed its broad suite: 1,281 passed, seven failed, and three were ignored. All seven failures were repaired at `4b76a34e` and now pass by exact name. Historical 641-test accounting, the activation Store contract, five daemon activation/replay tests, two SQLite migrations, two Hiqlite schema contracts, the placeholder-order invariant, all six names from run `33228540108`, and all nine names from run `33230939191` also remain accounted green. The required hosted rerun will execute its normal fast-Rust gate. |
 | Full/cluster/hosted gates | **All required cluster evidence is green; one fresh hosted run remains.** Vendor WAL/Hiqlite probes passed. The replicated Store lane passed 61/67 before six exact placeholder failures; after `4da3bbde`, all six failed three-voter names pass. The complete cluster harness, seven activation tests, and two Activity tests pass. Hosted runs `33226975369` and `33227941555` exposed and closed inventory/history preflight findings. Runs `33228540108` and `33230939191` passed every other selected job, including the complete replicated Store/topology lane, but fast Rust exposed six and nine exact cases respectively. Run `33234021296` stopped before broad jobs on three reviewed test-only structural counts, now exact-green at `c94cdcf3`. Run `33234420211` passed every non-fast-Rust job and the full Store/topology lane; its seven fast-Rust failures are exact-green at reviewed source `4b76a34e`. Merge remains conditional on documentation review, push, and one wholly green hosted rerun. |
 
 ## Watchdog-removal ledger
