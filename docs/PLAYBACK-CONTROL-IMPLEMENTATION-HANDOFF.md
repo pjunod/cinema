@@ -970,9 +970,9 @@ preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Freeze the docs-only history mapping and continuation-step repair found by
-   the first exact-head PR #642 review.
-2. Re-review the new exact PR head for typed reader/process ordering, the
+1. Re-review exact PR #642 head after the committed docs-only history mapping
+   and continuation-step repair.
+2. Confirm typed reader/process ordering, the
    `Unsupported`-only retry, direct/takeover immediate classification,
    completion/process rendezvous, cancellation, and exact cleanup ownership.
 3. Only after that review, run compile/static gates and the active cut's single
