@@ -17793,6 +17793,7 @@ impl TranscodeManager {
                         .is_ok()
                 }
             }
+            PlaylistError::ProducerEnded(_) => false,
             PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
                 session.failed.load(Relaxed) && session.failure_reason() == *error
             }
