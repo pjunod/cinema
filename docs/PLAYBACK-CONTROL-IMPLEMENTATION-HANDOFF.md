@@ -9,13 +9,16 @@
 (hosted run `33236731526` fully green; merge
 `a48884906da351ca0c72dc99c227aa169911d089`)
 **Active branch:** `codex/playback-control-m4-published-lifetime`
-**Current head:** `2f34a8eae08c16c7db9d9e96149fb7b6d26f4434`.
-Published-lifetime implementation and regression mapping are committed.
+**Current runtime/evidence heads:**
+`b683b600a6dea69803c621018f5263b697c96a40` / `9540e768`.
+Published-lifetime implementation, frozen-frontier repair, exact owner
+inventory, and regression mapping are committed.
 **Earlier exact candidate:**
 `f151b9788213474c3382c3a2494a6259b71bc216` received three formal exact-head
-adversarial approvals with no actionable P0–P3 finding. Head `2f34a8ea` adds
-the final validation-history mapping and still requires immutable final
-review.
+adversarial approvals with no actionable P0–P3 finding. Later full-tip review
+found one P1 late-observation frontier race and one stale mandatory owner
+inventory. Both are repaired at `b683b600`; review the resulting PR branch tip,
+not an older embedded hash.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -27,10 +30,11 @@ assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
 cleanup through `77e292d1`; historical-schema fixture and completion proof
 `411bf818` through `4d38a084`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
-**Current candidate identity:** runtime behavior was frozen and approved at
-`f151b978`; validation-history mapping is complete at `2f34a8ea`. Treat
-`2f34a8ea` as the next immutable review target, not as an already approved or
-merge-ready head.
+**Current candidate identity:** runtime behavior was first frozen and approved
+at `f151b978`, then repaired at `b683b600` after the final review found a late-
+observation frontier race and stale owner inventory. Mapping is current at
+`9540e768`. The immutable review target is the final PR branch tip, not an
+embedded self-referential documentation hash.
 **Runtime review state before the serving-fence repair:** exact runtime head
 `b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
 `77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
@@ -56,10 +60,13 @@ startup, advancing, nonzero-exit, and successful-exit classification coverage
 now pass as four exact tests. The other 54 `plurxd` failures are sandbox
 environment failures at bind, mDNS/listener, or macOS `ps` observation seams.
 The `plurx-core` cluster failures likewise stop at sandbox-denied bind/listener
-setup. Formatting, lint, validation lint (23/27/12,843), history
-(1,118/768/661/80/77), 123 operations contracts, 52 benchmark checks, web
-policy, and diff inspection are green. Unrestricted `make cluster-check`,
-also passes its vendor recovery, 67-test replicated Store contract, real
+setup. The four successor regressions, the new frozen-frontier actor race, and
+the exact owner inventory (7/7) pass by exact name. Formatting, lint,
+validation lint (23 points / 27 checks), history (1,121/769/663/80/78), 123
+operations contracts, 52 benchmark checks, web policy, and diff inspection are
+green.
+Unrestricted `make cluster-check` also passes its vendor recovery, 67-test
+replicated Store contract, real
 membership/failover/topology drills, seven daemon activation tests, and two
 cluster activity tests. Immutable final branch-tip review, wholly green hosted
 CI, and merge remain. A later accidental duplicate invocation stopped before
@@ -932,8 +939,8 @@ preserved untracked vendor build artifacts remain outside every commit.
 Continue in this order:
 
 1. Commit this evidence update, then obtain immutable final review of the
-   resulting exact branch tip. Runtime and mapping are frozen through
-   `2f34a8ea`; the unrestricted cluster gate is green.
+   resulting exact branch tip. Runtime and evidence are frozen through
+   `b683b600` / `9540e768`; the unrestricted cluster gate is green.
 2. Push the reviewed head, require wholly green hosted CI, and merge.
 
 Do not skip the adversarial-review gate because an automatically started
@@ -953,11 +960,12 @@ node-handoff actions after their server contracts are separately proven.
 
 ### Active published-lifetime cut boundaries
 
-Implementation and regression mapping are committed through `2f34a8ea`;
-runtime head `f151b978` has three formal exact-head approvals, and the static
-and unrestricted cluster gates named above are green. Final immutable
-branch-tip review, hosted CI, and merge remain. The cut owns actor-managed live
-transcodes only, after first media has committed:
+Implementation and regression mapping are committed through `b683b600` /
+`9540e768`. The earlier runtime head `f151b978` had three formal exact-head
+approvals; later full-tip findings are repaired and the static and unrestricted
+cluster gates named above are green. Final immutable branch-tip review, hosted
+CI, and merge remain. The cut owns actor-managed live transcodes only, after
+first media has committed:
 
 - first media keeps or rearms the actor's existing
   `ProducerProgressDeadline`; it must not start a second polling owner;
@@ -968,9 +976,11 @@ transcodes only, after first media has committed:
   resources, and applies `CleanupPolicy::RetainPublished`; it must not call
   `Session::fail`, clear the published scratch/catalog, end the actor, or
   replace the child in place;
-- existing playlist, init, and materialized segments remain readable. A
-  request beyond the committed frontier receives typed `producer_ended`, so a
-  client can distinguish terminal producer loss from a missing object; and
+- an already-authorized playlist body plus retained init and numeric segments
+  at or behind the frozen frontier remain readable. Fresh playlist reloads are
+  rejected after the retained failure proposal. A request beyond the frontier
+  receives typed `producer_ended`, so a client can distinguish terminal
+  producer loss from a missing object; and
 - actor snapshot, metrics, logs, and events expose the postpublication
   disposition, proposal identity, completion proof, and cleanup result.
 
@@ -1039,7 +1049,7 @@ client controller; M6 moves automatic quality, codec, HDR/Dolby Vision, audio,
 subtitle, and node changes to prepare/commit/abort; M9 deletes compatibility
 `/status` polling and legacy reopen paths.
 
-The final immutable-head review of `2f34a8ea` must specifically challenge
+The final immutable branch-tip review must specifically challenge
 first-media deadline rearming and cutoff order; exactly-one stable
 postpublication failure and proposal identity; cancellation at every
 executor/reap boundary; exact attempt and permit release; `RetainPublished`
