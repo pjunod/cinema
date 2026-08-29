@@ -7,16 +7,13 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Current review candidate:** the documentation tip above runtime repair
-`daf1af99` and regression mapping `0dcb1990`, after source repair `b8b1dc73`
-and post-rebase history repair `00f84d1d`.
-Rebased head `8964e3b1` was rejected because internal remote starts could
-attach VOD work without current serving authority. Later reviews found
-premature replacement-permit release, an unbounded pin, and five ways a
-`BLOCKED` activation could be renewed, controlled, claimed, or abandoned
-without exact publication proof. The current tree closes that ledger with one
-atomic prepare/confirm-or-abandon Store protocol and negotiated remote
-`START`/`ACTIVATE` ownership. Its pre-freeze review is approved; immutable
-exact-head review is next.
+`6e01bbc3` and regression mapping `529144ca`. That source implements
+three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
+transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
+takeover, current-owner retry publication, and resolved-replay freshness.
+Store, lifecycle, and end-to-end integration reviewers unanimously approved
+the source with no P0–P3 finding. Immutable review of the docs-bearing exact
+head is next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -41,7 +38,8 @@ prepublication recovery, exact response admission, cancellation-safe process
 and resource settlement, authoritative local/remote routing, bounded relay
 stream ownership, and per-rendition VOD build/cleanup ownership. The newest
 wave makes cluster replacement make-before-break, persists a replay-visible
-successor publication fence and the first durable terminal cause, makes
+successor publication fence and the first durable terminal cause, separates
+durable confirmation from exact response publication, makes
 release a publication-fence/Store-cause/exact-projection transaction, and
 binds bodyless status, typed error, and EOF publication to exact response
 authority. It also actor-fences copy and rolling-cache response publication,
@@ -59,7 +57,8 @@ vendor WAL and Store case, the full cluster harness, seven activation tests,
 and two Activity tests are also accounted green. Formatting, workspace Clippy,
 validation catalog, history, 122 operations contracts, and 52 benchmark checks
 pass for the unchanged pre-rebase content. The current activation repair is
-formatted, diff-clean, and production compiler-clean, but deliberately
+formatted, diff-clean, production compiler-clean, and unanimously approved
+before freeze, but deliberately
 untested until its exact-head review completes. After approval, run only
 directly affected tests and required static, cluster, and hosted gates; then
 merge PR #636.
@@ -475,6 +474,34 @@ bind denials, and five stale assertion failures. Repairs through rebased
 `dad2cd5b` received targeted exact-head approval in `2afa1bba`; all 35 exact failed names
 then passed.
 
+The next activation audit rejected the two-phase response model itself. A
+confirmed route could outlive a cancelled response without durable request
+publication; a finite predecessor handoff could exceed the initial 12-second
+lease; capped owner inventory could misclassify cleanup; direct control and
+takeover could admit a `BLOCKED` route; and resolved replay could return an
+expired or stale owner epoch after waiting for serving authority. Store and
+lifecycle reviews also found backend row-count, NULL-owner, stale-pointer, and
+upgrade-only trigger gaps.
+
+Runtime `6e01bbc3` closes that ledger with three explicit states and two
+mutually exclusive final transactions. Confirm advances `BLOCKED` to `0` or a
+finite boundary while its request stays starting. Publish resolves only the
+exact current live route. Abandon fails and tombstones only a still-starting
+activation, with a cancellation-independent exact reaper. Finite routes enter
+ordinary lease ownership, transfer their starting request on takeover, and
+receive one renewal after becoming ready. SQLite v36 and Hiqlite v18 install
+the same atomic claim trigger for fresh and upgraded databases. In-flight and
+resolved replays re-read current durable ownership and refresh the control
+epoch. Mapping `529144ca` binds this repair to the existing playback recovery
+evidence.
+
+Three independent read-only review lanes challenged Store transaction and
+migration parity, cancellation/guard lifetime, and the full remote
+START→ACTIVATE→handoff→takeover→Publish path. Their final passes unanimously
+approved the committed source with no P0–P3 finding. No unit, focused, or
+cluster test ran during these review rounds; only formatting, diff inspection,
+and `cargo check -p plurxd --locked` ran.
+
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
 the corresponding detached startup fallback. Published-lifetime and copy
@@ -807,9 +834,9 @@ fixture, compile/Clippy, assertion/scanner, and runtime rounds. Fresh review of
 rebased candidate `8964e3b1` found the internal remote-start serving-authority
 bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` closed that
 first issue. Subsequent review exposed the provisional activation lifecycle
-gaps described at the top of this handoff. Their compile-clean repair is frozen
-in `daf1af99`, with regression mapping `0dcb1990`; the documentation tip is the
-immutable review candidate.
+gaps described at the top of this handoff. The final three-phase repair is
+frozen in `6e01bbc3`, with regression mapping `529144ca`; the documentation tip
+is the immutable review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
 `8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
