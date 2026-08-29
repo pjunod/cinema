@@ -71,7 +71,11 @@ sentinels before downstream jobs. Three reviewers independently recomputed and
 approved the inventory-only `c4a1d96d` repair; the two exact failed validation
 methods pass 2/2, catalog lint passes, and the complete hosted-equivalent Python
 validation catalog passes 68/68. Only docs-bearing exact-head review, push, a
-green hosted rerun, and merge remain for PR #636.
+green hosted rerun, and merge remain for PR #636. Hosted rerun `33227941555`
+stopped solely because docs commit `9ee007a8` matched the corrective-history
+classifier; unanimously reviewed mapping `9471d129` records that docs-only
+scope, and the exact history-policy rerun passes with all 1,100 corrective
+commits accounted.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
