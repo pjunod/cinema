@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cf3bdcb9"]
+points = ["cluster.auth"]
+checks = ["cluster-auth", "rust-gate"]
+reason = "The retained post_cas_repair_proof_distinguishes_quorum_age_from_topology_change regression requires the post-CAS proof to accept an unchanged leader and Raft term after the one-second quorum-freshness observation ages, while still rejecting a changed leader, changed term, or missing leader. The separate-process membership lifecycle exercises the same path after a fresh-quorum, acknowledged artwork-generation CAS and deliberately probes every losing voter before the post-CAS topology check, reproducing the loaded-runner delay without weakening the mutating claim's admission fence."
