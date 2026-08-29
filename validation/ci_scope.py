@@ -198,7 +198,16 @@ def scope_for_paths(catalog: Catalog, paths: tuple[str, ...]) -> dict[str, bool]
         "container": any(matches(path, CONTAINER_PATHS) for path in paths),
         "mobile_version": "mobile-version" in check_ids,
         "hiqlite_spike": "core.media" in point_ids,
-        "cluster_auth": bool({"cluster.auth", "cluster.page-reads"} & point_ids),
+        # `cluster.membership` belongs here even though its own behavior is
+        # unit-testable: the replicated Store, topology and daemon contracts
+        # are the only place a membership change is exercised against real
+        # voters, and `points.toml` already declares `cluster-auth` as its
+        # evidence. Without this, a change to the request-admission fence
+        # merges on the fast Rust gate alone while its regression record
+        # claims three-voter coverage that never ran.
+        "cluster_auth": bool(
+            {"cluster.auth", "cluster.membership", "cluster.page-reads"} & point_ids
+        ),
         "docs_only": False,
     }
     if any(matches(path, CI_ROUTING_PATHS) for path in paths):

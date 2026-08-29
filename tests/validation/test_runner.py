@@ -189,6 +189,13 @@ class CatalogCase(unittest.TestCase):
         )
         self.assertTrue(topology_schema["cluster_auth"])
 
+        # A membership change is only exercised against real voters in the
+        # replicated lane, so it must select it.
+        membership = scope_for_paths(
+            catalog, ("crates/plurx-core/src/cluster/membership.rs",)
+        )
+        self.assertTrue(membership["cluster_auth"])
+
         core = scope_for_paths(catalog, ("crates/plurx-core/src/domain.rs",))
         self.assertTrue(core["hiqlite_spike"])
         self.assertTrue(core["cluster_auth"])

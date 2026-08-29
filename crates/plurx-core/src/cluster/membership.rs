@@ -186,6 +186,79 @@ impl LocalServingRole {
     }
 }
 
+/// One-shot publication of the local serving role.
+///
+/// `cluster_capacity_gate` loads this slot on every request, so a refresh has
+/// to publish exactly once: any interim value is a live 503 for as long as the
+/// refresh runs. `commit` publishes the computed role. Dropping without a
+/// commit — an early `?`, a panic, or a cancelled future — publishes `Fenced`,
+/// so failing closed survives every failure path without also fencing the
+/// success path.
+struct LocalServingRolePublication<'a> {
+    slot: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> LocalServingRolePublication<'a> {
+    #[must_use = "an unused publication fences the node for the rest of the refresh"]
+    fn new(slot: &'a AtomicU8) -> Self {
+        Self {
+            slot,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, role: LocalServingRole) {
+        self.slot.store(role.encoded(), Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for LocalServingRolePublication<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.slot
+                .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
+        }
+    }
+}
+
+/// One-shot publication of the local maintenance flag.
+///
+/// `cluster_capacity_gate` consults this flag *before* the serving role, and
+/// its allow-list is an explicit enumeration rather than `/healthz` plus
+/// `/metrics`, so an interim `true` is a broader outage than an interim
+/// `Fenced`. Same contract as the serving-role publication: `commit` is the
+/// only way to publish an open gate, and any path that does not reach it
+/// leaves the node in maintenance.
+struct LocalMaintenancePublication<'a> {
+    slot: &'a AtomicBool,
+    committed: bool,
+}
+
+impl<'a> LocalMaintenancePublication<'a> {
+    #[must_use = "an unused publication holds the node in maintenance for the rest of the refresh"]
+    fn new(slot: &'a AtomicBool) -> Self {
+        Self {
+            slot,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, requested: bool) {
+        self.slot.store(requested, Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for LocalMaintenancePublication<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.slot.store(true, Ordering::Release);
+        }
+    }
+}
+
 impl ClusterRole {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -3276,9 +3349,12 @@ impl MembershipManager {
         // the transaction below is delayed or the response is lost.
         let maintenance_requested = self.refresh_local_maintenance(inner).await?;
         // This local read is also the removal protocol's target-side route
-        // barrier. It happens before sampling and publishing last_applied, so
-        // a coordinator that observes the barrier knows this process has
-        // already fenced its HTTP request path.
+        // barrier, and the barrier is the *publication*, not the call: the
+        // refresh finishes before last_applied is sampled and published, so a
+        // coordinator that observes the heartbeat write knows the role this
+        // process is serving under reflects a read taken before that write.
+        // It does not mean the process is fenced — a healthy node publishes
+        // `Voter` here and keeps serving, which is the point.
         let serving_role = self.refresh_local_route_admission(inner).await?;
         if serving_role == LocalServingRole::Voter && inner.role.is_learner() {
             self.persist_local_promoted_voter_role(inner).await?;
@@ -3474,9 +3550,16 @@ impl MembershipManager {
         &self,
         inner: &ReplicatedMembership,
     ) -> Result<bool, MembershipError> {
-        // Fail closed. A transient local read error must not reopen a process
-        // that previously observed a durable maintenance request.
-        inner.local_maintenance.store(true, Ordering::Release);
+        // Publish once, at the end, for the same reason the serving role
+        // does: storing `true` up front held the node in maintenance for as
+        // long as the read below took, on every heartbeat, on a node nobody
+        // had asked to drain. This gate is the first one
+        // `cluster_capacity_gate` consults and its allow-list is an explicit
+        // enumeration, so that window refused more routes than the fenced one
+        // — every ordinary API call the web app makes among them. A transient
+        // read error still fails closed: the guard publishes `true` on every
+        // path that does not reach its commit.
+        let publication = LocalMaintenancePublication::new(&inner.local_maintenance);
         let requested = inner
             .client
             .query_map::<CountRow, _>(
@@ -3486,7 +3569,7 @@ impl MembershipManager {
             .await?
             .first()
             .is_some_and(|row| row.count == 1);
-        inner.local_maintenance.store(requested, Ordering::Release);
+        publication.commit(requested);
         Ok(requested)
     }
 
@@ -3494,11 +3577,18 @@ impl MembershipManager {
         &self,
         inner: &ReplicatedMembership,
     ) -> Result<LocalServingRole, MembershipError> {
-        // Fail closed before touching the database. If the local read fails,
-        // the request path stays fenced until a later heartbeat succeeds.
-        inner
-            .local_serving_role
-            .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
+        // Publish once, at the end. Storing `Fenced` here fenced the request
+        // path for as long as the two reads below took — on every heartbeat,
+        // on a healthy node — because `cluster_capacity_gate` loads this slot
+        // per request and answers 503 for everything but `/healthz` and
+        // `/metrics`. The removal protocol's target-side barrier does not
+        // need that window: a coordinator observes this node's heartbeat
+        // write, which lands after this call returns, so the property it
+        // relies on is that the published role reflects a read taken before
+        // that write. One publication at the end supplies exactly that, and
+        // the guard still fails closed on every error, panic, and
+        // cancellation path.
+        let publication = LocalServingRolePublication::new(&inner.local_serving_role);
         let active = inner
             .client
             .query_map::<CountRow, _>(
@@ -3537,9 +3627,7 @@ impl MembershipManager {
         } else {
             role
         };
-        inner
-            .local_serving_role
-            .store(published_role.encoded(), Ordering::Release);
+        publication.commit(published_role);
         Ok(role)
     }
 
@@ -8563,6 +8651,87 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The route gate answers 503 for `Fenced`, so the cost of an interim
+    // publication is a real outage window on a healthy node, once per
+    // heartbeat. These three pin the whole contract of the guard that makes
+    // an interim publication unwriteable.
+
+    #[test]
+    fn a_serving_role_publication_does_not_touch_the_slot_before_it_commits() {
+        let slot = AtomicU8::new(LocalServingRole::Voter.encoded());
+        let publication = LocalServingRolePublication::new(&slot);
+        // The reads a refresh performs happen here. A node that is serving
+        // must still be serving.
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Voter,
+        );
+        publication.commit(LocalServingRole::Learner);
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Learner,
+        );
+    }
+
+    #[test]
+    fn an_uncommitted_serving_role_publication_fences_on_drop() {
+        let slot = AtomicU8::new(LocalServingRole::Voter.encoded());
+        {
+            let _publication = LocalServingRolePublication::new(&slot);
+            // An early `?`, a panic, or a cancelled future leaves here.
+        }
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Fenced,
+            "a refresh that did not finish must leave the request path fenced",
+        );
+    }
+
+    #[test]
+    fn a_committed_serving_role_publication_survives_its_own_drop() {
+        let slot = AtomicU8::new(LocalServingRole::Fenced.encoded());
+        LocalServingRolePublication::new(&slot).commit(LocalServingRole::Voter);
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Voter,
+            "the drop that follows a commit must not re-fence the node",
+        );
+    }
+
+    #[test]
+    fn a_maintenance_publication_does_not_close_the_gate_before_it_commits() {
+        let slot = AtomicBool::new(false);
+        let publication = LocalMaintenancePublication::new(&slot);
+        assert!(
+            !slot.load(Ordering::Acquire),
+            "a node nobody asked to drain must keep serving while the read runs",
+        );
+        publication.commit(false);
+        assert!(!slot.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn an_uncommitted_maintenance_publication_holds_the_node_in_maintenance() {
+        let slot = AtomicBool::new(false);
+        {
+            let _publication = LocalMaintenancePublication::new(&slot);
+        }
+        assert!(
+            slot.load(Ordering::Acquire),
+            "a refresh that did not finish must leave the node in maintenance",
+        );
+    }
+
+    #[test]
+    fn a_committed_maintenance_publication_survives_its_own_drop() {
+        let slot = AtomicBool::new(true);
+        LocalMaintenancePublication::new(&slot).commit(false);
+        assert!(
+            !slot.load(Ordering::Acquire),
+            "the drop that follows a commit must not re-close the gate",
+        );
+    }
 
     #[test]
     fn maintenance_is_replicated_and_rollout_gated() {
