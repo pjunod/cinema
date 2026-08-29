@@ -6,14 +6,17 @@
 **Active branch:** `codex/playback-control-m4-prepublication`
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Current review candidate:** the documentation tip above runtime repair
-`6e01bbc3` and regression mapping `529144ca`. That source implements
+**Current review candidate:** the documentation tip above runtime repairs
+`6e01bbc3` and `07bb95bc`, with regression mappings `529144ca` and `ea36ccd2`.
+That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
 takeover, current-owner retry publication, and resolved-replay freshness.
 Store, lifecycle, and end-to-end integration reviewers unanimously approved
-the source with no P0–P3 finding. Immutable review of the docs-bearing exact
-head is next.
+the repaired source with no P0–P3 finding after exact head
+`032292a159513e51f13bab5db1d6081c46b0cc5c` exposed and rejected detached
+remote-START restart-admission loss. Immutable review of the next docs-bearing
+exact head is next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -502,6 +505,17 @@ approved the committed source with no P0–P3 finding. No unit, focused, or
 cluster test ran during these review rounds; only formatting, diff inspection,
 and `cargo check -p plurxd --locked` ran.
 
+Formal exact-head review then rejected
+`032292a159513e51f13bab5db1d6081c46b0cc5c`: internal remote `START` acquired
+restart admission in the HTTP handler but detached worker creation into a task
+which did not own that guard. Handler cancellation could therefore let restart
+preparation observe zero admissions and snapshot owners while the admitted
+worker was still being created. Repair `07bb95bc` moves the admission into the
+detached task before creation and retains it through pinning and confirmation-
+watcher ownership handoff; mapping `ea36ccd2` records the regression. Store,
+lifecycle, and integration reviewers unanimously approve the repair. No test
+ran during that review.
+
 Merged `main` remains behavior-neutral for recovery. The active cut transfers
 prepublication transcode startup authority to the actor/executor and removes
 the corresponding detached startup fallback. Published-lifetime and copy
@@ -835,8 +849,9 @@ rebased candidate `8964e3b1` found the internal remote-start serving-authority
 bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` closed that
 first issue. Subsequent review exposed the provisional activation lifecycle
 gaps described at the top of this handoff. The final three-phase repair is
-frozen in `6e01bbc3`, with regression mapping `529144ca`; the documentation tip
-is the immutable review candidate.
+frozen in `6e01bbc3`, with restart-admission repair `07bb95bc` and regression
+mappings `529144ca`/`ea36ccd2`; the documentation tip is the immutable review
+candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
 evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
 `8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
