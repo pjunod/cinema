@@ -21113,7 +21113,7 @@ mod tests {
             .is_some_and(|lease| lease.retired));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
         let root = crate::test_tempdir().expect("fixture root");
         let session_dir = root.path().join("session");
@@ -21282,6 +21282,14 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+        // Keep the filesystem-backed retirement and concurrent retry on real
+        // time. A start-paused runtime may auto-advance while async scratch
+        // cleanup is pending; under hosted load that can expire the receipt
+        // before the retry reaches `retry_pause`, leaving this test's barrier
+        // waiting for an attempt that correctly never starts. Freeze time only
+        // after the durable retry has completed, where advancing it exercises
+        // terminal tombstone expiry without mixing virtual time with real I/O.
+        tokio::time::pause();
         let terminal_deadline = replay_a
             .terminal_commit
             .as_ref()
