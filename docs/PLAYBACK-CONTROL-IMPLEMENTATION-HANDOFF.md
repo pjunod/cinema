@@ -970,13 +970,14 @@ preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Adversarially review exact PR #642 head, then freeze any required repair.
-2. Obtain adversarial review of typed reader/process ordering, the
+1. Freeze the docs-only history mapping and continuation-step repair found by
+   the first exact-head PR #642 review.
+2. Re-review the new exact PR head for typed reader/process ordering, the
    `Unsupported`-only retry, direct/takeover immediate classification,
    completion/process rendezvous, cancellation, and exact cleanup ownership.
 3. Only after that review, run compile/static gates and the active cut's single
    broad unit run. Then run the required unrestricted cluster and hosted gates,
-   repair and re-review any failure, open the PR, and merge only when the exact
+   repair and re-review any failure, and merge only when the exact
    candidate is wholly green.
 
 Do not skip the adversarial-review gate because an automatically started

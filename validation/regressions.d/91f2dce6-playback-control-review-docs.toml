@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["91f2dce6"]
+reason = "This commit only freezes the playback-control status and handoff documentation around the already-tested actor-owned copy-lifetime implementation; it changes no runtime or validation behavior."
+ignore = true

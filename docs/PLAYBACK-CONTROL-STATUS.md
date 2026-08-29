@@ -456,11 +456,10 @@ not playback watchdogs.
 
 ## Remaining delivery order
 
-1. Freeze the copy-lifetime candidate in a commit, open its PR, and
-   adversarially review that exact PR head. Confirm the actor is the only copy
-   policy owner, reader/process rendezvous is bounded, and general lifecycle
-   serialization did not regain recovery authority.
-2. Only after that exact-head review, run the active cut's one broad local unit
+1. Re-review the repaired exact PR #642 head. The first exact-head pass found
+   only the missing docs-only history mapping and these stale continuation
+   steps; runtime ownership remained clean.
+2. Only after that new exact-head review, run the active cut's one broad local unit
    suite and remaining static gates, followed by unrestricted cluster and
    hosted gates. Repair and re-review as needed, and merge only when the exact
    candidate is wholly green. Compile-only cargo check and the zero-mismatch
