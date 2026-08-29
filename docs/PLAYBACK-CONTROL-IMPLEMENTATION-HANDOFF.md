@@ -9,9 +9,10 @@
 **Current review candidate:** the local committed tip above runtime repairs
 through `4da3bbde`, regression evidence closed through `44947095`,
 hosted-preflight owner-inventory reconciliation `c4a1d96d`, final-Rust repair
-`c48a9867`, hosted-gate repair `600a95aa`, and evidence mapping `700bcdd9`.
-The remote PR still points to `c48a9867` until this corrected documentation tip
-passes immutable review and is pushed.
+`c48a9867`, hosted-gate repair `600a95aa`, evidence mapping `700bcdd9`, and
+hosted structural-inventory reconciliation `c94cdcf3` mapped through
+`4ad4a4da`. The remote PR points to reviewed head `cdc27aa8`; the local
+candidate is ahead only by the inventory repair and this synchronized ledger.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -107,8 +108,14 @@ only a successful acknowledgement priority; canceled acknowledgements still
 fall through to body/no-progress deadline or receiver-close classification.
 Both VOD and rolling pumps now share that ordering. Two adversarial lanes
 approve the integrated repair. All nine exact hosted names pass; the complete
-suite has not been rerun locally. Corrected-tip review, push, hosted rerun, and
-merge remain for PR #636.
+suite has not been rerun locally. Hosted run `33234021296` then stopped in
+preflight because the whole-module ownership ledger had not counted the new
+test-only synchronization shapes. Two reviewers independently proved the exact
+net additions: one joined waiter task, nine bounded fixture timers, and six
+Barrier `wait` tokens conservatively matched as process-shaped; no production
+owner changed. Repair `c94cdcf3` changes only those three exact expectations,
+the exact validation method passes, and `4ad4a4da` maps the evidence.
+Exact-head review, push, hosted rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -916,11 +923,16 @@ eight completed failures and one cleanup hang. The integrated repair is
 committed at `600a95aa`, mapped through `700bcdd9`, approved by both adversarial
 lanes, and green for all nine exact names. Package Clippy, formatting, diff,
 catalog, and history gates pass. No broad local suite was rerun.
+Run `33234021296` stopped in preflight on the three structural counts changed
+by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
+`4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
+equality assertions; its exact failed validation method passes.
 The preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Obtain unanimous exact-head review of the corrected documentation tip.
+1. Obtain unanimous exact-head review of the inventory-reconciled documentation
+   tip.
 2. Push the reviewed and exact-green candidate, update PR #636's body to pin
    that full object ID, require every hosted check green, merge, and
    continue immediately with the published-lifetime watchdog cut.
