@@ -47,8 +47,10 @@ carries a reason a human can read.** Concretely, when this plan is done:
   DV over a **served fragment index**, not the live-HLS recovery path. Today
   every preserved-DV VOD session is `vod_index_pending`.
 - A Profile 7 disc remux reaches those same clients as **Profile 8.1 Dolby
-  Vision** through a prepared sidecar, with the badge saying so honestly
-  (`DV P7 → DV P8`, enhancement layer discarded).
+  Vision** — converted on the fly in the copy pipeline, or permanently on
+  disk when the operator asks for it — with the badge saying so honestly
+  (`DV P7 → DV P8`, enhancement layer discarded). A device that declares a
+  real Profile 7 decoder gets the untouched dual-layer stream.
 - The server hears one structured capabilities document per decision instead
   of a growing bag of query flags, re-derives the plan on session create
   instead of trusting an echo, and can see a browser's learned decode limits
@@ -66,7 +68,7 @@ Keep it. Every defect found lives at an edge of it:
 | # | Edge | Where | Consequence |
 |---|---|---|---|
 | E1 | **VOD index built only for the stripped identity.** The indexer hardcodes `preserve_dolby_vision=false`; the session identity uses the request's real flag; `copy_video_args` differs, so the fingerprints differ. | `crates/plurxd/src/state.rs:1198-1209` (sole indexing caller of `from_probe`, used at `:3424`, `:3614`, `:4002`, `:4301`) vs `crates/plurxd/src/vodserve.rs:1494-1500`; args differ at `crates/plurx-core/src/transcode/mod.rs:1259-1296` | Every preserved-DV VOD session → `vod_index_pending` (`vodserve.rs:1547`) → live-HLS recovery (`crates/plurxd/src/transcode.rs:12940-12970`). A total DV outage if `playback.vod_live_recovery=0`. The admin "indexed" badge (`http/browse.rs:357-368`) lies the same way. |
-| E2 | **DV facts parsed from a human label.** `dolby_vision_profile()` does `split("profile")` on `files.hdr_format`. | `playback/mod.rs:439-446`; label built at `crates/plurx-core/src/scan/probe.rs:289-325` | A record without `dv_profile`, or a codec-tag-only detection, yields the bare label `"Dolby Vision"` ⇒ profile `None` ⇒ unclaimable by **any** client. No column carries `el_present_flag`, which the P7 sidecar needs. |
+| E2 | **DV facts parsed from a human label.** `dolby_vision_profile()` does `split("profile")` on `files.hdr_format`. | `playback/mod.rs:439-446`; label built at `crates/plurx-core/src/scan/probe.rs:289-325` | A record without `dv_profile`, or a codec-tag-only detection, yields the bare label `"Dolby Vision"` ⇒ profile `None` ⇒ unclaimable by **any** client. No column carries `el_present_flag`, which the P7 conversion needs. |
 | E3 | **Transcode grade is hardcoded.** `reencode_grade` returns SDR unless the source is P5-needing-RPU-render **and** the client sent `hdr10t=1`. | `playback/mod.rs:514-520`; `dolby_vision_needs_rpu_render` `:463` | Every transcode of HDR10, HDR10+, HLG, P7 or P8 is tone-mapped. This is the single largest "or lower" cause. |
 | E4 | **Two deciders.** `/decision` computes `preserve_dolby_vision`; the client echoes it in the create body; create trusts the echo. | `crates/plurxd/src/http/hls.rs:562` (field), `:603` (`== Some(true)`) | Verified all three clients propagate it today (web `index.html:6786,6981`; Apple `PlayerController.swift:5074-5082`; Android `SubtitlePolicy.kt:277`) — a seam, not a live bug. It stays a seam until create re-derives. |
 | E5 | **Flat, positional wire caps with presence semantics.** `dv=1` is the blanket claim only when `dvprofile` is *absent*; `hdr10t` is a bespoke flag for one rung; `maxheight` is codec-agnostic so the web sends `min(8-bit rung, Main10 rung)` and Android bolted `vmaxheight` beside it. | `crates/plurxd/src/http/stream.rs:170-215` (query), `:277-303` (`caps_profile`); web `index.html:6337-6376` | Each new capability is a new key with its own absent-means-what rule; the min-of-rungs hack costs a needless transcode on devices that decode 8-bit 4K but Main10 only at 1080p. |
@@ -78,7 +80,14 @@ What is **not** a defect and stays as it is: the P7 rule. Apple advertises
 `DVHE_DTR→4, DVHE_STN→5, DVHE_ST→8` and drops `DVHE_DTB` (=7)
 (`clients/android/app/src/main/java/tv/plurx/app/data/CapsPolicy.kt`).
 No consumer decoder Paul owns takes dual-layer. The route to DV from a P7
-disc is conversion to single-layer Profile 8.1 (§7 M5), never a wider claim.
+disc is conversion to single-layer Profile 8.1 (§7 M5). A client that
+*proves* a Profile 7 decoder — Android `MediaCodec` declaring
+`DolbyVisionProfileDvheDtb` (Shield-class boxes, some TVs) — may claim 7
+and receive the untouched stream; the server already preserves NAL 62/63
+for a preserved-DV copy (`hevc_copy_bsf_for_client`,
+`transcode/mod.rs:271-287`). Paul, 2026-08-29: "claim profile 7 all you
+want if you can do it." The guardrail (§6) is that the claim comes from the
+decoder enumeration, never from a display bit or a guess.
 
 ---
 
@@ -104,7 +113,7 @@ disc is conversion to single-layer Profile 8.1 (§7 M5), never a wider claim.
             │ POST /hls/sessions {caps, plan_ref, overrides}
             ▼
  ┌──────────────────────────────┐
- │ create RE-DERIVES the plan   │  mismatch ⇒ typed refusal `plan_mismatch`
+ │ create RE-DERIVES the plan   │  mismatch ⇒ WARN `plan_mismatch`, server plan wins
  │ from caps; overrides are     │  named overrides only: compatible_hdr_base,
  │ named, each with a reason    │  force=transcode, subtitle burn
  └──────────────────────────────┘
@@ -123,8 +132,13 @@ Five ideas, each one milestone:
 4. **Grade negotiation** (M4). `target_grade(source, client presentation,
    node render caps)` replaces `reencode_grade`; the HDR10 passthrough rung
    opens for non-DV HDR sources and stripped P7/P8.
-5. **P7 → P8.1 prepared sidecar** (M5) using `dovi_tool` + `mkvmerge` (§5),
-   scanned like any file, chosen by `decide()` as a *source variant*.
+5. **P7 → P8.1, both ways** (M5). On the fly: an in-process RPU rewrite
+   stage in the copy pipeline (the `dolby_vision` crate, §5), so a P7 disc
+   remux reaches a DV-capable client as Profile 8.1 with no disk cost.
+   Permanently: an operator-triggered on-disk conversion of a file or a
+   whole library (`dovi_tool` + `mkvmerge`), after which the file simply
+   *is* P8.1 and no runtime stage is involved. Paul's ruling 2026-08-29:
+   "why not both, with the option to do the disk conversion."
 
 Plus M0 (measure before touching anything) and M6 (learned limits reported
 inside caps v2, so the server's reasons name them).
@@ -174,7 +188,7 @@ Field semantics, and what each replaces:
 | `video[].codec` | one entry per decodable codec; the server's per-codec ceiling replaces the single `max_height` + `vmaxheight` pair | `vcodec`, `maxheight`, `vmaxheight` |
 | `video[].profiles` | codec profiles the decoder proved at `max_height` (`main`/`main10` for HEVC). A 10-bit ceiling lower than 8-bit is expressed as **two entries** for the same codec with different `max_height`, which is exactly what the web's min-of-rungs hack was working around | the `hevcTierSummary` min |
 | `video[].present` | transfer functions the device can *present* for this codec: `sdr`, `pq` (HDR10/HDR10+), `hlg`. `pq` here is what `hdr10t=1` meant, generalised | `hdr`, `hdr10t` |
-| `video[].dv_profiles` | DV profiles this codec's decoder takes, exhaustively; `[]` means none. **Never 7** on a consumer client (§6) — except Android devices whose MediaCodec declares `DolbyVisionProfileDvheDtb` (§7 M5 follow-on) | `dv`, `dvprofile` |
+| `video[].dv_profiles` | DV profiles this codec's decoder takes, exhaustively; `[]` means none. `7` only when the decoder enumeration says so — Android `MediaCodec` `DolbyVisionProfileDvheDtb` — never from a display bit (§6) | `dv`, `dvprofile` |
 | `dv_transport` | `hls` when preserved DV must ride the copy-video HLS envelope; `progressive` when raw MP4 is fine | `dvhls` |
 | `display` | facts about the attached output, separate from decode: Apple `eligibleForHDRPlayback`/`availableHDRModes`, web `(dynamic-range: high)` + a DV probe, Android `Display.HdrCapabilities` | folded into `hdr`/`dv` today |
 | `learned_limits` | the web's `plurx_decode_limits` entries, verbatim (§4.6) | nothing — invisible today |
@@ -259,7 +273,8 @@ fn has_compatible_dv_base(file: &MediaFile) -> bool {
 
 The label `hdr_format` stays as the display string and is **derived** from
 the columns at scan time from M2 on. MEL vs FEL is *not* an ffprobe fact; it
-comes from the RPU and is recorded by M5 in `dv_sidecars.el_type`.
+comes from the RPU: M5a reads it off the first RPU per session, M5b records
+it in `dv_conversions.el_type`.
 
 ### 4.4 Grade negotiation (M4)
 
@@ -329,12 +344,17 @@ Create runs `decide()` again from `caps` (legacy clients that send no
 `caps` keep today's trust path, logged at `warn` with the client build so
 the fleet can be watched for stragglers). If the client's `preserve_dolby_vision`
 or `hdr10` echo disagrees with the re-derived plan **and** no named override
-explains it, the create is refused with the typed error
-`plan_mismatch` (reuse `ApiError::typed`, the pattern at `hls.rs:697-702`),
-carrying both values. Named overrides: `compatible_hdr_base` is Apple's
-existing `forceCompatibleHDRBase` retry (`PlayerController.swift:2373`) and
-stays legitimate; `force` is the quality menu. Each override appends its
-own reason to the session's reasons so the badge shows it.
+explains it, the create **proceeds with the server's plan** and records a
+`plan_mismatch` warning: a `tracing::warn!` with both values and the client
+build, a reason string on the session (`"plan_mismatch: client asked
+preserve_dolby_vision=true, server derived false"`) so the badge and the
+stats overlay show it, and a counter on `/api/v1/system` so the fleet can be
+watched. **Never a refusal** — Paul's ruling 2026-08-29: "I don't see a
+reason for it to prevent functionality." Named overrides:
+`compatible_hdr_base` is Apple's existing `forceCompatibleHDRBase` retry
+(`PlayerController.swift:2373`) and stays legitimate; `force` is the
+quality menu. Each override appends its own reason to the session's reasons
+so the badge shows it.
 
 `session_delivered_dynamic_range` (`hls.rs:664-680`) keeps reading the
 built session, not the decision — MEDIA-BADGES-PLAN §3.2 — so a burn or a
@@ -383,6 +403,8 @@ async fn fragment_index_video_identities(store, file, have_dovi)
     // DV:     [from_probe(.., preserve=true)]  +  [from_probe(.., preserve=false)] when
     //         has_compatible_dv_base(file)   (a P5 has no strippable base; its
     //         non-preserved route is a transcode, which is not a copy identity)
+    // P7:     + [from_probe(.., preserve=true).with(DvConvert::P7ToP81)] once M5a
+    //         lands — the identity a {5,8} client actually requests
 }
 ```
 
@@ -392,64 +414,120 @@ files, so a DV-heavy library does not double its pass time silently. The
 browse badge (`browse.rs:352-370`) reports `indexed` only when **every**
 identity for the file is present, `partial` when some are, else `pending`.
 
-### 4.8 P7 → P8.1 sidecar (M5)
+### 4.8 P7 → P8.1 on the fly (M5a) and on disk (M5b)
+
+**Order is fixed: M5a first**, so P7 titles are usable as DV while the disk
+converter is still being built (Paul, 2026-08-29).
+
+**M5a — the streaming stage.** A new `CopyVideoOptions::dv_convert:
+Option<DvConvert>` (`DvConvert::P7ToP81`) set by the decider when the source
+is `dv_profile=7` with a compatible base and the client's `dv_profiles`
+contains 8 but not 7. Because it is a field of `CopyVideoOptions`, its
+rendering into `copy_video_args` (a marker token such as
+`--plurx-dv-convert=p7-to-p81`, stripped before exec) puts it into the
+argv fingerprint, so M1 indexes the converted identity as a third identity
+for P7 files and the VOD index keyspace stays honest.
+
+```
+ ffmpeg#1: -i src.mkv -map 0:v:0 -c:v copy
+           -bsf:v hevc_mp4toannexb,filter_units=remove_types=63   # EL dropped
+           -f hevc -                                              # Annex B
+     │
+     ▼
+ plurx dv-convert (in-process, tokio task, `dolby_vision` crate):
+   for each NAL: type 62 (RPU) → DoviRpu::parse_unspec62_nalu
+                               → convert_with_mode(2)   # P8.1: EL refs off,
+                               → write_hevc_unspec62_nalu  # CRC32 recomputed
+                 anything else → pass through unchanged
+     │
+     ▼
+ ffmpeg#2: -f hevc -i - -i src.mkv -map 0:v -map 1:a … -c copy
+           -tag:v dvh1 -strict unofficial  → the existing HLS/fMP4 segmenter
+```
+
+The one open mechanical question is the **`dvcC` box**: the P8.1 stream out
+of ffmpeg#2 must carry a Dolby Vision configuration record with
+`dv_profile=8`, `el_present_flag=0`, the source's `dv_bl_signal_compatibility_id`,
+and the master playlist must say `dvh1.08.06` (compat id 6) or `.08.01`.
+**Spike first (M5a-0, one day):** on a node, run `ffmpeg -f hevc -i
+BL_RPU.p81.hevc -c copy -tag:v dvh1 -strict unofficial -f mp4 out.mp4` and
+`xxd out.mp4 | grep -i dvcc`. Two outcomes, choose by result, do not guess:
+
+- ffmpeg derives the record from the RPU on the copy path → nothing more to
+  do; `exact_hls_context` (`hls.rs:2863-2932`) reads the init and advertises
+  `dvh1.08.xx` exactly as it does for a native P8 file today.
+- it does not → plurx inserts the box into the init segment: a 24-byte
+  `dvcC` payload appended inside the `dvh1` sample entry, and the seven
+  enclosing `size` fields (`dvh1`, `stsd`, `stbl`, `minf`, `mdia`, `trak`,
+  `moov`) bumped by 32. `crates/plurx-core/src/fmp4` already parses this
+  tree for the fragment reader; add the writer beside it with a golden test
+  against a real init from a native P8 title. Media segments are untouched
+  either way — the RPU lives in `mdat` sample data, already rewritten
+  upstream.
+
+Concurrency: the rewrite is a header edit per frame, sub-millisecond; a 4K
+remux at 60–80 Mb/s is I/O-bound through the two pipes, not CPU-bound.
+Measure it in the D6 style anyway and record the number.
+
+The badge reads `DV P7 → DV P8` (new "converted" state in
+MEDIA-BADGES-PLAN §4, dimmed source half like today's `→ HDR10`, tooltip
+"Profile 7 enhancement layer discarded; MEL: near-lossless / FEL: EL detail
+lost"). MEL vs FEL is read off the first RPU by the same stage
+(`DoviRpu::el_type`) and reported in the session's `reasons`. **FEL sources
+are converted too** (default; §9 Q3 stands unless overruled) — the base +
+RPU is real Profile 8.1 DV, which is what every consumer P7 player does.
+
+**M5b — the permanent on-disk conversion.** An operator action, per file or
+per library, run by the daemon as a background queue like the fragment
+indexer:
+
+```bash
+# 1. base layer + RPU, EL dropped (as M5a step 1, to a temp file)
+ffmpeg -nostdin -i "$SRC" -map 0:v:0 -c:v copy \
+  -bsf:v hevc_mp4toannexb,filter_units=remove_types=63 -f hevc BL_RPU.hevc
+# 2. rewrite every RPU to Profile 8.1 (mode 2); --discard is belt-and-braces
+dovi_tool -m 2 convert --discard -i BL_RPU.hevc -o BL_RPU.p81.hevc
+# 3. MEL/FEL for the ledger: `info` reads an RPU binary, so extract first.
+#    The summary names the profile with its EL type ("Profile: 7 (MEL)" /
+#    "(FEL)") — verify the exact string on the pinned version, parse defensively.
+dovi_tool extract-rpu -i BL_RPU.hevc -o RPU.bin
+dovi_tool info -i RPU.bin --summary
+# 4. remux: new video + EVERY other track of the original (audio, subs,
+#    chapters, tags). mkvmerge parses the RPU NALs in a raw Annex B stream and
+#    writes the Profile 8 Dolby Vision configuration block — the step ffmpeg
+#    cannot do. Pin MKVToolNix >= 68 (earlier builds could miss the RPU when
+#    the first access unit overran the 1 MiB probe buffer; issue #3363).
+mkvmerge -o "$OUT.tmp" BL_RPU.p81.hevc --no-video "$SRC"
+# 5. verify BEFORE touching the original: ffprobe reports dv_profile=8,
+#    el_present_flag=0, same duration ±1 frame, same audio track count.
+# 6. commit: rename original → "$SRC.p7.orig" (setting `keep_original`, default
+#    on) or delete it (off), rename "$OUT.tmp" → "$SRC", re-probe the row.
+```
+
+After step 6 the row is `dv_profile=8`; M1 re-indexes on the size/mtime
+change; nothing at runtime knows the file was ever P7 except the ledger:
 
 ```sql
-CREATE TABLE dv_sidecars (
+CREATE TABLE dv_conversions (
     file_id        INTEGER PRIMARY KEY REFERENCES files(id) ON DELETE CASCADE,
-    path           TEXT NOT NULL,          -- under <runtime cache>/dv-sidecars/<file_id>.mkv
-    source_size    INTEGER NOT NULL,       -- invalidation by mismatch, as fragment_indexes
-    source_mtime   INTEGER NOT NULL,
-    el_type        TEXT NOT NULL,          -- 'mel' | 'fel'  (from dovi_tool info on the RPU)
-    bytes          INTEGER NOT NULL,
-    built_at_ms    INTEGER NOT NULL,
-    last_used_ms   INTEGER NOT NULL        -- LRU for the size cap
+    state          TEXT NOT NULL,          -- queued|running|verified|committed|failed
+    el_type        TEXT,                   -- 'mel' | 'fel'
+    original_path  TEXT,                   -- the .p7.orig, NULL when deleted
+    bytes_before   INTEGER, bytes_after INTEGER,
+    error          TEXT,
+    queued_at_ms   INTEGER NOT NULL, finished_at_ms INTEGER
 ) STRICT;
 ```
 
-Build recipe (the standard dovi_tool workflow, verified against its README
-2026-08-29):
-
-```bash
-# 1. base layer + RPU as Annex B, enhancement layer dropped (NAL 63)
-ffmpeg -nostdin -i "$SRC" -map 0:v:0 -c:v copy \
-  -bsf:v hevc_mp4toannexb,filter_units=remove_types=63 -f hevc BL_RPU.hevc
-# 2. rewrite every RPU to Profile 8.1 (mode 2). --discard is belt-and-braces
-#    if step 1 ever runs without filter_units.
-dovi_tool -m 2 convert --discard -i BL_RPU.hevc -o BL_RPU.p81.hevc
-# 3. MEL/FEL for the ledger and the badge: `info` reads an RPU binary, not
-#    HEVC, so extract first. The summary names the source profile with its
-#    EL type ("Profile: 7 (MEL)" / "(FEL)") — verify the exact string on the
-#    pinned version and parse defensively.
-dovi_tool extract-rpu -i BL_RPU.hevc -o RPU.bin
-dovi_tool info -i RPU.bin --summary
-# 4. remux video-only; mkvmerge parses the RPU NALs in a raw Annex B stream
-#    and writes the Profile 8 Dolby Vision configuration block — the step
-#    ffmpeg cannot do. Pin MKVToolNix >= 68: earlier builds could miss the
-#    RPU when the first access unit overran the 1 MiB probe buffer
-#    (mkvtoolnix issue #3363, fixed 2022-07).
-mkvmerge -o "$SIDECAR" BL_RPU.p81.hevc
-# 5. probe the sidecar with the ordinary scanner: expect dv_profile=8,
-#    dv_bl_compat_id=1|6, dv_el_present=0
-```
-
-Audio, subtitles and chapters are **not** copied into the sidecar; the
-sidecar is a *video variant* of the same `files` row. At decision time,
-`decide()` receives the source with its video facts swapped for the
-sidecar's (`container=mkv`, `dv_profile=8`, `dv_el_present=0`) when the
-client's `dv_profiles` contains 8 and the sidecar is current; the copy
-session's ffmpeg gets `-i sidecar.mkv -i original.mkv -map 0:v -map 1:a…`.
-`delivered_dynamic_range` returns `dolby_vision`; the badge reads
-`DV P7 → DV P8` (new "converted" state in MEDIA-BADGES-PLAN §4, dimmed
-source half like today's `→ HDR10`, with the tooltip "Profile 7 enhancement
-layer discarded; MEL: near-lossless / FEL: EL detail lost").
-
-Policy knobs (settings keys, `store/mod.rs:369-380` style):
-`playback.dv_sidecar` (`off|lazy|eager`, default `lazy` — build on the
-first DV-capable request for a P7 title, serve HDR10 base meanwhile with the
-reason `"Dolby Vision Profile 8 variant is being prepared"`),
-`playback.dv_sidecar_cap_gb` (LRU, default 200). A sidecar is roughly the
-source size minus the EL (≈ 85–95 % of a disc remux) — Paul decides the cap.
+Settings (keys in the `store/mod.rs:369-380` style): `playback.dv_convert`
+(`off|on`, the on-the-fly stage, default `on` when the node's ffmpeg passed
+the M5a spike), `library.dv_disk_convert` (`off|manual|auto` per library —
+`auto` queues every new P7 scan result), `library.dv_disk_keep_original`
+(default on), `library.dv_disk_convert_parallel` (default 1 — a disc remux
+is 60–80 GB of sequential I/O per pass). Settings → Libraries gets the
+per-library toggle and a "Convert now" button with queue progress; the
+admin file view gets a per-file "Convert to Profile 8.1" action and the
+ledger row.
 
 ---
 
@@ -461,25 +539,29 @@ The options, with the recommendation marked:
 
 | Dependency | Form | Licence | Buys | Cost / risk |
 |---|---|---|---|---|
-| **`dovi_tool`** (quietvoid) — **recommended, M5** | static binary in the Docker image (GitHub release asset, pinned version + sha256; or `cargo install dovi_tool --locked` in the builder stage) | MIT | the only battle-tested P7→P8.1 RPU converter; `info` gives MEL/FEL; the de-facto tool every DV library workflow uses | +~10 MB image; a boot probe (`dovi_tool --version`) so its absence degrades to "sidecars off", never a crash |
-| **`mkvtoolnix`** (`mkvmerge`) — **recommended, M5** | `apt-get install mkvtoolnix` | GPL-2 (separate process, fine) | writes the Profile 8 DV configuration block from a raw HEVC stream, which ffmpeg's muxers cannot (verified 2026-08-29: `dovi_rpu` bsf has `strip`/`compression` only and copies the RPU profile header verbatim; `ff_dovi_configure_ext` refuses profiles 4/7) | +~30 MB image; pin ≥ 68 (raw-HEVC RPU detection landed after the MP4-only support in v57; the large-first-frame miss was fixed 2022-07) |
-| `dolby_vision` crate (quietvoid) | Cargo dependency | MIT | in-process RPU parse/convert — the road to **streaming** P7→P8.1 with no sidecar disk cost | needs plurx to also write the `dvcC` box and the master `CODECS`; touches the copy seam that M1 is fixing; do it **after** M5 proves clients play the converted output |
+| **`dovi_tool`** (quietvoid) — **M5b** | static binary in the Docker image (GitHub release asset, pinned version + sha256; or `cargo install dovi_tool --locked` in the builder stage) | MIT | the only battle-tested P7→P8.1 RPU converter; `info` gives MEL/FEL; the de-facto tool every DV library workflow uses | +~10 MB image; a boot probe (`dovi_tool --version`) so its absence degrades to "disk conversion off", never a crash |
+| **`mkvtoolnix`** (`mkvmerge`) — **M5b** | `apt-get install mkvtoolnix` | GPL-2 (separate process, fine) | writes the Profile 8 DV configuration block from a raw HEVC stream, which ffmpeg's muxers cannot (verified 2026-08-29: `dovi_rpu` bsf has `strip`/`compression` only and copies the RPU profile header verbatim; `ff_dovi_configure_ext` refuses profiles 4/7) | +~30 MB image; pin ≥ 68 (raw-HEVC RPU detection landed after the MP4-only support in v57; the large-first-frame miss was fixed 2022-07) |
+| **`dolby_vision` crate** (quietvoid) — **M5a** | Cargo dependency (`dolby_vision = "3"`, default features; pin exact) | MIT | in-process RPU parse/convert — the streaming P7→P8.1 stage with no disk cost; the same code dovi_tool is built on | plurx may have to write the `dvcC` box itself (§4.8 spike decides); a Rust dep, so it rides `make unit` and `cargo audit` like everything else |
 | `libplacebo` (already optional in jellyfin-ffmpeg) | none new | LGPL | higher-quality tone-mapping on Vulkan GPUs; `ToneMap::Libplacebo` exists at `transcode.rs:3596` | unchanged; not on this plan's path |
 | `mediainfo` | apt | BSD-2 | prettier DV strings | nothing ffprobe + dovi_tool don't give; **not recommended** |
 
-Decision Paul is being asked to confirm (§9 Q1): add `dovi_tool` +
-`mkvmerge` to the image now; take the `dolby_vision` crate as the M5
-follow-on if sidecar disk cost turns out to matter more than the seam risk.
+Decided 2026-08-29 (Paul: "why not both, with the option to do the disk
+conversion"): the `dolby_vision` crate for M5a, `dovi_tool` + `mkvmerge` in
+the image for M5b. Each has a boot probe; absence degrades to "that
+conversion mode off" with a reason string, never a crash.
 
 ---
 
 ## 6. Non-goals and guardrails
 
-- **Do not widen any client's `dv_profiles` to include 7.** No decoder Paul
-  owns takes dual-layer; the failure is a black screen, not a downgrade. The
-  one exception is an Android device whose MediaCodec explicitly declares
-  `DolbyVisionProfileDvheDtb` (Shield-class boxes); gate on that constant and
-  nothing else, and only after M5 exists so the server has a P8 fallback.
+- **A client claims Profile 7 only from its decoder enumeration.** Android
+  `MediaCodec` `DolbyVisionProfileDvheDtb` is the one legitimate source;
+  never a display HDR bit, never `canPlayType`, never a guess — a wrong claim
+  is a black screen, not a downgrade. Apple and web have no such enumeration
+  and stay at `{5,8}`. Build the Android claim in M5a's PR (it is a
+  `CapsPolicy.kt` change plus dropping the server's nothing-special-about-7
+  assumption), so a P7-capable box gets the original and everyone else gets
+  the conversion from the same release.
 - **Do not change `decide()`'s ladder order or its reason strings** other
   than adding the new ones named in §4. Tests at `playback/mod.rs:1100-1500`
   pin the existing ones and the badge plan cites them.
@@ -489,15 +571,19 @@ follow-on if sidecar disk cost turns out to matter more than the seam risk.
 - **Do not touch `exact_hls_context` (`hls.rs:2863-2932`) without a
   master-playlist assertion test.** It has already caused one AVPlayer
   `-12927` outage by rewriting `dvh1.05.06` into an HEVC-shaped identifier.
-  M5's `DV P7 → DV P8` variant goes through it unchanged because the sidecar
-  is a real P8 source.
+  M5a's converted stream must go through it **unchanged**: once the init
+  carries a P8 `dvcC` (§4.8), the existing reader advertises `dvh1.08.xx`
+  exactly as for a native P8 file. If the spike shows you need to teach it
+  anything, write the master-playlist test first.
 - **Do not route non-DV HDR10 through `tonemapx`** (§4.4). It is the P5
   renderer and aborts on the wrong input.
 - **Do not re-scan the library to fix profile-less labels.** M2 backfills
   from stored probe JSON; the residue that has no DOVI record needs a real
   re-probe, reported as a count for Paul to act on.
-- **Do not make the sidecar per-session.** Once per file, LRU-capped, or
-  the streaming-crate follow-on — never "convert on every play".
+- **Do not build a disk sidecar for the streaming path.** M5a is a
+  per-session in-process stage (cheap: a header rewrite per frame); the only
+  thing that ever lands on disk is M5b's operator-requested permanent
+  conversion of the library file itself.
 - **Do not merge to `main`.** One PR per milestone, CI green, Paul merges.
 - **Do not hand-edit build-claim surfaces.** Client changes in M3/M6 bump
   via `make apple-build-bump`; Android `versionCode` + its README status line
@@ -582,7 +668,8 @@ the progressive `play_url` only.
 **Acceptance:** server: `curl -X POST /decision` with the §4.1 example
 returns the same `decision` as the GET with the equivalent `CAPS_Q`;
 a create whose body says `preserve_dolby_vision:true` for a client whose
-caps have `dv_profiles:[]` is refused `plan_mismatch`; Apple's
+caps have `dv_profiles:[]` **succeeds** with the server's plan, carries the
+`plan_mismatch` reason, and increments the `/system` counter; Apple's
 `compatible_hdr_base` override is accepted and its reason appears in the
 session's `reasons`. Clients: each build's `/decision` request in the
 server log carries `caps.v=2`; `tests/playback/web-policy.test.js` has a
@@ -607,22 +694,56 @@ the same request on a node with `hdr10_passthrough=false` returns `sdr`
 with the reason naming the node. Stripped P7 on an HDR-presenting Chrome
 transcodes to **hdr10**.
 
-### M5 — Profile 7 → Profile 8.1 sidecar (server + image)
+### M5a — Profile 7 → 8.1 on the fly (server + Android caps) — before M5b
 
-Image: `dovi_tool` + `mkvmerge` pinned; boot probe. Table, recipe, policy
-knobs, LRU per §4.8. `decide()` source-variant swap. Badge state
-`DV P7 → DV P8` in the web, Apple and Android badge code (MEDIA-BADGES-PLAN
-§4 table gains the row; fix the stale P7 row at ~line 340 in the same
-commit). Settings UI: the three knobs under Playback.
+Paul, 2026-08-29: "do the on the fly first so it can be useable while the
+on disk part is building too."
 
-**Acceptance:** for Resident Evil (P7) with `playback.dv_sidecar=lazy`: the
-first Safari request returns `hdr10` with the "being prepared" reason; after
-the build, `dv_sidecars` has the row with `el_type` set, ffprobe on the
-sidecar reports `dv_profile=8, el_present_flag=0`, and the next Safari
-request returns `delivered_dynamic_range:"dolby_vision"` over a VOD session
-(M1 indexed the sidecar's preserved identity). Apple TV and a DV-capable
-Android phone play it with the DV badge lit on the device (device check —
-§8). Chrome on the same title still gets `hdr10` with the strip reason.
+M5a-0, the spike (§4.8): does this ffmpeg write `dvcC` from a raw P8.1
+Annex B stream on the copy path? Record the answer in the M0 doc; it picks
+the branch. Then: `dolby_vision` crate dependency; `DvConvert` on
+`CopyVideoOptions` and in the argv fingerprint (M1 indexes the third
+identity); the two-ffmpeg pipe with the in-process RPU rewrite in the copy
+session **and** in the index pipe (`fragindex::build`) so the index
+describes the converted bytes; the `dvcC` insertion if the spike said so,
+with its golden test; `playback.dv_convert` setting + boot probe; badge
+state `DV P7 → DV P8` in web, Apple and Android (MEDIA-BADGES-PLAN §4 gains
+the row; fix the stale P7 row at ~line 340 in the same commit); MEL/FEL in
+the session's `reasons`. Same PR, Android side: `CapsPolicy.kt` maps
+`DolbyVisionProfileDvheDtb` → 7 when the decoder enumeration declares it,
+and the server treats 7 like any other listed profile (it already does —
+`allows_dolby_vision` is list membership; just delete any assumption that
+7 never arrives, and add the test).
+
+**Acceptance:** for Resident Evil (P7) on Safari with `dv_profiles:[5,8]`:
+`/decision` returns `method:"remux"`, `preserve_dolby_vision:true`,
+`delivered_dynamic_range:"dolby_vision"`, a reason naming the conversion
+and the EL type; the session's init carries `dvcC` with `dv_profile=8,
+el_present_flag=0`; the master playlist advertises `dvh1.08.06`;
+`vod_indexed:true` after one index pass (three rows in `fragment_indexes`
+for the file); Apple TV and a DV-capable Android phone play it with the DV
+badge lit on the device (§8 checklist). Chrome on the same title still gets
+`hdr10` with the strip reason. An Android device whose caps list 7 gets
+`preserve_dolby_vision:true` with **no** conversion reason and NAL 63
+present in its segments. Throughput on nuc4 for a 4K remux ≥ 1.5× realtime.
+
+### M5b — Profile 7 → 8.1 permanently on disk (server + image + UI)
+
+Image: `dovi_tool` + `mkvmerge` pinned with a boot probe. The queue,
+recipe, verify-before-commit, `dv_conversions` ledger and the four settings
+per §4.8. Settings → Libraries: per-library `off|manual|auto` and "Convert
+now" with progress; admin file view: per-file action and ledger row. The
+converted file is re-probed, becomes `dv_profile=8`, and M1/M5a then have
+nothing to do for it — that is the point.
+
+**Acceptance:** convert one MEL and one FEL title with `keep_original` on:
+the originals are renamed `.p7.orig`, ffprobe on the new files reports
+`dv_profile=8, el_present_flag=0`, audio/subtitle/chapter counts are
+unchanged, duration matches within one frame, `dv_conversions` shows
+`committed` with `el_type` and byte counts, and `/decision` for Safari
+returns `dolby_vision` with **no** conversion reason (native P8 path). A
+deliberately truncated input leaves the original untouched and the ledger
+row `failed` with the ffprobe mismatch as `error`.
 
 ### M6 — Learned limits reported (web + server, E6)
 
@@ -643,15 +764,15 @@ returns the title to remux.
 ## 8. Rollout — fleet, devices, status page
 
 Server milestones ship through the ansible media playbook to every node
-(project instruction), in milestone order; M1 and M2 carry sidecar/database
-migrations, so deploy one node, watch the boot backfill and index-pass log
-lines, then the rest. Client milestones (M3b–d, M5 badge, M6) go through the
+(project instruction), in milestone order; M1, M2 and M5b carry
+sidecar/database migrations, so deploy one node, watch the boot backfill and index-pass log
+lines, then the rest. Client milestones (M3b–d, M5a badge + Android caps, M6) go through the
 `mobile_release` role to every reachable Apple and Android device (the floor
 is the named roster, not a count — project memory).
 
 Device verification that cannot be done from a shell — DV badge lit on Apple
-TV / Android for the M5 sidecar, the `plan_mismatch` refusal never firing on
-a real seek/reopen in M3 — is a checklist in the PR description for Paul to
+TV / Android for M5a's converted stream, the `plan_mismatch` warning staying
+at zero across real seeks/reopens in M3 — is a checklist in the PR description for Paul to
 run or delegate; write it as exact taps and expected on-screen text.
 
 `docs/STATUS.html` gets one line per merged milestone with the node version
@@ -659,22 +780,15 @@ it landed in; build-number claims only through `make apple-build-bump`.
 
 ---
 
-## 9. Open decisions for Paul
+## 9. Decisions — taken 2026-08-29, and the one still defaulted
 
-1. **Dependencies (§5):** add `dovi_tool` + `mkvmerge` to the image now?
-   Recommended yes.
-2. **Sidecar disk policy (§4.8):** `lazy` with a 200 GB LRU cap as the
-   default, or `eager` for the whole P7 population once M0's census says how
-   big that is?
-3. **FEL sources:** convert them too (the base + RPU is still real DV, just
-   without the EL detail) and label it, or skip FEL and serve HDR10?
-   Recommended convert-and-label; the alternative is what happens today.
-4. **`plan_mismatch` strictness (§4.5):** refuse, or warn-and-re-derive for
-   one release while the three clients roll out? Recommended refuse only
-   for clients that sent `caps.v=2`; legacy creates keep the trust path.
-5. **Android Profile 7 (§6):** allow it when MediaCodec declares
-   `DolbyVisionProfileDvheDtb`? Only matters if a Shield-class box joins the
-   fleet.
+| # | Question | Ruling |
+|---|---|---|
+| 1 | Dependencies (§5) | **Both**: `dolby_vision` crate (M5a) and `dovi_tool` + `mkvmerge` in the image (M5b). Paul: "why not both, with the option to do the disk conversion." |
+| 2 | On-the-fly vs on-disk | **Both, on-the-fly first** so P7 titles are usable while M5b is being built. On-disk is operator-triggered per file/library, `keep_original` on by default. |
+| 3 | FEL sources | **Defaulted** to convert-and-label (the base + RPU is real P8.1 DV; every consumer P7 player does the same). Overrule in the M5a PR if you want FEL served as HDR10 instead. |
+| 4 | `plan_mismatch` (§4.5) | **Warn, never refuse.** Paul: "I don't see a reason for it to prevent functionality." Server plan wins; reason on the session; counter on `/system`. |
+| 5 | Profile 7 claims (§6) | **Allowed from a real decoder enumeration** (Android `DolbyVisionProfileDvheDtb`); never from a display bit. Paul: "claim profile 7 all you want if you can do it." |
 
 ---
 
