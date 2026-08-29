@@ -11,7 +11,8 @@ commits = [
   "8ff70435",
   "daf1af99",
   "6e01bbc3",
+  "07bb95bc",
 ]
 points = ["playback.pipeline"]
 checks = ["rust-gate", "rust-gate-ci", "playback-recovery", "resource-bounds"]
-reason = "The current Rust, SQLite, replicated Store, recovery, and resource-bound contracts exercise actor-owned prepublication decisions, exact response and EOF settlement, cancellation-safe child/scratch ownership, bounded relay and abort lifetimes, three-phase replacement publication fencing, atomic BLOCKED confirmation and request publication or abandonment, explicit remote START/ACTIVATE ownership, takeover replay and pagination, renewal-before-adoption, and move-owned cleanup identity. The mapping follows these corrective commits after their rebase changed the hashes that their original exact-head review and source-level regression fixtures named."
+reason = "The current Rust, SQLite, replicated Store, recovery, and resource-bound contracts exercise actor-owned prepublication decisions, exact response and EOF settlement, cancellation-safe child/scratch ownership, bounded relay and abort lifetimes, three-phase replacement publication fencing, atomic BLOCKED confirmation and request publication or abandonment, restart-drain admission retained through detached remote START ownership handoff, explicit remote START/ACTIVATE ownership, takeover replay and pagination, renewal-before-adoption, and move-owned cleanup identity. The mapping follows these corrective commits after their rebase changed the hashes that their original exact-head review and source-level regression fixtures named."
