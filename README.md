@@ -72,7 +72,10 @@ the post-membership topology, consistency classes, observability, and ordered
 work that turns additional nodes into measured read and application capacity,
 and
 [docs/CLUSTER-MEDIA-POOL-PLAN.md](docs/CLUSTER-MEDIA-POOL-PLAN.md) defining how
-those voters become one capability-aware transcode, cache, and failover pool;
+those voters become one capability-aware transcode, cache, and failover pool,
+and [docs/WINDOWS-PORT-PLAN.md](docs/WINDOWS-PORT-PLAN.md) laying out what a
+native Windows server takes — the Unix surface inventoried, the decision per
+piece, and milestones from first compile to measured hardware transcode;
 client strategy in
 [docs/CLIENTS.md](docs/CLIENTS.md), with
 [docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md](docs/APPLE-NATIVE-SUBTITLES-HANDOFF.md)
