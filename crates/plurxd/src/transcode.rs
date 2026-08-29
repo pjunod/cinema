@@ -2131,6 +2131,75 @@ enum PublishedFailureCleanupOutcome {
     RetirementTookOwnership,
 }
 
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, Debug)]
+enum PublishedAttemptCleanupCause {
+    Failure {
+        decision_sequence: u64,
+        reason: crate::playback_control::ProducerDecisionReason,
+    },
+    Completion {
+        disposition: crate::playback_control::RollingProducerCompletionDisposition,
+    },
+    ExecutorLost,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn settle_exact_published_child(
+    session: &Session,
+    producer_attempt: u64,
+    require_successful_exit: bool,
+) -> Result<(), String> {
+    let mut slot = session.child.lock().await;
+    let Some(child) = slot.as_mut() else {
+        // Another cancellation-independent owner can win this exact cleanup
+        // before a cancelled executor's monitor starts its fallback owner.
+        // Both paths serialize on `child_transition`, so an empty slot here
+        // is already-settled rather than an unowned live process.
+        session.release_hardware_after_confirmed_reap();
+        session.release_software_after_confirmed_reap();
+        return Ok(());
+    };
+    if child.producer_attempt != producer_attempt {
+        return Err(format!(
+            "actor selected producer attempt {producer_attempt}, but child slot contains {}",
+            child.producer_attempt
+        ));
+    }
+    if !require_successful_exit {
+        child
+            .request_termination()
+            .map_err(|error| format!("terminating producer attempt {producer_attempt}: {error}"))?;
+    }
+    tokio::time::timeout(
+        PREPUBLICATION_REAP_ATTEMPT_TIMEOUT,
+        child.wait_for_terminal(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "producer attempt {producer_attempt} reap exceeded {:?}",
+            PREPUBLICATION_REAP_ATTEMPT_TIMEOUT
+        )
+    })?
+    .map_err(|error| format!("reaping producer attempt {producer_attempt}: {error}"))?;
+    let status = child
+        .try_wait_observed(&session.control)
+        .map_err(|error| format!("confirming producer attempt {producer_attempt} reap: {error}"))?
+        .ok_or_else(|| {
+            format!("producer attempt {producer_attempt} wait returned before confirmed reap")
+        })?;
+    if require_successful_exit && !status.success() {
+        return Err(format!(
+            "producer attempt {producer_attempt} completion cleanup observed non-success status {status}"
+        ));
+    }
+    *slot = None;
+    session.release_hardware_after_confirmed_reap();
+    session.release_software_after_confirmed_reap();
+    Ok(())
+}
+
 /// Retain the published generation while converging physical cleanup for one
 /// exact producer attempt.
 ///
@@ -2141,14 +2210,22 @@ enum PublishedFailureCleanupOutcome {
 /// admitted from this generation remain legitimate. Admission capacity is
 /// released only after this task confirms the exact supervised child reaped.
 #[cfg(any(test, feature = "live-hls-recovery"))]
-async fn own_published_failure_cleanup(
+async fn own_published_attempt_cleanup(
     session: Arc<Session>,
     producer_attempt: u64,
-    decision_sequence: u64,
-    reason: crate::playback_control::ProducerDecisionReason,
+    cause: PublishedAttemptCleanupCause,
     sid: String,
     settled: tokio::sync::oneshot::Sender<PublishedFailureCleanupOutcome>,
 ) {
+    let (cause_kind, failure_reason, completion_disposition) = match cause {
+        PublishedAttemptCleanupCause::Failure { reason, .. } => {
+            ("failure", Some(reason), None)
+        }
+        PublishedAttemptCleanupCause::Completion { disposition } => {
+            ("completion", None, Some(disposition))
+        }
+        PublishedAttemptCleanupCause::ExecutorLost => ("executor_lost", None, None),
+    };
     loop {
         let outcome = {
             // Copy replacement and ordinary retirement still use this
@@ -2159,39 +2236,44 @@ async fn own_published_failure_cleanup(
             if session.retirement_cleanup_finished.load(Acquire) {
                 Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership)
             } else {
-                terminate_exact_prepublication_child(&session, producer_attempt)
-                    .await
-                    .map(|()| {
-                        session.release_hardware_after_confirmed_reap();
-                        session.release_software_after_confirmed_reap();
-                        PublishedFailureCleanupOutcome::Reaped
-                    })
+                settle_exact_published_child(
+                    &session,
+                    producer_attempt,
+                    matches!(cause, PublishedAttemptCleanupCause::Completion { .. }),
+                )
+                .await
+                .map(|()| PublishedFailureCleanupOutcome::Reaped)
             }
         };
         match outcome {
             Ok(outcome) => {
                 if outcome == PublishedFailureCleanupOutcome::Reaped {
-                    if let Err(error) = session
-                        .control
-                        .decision_applied(decision_sequence, None)
-                        .await
-                    {
-                        tracing::warn!(
-                            session = %session_log_id(&sid),
-                            producer_attempt,
-                            decision_sequence,
-                            reason = ?reason,
-                            cleanup_policy = "retain_published",
-                            ?error,
-                            "published producer reaped after its actor decision could no longer be acknowledged"
-                        );
+                    if let PublishedAttemptCleanupCause::Failure {
+                        decision_sequence,
+                        ..
+                    } = cause {
+                        if let Err(error) = session
+                            .control
+                            .decision_applied(decision_sequence, None)
+                            .await
+                        {
+                            tracing::warn!(
+                                session = %session_log_id(&sid),
+                                producer_attempt,
+                                decision_sequence,
+                                cleanup_policy = "retain_published",
+                                ?error,
+                                "published producer reaped after its actor decision could no longer be acknowledged"
+                            );
+                        }
                     }
                 }
                 tracing::info!(
                     session = %session_log_id(&sid),
                     producer_attempt,
-                    decision_sequence,
-                    reason = ?reason,
+                    cause = cause_kind,
+                    failure_reason = ?failure_reason,
+                    completion_disposition = ?completion_disposition,
                     cleanup_policy = "retain_published",
                     outcome = match outcome {
                         PublishedFailureCleanupOutcome::Reaped => "reaped",
@@ -2199,7 +2281,7 @@ async fn own_published_failure_cleanup(
                             "retirement_took_ownership"
                         }
                     },
-                    "published producer failure cleanup settled without discarding admitted media"
+                    "published producer cleanup settled without discarding admitted media"
                 );
                 let _ = settled.send(outcome);
                 return;
@@ -2208,8 +2290,9 @@ async fn own_published_failure_cleanup(
                 tracing::error!(
                     session = %session_log_id(&sid),
                     producer_attempt,
-                    decision_sequence,
-                    reason = ?reason,
+                    cause = cause_kind,
+                    failure_reason = ?failure_reason,
+                    completion_disposition = ?completion_disposition,
                     cleanup_policy = "retain_published",
                     retry_after_ms = PREPUBLICATION_REAP_RETRY.as_millis(),
                     %error,
@@ -2230,15 +2313,51 @@ fn spawn_published_failure_cleanup_owner(
     sid: &str,
 ) -> tokio::sync::oneshot::Receiver<PublishedFailureCleanupOutcome> {
     let (settled, settlement) = tokio::sync::oneshot::channel();
-    tokio::spawn(own_published_failure_cleanup(
+    tokio::spawn(own_published_attempt_cleanup(
         Arc::clone(session),
         producer_attempt,
-        decision_sequence,
-        reason,
+        PublishedAttemptCleanupCause::Failure {
+            decision_sequence,
+            reason,
+        },
         sid.to_owned(),
         settled,
     ));
     settlement
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_published_completion_cleanup_owner(
+    session: &Arc<Session>,
+    producer_attempt: u64,
+    disposition: crate::playback_control::RollingProducerCompletionDisposition,
+    sid: &str,
+) -> tokio::sync::oneshot::Receiver<PublishedFailureCleanupOutcome> {
+    let (settled, settlement) = tokio::sync::oneshot::channel();
+    tokio::spawn(own_published_attempt_cleanup(
+        Arc::clone(session),
+        producer_attempt,
+        PublishedAttemptCleanupCause::Completion { disposition },
+        sid.to_owned(),
+        settled,
+    ));
+    settlement
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_published_executor_loss_cleanup_owner(
+    session: &Arc<Session>,
+    producer_attempt: u64,
+    sid: &str,
+) {
+    let (settled, _settlement) = tokio::sync::oneshot::channel();
+    tokio::spawn(own_published_attempt_cleanup(
+        Arc::clone(session),
+        producer_attempt,
+        PublishedAttemptCleanupCause::ExecutorLost,
+        sid.to_owned(),
+        settled,
+    ));
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3022,6 +3141,7 @@ enum PrepublicationExecutorExit {
     SessionGone,
     FailedClosed,
     ActorFailureApplied,
+    ActorCompletionApplied,
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -3064,7 +3184,10 @@ async fn classify_successful_transcode_exit(
     session: &Arc<Session>,
     probe: &crate::playback_control::RollingProducerExitProbe,
     sid: &str,
-) {
+) -> Result<
+    crate::playback_control::RollingProducerCompletionDisposition,
+    crate::playback_control::ProducerAttemptRejection,
+> {
     let bytes = if session.control.current_producer_attempt() == probe.producer_attempt
         && session.compatibility_producer_attempt() == probe.producer_attempt
     {
@@ -3105,6 +3228,7 @@ async fn classify_successful_transcode_exit(
         disposition = ?disposition,
         "actor-owned transcode exit completion probe settled"
     );
+    disposition
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -3128,7 +3252,53 @@ async fn run_prepublication_transcode_executor(
                 let Some(session) = session.upgrade() else {
                     return PrepublicationExecutorExit::SessionGone;
                 };
-                classify_successful_transcode_exit(&session, &probe, &sid).await;
+                let disposition = classify_successful_transcode_exit(&session, &probe, &sid).await;
+                if matches!(
+                    disposition,
+                    Ok(
+                        crate::playback_control::RollingProducerCompletionDisposition::CompleteVerifiedDuration
+                            | crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration
+                    )
+                ) {
+                    let disposition = disposition.expect("matched successful completion");
+                    // Transfer the already-exited child and its admission
+                    // resources before awaiting. A cancelled executor cannot
+                    // strand either one after the actor has made completion
+                    // immutable.
+                    let settlement = spawn_published_completion_cleanup_owner(
+                        &session,
+                        probe.producer_attempt,
+                        disposition,
+                        &sid,
+                    );
+                    match settlement.await {
+                        Ok(PublishedFailureCleanupOutcome::Reaped) => {
+                            if let Err(error) = registration.settle_expected().await {
+                                tracing::error!(
+                                    session = %session_log_id(&sid),
+                                    producer_attempt = probe.producer_attempt,
+                                    disposition = ?disposition,
+                                    ?error,
+                                    "completed producer reaped but executor settlement was rejected"
+                                );
+                                return PrepublicationExecutorExit::FailedClosed;
+                            }
+                            return PrepublicationExecutorExit::ActorCompletionApplied;
+                        }
+                        Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership) => {
+                            return PrepublicationExecutorExit::ActorTerminal;
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                session = %session_log_id(&sid),
+                                producer_attempt = probe.producer_attempt,
+                                disposition = ?disposition,
+                                "completed producer cleanup owner ended without settlement"
+                            );
+                            return PrepublicationExecutorExit::FailedClosed;
+                        }
+                    }
+                }
             }
             crate::playback_control::RollingProducerExecutorPoll::Decision(decision) => {
                 let Some(session) = session.upgrade() else {
@@ -3188,18 +3358,37 @@ async fn run_prepublication_transcode_executor(
                                 *reason,
                                 &sid,
                             );
-                            if settlement.await.is_err() {
-                                tracing::error!(
-                                    session = %session_log_id(&sid),
-                                    producer_attempt = *failed_attempt,
-                                    decision_sequence = *decision_sequence,
-                                    reason = ?reason,
-                                    cleanup_policy = "retain_published",
-                                    "published producer cleanup owner ended without settlement"
-                                );
-                                return PrepublicationExecutorExit::FailedClosed;
+                            match settlement.await {
+                                Ok(PublishedFailureCleanupOutcome::Reaped) => {
+                                    if let Err(error) = registration.settle_expected().await {
+                                        tracing::error!(
+                                            session = %session_log_id(&sid),
+                                            producer_attempt = *failed_attempt,
+                                            decision_sequence = *decision_sequence,
+                                            reason = ?reason,
+                                            cleanup_policy = "retain_published",
+                                            ?error,
+                                            "published producer failure reaped but executor settlement was rejected"
+                                        );
+                                        return PrepublicationExecutorExit::FailedClosed;
+                                    }
+                                    return PrepublicationExecutorExit::ActorFailureApplied;
+                                }
+                                Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership) => {
+                                    return PrepublicationExecutorExit::ActorTerminal;
+                                }
+                                Err(_) => {
+                                    tracing::error!(
+                                        session = %session_log_id(&sid),
+                                        producer_attempt = *failed_attempt,
+                                        decision_sequence = *decision_sequence,
+                                        reason = ?reason,
+                                        cleanup_policy = "retain_published",
+                                        "published producer cleanup owner ended without settlement"
+                                    );
+                                    return PrepublicationExecutorExit::FailedClosed;
+                                }
                             }
-                            return PrepublicationExecutorExit::ActorFailureApplied;
                         }
 
                         debug_assert_eq!(
@@ -5963,6 +6152,19 @@ impl MediaResponsePublication {
             "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
             "segment-range" => Object::ByteRange,
             _ => Object::ProtocolResponse,
+        }
+    }
+
+    fn rolling_media_segment_index(
+        &self,
+        object: crate::playback_control::RollingResponseObject,
+    ) -> Option<i64> {
+        use crate::playback_control::RollingResponseObject as Object;
+        match object {
+            Object::MediaSegment | Object::ByteRange | Object::NotModified => {
+                self.object_name.as_deref().and_then(segment_index)
+            }
+            _ => None,
         }
     }
 }
@@ -14497,10 +14699,12 @@ impl TranscodeManager {
                 }
             }
         };
-        let expected_remaining_ms = (file.duration_ms > 0).then_some(
-            file.duration_ms
-                .saturating_sub((start_seconds * 1_000.0).round() as i64)
-                .max(0),
+        let expected_remaining_ms = file.duration_ms.filter(|duration_ms| *duration_ms > 0).map(
+            |duration_ms| {
+                duration_ms
+                    .saturating_sub((start_seconds * 1_000.0).round() as i64)
+                    .max(0)
+            },
         );
         let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
         let policy = if let Some(retry) = retry.as_ref() {
@@ -14681,10 +14885,22 @@ impl TranscodeManager {
                         )
                         .await;
                     } else {
+                        let producer_attempt = session.control.current_producer_attempt();
+                        // Registration loss makes the actor fail closed, but
+                        // it cannot reap a process. Transfer that exact child
+                        // to a detached owner before this monitor returns so
+                        // an executor panic/cancellation after first media
+                        // cannot strand either the child or its admission.
+                        spawn_published_executor_loss_cleanup_owner(
+                            &session,
+                            producer_attempt,
+                            &executor_monitor_sid,
+                        );
                         tracing::error!(
                             session = %session_log_id(&executor_monitor_sid),
+                            producer_attempt,
                             %join_error,
-                            "producer executor stopped after actor lifetime ownership activated"
+                            "producer executor stopped after actor lifetime ownership activated; exact cleanup owner retained admitted media"
                         );
                     }
                 }
@@ -17197,16 +17413,21 @@ impl TranscodeManager {
                             frozen.contract_fingerprint.clone(),
                         )
                     } else {
+                        let media_segment_index =
+                            publication.rolling_media_segment_index(object);
                         crate::playback_control::RollingResponsePublication::attempt_media(
                             object,
                             *producer_attempt,
+                            media_segment_index,
                         )
                     }
                 }
                 MediaResponsePublicationBinding::AttemptMedia => {
+                    let media_segment_index = publication.rolling_media_segment_index(object);
                     crate::playback_control::RollingResponsePublication::attempt_media(
                         object,
                         *producer_attempt,
+                        media_segment_index,
                     )
                 }
                 MediaResponsePublicationBinding::AttemptStatus => {
@@ -28304,13 +28525,14 @@ mod tests {
     /// A session for driving `watch_for_stall` directly: a real (harmless)
     /// child process, a directory the test controls, and telemetry the test
     /// can backdate.
-    fn watchdog_session_with_publication(
+    fn watchdog_session_with_control(
         dir: &std::path::Path,
         child: Option<Child>,
         cached: bool,
         actor_managed_prepublication: bool,
+        control: crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
     ) -> Arc<Session> {
-        let control = crate::playback_control::RollingControlHandle::spawn("test-start");
         Arc::new(Session {
             dir: dir.to_path_buf(),
             response_incarnation: uuid::Uuid::new_v4(),
@@ -28328,7 +28550,9 @@ mod tests {
             scratch_cleanup_started: AtomicBool::new(false),
             retirement_context: None,
             cache_integrity_cleanup_started: AtomicBool::new(false),
-            child: Mutex::new(child.map(|child| AttemptChild::new(0, child, control.clone()))),
+            child: Mutex::new(
+                child.map(|child| AttemptChild::new(producer_attempt, child, control.clone())),
+            ),
             child_transition: Mutex::new(()),
             watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
@@ -28404,6 +28628,22 @@ mod tests {
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         })
+    }
+
+    fn watchdog_session_with_publication(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+    ) -> Arc<Session> {
+        watchdog_session_with_control(
+            dir,
+            child,
+            cached,
+            actor_managed_prepublication,
+            crate::playback_control::RollingControlHandle::spawn("test-start"),
+            0,
+        )
     }
 
     fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
@@ -28517,6 +28757,225 @@ mod tests {
         assert!(segment.exists(), "published segment must be retained");
         assert!(!session.failed.load(Acquire));
         assert!(!session.control.is_retired());
+    }
+
+    #[tokio::test]
+    async fn successful_published_completion_reaps_child_and_returns_capacity_without_deleting_media()
+    {
+        let root = crate::test_tempdir().expect("published completion root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create completed scratch");
+        let playlist = scratch.join("index.m3u8");
+        let segment = scratch.join("seg00000.ts");
+        tokio::fs::write(
+            &playlist,
+            b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n",
+        )
+        .await
+        .expect("seed completed playlist");
+        tokio::fs::write(&segment, b"completed media")
+            .await
+            .expect("seed completed segment");
+
+        let admissions = Admissions::new();
+        let session = watchdog_session_with_publication(
+            &scratch,
+            Some(successful_child()),
+            false,
+            true,
+        );
+        session.actor_prepublication_transcode.store(false, Release);
+        session.first_media_handoff_applied.store(true, Release);
+        reserve_test_admissions(&session, &admissions);
+
+        assert_eq!(
+            spawn_published_completion_cleanup_owner(
+                &session,
+                0,
+                crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration,
+                "published-completion",
+            )
+            .await
+            .expect("completion cleanup owner"),
+            PublishedFailureCleanupOutcome::Reaped
+        );
+        assert!(session.child.lock().await.is_none());
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(playlist.exists(), "completed playlist must be retained");
+        assert!(segment.exists(), "completed segment must be retained");
+        assert!(!session.failed.load(Acquire));
+        assert!(!session.control.is_retired());
+    }
+
+    #[tokio::test]
+    async fn present_segment_resolved_before_published_failure_is_rechecked_against_actor_frontier()
+    {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("published frontier root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create frontier scratch");
+        tokio::fs::write(scratch.join("seg00000.ts"), b"published")
+            .await
+            .expect("seed published segment");
+        tokio::fs::write(scratch.join("seg00001.ts"), b"present but unpublished")
+            .await
+            .expect("seed beyond-frontier segment");
+        tokio::fs::write(scratch.join("init.mp4"), b"init")
+            .await
+            .expect("seed init segment");
+
+        let (control, mut registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                "published-frontier-test",
+            );
+        registration.register().await.expect("register executor");
+        let producer_attempt = control
+            .begin_initial_producer_attempt(
+                crate::playback_control::InitialProducerPolicy::software(
+                    "published-frontier-contract".to_owned(),
+                    PROGRESS_STALL,
+                ),
+            )
+            .await
+            .expect("begin producer attempt");
+        assert!(
+            control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt,
+                    playlist_ready: true,
+                    published_segment: Some(0),
+                    published_end_ms: Some(2_000),
+                    next_media_sequence: 1,
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await
+        );
+        let handoff = crate::playback_control::RollingFirstMediaPublicationHandoff::new();
+        assert_eq!(
+            control
+                .authorize_response_publication(
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                        producer_attempt,
+                        None,
+                    ),
+                    Some(handoff),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Ok(crate::playback_control::RollingResponseAuthorization {
+                first_producer_media_publication: true,
+            })
+        );
+
+        let session = watchdog_session_with_control(
+            &scratch,
+            None,
+            false,
+            true,
+            control.clone(),
+            producer_attempt,
+        );
+        session.actor_prepublication_transcode.store(false, Release);
+        session.first_media_handoff_applied.store(true, Release);
+        *session
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("published-frontier".to_owned(), Arc::clone(&session));
+
+        // Resolve/open both paths before the failure wins. This is the exact
+        // request race: path existence alone used to authorize segment 1
+        // after the actor had retained only the frontier through segment 0.
+        let beyond = match manager
+            .segment_for_publication("published-frontier", "seg00001.ts")
+            .await
+            .expect("resolve beyond-frontier segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("present segment must resolve before failure"),
+        };
+        let retained = match manager
+            .segment_for_publication("published-frontier", "seg00000.ts")
+            .await
+            .expect("resolve retained segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("published segment must resolve before failure"),
+        };
+        let init = match manager
+            .segment_for_publication("published-frontier", "init.mp4")
+            .await
+            .expect("resolve init segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("init segment must resolve before failure"),
+        };
+
+        control.observe_producer_exit(producer_attempt, false, Some(1), None);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if control.snapshot().await.is_some_and(|snapshot| {
+                    snapshot.producer_control.producer_ended_with_proposal
+                }) {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must commit the retained published failure");
+
+        assert!(matches!(
+            manager
+                .authorize_response_publication(
+                    "published-frontier",
+                    &beyond.response_owner(),
+                    MediaResponsePublication::attempt_media(
+                        "media-segment",
+                        Some("seg00001.ts"),
+                    ),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+        assert!(manager
+            .authorize_response_publication(
+                "published-frontier",
+                &retained.response_owner(),
+                MediaResponsePublication::attempt_media("media-segment", Some("seg00000.ts")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_ok());
+        assert!(manager
+            .authorize_response_publication(
+                "published-frontier",
+                &init.response_owner(),
+                MediaResponsePublication::attempt_media("segment-range", Some("init.mp4")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_ok());
     }
 
     struct DropProbe(Arc<AtomicBool>);
@@ -30116,6 +30575,12 @@ mod tests {
         cmd.spawn().expect("spawn sleep")
     }
 
+    fn successful_child() -> Child {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.kill_on_drop(true);
+        cmd.spawn().expect("spawn successful child")
+    }
+
     /// Backdate the motion clock so `stalled_for` reads past the threshold
     /// without the test waiting it out.
     fn force_stalled(p: &Progress) {
@@ -30223,6 +30688,7 @@ mod tests {
                     crate::playback_control::RollingResponsePublication::attempt_media(
                         crate::playback_control::RollingResponseObject::MediaSegment,
                         0,
+                        Some(0),
                     ),
                     None,
                     Instant::now() + Duration::from_secs(1),
