@@ -4410,8 +4410,9 @@ impl RollingControlActor {
 
     /// A retry is installed while its predecessor's retained Retry decision
     /// still awaits DecisionApplied. That exact N -> N+1 overlap is not a
-    /// second decision owner: the successor must retain its own startup/exit
-    /// evidence until the executor acknowledges the predecessor decision.
+    /// second decision owner: the successor must retain its own startup,
+    /// progress, and exit evidence until the executor acknowledges the
+    /// predecessor decision.
     fn pending_retry_precedes_successor(&self, producer_attempt: u64) -> bool {
         self.delivery.producer_attempt == producer_attempt
             && self.pending_decision.as_deref().is_some_and(|decision| {
@@ -4429,11 +4430,10 @@ impl RollingControlActor {
         mode: ProducerProgressDeadlineMode,
         instant: Instant,
     ) {
-        let pending_retry_successor_start = mode == ProducerProgressDeadlineMode::Starting
-            && self.pending_retry_precedes_successor(producer_attempt);
+        let pending_retry_successor = self.pending_retry_precedes_successor(producer_attempt);
         if self.retired
             || self.has_terminal_prepublication_failure()
-            || (self.pending_decision.is_some() && !pending_retry_successor_start)
+            || (self.pending_decision.is_some() && !pending_retry_successor)
             || self.prepublication.as_ref().is_some_and(|control| {
                 !matches!(control.completion, ProducerCompletionState::Incomplete)
             })
@@ -13301,6 +13301,236 @@ mod tests {
         );
         assert_eq!(actor.decision_applied_at(2, None), Ok(()));
         assert_eq!(actor.decision_applied_at(2, None), Ok(()));
+    }
+
+    #[tokio::test]
+    async fn successor_progress_before_retry_ack_advances_and_preserves_its_exact_deadline() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-successor-progress", "recipe-successor-progress"),
+            ),
+            Ok(1)
+        );
+        let first_deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+        assert!(actor.settle_due_deadlines_at(first_deadline).is_some());
+        assert_eq!(
+            actor.admit_producer_retry_at(first_deadline, 1, "recipe-successor-progress"),
+            Ok(2)
+        );
+
+        let progressed_at = first_deadline + Duration::from_secs(1);
+        actor.producer_events.publish_at(
+            RollingProducerEvent::Progress(producer_progress(
+                2,
+                1_000,
+                1_000,
+                1_000,
+                progressed_at,
+            )),
+            false,
+            progressed_at,
+        );
+        let preceding_producer = actor.producer_events.drain_blocks();
+        let (reply, response) = tokio::sync::oneshot::channel();
+        actor
+            .handle_command(RollingControlEnvelope {
+                sequence: 2,
+                published_at: progressed_at,
+                preceding_producer,
+                sealed_flow_barriers: 0,
+                command: RollingControlCommand::DecisionApplied {
+                    decision_sequence: 1,
+                    installed_attempt: Some(2),
+                    reply,
+                },
+            })
+            .await;
+        assert_eq!(response.await.expect("retry acknowledgement"), Ok(()));
+
+        let advancing = Some(ProducerProgressDeadline {
+            producer_attempt: 2,
+            mode: ProducerProgressDeadlineMode::Advancing,
+            instant: progressed_at + PRODUCER_PROGRESS_BUDGET,
+        });
+        assert_eq!(
+            actor.producer_progress_deadline, advancing,
+            "timely successor progress must replace Starting before Retry is acknowledged"
+        );
+        assert_eq!(actor.delivery.producer_out_time_ms, Some(1_000));
+        assert!(!actor.observe_producer_progress_at(
+            progressed_at + Duration::from_nanos(1),
+            producer_progress(
+                1,
+                99_000,
+                9_000,
+                9_000,
+                progressed_at + Duration::from_nanos(1),
+            ),
+        ));
+        assert_eq!(
+            actor.producer_progress_deadline, advancing,
+            "stale predecessor progress cannot disturb the successor clock"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_successor_exit_before_retry_ack_keeps_its_exact_classifier() {
+        fn pending_successor(started: Instant, suffix: &str) -> (RollingControlActor, Instant) {
+            let mut actor = registered_prepublication_actor(started);
+            let presentation = format!("presentation-successor-success-{suffix}");
+            let recipe = format!("recipe-successor-success-{suffix}");
+            assert_eq!(
+                actor.begin_initial_producer_attempt_at(
+                    started,
+                    hardware_policy(&presentation, &recipe),
+                ),
+                Ok(1)
+            );
+            let first_deadline = started + PREPUBLICATION_HARDWARE_STARTUP_BUDGET;
+            assert!(actor.settle_due_deadlines_at(first_deadline).is_some());
+            assert_eq!(
+                actor.admit_producer_retry_at(first_deadline, 1, &recipe),
+                Ok(2)
+            );
+            (actor, first_deadline)
+        }
+
+        async fn acknowledge_after_successful_exit(
+            actor: &mut RollingControlActor,
+            exit_at: Instant,
+        ) {
+            actor.producer_events.publish_at(
+                RollingProducerEvent::Exit(RollingProducerExitObservation {
+                    producer_attempt: 2,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: exit_at,
+                }),
+                false,
+                exit_at,
+            );
+            actor.producer_events.publish_at(
+                RollingProducerEvent::Exit(RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(99),
+                    signal: None,
+                    observed_at: exit_at + Duration::from_nanos(1),
+                }),
+                false,
+                exit_at + Duration::from_nanos(1),
+            );
+            let preceding_producer = actor.producer_events.drain_blocks();
+            let (reply, response) = tokio::sync::oneshot::channel();
+            actor
+                .handle_command(RollingControlEnvelope {
+                    sequence: 2,
+                    published_at: exit_at,
+                    preceding_producer,
+                    sealed_flow_barriers: 0,
+                    command: RollingControlCommand::DecisionApplied {
+                        decision_sequence: 1,
+                        installed_attempt: Some(2),
+                        reply,
+                    },
+                })
+                .await;
+            assert_eq!(response.await.expect("retry acknowledgement"), Ok(()));
+        }
+
+        let started = Instant::now();
+        let (mut completed, first_deadline) = pending_successor(started, "complete");
+        let exit_at = first_deadline + Duration::from_secs(1);
+        acknowledge_after_successful_exit(&mut completed, exit_at).await;
+        let classification_deadline = exit_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET;
+        assert_eq!(
+            completed.producer_progress_deadline,
+            Some(ProducerProgressDeadline {
+                producer_attempt: 2,
+                mode: ProducerProgressDeadlineMode::ClassifyingExit,
+                instant: classification_deadline,
+            })
+        );
+        let ProducerDecisionPoll::ClassifyExit(probe) = completed.poll_producer_decision_at(0)
+        else {
+            panic!("successful successor exit must retain its exact classifier");
+        };
+        assert_eq!(probe.producer_attempt, 2);
+        assert_eq!(probe.deadline, classification_deadline);
+        assert_eq!(
+            completed.observe_producer_exit_at(
+                exit_at + Duration::from_nanos(2),
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(88),
+                    signal: None,
+                    observed_at: exit_at + Duration::from_nanos(2),
+                },
+            ),
+            ProducerExitAcceptance::Rejected
+        );
+        assert_eq!(
+            completed.poll_producer_decision_at(0),
+            ProducerDecisionPoll::ClassifyExit(probe),
+            "stale predecessor exit cannot replace the successor classifier"
+        );
+        assert_eq!(
+            completed.classify_producer_exit_at(
+                exit_at + Duration::from_millis(1),
+                RollingProducerCompletionEvidence {
+                    probe_sequence: probe.probe_sequence,
+                    producer_attempt: 2,
+                    end_list: true,
+                    final_segment: Some(0),
+                    final_end_ms: Some(6_000),
+                },
+            ),
+            RollingProducerCompletionDisposition::CompleteUnverifiedDuration
+        );
+        assert_eq!(completed.poll_producer_decision_at(0), ProducerDecisionPoll::Idle);
+        assert_eq!(
+            completed
+                .prepublication
+                .as_ref()
+                .expect("producer control")
+                .completion,
+            ProducerCompletionState::CompleteUnverifiedDuration {
+                producer_attempt: 2,
+                final_segment: 0,
+                final_end_ms: 6_000,
+            }
+        );
+
+        let late_started = started + Duration::from_secs(1);
+        let (mut late, late_first_deadline) = pending_successor(late_started, "deadline");
+        let late_exit_at = late_first_deadline + Duration::from_secs(1);
+        acknowledge_after_successful_exit(&mut late, late_exit_at).await;
+        let late_classification_deadline = late_exit_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET;
+        assert!(late
+            .settle_due_deadlines_at(late_classification_deadline)
+            .is_some());
+        assert!(matches!(
+            late.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                decision_sequence: 2,
+                failed_attempt: 2,
+                reason: ProducerDecisionReason::ExitClassificationDeadline,
+                ..
+            })
+        ));
+        assert_eq!(
+            late.admit_producer_retry_at(
+                late_classification_deadline,
+                2,
+                "recipe-successor-success-deadline",
+            ),
+            Err(ProducerAttemptRejection::RetryUnavailable)
+        );
     }
 
     #[tokio::test]
