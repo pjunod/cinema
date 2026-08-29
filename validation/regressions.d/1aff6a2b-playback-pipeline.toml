@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1aff6a2b"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained plurxd copy-start regressions require actor-owned prepublication copy to bind the immutable session failure fence before its exact matching InitialProducerPolicy is admitted, reject a mismatched presentation without allocating an attempt, and reject Session::fail before first-media authorization without closing retry or marking media published. The retained copyseg malformed-moov regression plus the focused plurx-core nested-box regression require a declaration beyond a complete parent to remain Malformed/ReaderFailed while the same over-limit declaration at an unbounded top level remains Unsupported, preventing malformed input from minting the one structural fallback."

@@ -37,14 +37,13 @@ const MAX_ERROR_DETAIL_BYTES: usize = 512;
 const MAX_CAPABILITY_VALUES: usize = 8;
 const MIN_CONTROL_INTERVAL: Duration = Duration::from_millis(250);
 const RELAY_BUCKETS_MS: [u64; 9] = [10, 25, 50, 100, 250, 500, 1_000, 2_500, 4_000];
-/// Conservative compatibility default while the later M4 policy-admission
-/// slice moves the existing hardware/software/copy startup budgets into the
-/// actor. This deadline is action-passive: it records an exact provisional due
-/// coordinate but does not retry, kill, replace, or otherwise compete with
-/// legacy recovery.
+/// Compatibility budget retained only by legacy actor fixtures. Production
+/// attempts use their typed hardware, software, or copy policy budget.
+#[cfg(test)]
 const PRODUCER_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 const PREPUBLICATION_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 const PREPUBLICATION_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
+const PREPUBLICATION_COPY_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// Behavior-compatible advancing-output horizon used by the M4 producer
 /// ingress proof. Legacy actors retain it passively; opted-in prepublication
 /// actors may use their policy-specific horizon to emit one decision.
@@ -1202,7 +1201,7 @@ pub(crate) struct LocalControlRequest<'a> {
 /// projection is what a rolling-session actor may retain after the HTTP
 /// request has returned.  Keeping every policy input together prevents later
 /// quality, subtitle, and handoff work from reconstructing state from media
-/// fetches or from whichever legacy watchdog happened to fire.
+/// fetches or from whichever compatibility heuristic happened to fire.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct PlaybackDemandSnapshot {
     pub demand: PlaybackDemand,
@@ -1504,15 +1503,15 @@ pub(crate) struct RollingLeaseSnapshot {
     /// True only when the playback deadline, rather than an explicit
     /// lifecycle fence, performed the actor's terminal transition.
     pub expiration_claimed: bool,
-    /// Bounded, actor-owned rolling producer truth. Generic copy/cache actors
-    /// remain observation-only; opted-in transcodes expose their exact
-    /// decision, proposal, and completion evidence here.
+    /// Bounded, actor-owned rolling producer truth. Compatibility producers
+    /// remain observation-only; opted-in transcode and copy producers expose
+    /// their exact decision, proposal, and completion evidence here.
     pub producer_control: RollingProducerOperationalSnapshot,
 }
 
 /// The only producer-failure reasons that may be retained by the M4 actor.
-/// Legacy rolling sessions remain action-passive; only the explicit
-/// actor-managed transcode constructor permits production decisions before or
+/// Legacy rolling sessions remain action-passive; only an explicit
+/// actor-managed producer constructor permits production decisions before or
 /// after first-media publication.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -1590,6 +1589,10 @@ pub(crate) struct ValidatedRetryRecipe {
     pub fingerprint: String,
     pub presentation_contract_fingerprint: String,
     pub startup_kind: ProducerStartupKind,
+    /// The actor-owned exit contract for the successor attempt. This is
+    /// frozen into the validated recipe so retry installation cannot silently
+    /// inherit the failed attempt's classifier.
+    pub exit_classifier: ProducerExitClassifier,
 }
 
 impl ValidatedRetryRecipe {
@@ -1604,7 +1607,13 @@ impl ValidatedRetryRecipe {
             fingerprint,
             presentation_contract_fingerprint,
             startup_kind,
+            exit_classifier: ProducerExitClassifier::Immediate,
         }
+    }
+
+    pub(crate) fn with_exit_classifier(mut self, exit_classifier: ProducerExitClassifier) -> Self {
+        self.exit_classifier = exit_classifier;
+        self
     }
 
     #[cfg(test)]
@@ -1614,8 +1623,31 @@ impl ValidatedRetryRecipe {
             fingerprint: fingerprint.to_owned(),
             presentation_contract_fingerprint: "test-presentation-contract".to_owned(),
             startup_kind: ProducerStartupKind::Software,
+            exit_classifier: ProducerExitClassifier::Immediate,
         }
     }
+}
+
+/// Exact-attempt exit facts are interpreted according to the producer that
+/// was actually installed, rather than according to the session's original
+/// recipe. Ordinary transcodes classify directly from the process exit. A
+/// copy producer must rendezvous that exit with the reader's typed result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProducerExitClassifier {
+    Immediate,
+    CopyReader,
+}
+
+/// Typed completion emitted by the copy reader. These facts are deliberately
+/// narrower than process exit: only `Completed` needs the process half and
+/// completion probe, while the other variants are decisive failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CopyProducerExitClassification {
+    Unsupported,
+    InvalidConfiguration,
+    ReaderFailed,
+    Completed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -1623,6 +1655,7 @@ impl ValidatedRetryRecipe {
 pub(crate) enum ProducerStartupKind {
     Hardware,
     Software,
+    Copy,
 }
 
 impl ProducerStartupKind {
@@ -1630,6 +1663,7 @@ impl ProducerStartupKind {
         match self {
             Self::Hardware => PREPUBLICATION_HARDWARE_STARTUP_BUDGET,
             Self::Software => PREPUBLICATION_SOFTWARE_STARTUP_BUDGET,
+            Self::Copy => PREPUBLICATION_COPY_STARTUP_BUDGET,
         }
     }
 
@@ -1637,6 +1671,24 @@ impl ProducerStartupKind {
         match self {
             Self::Hardware => "hardware",
             Self::Software => "software",
+            Self::Copy => "copy",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ProducerRetryEligibility {
+    AnyPrepublicationFailure,
+    UnsupportedOnly,
+    Never,
+}
+
+impl ProducerRetryEligibility {
+    fn allows(self, reason: ProducerDecisionReason) -> bool {
+        match self {
+            Self::AnyPrepublicationFailure => true,
+            Self::UnsupportedOnly => reason == ProducerDecisionReason::Unsupported,
+            Self::Never => false,
         }
     }
 }
@@ -1647,6 +1699,8 @@ pub(crate) struct InitialProducerPolicy {
     pub progress_budget: Duration,
     pub retry_recipe: Option<ValidatedRetryRecipe>,
     pub presentation_contract_fingerprint: String,
+    exit_classifier: ProducerExitClassifier,
+    retry_eligibility: ProducerRetryEligibility,
     expected_remaining_ms: Option<i64>,
     completion_tolerance_ms: i64,
 }
@@ -1662,6 +1716,8 @@ impl InitialProducerPolicy {
             progress_budget,
             retry_recipe: Some(retry_recipe),
             presentation_contract_fingerprint,
+            exit_classifier: ProducerExitClassifier::Immediate,
+            retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
             expected_remaining_ms: None,
             completion_tolerance_ms: 10_000,
         }
@@ -1676,6 +1732,53 @@ impl InitialProducerPolicy {
             progress_budget,
             retry_recipe: None,
             presentation_contract_fingerprint,
+            exit_classifier: ProducerExitClassifier::Immediate,
+            retry_eligibility: ProducerRetryEligibility::Never,
+            expected_remaining_ms: None,
+            completion_tolerance_ms: 10_000,
+        }
+    }
+
+    /// Copy startup is actor-managed. When the caller freezes a fallback
+    /// recipe, it is eligible only when the reader proves the input
+    /// unsupported; no recipe means every failure is terminal. Runtime or
+    /// configuration failures never become a generic second-attempt surface.
+    pub(crate) fn copy(
+        presentation_contract_fingerprint: String,
+        progress_budget: Duration,
+        retry_recipe: Option<ValidatedRetryRecipe>,
+    ) -> Self {
+        let retry_eligibility = if retry_recipe.is_some() {
+            ProducerRetryEligibility::UnsupportedOnly
+        } else {
+            ProducerRetryEligibility::Never
+        };
+        Self {
+            startup_kind: ProducerStartupKind::Copy,
+            progress_budget,
+            retry_recipe,
+            presentation_contract_fingerprint,
+            exit_classifier: ProducerExitClassifier::CopyReader,
+            retry_eligibility,
+            expected_remaining_ms: None,
+            completion_tolerance_ms: 10_000,
+        }
+    }
+
+    /// Direct and takeover copy attempts have no independent reader verdict;
+    /// they retain the copy startup budget but classify their process exit
+    /// immediately and cannot retry.
+    pub(crate) fn copy_immediate(
+        presentation_contract_fingerprint: String,
+        progress_budget: Duration,
+    ) -> Self {
+        Self {
+            startup_kind: ProducerStartupKind::Copy,
+            progress_budget,
+            retry_recipe: None,
+            presentation_contract_fingerprint,
+            exit_classifier: ProducerExitClassifier::Immediate,
+            retry_eligibility: ProducerRetryEligibility::Never,
             expected_remaining_ms: None,
             completion_tolerance_ms: 10_000,
         }
@@ -1707,7 +1810,40 @@ impl InitialProducerPolicy {
                 .expected_remaining_ms
                 .is_some_and(|remaining| !(0..=MAX_MEDIA_MILLIS).contains(&remaining))
             || !(1..=120_000).contains(&self.completion_tolerance_ms)
-            || (self.startup_kind == ProducerStartupKind::Software && self.retry_recipe.is_some())
+            || !matches!(
+                (
+                    self.startup_kind,
+                    self.exit_classifier,
+                    self.retry_eligibility,
+                    self.retry_recipe.is_some(),
+                ),
+                (
+                    ProducerStartupKind::Hardware,
+                    ProducerExitClassifier::Immediate,
+                    ProducerRetryEligibility::AnyPrepublicationFailure,
+                    true,
+                ) | (
+                    ProducerStartupKind::Software,
+                    ProducerExitClassifier::Immediate,
+                    ProducerRetryEligibility::Never,
+                    false,
+                ) | (
+                    ProducerStartupKind::Copy,
+                    ProducerExitClassifier::CopyReader,
+                    ProducerRetryEligibility::UnsupportedOnly,
+                    true,
+                ) | (
+                    ProducerStartupKind::Copy,
+                    ProducerExitClassifier::CopyReader,
+                    ProducerRetryEligibility::Never,
+                    false,
+                ) | (
+                    ProducerStartupKind::Copy,
+                    ProducerExitClassifier::Immediate,
+                    ProducerRetryEligibility::Never,
+                    false,
+                )
+            )
         {
             return Err(ProducerAttemptRejection::InvalidPolicy);
         }
@@ -1980,8 +2116,9 @@ pub(crate) struct RollingDeliverySnapshot {
     /// attempt admission, so a producer that never emits telemetry is measured
     /// by the same coordinate as one that later stops.
     pub producer_progress_idle_ms: i64,
-    /// Exact-attempt terminal process observation. Recovery remains with the
-    /// compatibility watchdog until M4; this is an ordered fact only.
+    /// Exact-attempt terminal process observation. Actor-managed producers
+    /// classify this ordered fact under their frozen exit contract; passive
+    /// compatibility actors retain it for diagnostics only.
     pub producer_exit: Option<RollingProducerExitSnapshot>,
     pub playlist_ready: bool,
     pub published_segment: Option<i64>,
@@ -2024,9 +2161,9 @@ struct RollingProducerFlowObservation {
     state: ProducerPhysicalFlowState,
 }
 
-/// The actor's sole rolling-producer candidate clock. This slice deliberately
-/// records expiry without emitting a recovery action, so the compatibility
-/// watchdog remains the only component that can still retry or replace.
+/// The actor's sole rolling-producer clock. When an actor-managed producer is
+/// admitted, expiry is sequenced into its one immutable retry-or-fail
+/// decision; passive compatibility actors retain the observation only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ProducerProgressDeadlineMode {
     Starting,
@@ -2063,7 +2200,7 @@ struct ProducerDeadlineDue {
 }
 
 /// Immediate typed observation for a non-success producer exit. Actor-managed
-/// transcodes turn it into one immutable decision; compatibility actors retain
+/// producers turn it into one immutable decision; compatibility actors retain
 /// the ordered fact without gaining an action owner.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProducerProcessExitDue {
@@ -2431,6 +2568,8 @@ pub(crate) enum ProducerAttemptRejection {
     DecisionMismatch,
     RecipeMismatch,
     PresentationContractMismatch,
+    ClassifierMismatch,
+    DuplicateClassification,
     ControlUnavailable,
 }
 
@@ -2587,7 +2726,7 @@ impl RollingFlowSync {
 /// under the transition plus ingress fence and assigns the next coordinate;
 /// later producer facts therefore cannot leapfrog a queued command. This
 /// shared ordering is action-passive for legacy actors and decision-bearing
-/// only for the explicit actor-managed transcode constructor.
+/// only for an explicit actor-managed producer constructor.
 struct RollingProducerIngress {
     state: std::sync::Mutex<RollingProducerIngressState>,
     notify: tokio::sync::Notify,
@@ -3239,6 +3378,7 @@ enum RollingControlCommand {
         terminal_admission: Option<Arc<dyn RollingTerminalAdmission>>,
         reply: tokio::sync::oneshot::Sender<Result<RollingControlOutcome, ControlStateError>>,
     },
+    #[cfg(test)]
     BeginProducerAttempt {
         reply: tokio::sync::oneshot::Sender<Result<u64, ProducerAttemptRejection>>,
     },
@@ -3295,6 +3435,12 @@ enum RollingControlCommand {
         deadline: Instant,
         reply: tokio::sync::oneshot::Sender<RollingProducerCompletionDisposition>,
     },
+    ClassifyCopyProducerExit {
+        producer_attempt: u64,
+        classification: CopyProducerExitClassification,
+        deadline: Instant,
+        reply: tokio::sync::oneshot::Sender<Result<(), ProducerAttemptRejection>>,
+    },
     ObservePublication {
         observation: RollingPublicationObservation,
         deadline: Option<Instant>,
@@ -3339,6 +3485,7 @@ impl RollingControlCommand {
             #[cfg(test)]
             Self::Renew { .. } | Self::SetRenewalForTest { .. } => None,
             Self::Control { .. } => Some(0),
+            #[cfg(test)]
             Self::BeginProducerAttempt { .. } => Some(1),
             Self::RegisterProducerExecutor { .. } => Some(9),
             Self::BeginInitialProducerAttempt { .. } => Some(10),
@@ -3352,6 +3499,7 @@ impl RollingControlCommand {
             Self::DecisionApplied { .. } => Some(13),
             Self::ClassifyProducerExit { .. } => Some(16),
             Self::ExecutorSettled { .. } => Some(17),
+            Self::ClassifyCopyProducerExit { .. } => Some(18),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -3967,11 +4115,12 @@ struct PrepublicationProducerControl {
     completion: ProducerCompletionState,
 }
 
-/// Immutable response-admission contract for rolling generations whose
-/// producer recovery remains compatibility-owned. Copy and rolling-cache
-/// sessions do not opt into the prepublication executor, but their HTTP
-/// publication still has to linearize through the actor rather than bypassing
-/// it with process-local atomics.
+/// Immutable response-admission contract shared with a process-local session.
+///
+/// For a compatibility-owned producer this supplies both the presentation
+/// identity and the failure fence. For an actor-owned prepublication producer,
+/// `InitialProducerPolicy` remains the sole presentation/retry authority and
+/// this contract supplies only the Acquire half of `Session::fail` ordering.
 struct RollingResponsePublicationContract {
     presentation_contract_fingerprint: String,
     /// Monotone producer-failure publication shared with the compatibility
@@ -4015,6 +4164,8 @@ struct RollingControlActor {
     producer_progress_deadline: Option<ProducerProgressDeadline>,
     producer_deadline_due: Option<ProducerDeadlineDue>,
     producer_process_exit_due: Option<ProducerProcessExitDue>,
+    producer_exit_classifier: ProducerExitClassifier,
+    copy_producer_exit_classification: Option<CopyProducerExitClassification>,
     producer_flow_revision: u64,
     producer_physical_flow: ProducerPhysicalFlowState,
     last_applied_ingress_sequence: u64,
@@ -4109,6 +4260,8 @@ impl RollingControlActor {
             producer_progress_deadline: None,
             producer_deadline_due: None,
             producer_process_exit_due: None,
+            producer_exit_classifier: ProducerExitClassifier::Immediate,
+            copy_producer_exit_classification: None,
             producer_flow_revision: 0,
             producer_physical_flow: ProducerPhysicalFlowState::Running,
             last_applied_ingress_sequence: 0,
@@ -4486,7 +4639,7 @@ impl RollingControlActor {
 
     /// Session lifecycle is always the higher-priority clock. Only a live
     /// session may record a producer deadline; legacy actors retain it
-    /// passively while opted-in actor-managed transcodes may settle a decision.
+    /// passively while opted-in actor-managed producers may settle a decision.
     #[cfg(test)]
     fn settle_due_deadlines_at(&mut self, now: Instant) -> Option<ProducerDeadlineDue> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
@@ -4656,6 +4809,7 @@ impl RollingControlActor {
         &mut self,
         now: Instant,
         startup_budget: Duration,
+        exit_classifier: ProducerExitClassifier,
     ) -> Result<u64, ProducerAttemptRejection> {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live) {
             return Err(ProducerAttemptRejection::SessionEnded);
@@ -4674,6 +4828,8 @@ impl RollingControlActor {
         self.producer_exit_at = None;
         self.producer_deadline_due = None;
         self.producer_process_exit_due = None;
+        self.producer_exit_classifier = exit_classifier;
+        self.copy_producer_exit_classification = None;
         self.producer_physical_flow = ProducerPhysicalFlowState::Running;
         self.producer_signal_authorized = true;
         self.arm_producer_deadline(
@@ -4685,6 +4841,7 @@ impl RollingControlActor {
         Ok(attempt)
     }
 
+    #[cfg(test)]
     fn begin_producer_attempt_at(&mut self, now: Instant) -> Result<u64, ProducerAttemptRejection> {
         if self.prepublication.is_some() {
             return Err(ProducerAttemptRejection::InvalidPolicy);
@@ -4692,7 +4849,11 @@ impl RollingControlActor {
         if self.delivery.playlist_ready {
             return Err(ProducerAttemptRejection::PlaylistPublished);
         }
-        self.begin_producer_attempt_with_budget_at(now, PRODUCER_STARTUP_BUDGET)
+        self.begin_producer_attempt_with_budget_at(
+            now,
+            PRODUCER_STARTUP_BUDGET,
+            ProducerExitClassifier::Immediate,
+        )
     }
 
     fn register_producer_executor_at(&mut self) -> Result<(), ProducerAttemptRejection> {
@@ -4726,6 +4887,19 @@ impl RollingControlActor {
             .prepublication
             .as_ref()
             .ok_or(ProducerAttemptRejection::InvalidPolicy)?;
+        if self
+            .response_publication_contract
+            .as_ref()
+            .is_some_and(|contract| {
+                contract.presentation_contract_fingerprint
+                    != policy.presentation_contract_fingerprint
+            })
+        {
+            return Err(ProducerAttemptRejection::PresentationContractMismatch);
+        }
+        if self.response_failure_fenced() {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
         if !control.executor_registered {
             return Err(ProducerAttemptRejection::ExecutorNotRegistered);
         }
@@ -4737,8 +4911,11 @@ impl RollingControlActor {
         }
         self.producer_events
             .set_progress_budget(policy.progress_budget);
-        let attempt =
-            self.begin_producer_attempt_with_budget_at(now, policy.startup_kind.startup_budget())?;
+        let attempt = self.begin_producer_attempt_with_budget_at(
+            now,
+            policy.startup_kind.startup_budget(),
+            policy.exit_classifier,
+        )?;
         let retry_state = policy.retry_recipe.clone().map_or(
             PrepublicationRetryState::Unavailable,
             PrepublicationRetryState::Available,
@@ -4823,6 +5000,7 @@ impl RollingControlActor {
             PrepublicationRetryState::Available(recipe)
                 if !producer_media_published
                     && !self.executor_lost
+                    && policy.retry_eligibility.allows(reason)
                     && recipe.presentation_contract_fingerprint
                         == policy.presentation_contract_fingerprint =>
             {
@@ -5033,7 +5211,9 @@ impl RollingControlActor {
     ) -> bool {
         let producer_attempt = observation.producer_attempt;
         let deadline_accepts_progress = self.producer_progress_deadline.is_some_and(|deadline| {
-            deadline.producer_attempt == producer_attempt && now <= deadline.instant
+            deadline.producer_attempt == producer_attempt
+                && !matches!(deadline.mode, ProducerProgressDeadlineMode::ClassifyingExit)
+                && now <= deadline.instant
         });
         if !deadline_accepts_progress {
             let _ = self.settle_producer_deadline_at(now);
@@ -5048,6 +5228,53 @@ impl RollingControlActor {
             );
         }
         accepted
+    }
+
+    /// Start (or retain) the one classification rendezvous clock. The second
+    /// half never receives a fresh five seconds: both facts must fit under the
+    /// deadline started by whichever exact-attempt fact arrived first.
+    fn ensure_exit_classification_deadline_at(
+        &mut self,
+        published_at: Instant,
+        producer_attempt: u64,
+    ) -> Option<Instant> {
+        if let Some(deadline) = self.producer_progress_deadline.filter(|deadline| {
+            deadline.producer_attempt == producer_attempt
+                && deadline.mode == ProducerProgressDeadlineMode::ClassifyingExit
+        }) {
+            return Some(deadline.instant);
+        }
+        self.producer_progress_deadline = None;
+        let deadline = published_at
+            .checked_add(PRODUCER_EXIT_CLASSIFICATION_BUDGET)
+            .unwrap_or(published_at);
+        self.arm_producer_deadline(
+            producer_attempt,
+            ProducerProgressDeadlineMode::ClassifyingExit,
+            deadline,
+        );
+        self.producer_progress_deadline
+            .filter(|armed| {
+                armed.producer_attempt == producer_attempt
+                    && armed.mode == ProducerProgressDeadlineMode::ClassifyingExit
+            })
+            .map(|armed| armed.instant)
+    }
+
+    fn request_completion_probe(&mut self, producer_attempt: u64, deadline: Instant) {
+        let Some(control) = self.prepublication.as_mut() else {
+            return;
+        };
+        if control.pending_probe.is_some() {
+            return;
+        }
+        let probe_sequence = control.next_probe_sequence;
+        control.next_probe_sequence = control.next_probe_sequence.saturating_add(1);
+        control.pending_probe = Some(RollingProducerExitProbe {
+            probe_sequence,
+            producer_attempt,
+            deadline,
+        });
     }
 
     fn observe_producer_exit_at(
@@ -5081,7 +5308,11 @@ impl RollingControlActor {
             observed_idle_ms: 0,
         });
         self.producer_exit_at = Some(observation.observed_at.min(published_at));
-        self.producer_progress_deadline = None;
+        if !observation.success
+            || self.producer_exit_classifier == ProducerExitClassifier::Immediate
+        {
+            self.producer_progress_deadline = None;
+        }
         self.producer_signal_authorized = false;
         if self.has_terminal_prepublication_failure()
             || (self.pending_decision.is_some()
@@ -5110,31 +5341,94 @@ impl RollingControlActor {
                 .producer_deadline_due
                 .is_none_or(|due| due.producer_attempt != observation.producer_attempt)
         {
-            let deadline = published_at
-                .checked_add(PRODUCER_EXIT_CLASSIFICATION_BUDGET)
-                .unwrap_or(published_at);
-            self.arm_producer_deadline(
-                observation.producer_attempt,
-                ProducerProgressDeadlineMode::ClassifyingExit,
-                deadline,
-            );
-            if self.producer_progress_deadline.is_some_and(|armed| {
-                armed.producer_attempt == observation.producer_attempt
-                    && armed.mode == ProducerProgressDeadlineMode::ClassifyingExit
-                    && armed.instant == deadline
-            }) {
-                if let Some(control) = self.prepublication.as_mut() {
-                    let probe_sequence = control.next_probe_sequence;
-                    control.next_probe_sequence = control.next_probe_sequence.saturating_add(1);
-                    control.pending_probe = Some(RollingProducerExitProbe {
-                        probe_sequence,
-                        producer_attempt: observation.producer_attempt,
-                        deadline,
-                    });
-                }
+            let should_probe = self.producer_exit_classifier == ProducerExitClassifier::Immediate
+                || self.copy_producer_exit_classification
+                    == Some(CopyProducerExitClassification::Completed);
+            let deadline = self
+                .ensure_exit_classification_deadline_at(published_at, observation.producer_attempt);
+            if let (true, Some(deadline)) = (should_probe, deadline) {
+                self.request_completion_probe(observation.producer_attempt, deadline);
             }
         }
         ProducerExitAcceptance::Accepted
+    }
+
+    fn classify_copy_producer_exit_at(
+        &mut self,
+        published_at: Instant,
+        producer_attempt: u64,
+        classification: CopyProducerExitClassification,
+    ) -> Result<(), ProducerAttemptRejection> {
+        if self.retired {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
+        if producer_attempt == 0 || producer_attempt != self.delivery.producer_attempt {
+            return Err(ProducerAttemptRejection::StaleAttempt);
+        }
+        if self.producer_exit_classifier != ProducerExitClassifier::CopyReader {
+            return Err(ProducerAttemptRejection::ClassifierMismatch);
+        }
+        if self.copy_producer_exit_classification.is_some() {
+            return Err(ProducerAttemptRejection::DuplicateClassification);
+        }
+        if self.pending_decision.is_some()
+            || self
+                .producer_deadline_due
+                .is_some_and(|due| due.producer_attempt == producer_attempt)
+            || self.prepublication.as_ref().is_none_or(|control| {
+                control.failure_applied
+                    || !matches!(control.completion, ProducerCompletionState::Incomplete)
+            })
+        {
+            return Err(ProducerAttemptRejection::DecisionMismatch);
+        }
+        if self
+            .producer_process_exit_due
+            .is_some_and(|due| due.producer_attempt == producer_attempt)
+        {
+            let _ = self.maybe_commit_producer_decision_at(published_at);
+            return Err(ProducerAttemptRejection::DecisionMismatch);
+        }
+        if self.producer_progress_deadline.is_some_and(|deadline| {
+            deadline.producer_attempt == producer_attempt && published_at > deadline.instant
+        }) {
+            let _ = self.settle_producer_deadline_at(published_at);
+            let _ = self.maybe_commit_producer_decision_at(published_at);
+            return Err(ProducerAttemptRejection::DecisionMismatch);
+        }
+
+        self.copy_producer_exit_classification = Some(classification);
+        let decisive_reason = match classification {
+            CopyProducerExitClassification::Unsupported => {
+                Some(ProducerDecisionReason::Unsupported)
+            }
+            CopyProducerExitClassification::InvalidConfiguration => {
+                Some(ProducerDecisionReason::InvalidConfiguration)
+            }
+            CopyProducerExitClassification::ReaderFailed => {
+                Some(ProducerDecisionReason::ReaderFailed)
+            }
+            CopyProducerExitClassification::Completed => None,
+        };
+        if let Some(reason) = decisive_reason {
+            return self
+                .commit_producer_decision_at(published_at, producer_attempt, reason)
+                .then_some(())
+                .ok_or(ProducerAttemptRejection::DecisionMismatch);
+        }
+
+        let deadline = self
+            .ensure_exit_classification_deadline_at(published_at, producer_attempt)
+            .ok_or(ProducerAttemptRejection::DecisionMismatch)?;
+        if self
+            .delivery
+            .producer_exit
+            .as_ref()
+            .is_some_and(|exit| exit.success)
+        {
+            self.request_completion_probe(producer_attempt, deadline);
+        }
+        Ok(())
     }
 
     fn classify_producer_exit_at(
@@ -5537,7 +5831,11 @@ impl RollingControlActor {
         if self.retired {
             return Err(ResponsePublicationRejection::SessionEnded);
         }
-        if self.prepublication.is_some() {
+        if self
+            .prepublication
+            .as_ref()
+            .is_some_and(|control| control.initial_policy.is_some())
+        {
             return Err(ResponsePublicationRejection::InvalidBinding);
         }
         match self.response_publication_contract.as_ref() {
@@ -5567,15 +5865,16 @@ impl RollingControlActor {
     }
 
     fn response_presentation_contract_fingerprint(&self) -> Option<&str> {
-        self.prepublication
-            .as_ref()
-            .and_then(|control| control.initial_policy.as_ref())
-            .map(|policy| policy.presentation_contract_fingerprint.as_str())
-            .or_else(|| {
-                self.response_publication_contract
-                    .as_ref()
-                    .map(|contract| contract.presentation_contract_fingerprint.as_str())
-            })
+        match self.prepublication.as_ref() {
+            Some(control) => control
+                .initial_policy
+                .as_ref()
+                .map(|policy| policy.presentation_contract_fingerprint.as_str()),
+            None => self
+                .response_publication_contract
+                .as_ref()
+                .map(|contract| contract.presentation_contract_fingerprint.as_str()),
+        }
     }
 
     fn response_failure_fenced(&self) -> bool {
@@ -5817,8 +6116,11 @@ impl RollingControlActor {
             return Err(ProducerAttemptRejection::PlaylistPublished);
         }
         let recipe = recipe.clone();
-        let installed_attempt =
-            self.begin_producer_attempt_with_budget_at(now, recipe.startup_kind.startup_budget())?;
+        let installed_attempt = self.begin_producer_attempt_with_budget_at(
+            now,
+            recipe.startup_kind.startup_budget(),
+            recipe.exit_classifier,
+        )?;
         let control = self
             .prepublication
             .as_mut()
@@ -6213,6 +6515,13 @@ impl RollingControlActor {
                     reply,
                     ..
                 } if !reply.is_closed() && published_at <= *deadline && rolling_now() < *deadline
+            ) || matches!(
+                &command,
+                RollingControlCommand::ClassifyCopyProducerExit {
+                    deadline,
+                    reply,
+                    ..
+                } if !reply.is_closed() && published_at <= *deadline && rolling_now() < *deadline
             );
             self.fold_producer_blocks_at(published_at, preceding_producer);
             if !publication_may_win_exact_deadline && !classification_may_win_exact_deadline {
@@ -6274,6 +6583,7 @@ impl RollingControlActor {
                         let _ = reply.send(outcome);
                     }
                 }
+                #[cfg(test)]
                 RollingControlCommand::BeginProducerAttempt { reply } => {
                     // Installation holds this exact fence through synchronous
                     // child/registry publication. A newer attempt must not pass
@@ -6410,6 +6720,23 @@ impl RollingControlActor {
                         self.classify_producer_exit_at(published_at, evidence)
                     };
                     let _ = reply.send(disposition);
+                }
+                RollingControlCommand::ClassifyCopyProducerExit {
+                    producer_attempt,
+                    classification,
+                    deadline,
+                    reply,
+                } => {
+                    let outcome = if reply.is_closed() || rolling_now() >= deadline {
+                        Err(ProducerAttemptRejection::ControlUnavailable)
+                    } else {
+                        self.classify_copy_producer_exit_at(
+                            published_at,
+                            producer_attempt,
+                            classification,
+                        )
+                    };
+                    let _ = reply.send(outcome);
                 }
                 RollingControlCommand::ObservePublication {
                     observation,
@@ -6927,7 +7254,7 @@ impl RollingControlHandle {
         handle
     }
 
-    pub(crate) fn spawn_prepublication_transcode(
+    pub(crate) fn spawn_prepublication_producer(
         initial_kind: &'static str,
     ) -> (Self, RollingProducerExecutorRegistration) {
         let (handle, inbox, _decision_notify) = Self::spawn_unbound(initial_kind, true);
@@ -6938,6 +7265,12 @@ impl RollingControlHandle {
             registered: false,
         };
         (handle, registration)
+    }
+
+    pub(crate) fn spawn_prepublication_transcode(
+        initial_kind: &'static str,
+    ) -> (Self, RollingProducerExecutorRegistration) {
+        Self::spawn_prepublication_producer(initial_kind)
     }
 
     #[cfg(test)]
@@ -7056,6 +7389,7 @@ impl RollingControlHandle {
             });
     }
 
+    #[cfg(test)]
     pub(crate) async fn begin_producer_attempt(&self) -> Result<u64, ProducerAttemptRejection> {
         let (reply, response) = tokio::sync::oneshot::channel();
         self.enqueue_command(RollingControlCommand::BeginProducerAttempt { reply })
@@ -7079,10 +7413,11 @@ impl RollingControlHandle {
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
-    /// Bind immutable response facts for a rolling generation whose producer
-    /// remains compatibility-owned. This runs before registry publication, so
-    /// every later master/media/status response can use the same actor path as
-    /// prepublication transcodes without opting copy/cache into retry policy.
+    /// Bind immutable response facts before producer-policy admission or
+    /// compatibility registry publication. Compatibility-owned generations
+    /// use both facts; actor-owned prepublication generations take their
+    /// presentation identity from the matching initial policy and use this
+    /// binding only to order `Session::fail` with response authorization.
     pub(crate) async fn bind_response_publication_contract(
         &self,
         presentation_contract_fingerprint: String,
@@ -7186,6 +7521,34 @@ impl RollingControlHandle {
             .ok()
             .and_then(Result::ok)
             .ok_or(ProducerAttemptRejection::ControlUnavailable)
+    }
+
+    /// Publish one copy-reader result through the bounded actor mailbox. The
+    /// command is sealed with preceding process facts and names the exact
+    /// attempt, so a detached predecessor cannot classify its successor.
+    pub(crate) async fn classify_copy_producer_exit_before(
+        &self,
+        producer_attempt: u64,
+        classification: CopyProducerExitClassification,
+        deadline: Instant,
+    ) -> Result<(), ProducerAttemptRejection> {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        self.enqueue_command_before(
+            RollingControlCommand::ClassifyCopyProducerExit {
+                producer_attempt,
+                classification,
+                deadline,
+                reply,
+            },
+            deadline,
+        )
+        .await
+        .map_err(|_| ProducerAttemptRejection::ControlUnavailable)?;
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
     /// Poll the immutable actor decision after an executor-owned sequence.
@@ -7830,7 +8193,7 @@ static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 18] = [const { AtomicU64::new(0) }; 18];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 19] = [const { AtomicU64::new(0) }; 19];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -8118,6 +8481,7 @@ pub(crate) fn prometheus() -> String {
         "bind_response_publication_contract",
         "classify_producer_exit",
         "executor_settled",
+        "classify_copy_producer_exit",
     ]
     .iter()
     .enumerate()
@@ -11799,6 +12163,22 @@ mod tests {
         )
     }
 
+    fn copy_policy(contract: &str, fingerprint: &str) -> InitialProducerPolicy {
+        InitialProducerPolicy::copy(
+            contract.to_owned(),
+            PRODUCER_PROGRESS_BUDGET,
+            Some(
+                ValidatedRetryRecipe::new(
+                    "legacy-copy".to_owned(),
+                    fingerprint.to_owned(),
+                    contract.to_owned(),
+                    ProducerStartupKind::Copy,
+                )
+                .with_exit_classifier(ProducerExitClassifier::Immediate),
+            ),
+        )
+    }
+
     fn registered_prepublication_actor(now: Instant) -> RollingControlActor {
         let mut actor = prepublication_actor(now);
         assert_eq!(actor.register_producer_executor_at(), Ok(()));
@@ -11891,6 +12271,68 @@ mod tests {
         assert_eq!(
             software.producer_progress_budget(),
             software_progress_budget
+        );
+
+        let mut copy = registered_prepublication_actor(started);
+        assert_eq!(
+            copy.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy", "recipe-copy"),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            copy.producer_exit_classifier,
+            ProducerExitClassifier::CopyReader
+        );
+        assert_eq!(
+            copy.producer_progress_deadline,
+            Some(ProducerProgressDeadline {
+                producer_attempt: 1,
+                mode: ProducerProgressDeadlineMode::Starting,
+                instant: started + PREPUBLICATION_COPY_STARTUP_BUDGET,
+            })
+        );
+
+        let mut copy_without_retry = registered_prepublication_actor(started);
+        assert_eq!(
+            copy_without_retry.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::copy(
+                    "presentation-copy-without-retry".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                    None,
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            copy_without_retry.producer_exit_classifier,
+            ProducerExitClassifier::CopyReader
+        );
+
+        let mut immediate_copy = registered_prepublication_actor(started);
+        assert_eq!(
+            immediate_copy.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::copy_immediate(
+                    "presentation-copy-immediate".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            immediate_copy.producer_exit_classifier,
+            ProducerExitClassifier::Immediate
+        );
+        assert_eq!(
+            immediate_copy.producer_progress_deadline,
+            Some(ProducerProgressDeadline {
+                producer_attempt: 1,
+                mode: ProducerProgressDeadlineMode::Starting,
+                instant: started + PREPUBLICATION_COPY_STARTUP_BUDGET,
+            })
         );
     }
 
@@ -12090,6 +12532,103 @@ mod tests {
             started + Duration::from_millis(2),
             "copy-contract",
             "failed-copy-master-eof",
+        ));
+    }
+
+    #[test]
+    fn prepublication_response_contract_orders_failure_and_policy_binding() {
+        let started = Instant::now();
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::generation_metadata(
+                    RollingResponseObject::MasterPlaylist,
+                    "copy-contract".to_owned(),
+                ),
+            ),
+            Err(ResponsePublicationRejection::ProducerNotAdmitted),
+            "the failure fence cannot stand in for actor-owned producer policy"
+        );
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("copy-contract", "copy-retry"),
+            ),
+            Ok(1)
+        );
+        failed.store(true, Ordering::Release);
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(0),
+                ),
+            ),
+            Err(ResponsePublicationRejection::SessionEnded)
+        );
+        let control = actor
+            .prepublication
+            .as_ref()
+            .expect("prepublication control");
+        assert!(!control.producer_media_published);
+        assert!(matches!(
+            &control.retry_state,
+            PrepublicationRetryState::Available(_)
+        ));
+
+        let mut mismatch = registered_prepublication_actor(started);
+        assert_eq!(
+            mismatch.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            mismatch.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("other-contract", "other-retry"),
+            ),
+            Err(ProducerAttemptRejection::PresentationContractMismatch)
+        );
+        assert_eq!(mismatch.delivery.producer_attempt, 0);
+
+        let failed = Arc::new(AtomicBool::new(true));
+        let mut failed_before_policy = registered_prepublication_actor(started);
+        assert_eq!(
+            failed_before_policy.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            failed_before_policy.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("copy-contract", "copy-retry"),
+            ),
+            Err(ProducerAttemptRejection::SessionEnded)
+        );
+        assert_eq!(failed_before_policy.delivery.producer_attempt, 0);
+        let control = failed_before_policy
+            .prepublication
+            .as_ref()
+            .expect("prepublication control");
+        assert!(control.initial_policy.is_none());
+        assert!(matches!(
+            &control.retry_state,
+            PrepublicationRetryState::Unavailable
         ));
     }
 
@@ -12486,6 +13025,567 @@ mod tests {
                 ),
             )
             .is_ok());
+    }
+
+    #[test]
+    fn copy_retry_is_unsupported_only_and_successor_classifier_is_recipe_owned() {
+        let started = Instant::now();
+        let classified_at = started + Duration::from_secs(1);
+        let mut unsupported = registered_prepublication_actor(started);
+        assert_eq!(
+            unsupported.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy-retry", "recipe-copy-retry"),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            unsupported.classify_copy_producer_exit_at(
+                classified_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        let Some(ProducerDecision::Retry {
+            decision_sequence: 1,
+            failed_attempt: 1,
+            recipe,
+            reason: ProducerDecisionReason::Unsupported,
+        }) = unsupported.pending_decision.as_deref()
+        else {
+            panic!("unsupported copy input must select the one validated fallback");
+        };
+        assert_eq!(recipe.startup_kind, ProducerStartupKind::Copy);
+        assert_eq!(recipe.exit_classifier, ProducerExitClassifier::Immediate);
+        assert_eq!(
+            unsupported.classify_copy_producer_exit_at(
+                classified_at + Duration::from_nanos(1),
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Err(ProducerAttemptRejection::DuplicateClassification)
+        );
+        assert_eq!(
+            unsupported.admit_producer_retry_at(classified_at, 1, "recipe-copy-retry"),
+            Ok(2)
+        );
+        assert_eq!(
+            unsupported.producer_exit_classifier,
+            ProducerExitClassifier::Immediate,
+            "the fallback attempt must use its frozen recipe classifier"
+        );
+        assert_eq!(
+            unsupported.classify_copy_producer_exit_at(
+                classified_at + Duration::from_nanos(2),
+                1,
+                CopyProducerExitClassification::Completed,
+            ),
+            Err(ProducerAttemptRejection::StaleAttempt)
+        );
+        assert_eq!(
+            unsupported.classify_copy_producer_exit_at(
+                classified_at + Duration::from_nanos(2),
+                2,
+                CopyProducerExitClassification::Completed,
+            ),
+            Err(ProducerAttemptRejection::ClassifierMismatch)
+        );
+
+        for (classification, reason) in [
+            (
+                CopyProducerExitClassification::InvalidConfiguration,
+                ProducerDecisionReason::InvalidConfiguration,
+            ),
+            (
+                CopyProducerExitClassification::ReaderFailed,
+                ProducerDecisionReason::ReaderFailed,
+            ),
+        ] {
+            let mut actor = registered_prepublication_actor(started);
+            assert_eq!(
+                actor.begin_initial_producer_attempt_at(
+                    started,
+                    copy_policy("presentation-copy-fail", "recipe-copy-fail"),
+                ),
+                Ok(1)
+            );
+            assert_eq!(
+                actor.classify_copy_producer_exit_at(classified_at, 1, classification),
+                Ok(())
+            );
+            assert!(matches!(
+                actor.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    decision_sequence: 1,
+                    failed_attempt: 1,
+                    reason: actual_reason,
+                    ..
+                }) if *actual_reason == reason
+            ));
+        }
+
+        let mut unsupported_without_fallback = registered_prepublication_actor(started);
+        assert_eq!(
+            unsupported_without_fallback.begin_initial_producer_attempt_at(
+                started,
+                InitialProducerPolicy::copy(
+                    "presentation-copy-no-fallback".to_owned(),
+                    PRODUCER_PROGRESS_BUDGET,
+                    None,
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            unsupported_without_fallback.classify_copy_producer_exit_at(
+                classified_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            unsupported_without_fallback.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                reason: ProducerDecisionReason::Unsupported,
+                ..
+            })
+        ));
+
+        let mut startup_timeout = registered_prepublication_actor(started);
+        assert_eq!(
+            startup_timeout.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy-timeout", "recipe-copy-timeout"),
+            ),
+            Ok(1)
+        );
+        assert!(startup_timeout
+            .settle_due_deadlines_at(started + PREPUBLICATION_COPY_STARTUP_BUDGET)
+            .is_some());
+        assert!(matches!(
+            startup_timeout.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                reason: ProducerDecisionReason::StartupDeadline,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn copy_unsupported_and_nonzero_exit_use_actor_ingress_order() {
+        let started = Instant::now();
+        let first_fact_at = started + Duration::from_secs(1);
+        let second_fact_at = started + Duration::from_secs(2);
+
+        let mut unsupported_first = registered_prepublication_actor(started);
+        assert_eq!(
+            unsupported_first.begin_initial_producer_attempt_at(
+                started,
+                copy_policy(
+                    "presentation-copy-unsupported-first",
+                    "recipe-copy-unsupported-first"
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            unsupported_first.classify_copy_producer_exit_at(
+                first_fact_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            unsupported_first.observe_producer_exit_at(
+                second_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(32),
+                    signal: None,
+                    observed_at: second_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(matches!(
+            unsupported_first.pending_decision.as_deref(),
+            Some(ProducerDecision::Retry {
+                reason: ProducerDecisionReason::Unsupported,
+                ..
+            })
+        ));
+
+        let mut process_first = registered_prepublication_actor(started);
+        assert_eq!(
+            process_first.begin_initial_producer_attempt_at(
+                started,
+                copy_policy(
+                    "presentation-copy-process-first",
+                    "recipe-copy-process-first"
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            process_first.observe_producer_exit_at(
+                first_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(32),
+                    signal: None,
+                    observed_at: first_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert_eq!(
+            process_first.classify_copy_producer_exit_at(
+                second_fact_at,
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Err(ProducerAttemptRejection::DecisionMismatch)
+        );
+        assert!(matches!(
+            process_first.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                reason: ProducerDecisionReason::ProcessExit,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn copy_unsupported_retry_closes_only_after_actor_media_admission() {
+        let started = Instant::now();
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy(
+                    "presentation-copy-published-unsupported",
+                    "recipe-copy-published-unsupported",
+                ),
+            ),
+            Ok(1)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                started + Duration::from_millis(500),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .is_ok());
+        assert_eq!(
+            actor.classify_copy_producer_exit_at(
+                started + Duration::from_secs(1),
+                1,
+                CopyProducerExitClassification::Unsupported,
+            ),
+            Ok(())
+        );
+        assert!(matches!(
+            actor.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                failed_attempt: 1,
+                reason: ProducerDecisionReason::Unsupported,
+                proposal: Some(_),
+                cleanup: ProducerFailureCleanup {
+                    cleanup_policy: CleanupPolicy::RetainPublished,
+                    ..
+                },
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn copy_completed_and_success_exit_rendezvous_under_the_first_facts_deadline() {
+        let started = Instant::now();
+        let first_fact_at = started + Duration::from_secs(1);
+        let second_fact_at = started + Duration::from_secs(2);
+
+        let mut completed_first = registered_prepublication_actor(started);
+        assert_eq!(
+            completed_first.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy-complete-a", "recipe-copy-complete-a"),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            completed_first.classify_copy_producer_exit_at(
+                first_fact_at,
+                1,
+                CopyProducerExitClassification::Completed,
+            ),
+            Ok(())
+        );
+        let first_deadline = first_fact_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET;
+        assert_eq!(
+            completed_first.producer_progress_deadline,
+            Some(ProducerProgressDeadline {
+                producer_attempt: 1,
+                mode: ProducerProgressDeadlineMode::ClassifyingExit,
+                instant: first_deadline,
+            })
+        );
+        assert_eq!(
+            completed_first.poll_producer_decision_at(0),
+            ProducerDecisionPoll::Idle,
+            "Completed alone is not a natural-exit proof"
+        );
+        assert!(completed_first.observe_producer_progress_at(
+            first_fact_at + Duration::from_millis(100),
+            producer_progress(
+                1,
+                1_000,
+                1_000,
+                1_000,
+                first_fact_at + Duration::from_millis(100),
+            ),
+        ));
+        assert_eq!(
+            completed_first
+                .producer_progress_deadline
+                .map(|deadline| deadline.instant),
+            Some(first_deadline),
+            "progress cannot restart a classification rendezvous"
+        );
+        assert_eq!(
+            completed_first.observe_producer_exit_at(
+                second_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: second_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        let ProducerDecisionPoll::ClassifyExit(completed_first_probe) =
+            completed_first.poll_producer_decision_at(0)
+        else {
+            panic!("both copy exit halves must publish one completion probe");
+        };
+        assert_eq!(completed_first_probe.deadline, first_deadline);
+
+        let mut process_first = registered_prepublication_actor(started);
+        assert_eq!(
+            process_first.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy-complete-b", "recipe-copy-complete-b"),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            process_first.observe_producer_exit_at(
+                first_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: true,
+                    code: Some(0),
+                    signal: None,
+                    observed_at: first_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert_eq!(
+            process_first.poll_producer_decision_at(0),
+            ProducerDecisionPoll::Idle,
+            "a successful copy process exit still needs Completed"
+        );
+        assert_eq!(
+            process_first.classify_copy_producer_exit_at(
+                second_fact_at,
+                1,
+                CopyProducerExitClassification::Completed,
+            ),
+            Ok(())
+        );
+        let ProducerDecisionPoll::ClassifyExit(process_first_probe) =
+            process_first.poll_producer_decision_at(0)
+        else {
+            panic!("Completed must rendezvous with the retained successful exit");
+        };
+        assert_eq!(
+            process_first_probe.deadline,
+            first_fact_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET,
+            "the second half cannot mint a fresh classifier budget"
+        );
+    }
+
+    #[test]
+    fn copy_nonzero_exit_wins_completed_and_a_missing_half_times_out() {
+        let started = Instant::now();
+        let first_fact_at = started + Duration::from_secs(1);
+        let second_fact_at = started + Duration::from_secs(2);
+        let mut nonzero = registered_prepublication_actor(started);
+        assert_eq!(
+            nonzero.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("presentation-copy-nonzero", "recipe-copy-nonzero"),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            nonzero.classify_copy_producer_exit_at(
+                first_fact_at,
+                1,
+                CopyProducerExitClassification::Completed,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            nonzero.observe_producer_exit_at(
+                second_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(9),
+                    signal: None,
+                    observed_at: second_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert!(nonzero.maybe_commit_producer_decision_at(second_fact_at));
+        assert!(matches!(
+            nonzero.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                reason: ProducerDecisionReason::ProcessExit,
+                ..
+            })
+        ));
+
+        let mut nonzero_first = registered_prepublication_actor(started);
+        assert_eq!(
+            nonzero_first.begin_initial_producer_attempt_at(
+                started,
+                copy_policy(
+                    "presentation-copy-nonzero-first",
+                    "recipe-copy-nonzero-first",
+                ),
+            ),
+            Ok(1)
+        );
+        assert_eq!(
+            nonzero_first.observe_producer_exit_at(
+                first_fact_at,
+                RollingProducerExitObservation {
+                    producer_attempt: 1,
+                    success: false,
+                    code: Some(7),
+                    signal: None,
+                    observed_at: first_fact_at,
+                },
+            ),
+            ProducerExitAcceptance::Accepted
+        );
+        assert_eq!(
+            nonzero_first.classify_copy_producer_exit_at(
+                second_fact_at,
+                1,
+                CopyProducerExitClassification::Completed,
+            ),
+            Err(ProducerAttemptRejection::DecisionMismatch)
+        );
+        assert!(matches!(
+            nonzero_first.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                reason: ProducerDecisionReason::ProcessExit,
+                ..
+            })
+        ));
+
+        for completed_first in [false, true] {
+            let mut missing = registered_prepublication_actor(started);
+            assert_eq!(
+                missing.begin_initial_producer_attempt_at(
+                    started,
+                    copy_policy("presentation-copy-missing", "recipe-copy-missing"),
+                ),
+                Ok(1)
+            );
+            if completed_first {
+                assert_eq!(
+                    missing.classify_copy_producer_exit_at(
+                        first_fact_at,
+                        1,
+                        CopyProducerExitClassification::Completed,
+                    ),
+                    Ok(())
+                );
+            } else {
+                assert_eq!(
+                    missing.observe_producer_exit_at(
+                        first_fact_at,
+                        RollingProducerExitObservation {
+                            producer_attempt: 1,
+                            success: true,
+                            code: Some(0),
+                            signal: None,
+                            observed_at: first_fact_at,
+                        },
+                    ),
+                    ProducerExitAcceptance::Accepted
+                );
+            }
+            assert!(missing
+                .settle_due_deadlines_at(first_fact_at + PRODUCER_EXIT_CLASSIFICATION_BUDGET)
+                .is_some());
+            assert!(matches!(
+                missing.pending_decision.as_deref(),
+                Some(ProducerDecision::Fail {
+                    reason: ProducerDecisionReason::ExitClassificationDeadline,
+                    ..
+                })
+            ));
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn bounded_copy_classification_is_sequenced_after_preceding_process_exit() {
+        let (handle, mut registration) =
+            RollingControlHandle::spawn_prepublication_producer("copy-classification");
+        assert_eq!(registration.register().await, Ok(()));
+        assert_eq!(
+            handle
+                .begin_initial_producer_attempt(copy_policy(
+                    "presentation-copy-sequenced",
+                    "recipe-copy-sequenced",
+                ))
+                .await,
+            Ok(1)
+        );
+        handle.observe_producer_exit(1, true, Some(0), None);
+        assert_eq!(
+            handle
+                .classify_copy_producer_exit_before(
+                    1,
+                    CopyProducerExitClassification::Completed,
+                    rolling_now() + Duration::from_secs(1),
+                )
+                .await,
+            Ok(())
+        );
+        let RollingProducerExecutorPoll::ClassifyExit(probe) = registration.next_decision().await
+        else {
+            panic!("the sealed copy result must observe the preceding successful exit");
+        };
+        assert_eq!(probe.producer_attempt, 1);
+        assert!(probe.deadline > rolling_now());
     }
 
     #[test]
@@ -13347,6 +14447,8 @@ mod tests {
                     progress_budget: PRODUCER_PROGRESS_BUDGET,
                     retry_recipe: Some(invalid_recipe),
                     presentation_contract_fingerprint: "presentation-retry".to_owned(),
+                    exit_classifier: ProducerExitClassifier::Immediate,
+                    retry_eligibility: ProducerRetryEligibility::AnyPrepublicationFailure,
                     expected_remaining_ms: None,
                     completion_tolerance_ms: 10_000,
                 },

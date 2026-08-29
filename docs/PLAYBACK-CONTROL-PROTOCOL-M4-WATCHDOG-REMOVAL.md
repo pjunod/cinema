@@ -1,7 +1,11 @@
 # Playback control protocol M4 — one producer deadline
 
-**Status:** implementation contract
-**Baseline:** `origin/main` at `9063bb1e` (PR #626)
+**Status:** implementation contract; copy-lifetime cut frozen at
+PR [#642](https://github.com/pjunod/plurx/pull/642), candidate
+implementation checkpoint `73f04d06c2870dabbea5cf5f45d423937ebc8858`, awaiting final hosted validation
+**Contract baseline:** `9063bb1e` (PR #626)
+**Current merged baseline:** `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
+(PR #641)
 **Parent design:**
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md)
 **Delivery ledger:**
@@ -37,6 +41,57 @@ M4 does not:
 The old rolling presentation therefore remains usable as the VOD fallback,
 but its producer lifecycle no longer depends on polling tasks racing each
 other.
+
+### Current copy-lifetime cut
+
+The active working tree makes the rolling actor the copy producer's lifetime
+owner. A pipe reader reports one typed fact: `Unsupported`, invalid
+configuration, reader failure, completion, or lifecycle cancellation. Only
+`Unsupported` may consume one frozen direct-HLS retry recipe. Direct-HLS and
+takeover attempts have no reader classifier or retry; their process exits are
+classified immediately.
+
+Pipe completion and successful process exit rendezvous under one bounded
+actor classification deadline. Neither fact is success alone; after both
+arrive, the existing ENDLIST/frontier probe proves completion. The legacy copy
+startup/progress watcher, watchdog election, request-side child-exit inference,
+and in-place copy fallback policy are removed. General child/resource
+serialization remains where response, flow, retirement, retention, or cleanup
+ordering still requires it, but it cannot infer copy failure or choose a
+retry.
+
+This cut changes no client wire and continues to return `action:none`. The
+compatible server must deploy before separate passive Apple and Android
+reporter PRs; active mobile action consumption follows later. The one broad
+unit run is consumed and all five failures pass by exact name. Compile-only
+`cargo check --locked -p plurxd --features live-hls-recovery --tests`, the
+complete static gates, the ownership recount, and unrestricted cluster
+validation succeed. The first adversarial pass found a P2 `Unsupported`/EPIPE
+ordering race; the repair retains `ChildStdout` through typed actor
+classification and adds a both-order actor test. A second independent review
+found a P2 where local `SessionDir.started`/playlist existence downgraded
+structural `Unsupported` to `ReaderFailed` even though only actor-authorized
+response publication may close retry. The repair always preserves structural
+`Unsupported`; the actor chooses `Retry` before media admission or `Fail` with
+`RetainPublished` afterward. Regression
+`copy_unsupported_retry_closes_only_after_actor_media_admission` covers the
+boundary. A residual EOF form of the same P2 was then found:
+`copyseg::finish` collapsed structural `Segmenter::finish` `Unsupported` to
+`ReaderFailed`; that path now preserves `Unsupported` too. Regression
+`an_unsupported_final_tail_stays_typed_after_local_playlist_creation` uses
+`max_seconds=0` with a local playlist already present, alongside the actor
+publication regression. Compile-only cargo check and the zero-mismatch ledger
+recount are green, including 15 `RetainPublished` owners. Both independent
+current-worktree reviews formally approve all three runtime fixes with no
+actionable P0–P3. Corrected `fmp4`/`copyseg` comments
+state that malformed input is a reader failure, structural `Unsupported` is
+actor/publication-gated, and odd-track handling is not an unconditional
+fallback. Hosted run `33253810937` later exposed a loaded-runner post-CAS
+freshness misclassification in the cluster harness; its fast Rust job was
+cancelled after that failure and must complete in the replacement run. Reviewed
+`cf3bdcb9` keeps fresh-quorum mutation admission and exact leader/term fencing,
+adds a focused regression, and passes the complete local cluster harness. A
+final exact pushed-head review, wholly green hosted rerun, and merge remain.
 
 ## 2. Existing owners and their replacement
 
@@ -697,21 +752,24 @@ the child.
 
 ### 4.3 Copy and exit classification
 
-Copy sessions register `exit_classifier=copy_reader`. Their supervisor always
-publishes the exact process exit fact, but the actor does not turn that fact
-into a decision while the copy reader classification is outstanding. The
+Copy exit classification is frozen per attempt. A custom-segmenter attempt
+registers `exit_classifier=copy_reader`; a direct or fallback HLS-muxer attempt
+registers `exit_classifier=immediate`. Every supervisor publishes the exact
+process exit fact. For `copy_reader`, the actor retains that fact until the
 reader publishes exactly one of `unsupported`, `invalid_configuration`,
 `reader_failed`, or `completed` through the same sequenced ingress; every
-current direct `Session::fail` in that task is removed.
+current direct `Session::fail` in that task is removed. For `immediate`, a
+non-success exit is decisive, while a zero exit still requires the same
+ENDLIST/frontier completion proof as every other managed producer.
 
 `unsupported` and invalid/reader failure are decisive even if the process exit
 arrives later. If exit arrives first, it is retained until the classifier fact.
 If the reader task exits or panics without classifying, its join monitor
-publishes `reader_failed`. Exact exit immediately starts the one-shot probe and
-the five-second `classifying_exit` mode of `ProducerProgressDeadline`. That
-deadline can win only if no classification was published at or before its
-armed instant. A late generic
-exit cannot consume a retry or replace the typed reason. Model tests cover all
+publishes `reader_failed`. The first exact fact among `completed` and process
+exit starts one five-second `classifying_exit` rendezvous. Both facts must
+arrive within it before the actor asks for the one-shot completion probe;
+missing either fact yields `exit_classification_deadline`. A late generic exit
+cannot consume a retry or replace the typed reason. Model tests cover all
 orderings of successful and non-success exit, every copy outcome, completion
 probe, and the producer deadline.
 
@@ -742,13 +800,15 @@ proposal into a bounded wire action with an action UUID, successor, boundary,
 strict relay validation, passive parsing, and exact-sequence replay before it
 can be emitted.
 
-The already-published playlist and admitted objects remain readable. The actor
-uses distinct `prepublication_failed` and `producer_ended_with_proposal`
+An already-authorized response body may finish, and init plus numeric media at
+or behind the frozen committed frontier remain readable. The actor uses
+distinct `prepublication_failed` and `producer_ended_with_proposal`
 dispositions. Only the former projects `Session::failed`. In the latter state,
-playlist and already-admitted object reads continue; a request beyond the
-published frontier fails promptly with typed `producer_ended` instead of
-waiting for bytes that can no longer appear. M4 must not point the generation
-at another child, reset its sequence, or overwrite its scratch directory.
+every fresh video-playlist authorization is rejected, as are full, range, and
+conditional media requests beyond the frozen frontier; each fails promptly
+with typed `producer_ended` instead of waiting for bytes that can no longer
+appear. M4 must not point the generation at another child, reset its sequence,
+or overwrite its scratch directory.
 
 Successful natural exit is not completion by itself. Its immediate one-shot
 probe must publish a parsed exact-attempt `#EXT-X-ENDLIST`, an indexed final
@@ -870,9 +930,11 @@ those values as structured fields.
 The validation catalog gains a source check over playback server modules. It
 fails if an unapproved recovery pattern is introduced, including:
 
-- the deleted symbol names `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`,
-  `PROGRESS_STALL`, `WATCHDOG_POLL`, `child_transition`, `watchdog_active`,
-  `replacing_child`, `downgrade_one_step`, and `watch_for_stall`;
+- the deleted recovery-owner names `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`,
+  `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`, and
+  `watch_for_stall`, plus any use of `PROGRESS_STALL`, `child_transition`,
+  `replacing_child`, or `downgrade_one_step` as a copy recovery voter rather
+  than an enumerated actor policy value or lifecycle fence;
 - a detached `sleep` loop that inspects producer or publication state and then
   kills, starts, or swaps a process; or
 - any child replacement outside the named process executor.
@@ -931,6 +993,10 @@ misclassified as a watchdog.
 | retry/install, then authority loss | authority cleanup reaches pending supervisor; late install is rejected |
 | copy `Unsupported` and timeout | one pre-publication retry total |
 | copy `Unsupported` and generic exit | Unsupported classification owns the reason and sole retry token |
+| copy reader completes before successful process exit | wait under the existing classification deadline; do not complete or renew it |
+| successful copy process exit arrives before reader completion | wait under the same classification deadline; do not infer success from exit alone |
+| direct-HLS or takeover process exits | classify immediately; no reader rendezvous and no retry recipe |
+| invalid configuration, reader failure, or copy deadline | one final actor failure; never reinterpret it as `Unsupported` |
 | zero exit without valid ENDLIST/frontier | typed partial-success failure, never complete |
 | post-publication failure cleanup expires | terminate/reap continues; published scratch and catalogs remain readable; original decision reason remains |
 | pre-publication failure cleanup completes | reap is confirmed before scratch is discarded and compatibility projections reset |
@@ -944,27 +1010,32 @@ misclassified as a watchdog.
 
 ## 10. Verification order
 
-Per the delivery instruction, implementation is reviewed adversarially before
-unit tests run.
+Per the delivery instruction, implementation was reviewed adversarially before
+the one broad local unit run. Steps 1–10 are complete locally. That run is
+consumed and must not be repeated: its five failures all pass by exact name
+after reviewed repairs. The checked owner catalog, compile/static gates, and
+one unrestricted cluster run are green; the later hosted cluster correction
+also passes its exact regression and complete focused cluster harness.
 
-1. Generate the checked source catalog of every child/recovery/failure owner
-   and map each current `child_transition` invariant.
-2. Implement actor state, exact deadline, decision channel, and model tests.
-3. Implement the process executor and migrate transcode/copy paths.
-4. Delete the old tasks, locks, atomics, and replacement helpers.
-5. Add status, metrics, and the repository ownership check.
-6. Open or update the implementation PR at the frozen cumulative head.
-7. Obtain adversarial review of that exact PR head; fix every finding and
-   repeat exact-head review before running unit tests.
-8. Run the full local unit suite once on that reviewed merge candidate. If it
-   fails, repair the cause and rerun only the failed or directly affected
-   tests; do not restart the full suite.
-9. Review every behavioral repair and restore exact-head approval.
-10. Run the required non-unit cluster/integration gate because terminal,
-    owner-fence, and producer-action ordering cross cluster ownership.
-11. Require every hosted job to pass and merge only while the reviewed head is
-    unchanged. Hosted PR validation remains required and is distinct from the
-    single local full-suite run.
+1. **Complete:** generate the checked source catalog and map every current
+   child/recovery/failure owner and `child_transition` invariant.
+2. **Complete:** implement actor state, exact deadline, decision channel, and
+   model tests.
+3. **Complete:** implement the process executor and migrate transcode/copy
+   paths.
+4. **Complete:** delete the old tasks, locks, atomics, and replacement helpers.
+5. **Complete:** add status, metrics, and the repository ownership check.
+6. **Complete:** open PR #642 at the cumulative branch head.
+7. **Complete for the unit boundary:** obtain adversarial review before the
+   broad run and review every later behavioral repair by exact delta.
+8. **Consumed:** run the broad local unit suite once; repair and rerun only the
+   five failed or directly affected names.
+9. **Complete locally:** restore approval for every behavioral repair and
+   validation correction. A cumulative final-PR-head review remains required.
+10. **Complete locally:** run the non-unit cluster/integration gate because
+    terminal, owner-fence, and producer-action ordering cross cluster ownership.
+11. **Pending:** require cumulative exact-head approval and every hosted job to
+    pass, then merge only while that reviewed head is unchanged.
 
 ## 11. Acceptance
 

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f94b82da"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained prepublication_response_contract_orders_failure_and_policy_binding test requires an actor-managed copy to reject Session::fail before policy admission without allocating an attempt or preserving retry, while the retained an_oversized_nested_box_is_malformed_before_the_resource_ceiling test requires a declaration beyond a complete parent to remain Malformed instead of minting structural fallback; both run in the local and hosted Rust gates."

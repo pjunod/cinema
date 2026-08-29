@@ -24,7 +24,7 @@
 //! the cluster finishes its index backfill.
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use plurx_core::fmp4::Init;
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -101,28 +101,33 @@ impl Default for Limits {
 #[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// The stream was not one this reader could follow, and no player ever
-    /// saw output — the playlist was never published, whatever segment files
-    /// the publish gate was still holding invisible. The caller respawns on
-    /// the legacy muxer — once — clearing the directory first.
-    ///
-    /// Separate from every other failure on purpose: this is the only ending
-    /// where falling back is both possible and correct. Once the playlist is
-    /// out, a respawn would rewrite a timeline a player is already holding.
+    /// The stream was not one this reader could follow. This is a typed shape
+    /// fact only: local playlist creation does not prove client visibility.
+    /// The actor uses exact response-publication ordering to choose the one
+    /// frozen direct-HLS retry before publication or retained failure after
+    /// publication.
     Unsupported(String),
     /// The emitted out-of-band HEVC init is not decodable. Retrying through
     /// ffmpeg's legacy HLS muxer would publish the same invalid decoder
     /// configuration, so this failure is terminal even when probe metadata
     /// did not predict that promotion would be needed.
     InvalidHevcConfiguration(String),
-    /// It ran. The counts are what it published, whether it reached the end of
-    /// the film or the session was killed under it.
-    ///
-    /// Returning stops the reader, which drops the `ChildStdout` the caller
-    /// handed over — ffmpeg then takes EPIPE on its next muxer write and
-    /// exits. That is how a segmenter session ends its own ffmpeg, and it is
-    /// why no path here needs to kill the child itself.
-    Ran(SegmentCounts),
+    /// The reader consumed the complete pipe and durably published every final
+    /// segment plus the exact ENDLIST. Process exit and duration/frontier proof
+    /// remain separate actor facts; this outcome alone is not session success.
+    Completed(SegmentCounts),
+    /// The stream was structurally supported, but the reader could not finish
+    /// parsing, merging, or durably publishing it. This never authorizes the
+    /// legacy retry; the actor decides discard versus retained failure from
+    /// exact attempt-media publication ordering.
+    ReaderFailed {
+        reason: String,
+        counts: SegmentCounts,
+    },
+    /// Scratch disappeared because lifecycle teardown already owns the
+    /// session. This is not producer-failure evidence and must not overwrite
+    /// the actor's End/authority/lease verdict.
+    Cancelled(SegmentCounts),
 }
 
 /// Everything a session writes, and the playlist it keeps in step.
@@ -194,9 +199,9 @@ impl SessionDir {
     async fn write_init(&mut self, init: &Init) -> std::io::Result<()> {
         self.publish_file("init.mp4", &init.bytes).await?;
         // No playlist yet: one with no segment in it is a promise the session
-        // cannot keep if ffmpeg dies in the next second, and
-        // `session_producing` reads exactly this file to decide whether there
-        // is real output. It lands when the publish gate opens.
+        // cannot keep if ffmpeg dies in the next second. The actor's first-
+        // media admission observes exactly this file, so it lands only when
+        // the publish gate opens.
         Ok(())
     }
 
@@ -251,6 +256,17 @@ fn session_gone(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::NotFound
 }
 
+/// A missing object is lifecycle cancellation only when teardown removed the
+/// session directory itself. A missing temp/final file inside a live directory
+/// is a producer write failure and must stay visible to the actor.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn session_directory_gone(dir: &Path) -> bool {
+    matches!(
+        tokio::fs::metadata(dir).await,
+        Err(ref error) if session_gone(error)
+    )
+}
+
 /// Read `src` to exhaustion, publishing segments into `dir`.
 ///
 /// Generic over the source so the tests can drive a whole session from a byte
@@ -263,6 +279,21 @@ pub async fn run<R: AsyncRead + Unpin>(
     session_id: &str,
     limits: Limits,
 ) -> Outcome {
+    match tokio::fs::metadata(&dir).await {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => {
+            return Outcome::ReaderFailed {
+                reason: "the copy session scratch path is not a directory".into(),
+                counts: SegmentCounts::default(),
+            };
+        }
+        Err(error) => {
+            return Outcome::ReaderFailed {
+                reason: format!("opening the copy session directory: {error}"),
+                counts: SegmentCounts::default(),
+            };
+        }
+    }
     let mut reader = FragmentReader::new();
     let mut out = SessionDir::new(dir, limits.publish_gate_secs);
     // Hold the initialization segment until the first video sample arrives.
@@ -278,10 +309,17 @@ pub async fn run<R: AsyncRead + Unpin>(
             Ok(0) => break,
             Ok(n) => n,
             Err(e) => {
-                // A killed child closes the pipe under us. That is a session
-                // ending, not a fault to shout about.
-                tracing::debug!(session = %crate::transcode::session_log_id(session_id), "copy segmenter pipe read: {e}");
-                break;
+                let counts = segmenter
+                    .as_ref()
+                    .map_or_else(SegmentCounts::default, Segmenter::counts);
+                if session_directory_gone(&out.dir).await {
+                    tracing::debug!(session = %crate::transcode::session_log_id(session_id), "copy segmenter pipe closed after session teardown: {e}");
+                    return Outcome::Cancelled(counts);
+                }
+                return Outcome::ReaderFailed {
+                    reason: format!("reading the fragmented MP4 pipe: {e}"),
+                    counts,
+                };
             }
         };
         reader.push(&buf[..n]);
@@ -291,25 +329,22 @@ pub async fn run<R: AsyncRead + Unpin>(
                 Ok(Some(unit)) => unit,
                 Ok(None) => break,
                 Err(e) => {
-                    // The fallback door is open until the playlist is out —
-                    // not until the first segment. Segments on disk that no
-                    // player has ever been told about are not a timeline
-                    // anyone holds; the respawn clears the directory and
-                    // recuts, and the viewer never learns anything happened.
-                    // The publish gate widens this window on purpose.
-                    if !out.started {
-                        return Outcome::Unsupported(format!("{e}"));
-                    }
-                    // Past the playlist: the door is shut, because a player
-                    // may be holding segments from this timeline. Stop
-                    // reading and let the session end like any ffmpeg that
-                    // died — the playlist keeps what was real, without an
-                    // ENDLIST claiming the film finished here.
-                    tracing::error!(
-                        session = %crate::transcode::session_log_id(session_id),
-                        "copy segmenter lost the fragment stream: {e}"
-                    );
-                    return finish(segmenter, &mut out, session_id, false).await;
+                    // The reader reports stream shape, never publication
+                    // policy. A local playlist file is not proof that any
+                    // response crossed actor authorization; conversely the
+                    // actor may already have published media before this
+                    // task observes the file. Preserve structural Unsupported
+                    // exactly and let the actor choose Retry or
+                    // RetainPublished from its ordered response state.
+                    return match e {
+                        fmp4::Fmp4Error::Unsupported(reason) => Outcome::Unsupported(reason),
+                        fmp4::Fmp4Error::Malformed(reason) => Outcome::ReaderFailed {
+                            reason: format!("parsing the fragmented MP4 stream: {reason}"),
+                            counts: segmenter
+                                .as_ref()
+                                .map_or_else(SegmentCounts::default, Segmenter::counts),
+                        },
+                    };
                 }
             };
             match unit {
@@ -326,10 +361,11 @@ pub async fn run<R: AsyncRead + Unpin>(
                     // one audio stream, so anything else in the `moov` is
                     // something ffmpeg added on its own — a chapter `text`
                     // track is what it was the first time, and Safari refused
-                    // the stream over it while Chrome played on. Falling back
-                    // is the right answer to a shape this path did not ask
-                    // for: the legacy muxer's output is known to be playable,
-                    // and a warning names what appeared.
+                    // the stream over it while Chrome played on. Report the
+                    // shape exactly; the actor may use the known-playable
+                    // legacy muxer only while response publication still
+                    // permits a retry, and otherwise retains the admitted
+                    // timeline as a typed failure.
                     if let Some(odd) = init.tracks.iter().find(|t| t.kind == TrackKind::Other) {
                         return Outcome::Unsupported(format!(
                             "the pipe declared a track this path never asked for \
@@ -351,9 +387,10 @@ pub async fn run<R: AsyncRead + Unpin>(
                 Unit::Fragment(fragment) => {
                     if segmenter.is_none() {
                         let Some((mut init, policy)) = pending_init.take() else {
-                            return Outcome::Unsupported(
-                                "a fragment arrived before the moov".into(),
-                            );
+                            return Outcome::ReaderFailed {
+                                reason: "a fragment arrived before the moov".into(),
+                                counts: SegmentCounts::default(),
+                            };
                         };
                         match fmp4::promote_hevc_parameter_sets(&mut init, &fragment) {
                             Ok(true) => tracing::info!(
@@ -364,7 +401,15 @@ pub async fn run<R: AsyncRead + Unpin>(
                             Err(e) => {
                                 let reason = format!("preparing the HLS init segment: {e}");
                                 return match fmp4::validate_hevc_decoder_configuration(&init) {
-                                    Ok(()) => Outcome::Unsupported(reason),
+                                    Ok(()) => match e {
+                                        fmp4::Fmp4Error::Unsupported(_) => {
+                                            Outcome::Unsupported(reason)
+                                        }
+                                        fmp4::Fmp4Error::Malformed(_) => Outcome::ReaderFailed {
+                                            reason,
+                                            counts: SegmentCounts::default(),
+                                        },
+                                    },
                                     Err(configuration) => Outcome::InvalidHevcConfiguration(
                                         format!("{reason}; {configuration}"),
                                     ),
@@ -377,10 +422,16 @@ pub async fn run<R: AsyncRead + Unpin>(
                                 "promoted HDR10 static metadata into the HLS init segment"
                             ),
                             Ok(false) => {}
-                            Err(e) => {
+                            Err(fmp4::Fmp4Error::Unsupported(reason)) => {
                                 return Outcome::Unsupported(format!(
-                                    "preparing the HLS init segment: {e}"
+                                    "preparing the HLS init segment: {reason}"
                                 ));
+                            }
+                            Err(fmp4::Fmp4Error::Malformed(reason)) => {
+                                return Outcome::ReaderFailed {
+                                    reason: format!("preparing the HLS init segment: {reason}"),
+                                    counts: SegmentCounts::default(),
+                                };
                             }
                         }
                         if let Err(error) = fmp4::validate_hevc_decoder_configuration(&init) {
@@ -389,7 +440,14 @@ pub async fn run<R: AsyncRead + Unpin>(
                             ));
                         }
                         if let Err(e) = out.write_init(&init).await {
-                            return Outcome::Unsupported(format!("writing init.mp4: {e}"));
+                            return if session_directory_gone(&out.dir).await {
+                                Outcome::Cancelled(SegmentCounts::default())
+                            } else {
+                                Outcome::ReaderFailed {
+                                    reason: format!("writing init.mp4: {e}"),
+                                    counts: SegmentCounts::default(),
+                                }
+                            };
                         }
                         segmenter = Some(Segmenter::new(init, policy));
                     }
@@ -399,29 +457,31 @@ pub async fn run<R: AsyncRead + Unpin>(
                     match seg.push(fragment) {
                         Ok(Some(published)) => {
                             if let Err(e) = out.write_segment(&published).await {
-                                if session_gone(&e) {
+                                return if session_directory_gone(&out.dir).await {
                                     tracing::debug!(
                                         session = %crate::transcode::session_log_id(session_id),
                                         "session directory went away mid-write; stopping"
                                     );
+                                    Outcome::Cancelled(seg.counts())
                                 } else {
-                                    tracing::error!(
-                                        session = %crate::transcode::session_log_id(session_id),
-                                        "writing {}: {e}", published.name()
-                                    );
-                                }
-                                return Outcome::Ran(seg.counts());
+                                    Outcome::ReaderFailed {
+                                        reason: format!("writing {}: {e}", published.name()),
+                                        counts: seg.counts(),
+                                    }
+                                };
                             }
                         }
                         Ok(None) => {}
                         Err(e) => {
-                            // Same door as the reader's: open until the
-                            // playlist is out, shut after.
-                            if !out.started {
-                                return Outcome::Unsupported(format!("{e}"));
-                            }
-                            tracing::error!(session = %crate::transcode::session_log_id(session_id), "merging a segment: {e}");
-                            return Outcome::Ran(seg.counts());
+                            return match e {
+                                fmp4::Fmp4Error::Unsupported(reason) => {
+                                    Outcome::Unsupported(reason)
+                                }
+                                fmp4::Fmp4Error::Malformed(reason) => Outcome::ReaderFailed {
+                                    reason: format!("merging a fragmented MP4 segment: {reason}"),
+                                    counts: seg.counts(),
+                                },
+                            };
                         }
                     }
                     if !warned_memory {
@@ -450,7 +510,10 @@ pub async fn run<R: AsyncRead + Unpin>(
     // and an ENDLIST there would tell the player the film ends early.
     let complete = reader.saw_trailer() || reader.buffered() == 0;
     if segmenter.is_none() && pending_init.is_some() {
-        return Outcome::Unsupported("the pipe ended before its first media fragment".into());
+        return Outcome::ReaderFailed {
+            reason: "the pipe ended before its first media fragment".into(),
+            counts: SegmentCounts::default(),
+        };
     }
     finish(segmenter, &mut out, session_id, complete).await
 }
@@ -497,60 +560,96 @@ async fn finish(
     complete: bool,
 ) -> Outcome {
     let Some(mut seg) = segmenter else {
-        return Outcome::Unsupported("the pipe ended before its moov arrived".into());
+        return Outcome::ReaderFailed {
+            reason: "the pipe ended before its moov arrived".into(),
+            counts: SegmentCounts::default(),
+        };
     };
-    if complete {
+    if !complete {
+        let counts = seg.counts();
+        return Outcome::ReaderFailed {
+            reason: "the fragmented MP4 pipe ended inside an incomplete unit".into(),
+            counts,
+        };
+    }
+    {
         // `#EXT-X-ENDLIST` says "this is the whole film". Only write it if the
         // last segment actually landed — a playlist terminated one segment
         // short of what was produced tells the player it has everything while
         // the picture stops early, which is worse than a playlist that simply
         // stops growing.
-        let final_ok = match seg.finish() {
+        match seg.finish() {
             Ok(published) => {
-                let mut wrote_all = true;
                 for segment in published {
-                    match out.write_segment(&segment).await {
-                        Ok(()) => {}
-                        Err(e) if session_gone(&e) => {
+                    if let Err(e) = out.write_segment(&segment).await {
+                        if session_directory_gone(&out.dir).await {
                             tracing::debug!(
                                 session = %crate::transcode::session_log_id(session_id),
                                 "session directory went away before the final segment; stopping"
                             );
-                            wrote_all = false;
-                            break;
+                            return Outcome::Cancelled(seg.counts());
                         }
-                        Err(e) => {
-                            tracing::error!(
-                                session = %crate::transcode::session_log_id(session_id),
-                                "writing a final segment: {e}"
-                            );
-                            wrote_all = false;
-                            break;
-                        }
+                        return Outcome::ReaderFailed {
+                            reason: format!("writing a final segment: {e}"),
+                            counts: seg.counts(),
+                        };
                     }
                 }
-                wrote_all
+            }
+            Err(fmp4::Fmp4Error::Unsupported(reason)) => {
+                return Outcome::Unsupported(reason);
+            }
+            Err(fmp4::Fmp4Error::Malformed(reason)) => {
+                return Outcome::ReaderFailed {
+                    reason: format!("merging the final segment: {reason}"),
+                    counts: seg.counts(),
+                };
+            }
+        }
+        if let Err(e) = out.write_endlist().await {
+            return if session_directory_gone(&out.dir).await {
+                Outcome::Cancelled(seg.counts())
+            } else {
+                Outcome::ReaderFailed {
+                    reason: format!("writing the playlist end: {e}"),
+                    counts: seg.counts(),
+                }
+            };
+        }
+        if !out.started {
+            return Outcome::ReaderFailed {
+                reason: "the reader completed without publishing an ENDLIST".into(),
+                counts: seg.counts(),
+            };
+        }
+        let endlist = tokio::fs::read_to_string(out.dir.join("index.m3u8")).await;
+        match endlist {
+            Ok(text) if text.ends_with("#EXT-X-ENDLIST\n") => {}
+            Ok(_) => {
+                return Outcome::ReaderFailed {
+                    reason: "the final playlist did not end with ENDLIST".into(),
+                    counts: seg.counts(),
+                };
             }
             Err(e) => {
-                tracing::error!(session = %crate::transcode::session_log_id(session_id), "merging the final segment: {e}");
-                false
-            }
-        };
-        if final_ok {
-            if let Err(e) = out.write_endlist().await {
-                if session_gone(&e) {
-                    tracing::debug!(session = %crate::transcode::session_log_id(session_id), "session gone before the playlist end");
-                } else {
-                    tracing::error!(session = %crate::transcode::session_log_id(session_id), "writing the playlist end: {e}");
+                if session_directory_gone(&out.dir).await {
+                    return Outcome::Cancelled(seg.counts());
                 }
+                return Outcome::ReaderFailed {
+                    reason: format!("verifying the final playlist: {e}"),
+                    counts: seg.counts(),
+                };
             }
         }
     }
     let counts = seg.counts();
     if counts.segments == 0 {
-        return Outcome::Unsupported("the pipe ended before a single segment".into());
+        return Outcome::ReaderFailed {
+            reason: "the pipe ended before a single segment".into(),
+            counts,
+        };
     }
-    Outcome::Ran(counts)
+    Outcome::Completed(counts)
 }
 
 /// The end-of-session line `scripts/perf-report` greps.
@@ -588,6 +687,39 @@ mod tests {
     use plurx_core::fmp4::{CutReason, Track, VideoCodec};
     use plurx_core::testfixtures::pipe;
     use std::path::Path;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    struct BrokenPipe;
+
+    impl AsyncRead for BrokenPipe {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Err(std::io::Error::other("fixture read failure")))
+        }
+    }
+
+    struct TeardownPipe {
+        dir: PathBuf,
+    }
+
+    impl AsyncRead for TeardownPipe {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let _ = std::fs::remove_dir_all(&self.dir);
+            Poll::Ready(Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "fixture teardown",
+            )))
+        }
+    }
 
     /// Long enough to reach a ceiling from a 12 s fixture. The floor is 3 s
     /// rather than the shipped 6 s for the same reason: the property under
@@ -708,7 +840,7 @@ mod tests {
     #[tokio::test]
     async fn a_session_on_a_source_with_clean_points_publishes_only_clean_cuts() {
         let (dir, outcome) = session("clean-cra", brisk()).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("the segmenter did not run: {outcome:?}");
         };
         assert!(counts.segments >= 2, "{counts:?}");
@@ -745,7 +877,7 @@ mod tests {
             publish_gate_secs: 0,
         };
         let (dir, outcome) = session("open-gop", limits).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("the segmenter did not run: {outcome:?}");
         };
         assert!(counts.ceiling_cuts >= 1, "{counts:?}");
@@ -764,7 +896,7 @@ mod tests {
     #[tokio::test]
     async fn the_playlist_matches_the_template_and_produce_can_parse_it() {
         let (dir, outcome) = session("clean-cra", brisk()).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("{outcome:?}");
         };
         let text = playlist(dir.path());
@@ -823,7 +955,7 @@ mod tests {
     #[tokio::test]
     async fn the_first_segment_is_short_and_the_playlist_says_so() {
         let (dir, outcome) = session("clean-cra", Limits::default()).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("{outcome:?}");
         };
         assert!(counts.segments >= 2, "{counts:?}");
@@ -867,7 +999,7 @@ mod tests {
         // Two thirds of the stream, which lands inside a fragment.
         let cut = feed.len() * 2 / 3;
         let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", brisk()).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
         assert!(counts.segments >= 1);
@@ -897,7 +1029,7 @@ mod tests {
         let mut limits = brisk();
         limits.publish_gate_secs = 999;
         let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
         assert!(counts.segments >= 1, "{counts:?}");
@@ -925,7 +1057,7 @@ mod tests {
         let mut limits = brisk();
         limits.publish_gate_secs = 4;
         let outcome = run(&feed[..cut], dir.path().to_path_buf(), "test", limits).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::ReaderFailed { counts, .. } = outcome else {
             panic!("{outcome:?}");
         };
         assert!(
@@ -959,7 +1091,7 @@ mod tests {
         let mut limits = brisk();
         limits.publish_gate_secs = 999;
         let (dir, outcome) = session("clean-cra", limits).await;
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("{outcome:?}");
         };
         assert!(counts.segments >= 2, "{counts:?}");
@@ -971,11 +1103,30 @@ mod tests {
         assert_eq!(text.matches(".m4s\n").count() as u64, counts.segments);
     }
 
-    /// The capability check. A pipe whose `moov` is nonsense must not produce
-    /// half a session — it must say so before anything is published, which is
-    /// what lets the caller fall back to ffmpeg's own muxer.
+    /// EOF may be where the reader first proves a structural incompatibility:
+    /// final tail splitting rejects a sample longer than the HLS ceiling. A
+    /// local playlist can already exist by then, but only the actor knows
+    /// whether any response was admitted, so the reader must preserve the
+    /// typed Unsupported fact rather than inventing publication policy.
     #[tokio::test]
-    async fn an_unparseable_moov_falls_back_to_the_legacy_path() {
+    async fn an_unsupported_final_tail_stays_typed_after_local_playlist_creation() {
+        let mut limits = brisk();
+        limits.max_seconds = 0;
+        let (dir, outcome) = session("clean-cra", limits).await;
+        let Outcome::Unsupported(reason) = outcome else {
+            panic!("the EOF structural failure lost its typed outcome: {outcome:?}");
+        };
+        assert!(reason.contains("sample longer than"), "{reason}");
+        assert!(
+            dir.path().join("index.m3u8").exists(),
+            "the fixture must prove local playlist creation cannot decide fallback"
+        );
+    }
+
+    /// Malformed bytes are a failed reader, not evidence that the legal stream
+    /// shape is unsupported and eligible for the one legacy retry.
+    #[tokio::test]
+    async fn an_unparseable_moov_is_reader_failure_not_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
         let mut feed = pipe("open-gop");
         // Corrupt the moov's first child box size. The box walk then runs past
@@ -984,8 +1135,8 @@ mod tests {
         feed[head..head + 4].copy_from_slice(&0xffff_ffffu32.to_be_bytes());
         let outcome = run(&feed[..], dir.path().to_path_buf(), "test", brisk()).await;
         assert!(
-            matches!(outcome, Outcome::Unsupported(_)),
-            "a broken moov did not ask for the fallback: {outcome:?}"
+            matches!(outcome, Outcome::ReaderFailed { .. }),
+            "a broken moov minted a fallback request: {outcome:?}"
         );
         assert!(!dir.path().join("index.m3u8").exists());
     }
@@ -1042,12 +1193,71 @@ mod tests {
         assert!(!dir.path().join("index.m3u8").exists());
     }
 
-    /// Nothing at all down the pipe — ffmpeg refused the source outright.
+    /// Nothing at all down the pipe is producer/read failure, not a structural
+    /// capability decision from parsed media.
     #[tokio::test]
-    async fn an_empty_pipe_asks_for_the_fallback() {
+    async fn an_empty_pipe_is_reader_failure_not_fallback() {
         let dir = crate::test_tempdir().expect("tempdir");
         let outcome = run(&[][..], dir.path().to_path_buf(), "test", brisk()).await;
-        assert!(matches!(outcome, Outcome::Unsupported(_)), "{outcome:?}");
+        assert!(
+            matches!(outcome, Outcome::ReaderFailed { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_supported_reader_failure_is_not_a_fallback_request() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(BrokenPipe, dir.path().to_path_buf(), "test", brisk()).await;
+        let Outcome::ReaderFailed { reason, counts } = outcome else {
+            panic!("a pipe read error was not classified as reader failure: {outcome:?}");
+        };
+        assert!(reason.contains("fixture read failure"), "{reason}");
+        assert_eq!(counts, SegmentCounts::default());
+    }
+
+    #[tokio::test]
+    async fn missing_scratch_at_start_is_reader_failure_not_cancellation() {
+        let feed = pipe("clean-cra");
+        let dir = crate::test_tempdir().expect("tempdir");
+        let path = dir.path().to_path_buf();
+        std::fs::remove_dir_all(&path).expect("remove fixture session directory");
+        let outcome = run(&feed[..], path, "test", brisk()).await;
+        assert!(
+            matches!(outcome, Outcome::ReaderFailed { .. }),
+            "a directory that never existed masqueraded as teardown: {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_file_at_the_scratch_path_is_reader_failure_not_cancellation() {
+        let feed = pipe("clean-cra");
+        let parent = crate::test_tempdir().expect("tempdir");
+        let path = parent.path().join("not-a-directory");
+        std::fs::write(&path, b"fixture").expect("write fixture file");
+        let outcome = run(&feed[..], path, "test", brisk()).await;
+        let Outcome::ReaderFailed { reason, .. } = outcome else {
+            panic!("a non-directory scratch path became cancellation: {outcome:?}");
+        };
+        assert!(reason.contains("not a directory"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn scratch_removed_after_reader_start_is_cancellation() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        let outcome = run(
+            TeardownPipe {
+                dir: dir.path().to_path_buf(),
+            },
+            dir.path().to_path_buf(),
+            "test",
+            brisk(),
+        )
+        .await;
+        assert!(
+            matches!(outcome, Outcome::Cancelled(_)),
+            "session teardown became producer failure: {outcome:?}"
+        );
     }
 
     /// The pipe arrives in whatever pieces the kernel felt like, and a
@@ -1129,7 +1339,7 @@ mod tests {
         let outcome = run(stdout, dir.path().to_path_buf(), "live", limits).await;
         let _ = child.wait().await;
 
-        let Outcome::Ran(counts) = outcome else {
+        let Outcome::Completed(counts) = outcome else {
             panic!("a live ffmpeg pipe was not readable: {outcome:?}");
         };
         assert!(counts.segments >= 2, "{counts:?}");

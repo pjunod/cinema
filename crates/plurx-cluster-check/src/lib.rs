@@ -3709,18 +3709,11 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
         }
     }
-    match cluster.request(handoff, Request::Metrics).await? {
-        Response::Metrics {
-            leader: Some(current_leader),
-            current_term,
-            quorum_acknowledged: true,
-            ..
-        } if current_leader == handoff && current_term == handoff_term => {}
-        Response::Metrics { .. } => {
-            bail!("artwork repair topology changed during the generation CAS")
-        }
-        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
-    }
+    require_artwork_repair_cas_topology(
+        cluster.request(handoff, Request::Metrics).await?,
+        handoff,
+        handoff_term,
+    )?;
     if handoff_winners != [handoff] {
         bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
     }
@@ -4643,6 +4636,35 @@ fn repeatable_artwork_observation_succeeded(response: Response) -> Result<bool> 
         Response::Flag { value: true } => Ok(true),
         Response::Flag { value: false } | Response::MembershipLeaderChange { .. } => Ok(false),
         response => bail!("mature repair observation was not repeatable: {response:?}"),
+    }
+}
+
+/// Verify the topology identity that fenced the mutating repair claim. Quorum
+/// freshness is deliberately not part of this post-CAS proof: the claim
+/// itself refuses a stale quorum before submitting its Raft write, while the
+/// following loser probes can legitimately consume the one-second freshness
+/// window on a loaded runner. A changed leader or term still invalidates the
+/// generation proof.
+fn require_artwork_repair_cas_topology(
+    response: Response,
+    expected_leader: u64,
+    expected_term: u64,
+) -> Result<()> {
+    match response {
+        Response::Metrics {
+            leader: Some(current_leader),
+            current_term,
+            ..
+        } if current_leader == expected_leader && current_term == expected_term => Ok(()),
+        Response::Metrics {
+            leader,
+            current_term,
+            ..
+        } => bail!(
+            "artwork repair topology changed during the generation CAS: expected leader \
+             {expected_leader} term {expected_term}, observed leader {leader:?} term {current_term}"
+        ),
+        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
     }
 }
 
@@ -12242,6 +12264,26 @@ mod tests {
             .expect("a rerouted read-only repeat is classified")
         );
         assert!(repeatable_artwork_observation_succeeded(Response::Ok).is_err());
+    }
+
+    #[test]
+    fn post_cas_repair_proof_distinguishes_quorum_age_from_topology_change() {
+        let metrics = |leader, current_term, quorum_acknowledged| Response::Metrics {
+            leader,
+            current_term,
+            voters: vec![1, 2, 3],
+            members: vec![1, 2, 3],
+            applied_index: Some(41),
+            quorum_acknowledged,
+        };
+
+        require_artwork_repair_cas_topology(metrics(Some(2), 9, true), 2, 9)
+            .expect("fresh matching topology is valid");
+        require_artwork_repair_cas_topology(metrics(Some(2), 9, false), 2, 9)
+            .expect("aged quorum freshness does not rewrite committed topology");
+        assert!(require_artwork_repair_cas_topology(metrics(Some(3), 9, true), 2, 9).is_err());
+        assert!(require_artwork_repair_cas_topology(metrics(Some(2), 10, true), 2, 9).is_err());
+        assert!(require_artwork_repair_cas_topology(metrics(None, 9, false), 2, 9).is_err());
     }
 
     #[test]

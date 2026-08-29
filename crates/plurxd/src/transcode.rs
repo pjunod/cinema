@@ -243,19 +243,15 @@ const ACTOR_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
 /// Compatibility mirror of the actor's bounded software startup/retry budget.
 /// Like the hardware mirror, it sizes HTTP patience and owns no timer.
 const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
-/// Initial floor for the retained copy-session stall watcher. Actor-managed
-/// transcodes use the rolling producer deadline for both startup and published
-/// lifetime; copy has not crossed that ownership boundary yet.
-const SOFTWARE_GRACE: Duration = Duration::from_secs(30);
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
-/// transcode progress budget and the retained copy watcher's stall threshold.
-/// Those ownership scopes are disjoint.
+/// progress budget for every actor-managed rolling producer.
 #[cfg(any(test, feature = "live-hls-recovery"))]
 const PROGRESS_STALL: Duration = Duration::from_secs(10);
-/// How often the retained copy watchdog re-asks, once past its initial grace.
-/// It never owns an actor-managed transcode decision.
+/// One typed copy-reader fact is a bounded actor ingress operation. This is
+/// separate from the actor's own five-second two-fact rendezvous, which starts
+/// only after the first exact-attempt completion/exit fact is accepted.
 #[cfg(any(test, feature = "live-hls-recovery"))]
-const WATCHDOG_POLL: Duration = Duration::from_secs(5);
+const COPY_READER_INGRESS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Repair cadence for a producer that has already been terminalized but whose
 /// process reap could not yet be confirmed. This owner never makes playback
 /// policy or replacement decisions; it only retains resources until physical
@@ -270,7 +266,7 @@ const PREPUBLICATION_REAP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
 /// Slack on top of both exact actor startup budgets for scheduler latency,
 /// predecessor reap, successor spawn/install, and the request's 100 ms file
 /// observation cadence. It is deliberately independent of every retained
-/// compatibility-watchdog polling interval.
+/// compatibility polling interval.
 const PLAYLIST_WAIT_SLACK: Duration = Duration::from_secs(13);
 /// How long a playlist request holds a still-starting session before giving up.
 ///
@@ -360,7 +356,8 @@ const FLOW_CONTROL_REPAIR_INTERVAL: Duration = Duration::from_secs(15);
 /// a yes/no answer to a question that needs a rate. A 4K HDR session
 /// tone-mapping at 0.7x and a session whose GPU has wedged look identical for
 /// the first twelve seconds, and the watchdog killed both, restarting the
-/// merely-slow one on software that is slower still.
+/// merely-slow one on software that is slower still. The actor now consumes
+/// these measurements directly and owns the only progress deadline.
 #[derive(Debug)]
 pub struct Progress {
     /// Monotonic zero point for `moved_at_ms`.
@@ -380,8 +377,8 @@ pub struct Progress {
     ///
     /// This is ENCODER progress, not published media: it includes frames muxed
     /// into the in-progress `.tmp` segment, which no client can fetch. The
-    /// watchdog wants exactly that (proof of motion); pacing must not use it
-    /// (that is what the segment index is for).
+    /// producer actor wants exactly that (proof of motion); pacing must not
+    /// use it (that is what the segment index is for).
     out_time_ms: AtomicI64,
     /// Cumulative encode rate x1000 (`speed=1.85x` -> 1850); `-1` when unknown.
     speed_milli: AtomicI64,
@@ -452,9 +449,9 @@ impl Progress {
     ///
     /// Called when a session respawns (the hardware->software fallback). The
     /// replacement writes its own timeline from the same seek point, so
-    /// carrying the dead process's numbers would make it look instantly
-    /// stalled -- and the generation bump is what stops the dead process's
-    /// reader from putting them back.
+    /// carrying the dead process's numbers would make its actor progress
+    /// deadline look expired -- and the generation bump is what stops the dead
+    /// process's reader from putting them back.
     pub fn begin_attempt(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Relaxed) + 1;
         self.reset_attempt(generation);
@@ -556,8 +553,8 @@ impl Progress {
     }
 }
 
-/// One completed, published segment — the unit of everything except the
-/// watchdog.
+/// One completed, published segment — the unit of playlist, retention, and
+/// delivery-frontier accounting.
 #[derive(Debug, Clone, PartialEq)]
 struct SegmentMeta {
     index: i64,
@@ -1471,9 +1468,9 @@ fn spawn_ffmpeg(
 /// stream on stdout, `-progress` has to go somewhere else, so it goes to
 /// stderr alongside the log. Progress blocks are `key=value` on a line of
 /// their own and ffmpeg's own messages are not, so the drain sorts them and
-/// feeds the telemetry the watchdog and the activity page already read. Losing
-/// that would leave a segmenter session with no `speed`, no `out_time`, and a
-/// stall watchdog with nothing to watch.
+/// feeds the actor progress ingress plus the activity page. Losing that would
+/// leave a segmenter session with no `speed`, no `out_time`, and no advancing
+/// progress evidence.
 #[cfg(any(test, feature = "live-hls-recovery"))]
 fn spawn_ffmpeg_pipe(
     args: &[String],
@@ -1526,7 +1523,7 @@ fn spawn_ffmpeg_pipe(
 /// UID while leaving `HOME` out of the daemon environment. A non-login process
 /// does not synthesize it from passwd, so fontconfig has no user cache while
 /// libass initializes a text-subtitle burn. A transcode can then spend the
-/// entire first-segment watchdog window rebuilding font metadata, leaving the
+/// entire producer startup budget rebuilding font metadata, leaving the
 /// player with no HLS resource.
 /// Keep the environment local to ffmpeg rather than changing the daemon's
 /// process environment, and use the data directory whose ownership plurxd has
@@ -1564,269 +1561,6 @@ fn is_progress_line(line: &str) -> bool {
             | "speed"
             | "progress"
     ) || (key.starts_with("stream_") && key.ends_with("_q"))
-}
-
-/// True once the playlist actually lists a finished segment — i.e. real,
-/// playable output. This must NOT be "a `seg*` file exists": ffmpeg's HLS muxer
-/// opens the next segment as a `.tmp` before any frame is written, so a
-/// name-prefix check counts a stalled session as healthy and blinds the
-/// fallback watchdog (the exact bug behind a 4K-DV grey screen that spun ffmpeg
-/// for a minute and was never retried). A `.ts` line lands in the playlist only
-/// when a segment is complete.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-async fn session_producing(dir: &std::path::Path) -> bool {
-    match tokio::fs::read(dir.join("index.m3u8")).await {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).lines().any(|l| {
-            let l = l.trim();
-            // A listed segment: `.ts` (transcode) or `.m4s` (copy fMP4).
-            !l.starts_with('#') && (l.ends_with(".ts") || l.ends_with(".m4s"))
-        }),
-        Err(_) => false,
-    }
-}
-
-/// What one watchdog poll should do with what it observed. Pure, because the
-/// subtlety is entirely in which states are *not* a stall, and each of those
-/// is a healthy session the wrong verdict would kill mid-film: a suspended
-/// encoder is motionless on purpose, an exited child is EOF or a kill (both
-/// already have owners reporting them), and a session failed elsewhere is
-/// already being torn down.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-#[derive(Debug, PartialEq)]
-enum WatchNext {
-    /// Nothing wrong, or nothing judgeable: look again next poll.
-    Wait,
-    /// The watch is over — the process exited or someone else failed the
-    /// session. Not a verdict; both cases already have their own reporters.
-    Done,
-    /// Output stopped advancing while the session was supposed to be moving.
-    Stall,
-}
-
-#[cfg(any(test, feature = "live-hls-recovery"))]
-fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration) -> WatchNext {
-    if failed || exited {
-        return WatchNext::Done;
-    }
-    if !suspended && stalled_for >= PROGRESS_STALL {
-        return WatchNext::Stall;
-    }
-    WatchNext::Wait
-}
-
-/// Observe one producer without turning the observation into a verdict.
-///
-/// A replacement can begin immediately after this returns, so `Done` and
-/// `Stall` must be confirmed while holding `Session::child_transition` before
-/// either one acts. `Wait` has no consequence and can go straight to sleep.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-async fn observed_watch_next(session: &Session) -> WatchNext {
-    let (replacing_child, exited) = {
-        let mut child = session.child.lock().await;
-        let replacing_child = session.replacing_child.load(Acquire);
-        let exited = child
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait_observed(&session.control), Ok(Some(_))));
-        (replacing_child, exited)
-    };
-    if replacing_child {
-        return WatchNext::Wait;
-    }
-    watch_next(
-        session.failed.load(Relaxed),
-        exited,
-        session.suspended.load(Relaxed),
-        session.progress.stalled_for(),
-    )
-}
-
-/// Compatibility recovery for copy sessions whose output stops advancing.
-///
-/// Actor-managed transcodes never enter this function: their rolling producer
-/// deadline owns both startup and published-lifetime failure. Copy retains the
-/// polling owner until its separate actor/executor cut because its reader can
-/// still classify `Unsupported` and replace the child in place.
-///
-/// This replaced a single verdict taken at a fixed deadline ("no segment after
-/// 30s ⇒ dead"), which could not tell a wedged pipeline from a slow one and
-/// killed both. It answers a different question — *is output still moving?* —
-/// on a poll, which is strictly more informative in both directions: a session
-/// that never opened its input still fails at the same deadline, and a session
-/// decoding 4K at 0.4x is left alone.
-///
-/// It used to return at the first playable segment, which left every *later*
-/// wedge unwatched: a pipeline that froze at minute 40 drained the client's
-/// buffer and then hung the player on a segment nobody was writing (review
-/// §2.3). Now the watch ends only when the process exits (EOF and kills both
-/// have owners reporting them) or the session is failed elsewhere. The states
-/// that are deliberately never judged: a *suspended* session is motionless on
-/// purpose — and `apply_ahead_window` restarts the motion clock at resume, so
-/// the suspension itself can never be read back as a stall — and a *cached*
-/// session has no process at all, so there is nothing here to watch.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-struct WatchdogClaim {
-    session: Arc<Session>,
-}
-
-#[cfg(any(test, feature = "live-hls-recovery"))]
-impl WatchdogClaim {
-    fn take(session: &Arc<Session>) -> Option<Self> {
-        if session.cached
-            || session
-                .watchdog_active
-                .compare_exchange(false, true, AcqRel, Acquire)
-                .is_err()
-        {
-            return None;
-        }
-        Some(Self {
-            session: Arc::clone(session),
-        })
-    }
-}
-
-#[cfg(any(test, feature = "live-hls-recovery"))]
-impl Drop for WatchdogClaim {
-    fn drop(&mut self) {
-        self.session.watchdog_active.store(false, Release);
-    }
-}
-
-#[cfg(any(test, feature = "live-hls-recovery"))]
-async fn watch_for_stall_claimed(
-    session: Arc<Session>,
-    dir: PathBuf,
-    sid: String,
-    initial_grace: Duration,
-) {
-    // A generous floor before the first verdict: opening a 4K file over NFS
-    // and filling a first segment is legitimately slow, and `stalled_for`
-    // counts from session start, so judging earlier would fail cold opens.
-    if !initial_grace.is_zero() {
-        tokio::time::sleep(initial_grace).await;
-    }
-    let mut produced = false;
-    loop {
-        // Once true, stays true — and stops the per-poll playlist read. The
-        // flag only picks the failure message: which half of the session's
-        // life wedged decides what the operator should go look at.
-        if !produced && session_producing(&dir).await {
-            produced = true;
-        }
-        let next = observed_watch_next(&session).await;
-        if next == WatchNext::Wait {
-            tokio::time::sleep(WATCHDOG_POLL).await;
-            continue;
-        }
-        #[cfg(test)]
-        {
-            let pause = session
-                .watchdog_verdict_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
-
-        // Replacement owns this gate from before it marks the predecessor
-        // through publishing (or failing) the successor. If one began after
-        // the observation above, wait for it and judge the new producer from
-        // scratch. Holding the same gate through a terminal action closes the
-        // final check-to-kill window: a replacement cannot start between this
-        // confirmation and the verdict it authorizes.
-        let transition = session.child_transition.lock().await;
-        #[cfg(test)]
-        {
-            let pause = session
-                .watchdog_transition_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
-        let next = observed_watch_next(&session).await;
-        match next {
-            WatchNext::Done => return,
-            WatchNext::Wait => {
-                drop(transition);
-                tokio::time::sleep(WATCHDOG_POLL).await;
-            }
-            WatchNext::Stall => {
-                tracing::error!(
-                    session = %session_log_id(&sid),
-                    stalled_s = session.progress.stalled_for().as_secs(),
-                    produced_ms = session.progress.out_time_ms(),
-                    "{}",
-                    if produced {
-                        "transcode output stopped advancing mid-stream; failing the session \
-                         so the player can recover instead of draining its buffer into a hang"
-                    } else {
-                        "transcode produced no playable segment and its output has stopped \
-                         advancing; failing the session — the source is likely undecodable \
-                         by this ffmpeg build (e.g. a Dolby Vision profile it can't handle)"
-                    }
-                );
-                // The two halves of the log line above are two different
-                // things to a viewer — one lost a stream that was playing,
-                // the other never had one — so the client is told which.
-                // Publish the first-writer failure fence while this watchdog
-                // still owns `child_transition`, before waiting for physical
-                // reap. Actor response admission must lose as soon as this
-                // terminal verdict wins, even if SIGKILL settlement stalls.
-                session.fail(PlaylistError::SessionFailed(
-                    if produced {
-                        "the encoder stopped part-way through this stream"
-                    } else {
-                        "the encoder never produced any video — this build of ffmpeg \
-                         most likely cannot decode this source"
-                    }
-                    .into(),
-                ));
-                session.kill_child().await;
-                return;
-            }
-        }
-    }
-}
-
-#[cfg(any(test, feature = "live-hls-recovery"))]
-#[allow(dead_code)] // Retained compatibility entry; production callers claim synchronously.
-async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
-    // No process, nothing to judge — and `failed` on a cache entry would be a
-    // lie with consequences (its segments exist; readers would refuse them).
-    // Claiming also makes duplicate starts harmless: a fallback may ensure a
-    // successor has coverage while the predecessor's watcher is still alive.
-    let Some(_claim) = WatchdogClaim::take(&session) else {
-        return;
-    };
-    watch_for_stall_claimed(session, dir, sid, SOFTWARE_GRACE).await;
-}
-
-/// Ensure one copy-session compatibility watchdog owns this session before
-/// returning.
-///
-/// The claim is taken synchronously, before the task is scheduled, so a copy
-/// fallback can publish a successor without leaving a scheduler-sized gap in
-/// which no watchdog owns it. An existing copy watcher makes this a no-op.
-#[cfg(any(test, feature = "live-hls-recovery"))]
-fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
-    debug_assert!(
-        !session.actor_managed_prepublication_process,
-        "actor-managed transcodes use the rolling producer deadline"
-    );
-    let Some(claim) = WatchdogClaim::take(&session) else {
-        return;
-    };
-    tokio::spawn(async move {
-        let _claim = claim;
-        watch_for_stall_claimed(session, dir, sid, SOFTWARE_GRACE).await;
-    });
 }
 
 /// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
@@ -1888,6 +1622,24 @@ struct PrepublicationTranscodeRetry {
     runtime_cache: PathBuf,
 }
 
+/// Frozen fallback for the copy reader's one structural-unsupported verdict.
+/// The actor validates this exact identity before the executor may replace the
+/// pipe producer with ffmpeg's direct HLS muxer.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+struct PrepublicationCopyRetry {
+    actor_recipe: crate::playback_control::ValidatedRetryRecipe,
+    args: Arc<[String]>,
+    runtime_cache: PathBuf,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+enum PrepublicationRetry {
+    Transcode(Box<PrepublicationTranscodeRetry>),
+    Copy(PrepublicationCopyRetry),
+}
+
 /// Cancellation settlement for the interval between scratch creation and
 /// manager publication. Once a Session exists the guard carries a temporary
 /// strong cleanup owner; it is released at registration and never forms a
@@ -1896,7 +1648,6 @@ struct PrepublicationTranscodeRetry {
 #[cfg(any(test, feature = "live-hls-recovery"))]
 struct PrepublicationStartSettlement {
     dir: PathBuf,
-    pending_child: Option<AttemptChild>,
     session: Option<Arc<Session>>,
     settled: bool,
 }
@@ -1906,31 +1657,12 @@ impl PrepublicationStartSettlement {
     fn new(dir: PathBuf) -> Self {
         Self {
             dir,
-            pending_child: None,
             session: None,
             settled: false,
         }
     }
 
-    /// Own a producer that was spawned before enough immutable presentation
-    /// state existed to construct its Session. There must be no await between
-    /// spawning the child and handing it here.
-    fn hold_child(&mut self, child: AttemptChild) {
-        debug_assert!(self.pending_child.is_none());
-        debug_assert!(self.session.is_none());
-        self.pending_child = Some(child);
-    }
-
-    /// Move the provisional producer into the Session. The guard remains the
-    /// scratch/session cleanup owner until manager registration linearizes.
-    fn take_child(&mut self) -> AttemptChild {
-        self.pending_child
-            .take()
-            .expect("prepublication child must be held before Session construction")
-    }
-
     fn attach(&mut self, session: &Arc<Session>) {
-        debug_assert!(self.pending_child.is_none());
         self.session = Some(Arc::clone(session));
     }
 
@@ -1951,7 +1683,6 @@ impl Drop for PrepublicationStartSettlement {
         if self.settled {
             return;
         }
-        let mut pending_child = self.pending_child.take();
         let session = self.session.take();
         let dir = self.dir.clone();
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -1959,19 +1690,10 @@ impl Drop for PrepublicationStartSettlement {
                 if let Some(session) = session {
                     fail_prepublication_transaction(
                         &session,
-                        "transcode start was cancelled before manager publication".to_owned(),
+                        "producer start was cancelled before manager publication".to_owned(),
                     )
                     .await;
                 } else {
-                    if let Some(child) = pending_child.as_mut() {
-                        if let Err(error) = child.kill().await {
-                            tracing::error!(
-                                %error,
-                                "cancelled prepublication child could not be reaped"
-                            );
-                        }
-                    }
-                    drop(pending_child);
                     let _ = tokio::fs::remove_dir_all(dir).await;
                 }
             });
@@ -2068,6 +1790,35 @@ impl PrepublicationTranscodeRetry {
             software_pool,
             runtime_cache,
         })
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationCopyRetry {
+    fn build(
+        args: Vec<String>,
+        presentation_contract_fingerprint: &str,
+        runtime_cache: PathBuf,
+    ) -> Self {
+        let fingerprint_body = serde_json::json!({
+            "version": 1,
+            "args": &args,
+            "encoder": "copy",
+            "pipeline": "ffmpeg-hls-muxer",
+            "presentation_contract_fingerprint": presentation_contract_fingerprint,
+        });
+        let fingerprint = hex::encode(Sha256::digest(fingerprint_body.to_string().as_bytes()));
+        Self {
+            actor_recipe: crate::playback_control::ValidatedRetryRecipe::new(
+                "copy-direct-hls-muxer".to_owned(),
+                fingerprint,
+                presentation_contract_fingerprint.to_owned(),
+                crate::playback_control::ProducerStartupKind::Copy,
+            )
+            .with_exit_classifier(crate::playback_control::ProducerExitClassifier::Immediate),
+            args: args.into(),
+            runtime_cache,
+        }
     }
 }
 
@@ -3010,7 +2761,7 @@ async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String)
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
-async fn execute_prepublication_retry(
+async fn execute_prepublication_transcode_retry(
     session: Arc<Session>,
     retry: &PrepublicationTranscodeRetry,
     decision_sequence: u64,
@@ -3027,7 +2778,9 @@ async fn execute_prepublication_retry(
     let mut replacement = session.begin_child_replacement().await;
     // Cancellation after the actor decision has been observed must fence the
     // generation even though retry admission intentionally happens later.
-    replacement.mark_admission_pending();
+    replacement.mark_actor_decision_pending(PlaylistError::SessionFailed(format!(
+        "producer retry was cancelled after actor decision {first_reason:?}"
+    )));
     let transaction = async {
         terminate_exact_prepublication_child(&session, failed_attempt).await?;
         clear_session_dir(&session.dir)
@@ -3134,6 +2887,104 @@ async fn execute_prepublication_retry(
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
+async fn execute_prepublication_copy_retry(
+    session: Arc<Session>,
+    retry: &PrepublicationCopyRetry,
+    decision_sequence: u64,
+    failed_attempt: u64,
+    actor_recipe: &crate::playback_control::ValidatedRetryRecipe,
+    first_reason: crate::playback_control::ProducerDecisionReason,
+    sid: &str,
+) -> Result<(), String> {
+    if actor_recipe != &retry.actor_recipe {
+        return Err(format!(
+            "actor copy retry recipe did not match immutable executor recipe ({first_reason:?})"
+        ));
+    }
+    if first_reason != crate::playback_control::ProducerDecisionReason::Unsupported {
+        return Err(format!(
+            "copy fallback was admitted for non-structural reason {first_reason:?}"
+        ));
+    }
+    let mut replacement = session.begin_child_replacement().await;
+    replacement.mark_actor_decision_pending(PlaylistError::SessionFailed(format!(
+        "copy retry was cancelled after actor decision {first_reason:?}"
+    )));
+    let transaction = async {
+        terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        clear_session_dir(&session.dir)
+            .await
+            .map_err(|error| format!("clearing copy-reader predecessor scratch: {error}"))?;
+        session.confirm_predecessor_scratch_cleared();
+        session.clear_compatibility_before_retry().await;
+
+        let producer_attempt = session
+            .control
+            .admit_producer_retry(decision_sequence, &retry.actor_recipe.fingerprint)
+            .await
+            .map_err(|reason| format!("actor rejected exact copy retry admission: {reason:?}"))?;
+        session
+            .bind_retry_compatibility_attempt(producer_attempt)
+            .await;
+        session
+            .spawn_and_install_prepublication_child(producer_attempt, || {
+                spawn_ffmpeg(
+                    retry.args.as_ref(),
+                    "copy",
+                    sid,
+                    FfmpegProgressObserver::rolling(
+                        Arc::clone(&session.progress),
+                        producer_attempt,
+                        session.control.clone(),
+                    ),
+                    &retry.runtime_cache,
+                    FfmpegDescriptors::default(),
+                )
+                .map_err(|error| format!("spawning immutable copy fallback: {error}"))
+            })
+            .await?;
+        session
+            .control
+            .decision_applied(decision_sequence, Some(producer_attempt))
+            .await
+            .map_err(|reason| format!("actor rejected copy DecisionApplied: {reason:?}"))?;
+        Ok::<u64, String>(producer_attempt)
+    }
+    .await;
+    let producer_attempt = match transaction {
+        Ok(producer_attempt) => producer_attempt,
+        Err(error) => {
+            session.fail(PlaylistError::SessionFailed(format!(
+                "copy recovery failed after {first_reason:?}: {error}"
+            )));
+            if let Err(acknowledgement_error) = session
+                .control
+                .decision_applied(decision_sequence, None)
+                .await
+            {
+                tracing::error!(
+                    session = %session_log_id(sid),
+                    decision_sequence,
+                    ?acknowledgement_error,
+                    "actor rejected failed copy retry DecisionApplied acknowledgement"
+                );
+            }
+            replacement.settle_terminal_rejection();
+            return Err(error);
+        }
+    };
+    replacement.complete();
+    tracing::info!(
+        session = %session_log_id(sid),
+        producer_attempt,
+        encoder = "copy",
+        pipeline = "ffmpeg-hls-muxer",
+        "actor-owned copy fallback installed"
+    );
+    Ok(())
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PrepublicationExecutorExit {
     ActorTerminal,
@@ -3185,6 +3036,137 @@ fn completion_playlist_evidence(
         final_segment: segments.last().map(|segment| segment.index),
         final_end_ms: segments.last().map(|segment| segment.end_ms),
     }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn publish_copy_reader_outcome(
+    session: &Session,
+    sid: &str,
+    producer_attempt: u64,
+    outcome: copyseg::Outcome,
+) {
+    let classification = match outcome {
+        copyseg::Outcome::Completed(counts) => {
+            tracing::info!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                build = crate::version::BUILD,
+                "{}",
+                copyseg::summary(&counts)
+            );
+            crate::playback_control::CopyProducerExitClassification::Completed
+        }
+        copyseg::Outcome::ReaderFailed { reason, counts } => {
+            tracing::error!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                counts = %copyseg::summary(&counts),
+                "copy segmenter reader failed: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::ReaderFailed
+        }
+        copyseg::Outcome::InvalidHevcConfiguration(reason) => {
+            tracing::error!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                "copy segmenter produced invalid HEVC configuration: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::InvalidConfiguration
+        }
+        copyseg::Outcome::Unsupported(reason) => {
+            tracing::warn!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                "copy segmenter rejected the stream shape: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::Unsupported
+        }
+        copyseg::Outcome::Cancelled(counts) => {
+            tracing::debug!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                counts = %copyseg::summary(&counts),
+                "copy segmenter stopped after lifecycle teardown"
+            );
+            return;
+        }
+    };
+    let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
+    if let Err(rejection) = session
+        .control
+        .classify_copy_producer_exit_before(producer_attempt, classification, deadline)
+        .await
+    {
+        tracing::warn!(
+            session = %session_log_id(sid),
+            producer_attempt,
+            ?classification,
+            ?rejection,
+            "copy reader classification was not accepted by the exact producer attempt"
+        );
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_copy_reader_owner(
+    session: Arc<Session>,
+    stdout: tokio::process::ChildStdout,
+    dir: PathBuf,
+    sid: String,
+    producer_attempt: u64,
+) {
+    tokio::spawn(async move {
+        // The outer owner retains the pipe until the actor has accepted the
+        // typed reader fact. Structural `Unsupported` deliberately stops
+        // reading early; dropping stdout before classification lets ffmpeg's
+        // resulting EPIPE race in as a non-zero process verdict and suppress
+        // the only permitted direct-HLS retry. The Arc also preserves this
+        // ordering if the reader task panics: `ReaderFailed` is sequenced
+        // while the pipe is still open, then the final owner closes it.
+        let stdout = Arc::new(Mutex::new(stdout));
+        let reader_stdout = Arc::clone(&stdout);
+        let worker_sid = sid.clone();
+        let worker = tokio::spawn(async move {
+            let mut stdout = reader_stdout.lock_owned().await;
+            copyseg::run(&mut *stdout, dir, &worker_sid, copyseg::Limits::default()).await
+        });
+        let outcome = match worker.await {
+            Ok(outcome) => outcome,
+            Err(join_error) => {
+                if session.control.is_retired()
+                    || session.control.current_producer_attempt() != producer_attempt
+                {
+                    return;
+                }
+                tracing::error!(
+                    session = %session_log_id(&sid),
+                    producer_attempt,
+                    %join_error,
+                    "copy reader task failed"
+                );
+                let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
+                if let Err(rejection) = session
+                    .control
+                    .classify_copy_producer_exit_before(
+                        producer_attempt,
+                        crate::playback_control::CopyProducerExitClassification::ReaderFailed,
+                        deadline,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session = %session_log_id(&sid),
+                        producer_attempt,
+                        ?rejection,
+                        "failed copy reader task could not classify its exact producer attempt"
+                    );
+                }
+                return;
+            }
+        };
+        publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await;
+        drop(stdout);
+    });
 }
 
 /// Read one exact-attempt completion snapshot under the actor's classification
@@ -3244,11 +3226,11 @@ async fn classify_successful_transcode_exit(
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
-async fn run_prepublication_transcode_executor(
+async fn run_prepublication_producer_executor(
     session: Weak<Session>,
     mut registration: crate::playback_control::RollingProducerExecutorRegistration,
     manager_publication: tokio::sync::oneshot::Receiver<()>,
-    retry: Option<PrepublicationTranscodeRetry>,
+    retry: Option<PrepublicationRetry>,
     sid: String,
 ) -> PrepublicationExecutorExit {
     // Registration with the actor must precede the initial deadline, but the
@@ -3328,8 +3310,20 @@ async fn run_prepublication_transcode_executor(
                         reason,
                     } => {
                         let result = match retry.as_ref() {
-                            Some(retry) => {
-                                execute_prepublication_retry(
+                            Some(PrepublicationRetry::Transcode(retry)) => {
+                                execute_prepublication_transcode_retry(
+                                    Arc::clone(&session),
+                                    retry,
+                                    *decision_sequence,
+                                    *failed_attempt,
+                                    recipe,
+                                    *reason,
+                                    &sid,
+                                )
+                                .await
+                            }
+                            Some(PrepublicationRetry::Copy(retry)) => {
+                                execute_prepublication_copy_retry(
                                     Arc::clone(&session),
                                     retry,
                                     *decision_sequence,
@@ -3418,9 +3412,19 @@ async fn run_prepublication_transcode_executor(
                         // Publish the actor's exact terminal verdict before
                         // DecisionApplied/End can make readers observe only a
                         // retired capability and return an anonymous 404.
-                        session.fail(PlaylistError::SessionFailed(format!(
-                            "producer failed before publication: {reason:?}"
-                        )));
+                        session.fail(
+                            if *reason
+                                == crate::playback_control::ProducerDecisionReason::ProcessExit
+                            {
+                                PlaylistError::ProducerExited(
+                                    "the actor observed a non-zero producer exit".to_owned(),
+                                )
+                            } else {
+                                PlaylistError::SessionFailed(format!(
+                                    "producer failed before publication: {reason:?}"
+                                ))
+                            },
+                        );
                         let mut replacement = session.begin_child_replacement().await;
                         replacement.mark_admission_pending();
                         let cleanup = async {
@@ -3469,7 +3473,7 @@ async fn run_prepublication_transcode_executor(
             crate::playback_control::RollingProducerExecutorPoll::Unavailable => {
                 if let Some(session) = session.upgrade() {
                     let producer_attempt = session.control.current_producer_attempt();
-                    if session.actor_prepublication_transcode.load(Acquire) {
+                    if session.actor_prepublication_producer.load(Acquire) {
                         fail_prepublication_transaction(
                             &session,
                             "prepublication executor became unavailable".to_owned(),
@@ -3488,6 +3492,73 @@ async fn run_prepublication_transcode_executor(
             }
         }
     }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_prepublication_executor_owner(
+    session: &Arc<Session>,
+    registration: crate::playback_control::RollingProducerExecutorRegistration,
+    manager_publication: tokio::sync::oneshot::Receiver<()>,
+    retry: Option<PrepublicationRetry>,
+    sid: String,
+) {
+    let executor_session = Arc::downgrade(session);
+    let monitor_session = Arc::downgrade(session);
+    let monitor_sid = sid.clone();
+    tokio::spawn(async move {
+        let worker = tokio::spawn(run_prepublication_producer_executor(
+            executor_session,
+            registration,
+            manager_publication,
+            retry,
+            sid,
+        ));
+        let unexpected_exit = match worker.await {
+            Err(join_error) => Some((format!("executor task failed: {join_error}"), None)),
+            Ok(exit) => exit.monitor_cleanup_attempt().map(|producer_attempt| {
+                (
+                    "executor returned failed-closed".to_owned(),
+                    Some(producer_attempt),
+                )
+            }),
+        };
+        if let Some((unexpected_exit, exact_attempt)) = unexpected_exit {
+            if let Some(session) = monitor_session.upgrade() {
+                let actor_still_owns_prepublication = match session.control.snapshot().await {
+                    Some(snapshot) => {
+                        snapshot.terminal.is_none()
+                            && !snapshot.producer_control.producer_media_published
+                    }
+                    None => true,
+                };
+                if session.actor_prepublication_producer.load(Acquire)
+                    && actor_still_owns_prepublication
+                {
+                    fail_prepublication_transaction(
+                        &session,
+                        format!(
+                            "prepublication executor stopped without cleanup: {unexpected_exit}"
+                        ),
+                    )
+                    .await;
+                } else {
+                    let producer_attempt =
+                        exact_attempt.unwrap_or_else(|| session.control.current_producer_attempt());
+                    spawn_published_executor_loss_cleanup_owner(
+                        &session,
+                        producer_attempt,
+                        &monitor_sid,
+                    );
+                    tracing::error!(
+                        session = %session_log_id(&monitor_sid),
+                        producer_attempt,
+                        reason = %unexpected_exit,
+                        "producer executor stopped after actor lifetime ownership activated; exact cleanup owner retained admitted media"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Fail in terms of the dependency that is actually missing.
@@ -3983,6 +4054,7 @@ impl AttemptChild {
         }
     }
 
+    #[cfg(test)]
     async fn kill(&mut self) -> std::io::Result<()> {
         if let Some(terminal) = self
             .terminal
@@ -4262,9 +4334,9 @@ struct Session {
     /// bit plus `first_media_handoff_applied` to close that handoff interval.
     actor_managed_prepublication_process: bool,
     /// This bit is only a projection of the actor's exact first-media
-    /// authorization. It begins true for the bounded transcode cut and is
+    /// authorization. It begins true for every actor-managed producer cut and is
     /// cleared by that authorization, never by a compatibility observation.
-    actor_prepublication_transcode: Arc<AtomicBool>,
+    actor_prepublication_producer: Arc<AtomicBool>,
     /// Serializes actor response authorization through the exact first-media
     /// ownership transfer. It is per Session, so one slow generation cannot
     /// block unrelated registry traffic.
@@ -4312,33 +4384,15 @@ struct Session {
     /// where the segments already exist and there is nothing to run, watch,
     /// suspend or kill.
     child: Mutex<Option<AttemptChild>>,
-    /// Serializes a fallback's kill-to-successor interval with any terminal
-    /// playlist or watchdog verdict. Observations may happen without it, but
-    /// every action is re-confirmed while holding it so a replacement cannot
-    /// land in the check-to-use gap.
+    /// Serializes an actor-authorized kill-to-successor interval with terminal,
+    /// flow, retention, and response-path lifecycle work.
     child_transition: Mutex<()>,
-    /// Exactly one compatibility task owns copy-session stall coverage for the
-    /// current producer. A copy fallback that follows a predecessor `Done`
-    /// verdict re-arms it before publishing the successor; actor-managed
-    /// transcodes never set this latch.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
-    watchdog_active: AtomicBool,
-    /// True only while a fallback deliberately replaces one live producer
-    /// with another inside this same session. The predecessor's non-zero kill
-    /// status is neither a terminal playlist verdict nor a watchdog exit.
+    /// True only while an actor-approved fallback deliberately replaces one
+    /// live producer with another inside this same session. The predecessor's
+    /// non-zero kill status belongs to the failed attempt, never its successor.
     replacing_child: AtomicBool,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
-    /// acts. Production has no pause; the seam makes replacement races
-    /// deterministic instead of hoping the scheduler lands in a tiny window.
-    #[cfg(test)]
-    watchdog_verdict_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after the watchdog owns the transition, before its
-    /// terminal re-observation. This pins the inverse race where a fallback
-    /// has decided to replace but reaches the gate after the watchdog.
-    #[cfg(test)]
-    watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
     /// Test-only rendezvous after the actor snapshot for a per-session
     /// activity read. It proves the manager registry lock was released before
     /// telemetry can wait and makes attempt replacement interleavings exact.
@@ -4401,12 +4455,10 @@ struct Session {
     scratch_cleanup_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
     /// Served from the pre-transcode cache.
     ///
-    /// Two things follow, and the second is the dangerous one. A cached
-    /// session has no process, so every watchdog, stall check and flow-control
-    /// decision is about nothing. And its directory is a finished asset this
-    /// session did not produce and other viewers will want — deleting it on
-    /// the way out, which is what every other session does, would destroy the
-    /// cache one playback at a time.
+    /// A cached session has no process, and its directory is a finished asset
+    /// this session did not produce and other viewers will want. Deleting it on
+    /// the way out, which is what rolling sessions do with unique scratch,
+    /// would destroy the cache one playback at a time.
     cached: bool,
     /// Process-local read ownership for a finished cache entry. Kept for the
     /// session's full lifetime so the budget sweep cannot remove its playlist
@@ -4554,12 +4606,11 @@ struct Session {
     /// The hardware slot this session holds.
     ///
     /// Released two ways, on purpose. `release_hardware` hands it back the
-    /// moment the session ends, which is what makes the cap *prompt*: the
-    /// watchdog task holds an `Arc` to this session for its whole grace window,
-    /// so waiting for the last reference to go would keep a slot for twelve
-    /// seconds after the viewer closed the tab. And dropping the session
-    /// returns it too, which is what makes the cap *complete* — every way a
-    /// session can end, including the ones nobody wrote a branch for.
+    /// moment the session ends, which is what makes the cap *prompt*: actor
+    /// and executor tasks can retain an `Arc` while physical cleanup settles,
+    /// so waiting for the last reference would unnecessarily retain a slot.
+    /// Dropping the session returns it too, which makes the cap *complete* —
+    /// every way a session can end, including paths with no explicit branch.
     hw_slot: std::sync::Mutex<Option<HwSlot>>,
     /// This session's reservation from the software CPU pool, when it runs
     /// (or fell back to) a software encoder. Held for the session's life and
@@ -4620,6 +4671,7 @@ struct ChildReplacement<'a> {
     session: &'a Session,
     _transition: tokio::sync::MutexGuard<'a, ()>,
     state: ChildReplacementState,
+    cancellation_failure: Option<PlaylistError>,
 }
 
 #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -4639,7 +4691,13 @@ impl ChildReplacement<'_> {
         self.state = ChildReplacementState::AdmissionPendingOrAccepted;
     }
 
+    fn mark_actor_decision_pending(&mut self, failure: PlaylistError) {
+        self.cancellation_failure = Some(failure);
+        self.mark_admission_pending();
+    }
+
     /// A typed rejection proves the actor did not change path ownership.
+    #[cfg(test)]
     fn admission_rejected(&mut self) {
         self.state = ChildReplacementState::PreAdmission;
     }
@@ -4690,9 +4748,12 @@ impl Drop for ChildReplacement<'_> {
             }
             ChildReplacementState::TerminallySettled => {}
             ChildReplacementState::AdmissionPendingOrAccepted => {
-                self.session.fail(PlaylistError::SessionFailed(
-                    "producer replacement was cancelled before publication".into(),
-                ));
+                self.session
+                    .fail(self.cancellation_failure.clone().unwrap_or_else(|| {
+                        PlaylistError::SessionFailed(
+                            "producer replacement was cancelled before publication".into(),
+                        )
+                    }));
                 self.request_terminal_fence();
             }
         }
@@ -4868,6 +4929,7 @@ impl Session {
     /// allocates a successor attempt and before the predecessor is touched.
     /// The actor remains authoritative; this short gate exists only until M4
     /// removes the atomics that legacy pacing and pruning still consume.
+    #[cfg(test)]
     async fn reset_compatibility_delivery(&self, producer_attempt: u64) {
         {
             let mut projected_attempt = self
@@ -5173,6 +5235,7 @@ impl Session {
             session: self,
             _transition: transition,
             state: ChildReplacementState::PreAdmission,
+            cancellation_failure: None,
         }
     }
 
@@ -5218,81 +5281,6 @@ impl Session {
             }
         }
         Ok((replacement, producer_attempt))
-    }
-
-    /// Begin a replacement only while its session is still live after this
-    /// task acquires the transition.
-    ///
-    /// The copy reader decides `Unsupported` outside this gate. In between
-    /// that decision and acquiring it, the lifetime watchdog may win, observe
-    /// `Done` or `Stall`, and end. Re-checking the lifetime and failure
-    /// verdicts under the gate prevents a failed or retired session from
-    /// receiving a successor. Directory existence is only a scratch fact,
-    /// not session liveness: teardown can remove the manager entry before its
-    /// asynchronous deletion completes. An exited child is still replaceable:
-    /// the caller re-arms a watchdog synchronously when it publishes that
-    /// successor.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
-    async fn begin_copy_child_replacement(
-        &self,
-    ) -> Result<
-        Option<(ChildReplacement<'_>, u64)>,
-        crate::playback_control::ProducerAttemptRejection,
-    > {
-        if tokio::fs::metadata(&self.dir).await.is_err() {
-            return Ok(None);
-        }
-        let mut replacement = self.begin_child_replacement().await;
-        if self.control.is_retired() || self.failed.load(Relaxed) {
-            return Ok(None);
-        }
-        let producer_attempt = {
-            let mut child = self.child.lock().await;
-            let Some(child) = child.as_mut() else {
-                return Ok(None);
-            };
-            match child.try_wait_observed(&self.control) {
-                Ok(None) => {}
-                Ok(Some(_)) => {}
-                Err(_) => return Ok(None),
-            }
-            replacement.mark_admission_pending();
-            let producer_attempt = match self.control.begin_producer_attempt().await {
-                Ok(producer_attempt) => producer_attempt,
-                Err(crate::playback_control::ProducerAttemptRejection::ControlUnavailable) => {
-                    replacement.settle_terminal_rejection();
-                    return Err(
-                        crate::playback_control::ProducerAttemptRejection::ControlUnavailable,
-                    );
-                }
-                Err(rejection) => {
-                    replacement.admission_rejected();
-                    return Err(rejection);
-                }
-            };
-            self.reset_compatibility_delivery(producer_attempt).await;
-            if child
-                .try_wait_observed(&self.control)
-                .is_ok_and(|status| status.is_none())
-            {
-                let _ = child.kill().await;
-                let _ = child.try_wait_observed(&self.control);
-            }
-            producer_attempt
-        };
-        #[cfg(test)]
-        {
-            let pause = self
-                .replacement_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
-        Ok(Some((replacement, producer_attempt)))
     }
 
     /// Install a spawned replacement only if the actor still authorizes this
@@ -5382,11 +5370,95 @@ impl Session {
         })
     }
 
+    /// Pipe-producing counterpart to `spawn_and_install_prepublication_child`.
+    /// The raw Child enters exact-attempt supervision synchronously before the
+    /// stdout reader is returned, so cancellation cannot detach either half.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn spawn_and_install_prepublication_pipe_child<F>(
+        &self,
+        producer_attempt: u64,
+        spawn: F,
+    ) -> Result<tokio::process::ChildStdout, String>
+    where
+        F: FnOnce() -> Result<(Child, tokio::process::ChildStdout), String>,
+    {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_ref() {
+            return Err(format!(
+                "producer attempt {producer_attempt} cannot stage over installed attempt {}",
+                child.producer_attempt
+            ));
+        }
+        let (candidate, stdout) = spawn()?;
+        *slot = Some(AttemptChild::new(
+            producer_attempt,
+            candidate,
+            self.control.clone(),
+        ));
+        drop(slot);
+
+        let install_authorization = match self
+            .control
+            .authorize_producer_install(producer_attempt)
+            .await
+        {
+            Ok(authorization) => authorization,
+            Err(reason) => {
+                drop(stdout);
+                let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+                return Err(match cleanup {
+                    Ok(()) => {
+                        format!("actor rejected exact pipe producer installation: {reason:?}")
+                    }
+                    Err(error) => format!(
+                        "actor rejected exact pipe producer installation ({reason:?}); staged candidate reap failed: {error}"
+                    ),
+                });
+            }
+        };
+        #[cfg(test)]
+        {
+            let pause = self
+                .producer_install_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+        let final_rejection = {
+            let slot = self.child.lock().await;
+            if !slot
+                .as_ref()
+                .is_some_and(|child| child.producer_attempt == producer_attempt)
+            {
+                Some(crate::playback_control::ProducerAttemptRejection::SessionEnded)
+            } else {
+                self.control
+                    .lock_authorized_producer_install(install_authorization)
+                    .err()
+            }
+        };
+        let Some(reason) = final_rejection else {
+            return Ok(stdout);
+        };
+        drop(stdout);
+        let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+        Err(match cleanup {
+            Ok(()) => format!("actor rejected final pipe producer installation fence: {reason:?}"),
+            Err(error) => format!(
+                "actor rejected final pipe producer installation fence ({reason:?}); staged candidate reap failed: {error}"
+            ),
+        })
+    }
+
     /// Install a spawned replacement only if the actor still authorizes this
     /// exact attempt at the install linearization point. Legacy copy callers
     /// still pass an already-spawned child; actor-owned transcodes use the
     /// cancellation-safe prepublication variant above.
-    #[cfg(any(test, feature = "live-hls-recovery"))]
+    #[cfg(test)]
     async fn terminate_rejected_candidate(&self, mut candidate: Child, producer_attempt: u64) {
         let mut first_error = None;
         for signal_attempt in 1..=2 {
@@ -5428,7 +5500,7 @@ impl Session {
         }
     }
 
-    #[cfg(any(test, feature = "live-hls-recovery"))]
+    #[cfg(test)]
     async fn install_replacement_child(
         &self,
         producer_attempt: u64,
@@ -5493,9 +5565,9 @@ impl Session {
 
     /// Stop the encoder, if there is one. A cache hit has no process; a
     /// session whose ffmpeg already exited has one that is already reaped.
-    /// Keep the handle in the slot after waiting: detached watchdogs use its
-    /// exit status to tell routine teardown from a real stall. Replacement
-    /// paths suppress that same status with `begin_child_replacement`.
+    /// Keep the handle in the slot after waiting so exact-attempt lifecycle
+    /// tests can inspect the supervisor's terminal record.
+    #[cfg(test)]
     async fn kill_child(&self) {
         if let Some(child) = self.child.lock().await.as_mut() {
             let _ = child.kill().await;
@@ -6236,7 +6308,7 @@ async fn begin_first_media_publication_handoff_before(
     .ok()?
     .ok()?;
     let handoff = crate::playback_control::RollingFirstMediaPublicationHandoff::with_prepublication_projection(
-        Arc::clone(&session.actor_prepublication_transcode),
+        Arc::clone(&session.actor_prepublication_producer),
         permit,
     );
     let waiter = handoff.waiter();
@@ -6649,9 +6721,9 @@ pub enum PlaylistError {
     /// is returned only when a request needs media beyond the retained
     /// published frontier.
     ProducerEnded(String),
-    /// The session was failed after it started: the stall watchdog's verdict,
-    /// or a fallback that could not spawn. Carries the operator-facing detail
-    /// recorded at the moment of the verdict.
+    /// The session was failed after it started: an actor-owned producer
+    /// verdict or a fallback that could not spawn. Carries the operator-facing
+    /// detail recorded at the moment of the verdict.
     SessionFailed(String),
     /// Still starting when [`PLAYLIST_WAIT_BUDGET`] ran out. Not terminal —
     /// the session may yet publish — so clients are told to retry rather than
@@ -6950,8 +7022,8 @@ pub struct StartInfo {
     /// The player needs to know, because the difference is visible. A live
     /// session seeks by restarting the encoder somewhere else; a finished one
     /// seeks by moving `currentTime`, like direct play, in well under a second.
-    /// And the stall watchdog's restart arm has nothing to fix here — a
-    /// segment that is late was never going to be produced faster.
+    /// No rolling producer recovery applies here — a segment that is late was
+    /// never going to be produced faster.
     pub vod: bool,
     /// Legacy activity lifetime enforced by the registry that owns this
     /// session. A finished transcode-cache hit is seekable VOD to the client
@@ -7172,7 +7244,7 @@ pub struct SessionInfo {
     /// Compatibility-derived producer summary retained for existing Activity
     /// consumers. `producer_control` is the actor-owned source for deadline
     /// and ingress truth; this field remains non-authoritative until the M4
-    /// decision/executor cutover removes the legacy child/watchdog inputs.
+    /// decision/executor cutover removes the remaining compatibility inputs.
     pub producer_state: &'static str,
     /// Actor-owned rolling attempt and delivery coordinates. Immutable VOD is
     /// `None`; an unavailable rolling actor reports the once-sampled fallback
@@ -11226,7 +11298,7 @@ impl TranscodeManager {
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: false,
-            actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
+            actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
             response_publication_transition: Mutex::new(()),
             first_media_handoff_applied: AtomicBool::new(false),
             first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -11239,14 +11311,9 @@ impl TranscodeManager {
             cache_integrity_cleanup_started: AtomicBool::new(false),
             child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -14755,7 +14822,7 @@ impl TranscodeManager {
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: true,
             actor_managed_prepublication_process: true,
-            actor_prepublication_transcode: Arc::new(AtomicBool::new(true)),
+            actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
             response_publication_transition: Mutex::new(()),
             first_media_handoff_applied: AtomicBool::new(false),
             first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -14768,14 +14835,9 @@ impl TranscodeManager {
             cache_integrity_cleanup_started: AtomicBool::new(false),
             child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -14874,71 +14936,17 @@ impl TranscodeManager {
                 "rolling control actor rejected executor registration: {reason:?}"
             ));
         }
-        let executor_session = Arc::downgrade(&session);
-        let executor_sid = session_id.clone();
-        let executor_retry = retry.clone();
-        let executor_monitor_session = Arc::downgrade(&session);
-        let executor_monitor_sid = session_id.clone();
+        let executor_retry = retry
+            .clone()
+            .map(|retry| PrepublicationRetry::Transcode(Box::new(retry)));
         let (executor_activation, manager_publication) = tokio::sync::oneshot::channel();
-        tokio::spawn(async move {
-            let worker = tokio::spawn(run_prepublication_transcode_executor(
-                executor_session,
-                executor_registration,
-                manager_publication,
-                executor_retry,
-                executor_sid,
-            ));
-            let unexpected_exit = match worker.await {
-                Err(join_error) => Some((format!("executor task failed: {join_error}"), None)),
-                Ok(exit) => exit.monitor_cleanup_attempt().map(|producer_attempt| {
-                    (
-                        "executor returned failed-closed".to_owned(),
-                        Some(producer_attempt),
-                    )
-                }),
-            };
-            if let Some((unexpected_exit, exact_attempt)) = unexpected_exit {
-                if let Some(session) = executor_monitor_session.upgrade() {
-                    let actor_still_owns_prepublication = match session.control.snapshot().await {
-                        Some(snapshot) => {
-                            snapshot.terminal.is_none()
-                                && !snapshot.producer_control.producer_media_published
-                        }
-                        None => true,
-                    };
-                    if session.actor_prepublication_transcode.load(Acquire)
-                        && actor_still_owns_prepublication
-                    {
-                        fail_prepublication_transaction(
-                            &session,
-                            format!(
-                                "prepublication executor stopped without cleanup: {unexpected_exit}"
-                            ),
-                        )
-                        .await;
-                    } else {
-                        let producer_attempt = exact_attempt
-                            .unwrap_or_else(|| session.control.current_producer_attempt());
-                        // Registration loss makes the actor fail closed, but
-                        // it cannot reap a process. Transfer that exact child
-                        // to a detached owner before this monitor returns so
-                        // an executor panic/cancellation after first media
-                        // cannot strand either the child or its admission.
-                        spawn_published_executor_loss_cleanup_owner(
-                            &session,
-                            producer_attempt,
-                            &executor_monitor_sid,
-                        );
-                        tracing::error!(
-                            session = %session_log_id(&executor_monitor_sid),
-                            producer_attempt,
-                            reason = %unexpected_exit,
-                            "producer executor stopped after actor lifetime ownership activated; exact cleanup owner retained admitted media"
-                        );
-                    }
-                }
-            }
-        });
+        spawn_prepublication_executor_owner(
+            &session,
+            executor_registration,
+            manager_publication,
+            executor_retry,
+            session_id.clone(),
+        );
         let generation = match session.control.begin_initial_producer_attempt(policy).await {
             Ok(generation) => generation,
             Err(reason) => {
@@ -15047,8 +15055,8 @@ impl TranscodeManager {
     ///
     /// One step per session, deliberately: this fires once, and a viewer who
     /// has waited out the grace window twice has waited too long. If the
-    /// downgraded session also stalls, the lifetime watchdog takes it. On a
-    /// spawn failure the session is marked failed; the caller checks.
+    /// downgraded session also stalls, the actor's software deadline takes it.
+    /// On a spawn failure the session is marked failed; the caller checks.
     #[allow(clippy::too_many_arguments)] // one fallback's worth of context
     #[cfg(test)]
     async fn downgrade_one_step(
@@ -15352,92 +15360,39 @@ impl TranscodeManager {
                 ),
             }
         };
-        let progress = Arc::new(Progress::new());
-        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
-        let generation = control.begin_producer_attempt().await.map_err(|reason| {
-            format!("rolling control actor rejected the initial copy producer: {reason:?}")
-        })?;
-        progress.begin_fenced_attempt(generation);
-
         // Take over the cutting when the source is one whose keyframes can be
         // read (docs/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
         // fragmented stream down a pipe and `copyseg` decides where the
         // segments end — in front of a keyframe no player will discard a
-        // leading picture at. If anything about that stream turns out to be
-        // unreadable, the reader task respawns this same session on the
-        // arguments below, so the worst case is exactly today's behaviour.
+        // leading picture at. A structural Unsupported result may ask the
+        // actor for the one frozen legacy retry; the reader never performs the
+        // replacement itself.
         let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
-        let (child, pipe_stdout) = if segmenting {
-            let args = transcode::copy_pipe_args_with_dolby_vision(
+        let initial_args = if segmenting {
+            transcode::copy_pipe_args_with_dolby_vision(
                 &file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
                 pacing,
                 video_options,
-            );
-            tracing::info!(
-                session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
-                build = crate::version::BUILD,
-                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
-            );
-            match spawn_ffmpeg_pipe(
-                &args,
-                &session_id,
-                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
-                &self.runtime_cache,
-            ) {
-                Ok((child, stdout)) => (child, Some(stdout)),
-                Err(e) => {
-                    if video_options.promotes_parameter_sets() {
-                        return Err(format!(
-                            "the GOP-aware copy path required for this HEVC source could not start: {e}"
-                        ));
-                    }
-                    // Spawning failed before any of this was decided, so there
-                    // is nothing to unwind: start the legacy path here.
-                    tracing::warn!(
-                        session = %session_log_id(&session_id),
-                        "copy segmenter could not start ffmpeg ({e}); using the HLS muxer"
-                    );
-                    let args = legacy_args();
-                    let child = spawn_ffmpeg(
-                        &args,
-                        "copy",
-                        &session_id,
-                        FfmpegProgressObserver::rolling(
-                            Arc::clone(&progress),
-                            generation,
-                            control.clone(),
-                        ),
-                        &self.runtime_cache,
-                        FfmpegDescriptors::default(),
-                    )?;
-                    (child, None)
-                }
-            }
+            )
         } else {
-            let args = legacy_args();
-            tracing::info!(
-                session = %session_log_id(&session_id), file_id, start_seconds, mode = "legacy",
-                build = crate::version::BUILD,
-                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
-            );
-            let child = spawn_ffmpeg(
-                &args,
-                "copy",
-                &session_id,
-                FfmpegProgressObserver::rolling(Arc::clone(&progress), generation, control.clone()),
-                &self.runtime_cache,
-                FfmpegDescriptors::default(),
-            )?;
-            (child, None)
+            legacy_args()
         };
-        start_settlement.hold_child(AttemptChild::new(generation, child, control.clone()));
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            file_id,
+            start_seconds,
+            mode = if segmenting { "segmenter" } else { "legacy" },
+            build = crate::version::BUILD,
+            "{}",
+            ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
+        );
 
-        // Deliberately after the spawn: ffmpeg is already opening the source
-        // while this runs, so the probe costs the viewer nothing it was not
-        // already waiting for.
+        // Freeze the achieved media origin before actor admission. The actor,
+        // retry recipe, and response contract must describe one immutable
+        // presentation even if the start future is later cancelled.
         let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
 
         let (hls_codecs, hls_supplemental_codecs) =
@@ -15458,6 +15413,41 @@ impl TranscodeManager {
             },
             &copy_kind,
         );
+        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        let retry = (segmenting && !video_options.promotes_parameter_sets()).then(|| {
+            PrepublicationCopyRetry::build(
+                legacy_args(),
+                &presentation_contract_fingerprint,
+                self.runtime_cache.clone(),
+            )
+        });
+        let expected_remaining_ms =
+            file.duration_ms
+                .filter(|duration_ms| *duration_ms > 0)
+                .map(|duration_ms| {
+                    duration_ms
+                        .saturating_sub((media_origin_seconds * 1_000.0).round() as i64)
+                        .max(0)
+                });
+        let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
+        let policy = if segmenting {
+            crate::playback_control::InitialProducerPolicy::copy(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+                retry.as_ref().map(|retry| retry.actor_recipe.clone()),
+            )
+        } else {
+            crate::playback_control::InitialProducerPolicy::copy_immediate(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+            )
+        }
+        .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
+        let progress = Arc::new(Progress::new());
+        let (control, mut executor_registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                "copy-session-start",
+            );
         let failed = Arc::new(AtomicBool::new(false));
         if let Err(reason) = control
             .bind_response_publication_contract(
@@ -15467,17 +15457,9 @@ impl TranscodeManager {
             .await
         {
             return Err(format!(
-                "rolling control actor rejected copy response-publication ownership: {reason:?}"
+                "rolling control actor rejected copy response-publication failure fencing: {reason:?}"
             ));
         }
-        let _install_authorization = match control.authorize_producer_install(generation).await {
-            Ok(authorization) => authorization,
-            Err(reason) => {
-                return Err(format!(
-                    "rolling control actor rejected initial copy producer installation: {reason:?}"
-                ));
-            }
-        };
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
@@ -15486,8 +15468,8 @@ impl TranscodeManager {
             response_incarnation: uuid::Uuid::new_v4(),
             frozen_presentation: Some(frozen_presentation),
             actor_managed_response_publication: true,
-            actor_managed_prepublication_process: false,
-            actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
+            actor_managed_prepublication_process: true,
+            actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
             response_publication_transition: Mutex::new(()),
             first_media_handoff_applied: AtomicBool::new(false),
             first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -15498,16 +15480,11 @@ impl TranscodeManager {
             scratch_cleanup_started: AtomicBool::new(false),
             retirement_context: Some(self.rolling_retirement_context()),
             cache_integrity_cleanup_started: AtomicBool::new(false),
-            child: Mutex::new(Some(start_settlement.take_child())),
+            child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
@@ -15562,9 +15539,9 @@ impl TranscodeManager {
                 .unwrap_or(0),
             failed,
             failure: std::sync::Mutex::new(None),
-            playlist_published: AtomicBool::new(true),
+            playlist_published: AtomicBool::new(false),
             high_segment: Arc::new(AtomicI64::new(-1)),
-            compatibility_attempt: Arc::new(std::sync::Mutex::new(generation)),
+            compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
             fetched_end_ms: Arc::new(AtomicI64::new(0)),
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
@@ -15588,6 +15565,114 @@ impl TranscodeManager {
             first_slide_logged: AtomicBool::new(false),
         });
         start_settlement.attach(&session);
+        if let Err(reason) = executor_registration.register().await {
+            fail_prepublication_transaction(
+                &session,
+                format!("rolling control actor rejected copy executor registration: {reason:?}"),
+            )
+            .await;
+            start_settlement.disarm();
+            return Err(format!(
+                "rolling control actor rejected copy executor registration: {reason:?}"
+            ));
+        }
+        let (executor_activation, manager_publication) = tokio::sync::oneshot::channel();
+        spawn_prepublication_executor_owner(
+            &session,
+            executor_registration,
+            manager_publication,
+            retry.clone().map(PrepublicationRetry::Copy),
+            session_id.clone(),
+        );
+        let generation = match session.control.begin_initial_producer_attempt(policy).await {
+            Ok(generation) => generation,
+            Err(reason) => {
+                fail_prepublication_transaction(
+                    &session,
+                    format!(
+                        "rolling control actor rejected the initial copy producer policy: {reason:?}"
+                    ),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(format!(
+                    "rolling control actor rejected the initial copy producer policy: {reason:?}"
+                ));
+            }
+        };
+        session.bind_retry_compatibility_attempt(generation).await;
+        let pipe_stdout = if segmenting {
+            match session
+                .spawn_and_install_prepublication_pipe_child(generation, || {
+                    spawn_ffmpeg_pipe(
+                        &initial_args,
+                        &session_id,
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            session.control.clone(),
+                        ),
+                        &self.runtime_cache,
+                    )
+                })
+                .await
+            {
+                Ok(stdout) => Some(stdout),
+                Err(reason) => {
+                    fail_prepublication_transaction(
+                        &session,
+                        format!("initial copy pipe producer could not be installed: {reason}"),
+                    )
+                    .await;
+                    start_settlement.disarm();
+                    return Err(reason);
+                }
+            }
+        } else {
+            if let Err(reason) = session
+                .spawn_and_install_prepublication_child(generation, || {
+                    spawn_ffmpeg(
+                        &initial_args,
+                        "copy",
+                        &session_id,
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            session.control.clone(),
+                        ),
+                        &self.runtime_cache,
+                        FfmpegDescriptors::default(),
+                    )
+                })
+                .await
+            {
+                fail_prepublication_transaction(
+                    &session,
+                    format!("initial direct copy producer could not be installed: {reason}"),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
+            None
+        };
+        if let Some(stdout) = pipe_stdout {
+            spawn_copy_reader_owner(
+                Arc::clone(&session),
+                stdout,
+                dir.clone(),
+                session_id.clone(),
+                generation,
+            );
+        }
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            file_id,
+            start_seconds,
+            producer_attempt = generation,
+            mode = if segmenting { "segmenter" } else { "legacy" },
+            "started actor-owned prepublication copy session"
+        );
         if let Err(reason) = self
             .register_session(&session_id, Arc::clone(&session), generation)
             .await
@@ -15599,6 +15684,12 @@ impl TranscodeManager {
                 "rolling copy session registration rejected: {reason:?}"
             ));
         }
+        if executor_activation.send(()).is_err() {
+            let reason = "copy producer executor ended before manager publication".to_owned();
+            fail_prepublication_transaction(&session, reason.clone()).await;
+            start_settlement.disarm();
+            return Err(reason);
+        }
         start_settlement.settle();
         self.emit_session_event(
             &session_id,
@@ -15607,189 +15698,6 @@ impl TranscodeManager {
             SessionEventFields::default(),
         )
         .await;
-
-        // The reader task, when plurx is doing the cutting. It owns the pipe
-        // for the session's life, and it owns the one fallback: a stream it
-        // cannot follow is killed and respawned on ffmpeg's HLS muxer, in this
-        // same session, so the player never learns anything happened. Only
-        // while the playlist is unpublished — once it is out, a respawn would
-        // rewrite a timeline a player may already be holding. (The publish
-        // gate keeps that window open through the first few segments: files
-        // nothing was ever told about are cleared and recut, not a timeline.)
-        if let Some(stdout) = pipe_stdout {
-            let session = Arc::clone(&session);
-            let sid = session_id.clone();
-            let dir = dir.clone();
-            let file = file.clone();
-            let progress = Arc::clone(&progress);
-            let runtime_cache = self.runtime_cache.clone();
-            tokio::spawn(async move {
-                let outcome =
-                    copyseg::run(stdout, dir.clone(), &sid, copyseg::Limits::default()).await;
-                match outcome {
-                    copyseg::Outcome::Ran(counts) => {
-                        tracing::info!(
-                            session = %session_log_id(&sid), build = crate::version::BUILD,
-                            "{}", copyseg::summary(&counts)
-                        );
-                    }
-                    copyseg::Outcome::InvalidHevcConfiguration(reason) => {
-                        tracing::error!(
-                            session = %session_log_id(&sid),
-                            "the emitted HEVC decoder configuration is invalid: {reason}"
-                        );
-                        session.fail(PlaylistError::SessionFailed(
-                            "the HEVC source's decoder configuration could not be completed".into(),
-                        ));
-                    }
-                    copyseg::Outcome::Unsupported(reason) => {
-                        if video_options.promotes_parameter_sets() {
-                            tracing::error!(
-                                session = %session_log_id(&sid),
-                                "the required HEVC init-promotion path failed: {reason}"
-                            );
-                            session.fail(PlaylistError::SessionFailed(
-                                "the HEVC source's decoder configuration could not be promoted"
-                                    .into(),
-                            ));
-                            return;
-                        }
-                        // Is this session still one anybody is watching?
-                        //
-                        // The reader task holds its own `Arc<Session>`, so the
-                        // struct outlives removal from the manager's map —
-                        // respawning into a stopped, superseded or reaped
-                        // session would put an ffmpeg behind a session id
-                        // nothing schedules, suspends or reaps, reading the
-                        // source flat out through its 90 s burst until the
-                        // last Arc drops. And it would log a warning blaming
-                        // the SOURCE for what was a viewer pressing stop,
-                        // which is how a good path gets a bad reputation.
-                        //
-                        // This is only the cheap preflight. The lifetime
-                        // verdict is rechecked after acquiring the shared
-                        // transition below, because scratch deletion trails
-                        // manager retirement and cannot prove liveness.
-                        if session.control.is_retired()
-                            || session.failed.load(Relaxed)
-                            || tokio::fs::metadata(&dir).await.is_err()
-                        {
-                            return;
-                        }
-                        // `Unsupported` was decided before this task reached
-                        // the transition. The watchdog may have terminally
-                        // judged the predecessor in that gap. A failed session
-                        // cannot restart; an exited predecessor may, but its
-                        // successor gets a fresh watchdog below.
-                        let (mut replacement, generation) = match session
-                            .begin_copy_child_replacement()
-                            .await
-                        {
-                            Ok(Some(replacement)) => replacement,
-                            Ok(None) => return,
-                            Err(reason) => {
-                                tracing::warn!(
-                                    session = %session_log_id(&sid),
-                                    rejection = ?reason,
-                                    "rolling actor rejected copy fallback before the predecessor was changed"
-                                );
-                                return;
-                            }
-                        };
-                        tracing::warn!(
-                            session = %session_log_id(&sid),
-                            "copy segmenter cannot read this stream ({reason}); \
-                             falling back to ffmpeg's HLS muxer for this session"
-                        );
-                        if let Err(error) = clear_session_dir(&dir).await {
-                            tracing::error!(
-                                session = %session_log_id(&sid),
-                                %error,
-                                "copy fallback refused because predecessor scratch could not be cleared"
-                            );
-                            session.fail(PlaylistError::SessionFailed(format!(
-                                "predecessor scratch could not be cleared: {error}"
-                            )));
-                            replacement.settle_terminal_rejection();
-                            return;
-                        }
-                        session.confirm_predecessor_scratch_cleared();
-                        let args = transcode::hls_copy_args_with_dolby_vision(
-                            &file,
-                            start_seconds,
-                            audio_index,
-                            options.transcode_audio,
-                            pacing,
-                            transcode::DolbyVisionCopyOptions::new(
-                                have_dovi,
-                                options.preserve_dolby_vision,
-                            ),
-                            &dir.to_string_lossy(),
-                        );
-                        // A fresh generation, or the dead process's last
-                        // progress blocks land on the replacement's telemetry
-                        // and the watchdog reads it as stalled from birth.
-                        // (The replacement then gets PROGRESS_STALL rather
-                        // than the full SOFTWARE_GRACE to emit its first
-                        // block, exactly as the hardware→software ladder's
-                        // replacement does. It matters only for a fallback
-                        // taken tens of seconds in, which means ffmpeg never
-                        // produced a moov — a session already in trouble.)
-                        match spawn_ffmpeg(
-                            &args,
-                            "copy",
-                            &sid,
-                            FfmpegProgressObserver::rolling(
-                                progress,
-                                generation,
-                                session.control.clone(),
-                            ),
-                            &runtime_cache,
-                            FfmpegDescriptors::default(),
-                        ) {
-                            Ok(child) => {
-                                if let Err(reason) =
-                                    session.install_replacement_child(generation, child).await
-                                {
-                                    replacement.settle_terminal_rejection();
-                                    tracing::warn!(
-                                        session = %session_log_id(&sid),
-                                        producer_attempt = generation,
-                                        rejection = ?reason,
-                                        "rolling actor refused copy fallback installation after spawn; candidate removed from session ownership"
-                                    );
-                                    return;
-                                }
-                                spawn_watch_for_stall(
-                                    Arc::clone(&session),
-                                    dir.clone(),
-                                    sid.clone(),
-                                );
-                                replacement.complete();
-                                tracing::info!(session = %session_log_id(&sid), "fallback copy started");
-                            }
-                            Err(e) => {
-                                tracing::error!(session = %session_log_id(&sid), "fallback copy failed: {e}");
-                                session.fail(PlaylistError::SessionFailed(
-                                    "the fallback remux could not be started".into(),
-                                ));
-                                replacement.complete();
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        // Fail-fast guard: copy has no encoder ladder, but if the segments stop
-        // coming (undecodable source, ffmpeg refusal) mark the session failed
-        // so the player errors instead of waiting on a gray screen.
-        {
-            let session = Arc::clone(&session);
-            let dir = dir.clone();
-            let sid = session_id.clone();
-            spawn_watch_for_stall(session, dir, sid);
-        }
 
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -17479,7 +17387,7 @@ impl TranscodeManager {
                 crate::playback_control::RollingResponsePublicationBinding::AttemptMedia { .. }
             );
             let (actor_handoff, first_media_applied) = if attempt_media_publication
-                && session.actor_prepublication_transcode.load(Acquire)
+                && session.actor_prepublication_producer.load(Acquire)
             {
                 require_publication_authority!();
                 let Some((handoff, applied)) =
@@ -17561,7 +17469,7 @@ impl TranscodeManager {
                 }
                 require_publication_authority!();
             }
-            if attempt_media_publication && session.actor_prepublication_transcode.load(Acquire) {
+            if attempt_media_publication && session.actor_prepublication_producer.load(Acquire) {
                 return Err(MediaResponsePublicationRejection::StateChanged);
             }
             if attempt_media_publication && session.actor_managed_prepublication_process {
@@ -18287,81 +18195,6 @@ impl TranscodeManager {
         }
     }
 
-    /// Share a producer's terminal startup verdict with every playlist reader.
-    ///
-    /// `false` means the producer is still running, exited cleanly, belongs to
-    /// a retired session, or does not exist because this is a cache hit. Only
-    /// a known non-zero exit from the session still registered under this id
-    /// is a failure, and callers invoke this only after finding no usable
-    /// playlist. Liveness is checked on both sides of child inspection: the
-    /// manager-wide guard is never held while a slow kill owns the per-session
-    /// child lock, while the final check still closes the remove-before-kill
-    /// teardown interval before the verdict is recorded.
-    async fn playlist_producer_failed(&self, session: &Arc<Session>, session_id: &str) -> bool {
-        if session.cached {
-            return false;
-        }
-        // The actor is the sole process-exit verdict owner for every
-        // actor-managed transcode, before and after first media. The mutable
-        // prepublication projection clears at that boundary, so gating on it
-        // would re-enable this request-side verdict for the published lifetime.
-        // Copy retains this compatibility check until its own actor cut.
-        if session.actor_managed_prepublication_process {
-            return false;
-        }
-        let active = self
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .is_some_and(|active| Arc::ptr_eq(active, session));
-        if !active {
-            return false;
-        }
-        // A replacement holds this gate from before killing its predecessor
-        // until the successor is installed or has failed to spawn. Keep the
-        // playlist poll cadence instead of waiting behind that work; a later
-        // poll can judge the successor. Once acquired, retaining the gate
-        // through the final identity check prevents a fallback from starting
-        // between observation and the terminal failure store.
-        let Ok(_transition) = session.child_transition.try_lock() else {
-            return false;
-        };
-        let unsuccessful_exit = {
-            let mut child = session.child.lock().await;
-            if session.replacing_child.load(Acquire) {
-                return false;
-            }
-            child
-                .as_mut()
-                .and_then(|child| match child.try_wait_observed(&session.control) {
-                    Ok(Some(status)) if !status.success() => Some(status),
-                    _ => None,
-                })
-        };
-        let Some(status) = unsuccessful_exit else {
-            return false;
-        };
-        let sessions = self.sessions.lock().await;
-        if !sessions
-            .get(session_id)
-            .is_some_and(|active| Arc::ptr_eq(active, session))
-        {
-            return false;
-        }
-        tracing::error!(
-            session = %session_log_id(session_id),
-            %status,
-            "HLS producer exited unsuccessfully before publishing a usable playlist; \
-             failing the session"
-        );
-        // The exit status is the one fact that separates "this build refused
-        // the source" from "something killed it", and it is already in hand
-        // here. Record it so every later reader reports the same cause.
-        session.fail(PlaylistError::ProducerExited(status.to_string()));
-        true
-    }
-
     /// Read the current media playlist for a session.
     ///
     /// Every terminal cause is named rather than collapsed — see
@@ -18585,12 +18418,6 @@ impl TranscodeManager {
                         continue;
                     };
                     if !playlist_published && !transcode_first_playlist_ready(&bytes) {
-                        if self.playlist_producer_failed(&session, session_id).await {
-                            return Err(PlaylistPublicationError::for_session(
-                                session.failure_reason(),
-                                &session,
-                            ));
-                        }
                         if let Some((error, _)) = session
                             .published_producer_ended_before(producer_attempt, deadline)
                             .await
@@ -18760,16 +18587,6 @@ impl TranscodeManager {
                     &session,
                     "playlist_object_mismatch",
                 );
-                return Err(PlaylistPublicationError::for_session(
-                    session.failure_reason(),
-                    &session,
-                ));
-            }
-            // The stall watchdog deliberately grants a cold encoder its full
-            // startup grace, so it cannot surface a process that has already
-            // told us startup is impossible. This request polls much sooner
-            // and knows that no usable playlist was present above.
-            if self.playlist_producer_failed(&session, session_id).await {
                 return Err(PlaylistPublicationError::for_session(
                     session.failure_reason(),
                     &session,
@@ -19241,26 +19058,10 @@ impl TranscodeManager {
                     ));
                 }
             }
-            // Actor-managed transcodes consume exact exits from the actor
-            // projection below; request handlers never inspect their child and
-            // manufacture a second producer verdict. Copy still needs this
-            // compatibility observation until its later ownership cut.
-            let exited = if session.actor_managed_prepublication_process {
-                false
-            } else {
-                let mut child = session.child.lock().await;
-                child.as_mut().is_some_and(|child| {
-                    matches!(child.try_wait_observed(&session.control), Ok(Some(_)))
-                })
-            };
             let timed_out = Instant::now() >= deadline;
-            if exited || timed_out {
+            if timed_out {
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
-                let reason = if exited {
-                    "producer_exited"
-                } else {
-                    "producer_timeout"
-                };
+                let reason = "producer_timeout";
                 tracing::error!(
                     session = %session_log_id(session_id),
                     segment = name,
@@ -19295,17 +19096,6 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                if exited {
-                    return Ok(SegmentPublication::Failed(
-                        PlaylistPublicationError::for_session(
-                            PlaylistError::ProducerExited(
-                                "the producer exited before this segment became available"
-                                    .to_owned(),
-                            ),
-                            &session,
-                        ),
-                    ));
-                }
                 return Ok(SegmentPublication::Pending(current_owner()));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -19388,7 +19178,7 @@ impl TranscodeManager {
     /// escape for a client that stops fetching: that client may leave the
     /// producer held while already-published media remains available. The
     /// `want_suspend == suspended` guard is load-bearing too: repeated polls
-    /// cannot re-signal the child or reset the watchdog's motion clock.
+    /// cannot re-signal the child or reset the actor's motion clock.
     /// SIGKILL still works on a stopped process, so idle/admin cleanup needs no
     /// special case.
     async fn apply_ahead_window(
@@ -19498,7 +19288,7 @@ impl TranscodeManager {
             return;
         }
         if !want_suspend {
-            // Before the flag flips, so the watchdog can never observe
+            // Before the flag flips, so the actor can never observe
             // "running" beside a motion clock that still spans the suspension
             // — that read would fail a healthy session at the moment of its
             // resume, before ffmpeg has emitted a single post-SIGCONT block.
@@ -20931,7 +20721,7 @@ fn test_session(dir: PathBuf) -> Session {
         frozen_presentation: None,
         actor_managed_response_publication: false,
         actor_managed_prepublication_process: false,
-        actor_prepublication_transcode: Arc::new(AtomicBool::new(false)),
+        actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
         response_publication_transition: Mutex::new(()),
         first_media_handoff_applied: AtomicBool::new(false),
         first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -20944,14 +20734,10 @@ fn test_session(dir: PathBuf) -> Session {
         cache_integrity_cleanup_started: AtomicBool::new(false),
         child: Mutex::new(Some(AttemptChild::new(0, child, control.clone()))),
         child_transition: Mutex::new(()),
-        watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
         #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
         #[cfg(any(test, feature = "live-hls-recovery"))]
-        watchdog_verdict_pause: std::sync::Mutex::new(None),
-        #[cfg(any(test, feature = "live-hls-recovery"))]
-        watchdog_transition_pause: std::sync::Mutex::new(None),
         activity_detail_pause: std::sync::Mutex::new(None),
         control_applied_pause: std::sync::Mutex::new(None),
         terminal_response_pending: Arc::new(AtomicBool::new(false)),
@@ -21327,7 +21113,7 @@ mod tests {
             .is_some_and(|lease| lease.retired));
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
         let root = crate::test_tempdir().expect("fixture root");
         let session_dir = root.path().join("session");
@@ -21496,6 +21282,14 @@ mod tests {
                 crate::playback_control::ControlStateError::SessionEnded
             ))
         ));
+        // Keep the filesystem-backed retirement and concurrent retry on real
+        // time. A start-paused runtime may auto-advance while async scratch
+        // cleanup is pending; under hosted load that can expire the receipt
+        // before the retry reaches `retry_pause`, leaving this test's barrier
+        // waiting for an attempt that correctly never starts. Freeze time only
+        // after the durable retry has completed, where advancing it exercises
+        // terminal tombstone expiry without mixing virtual time with real I/O.
+        tokio::time::pause();
         let terminal_deadline = replay_a
             .terminal_commit
             .as_ref()
@@ -22178,22 +21972,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn actor_first_media_hook_does_not_spawn_a_compatibility_watcher() {
+    async fn actor_first_media_hook_is_idempotent() {
         let dir = crate::test_tempdir().expect("session scratch");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
-        session.actor_prepublication_transcode.store(true, Release);
+        session.actor_prepublication_producer.store(true, Release);
         let (handoff, applied) =
             begin_first_media_publication_handoff(&session, "first-media-hook")
                 .await
                 .expect("first-media settlement capacity");
         handoff.settle_for_test(true);
         assert!(applied.await.expect("handoff application"));
-        assert!(!session.actor_prepublication_transcode.load(Acquire));
+        assert!(!session.actor_prepublication_producer.load(Acquire));
         assert!(session.first_media_handoff_applied.load(Acquire));
-        assert!(
-            !session.watchdog_active.load(Acquire),
-            "actor-managed transcodes must not elect the retained copy watchdog"
-        );
 
         let (duplicate, duplicate_applied) =
             begin_first_media_publication_handoff(&session, "first-media-hook")
@@ -22204,7 +21994,6 @@ mod tests {
             .await
             .expect("duplicate handoff application"));
         assert!(session.first_media_handoff_applied.load(Acquire));
-        assert!(!session.watchdog_active.load(Acquire));
     }
 
     #[test]
@@ -26180,50 +25969,6 @@ mod tests {
         );
     }
 
-    /// A producer that has already reported an unsuccessful exit cannot make
-    /// startup output later. The first playlist request must surface that
-    /// verdict instead of consuming the full 30-second publication window.
-    #[tokio::test]
-    async fn playlist_fails_promptly_when_the_producer_exits_unsuccessfully() {
-        use plurx_core::store::SqliteStore;
-
-        let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 1, 2.0).await;
-        let mut child = tokio::process::Command::new("false")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn false");
-        let status = child.wait().await.expect("wait for false");
-        assert!(!status.success(), "the fixture must exit unsuccessfully");
-        let session = watchdog_session(dir.path(), Some(child), false);
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = Arc::new(TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
-        mgr.sessions
-            .lock()
-            .await
-            .insert("early-exit".into(), Arc::clone(&session));
-
-        let playlist = tokio::time::timeout(Duration::from_millis(500), mgr.playlist("early-exit"))
-            .await
-            .expect("an unsuccessful producer exit must not consume the startup window");
-        // And it says *which* terminal cause, carrying the exit status: this
-        // is the one place the status is knowable, and an anonymous refusal
-        // here is what left #263's operator reading logs on a headless box.
-        assert!(
-            matches!(&playlist, Err(PlaylistError::ProducerExited(status)) if !status.is_empty()),
-            "a failed startup must name the producer exit, got {playlist:?}"
-        );
-        assert!(
-            session.failed.load(Relaxed),
-            "the terminal startup verdict must be shared with later requests"
-        );
-    }
-
     /// **The #263 regression.** A playlist request must outlive the server's
     /// own startup recovery, because a session inside that recovery is one the
     /// server is still successfully starting.
@@ -26515,47 +26260,8 @@ mod tests {
         );
     }
 
-    /// A clean encoder exit is EOF, not evidence of a broken session. Its
-    /// final playlist may still be crossing the filesystem boundary, so the
-    /// ordinary startup window remains open and the failure flag stays clear.
-    #[tokio::test]
-    async fn playlist_does_not_report_a_clean_producer_exit_as_failure() {
-        use plurx_core::store::SqliteStore;
-
-        let dir = crate::test_tempdir().expect("tempdir");
-        let mut child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn true");
-        let status = child.wait().await.expect("wait for true");
-        assert!(status.success(), "the fixture must exit successfully");
-        let session = watchdog_session(dir.path(), Some(child), false);
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = Arc::new(TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
-        mgr.sessions
-            .lock()
-            .await
-            .insert("clean-exit".into(), Arc::clone(&session));
-
-        let waiting =
-            tokio::time::timeout(Duration::from_millis(250), mgr.playlist("clean-exit")).await;
-        assert!(
-            waiting.is_err(),
-            "clean EOF keeps the ordinary publication window open"
-        );
-        assert!(
-            !session.failed.load(Relaxed),
-            "clean EOF must not poison the session"
-        );
-    }
-
-    /// A watchdog or copy-segmenter fallback deliberately kills one producer
-    /// before installing its replacement. That gap is not a terminal exit:
+    /// An actor-authorized retry deliberately kills one producer before
+    /// installing its replacement. That gap is not a terminal exit:
     /// playlist startup must keep waiting instead of poisoning the successor.
     #[tokio::test]
     async fn playlist_waits_while_a_killed_producer_is_being_replaced() {
@@ -26596,7 +26302,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn published_attempt_rejection_preserves_hardware_and_copy_predecessors() {
+    async fn published_attempt_rejection_preserves_the_predecessor() {
         let dir = crate::test_tempdir().expect("dir");
         let sentinel = dir.path().join("predecessor-segment");
         tokio::fs::write(&sentinel, b"still playable")
@@ -26634,21 +26340,6 @@ mod tests {
             .as_mut()
             .is_some_and(|child| matches!(child.try_wait(), Ok(None))));
 
-        let copy_rejection = match session.begin_copy_child_replacement().await {
-            Err(rejection) => rejection,
-            Ok(_) => panic!("published copy predecessor must not be changed"),
-        };
-        assert_eq!(
-            copy_rejection,
-            crate::playback_control::ProducerAttemptRejection::PlaylistPublished
-        );
-        assert!(tokio::fs::metadata(&sentinel).await.is_ok());
-        assert!(session
-            .child
-            .lock()
-            .await
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(None))));
         session.kill_child().await;
     }
 
@@ -27073,53 +26764,9 @@ mod tests {
         );
     }
 
-    /// Inspecting one producer may wait behind a slow kill that holds its
-    /// child lock. That wait must not retain the manager-wide sessions lock
-    /// and freeze status, playlist, or stop work for unrelated viewers.
-    #[tokio::test]
-    async fn playlist_exit_check_does_not_block_an_unrelated_session() {
-        use plurx_core::store::SqliteStore;
-
-        let dir = crate::test_tempdir().expect("tempdir");
-        let wedged = watchdog_session(dir.path(), None, false);
-        let unrelated = watchdog_session(dir.path(), None, false);
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = Arc::new(TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
-        {
-            let mut sessions = mgr.sessions.lock().await;
-            sessions.insert("wedged".into(), Arc::clone(&wedged));
-            sessions.insert("unrelated".into(), unrelated);
-        }
-
-        let held_child = wedged.child.lock().await;
-        let exit_check = tokio::spawn({
-            let mgr = Arc::clone(&mgr);
-            let wedged = Arc::clone(&wedged);
-            async move { mgr.playlist_producer_failed(&wedged, "wedged").await }
-        });
-        // Let the exit check reach the held per-session child lock. The
-        // manager-wide lock must already be available again at that point.
-        tokio::time::sleep(Duration::from_millis(25)).await;
-
-        let status =
-            tokio::time::timeout(Duration::from_millis(250), mgr.session_status("unrelated")).await;
-        assert!(
-            status.is_ok(),
-            "a slow child inspection must not block an unrelated session's status"
-        );
-
-        drop(held_child);
-        assert!(!exit_check.await.expect("exit-check task"));
-    }
-
     /// Re-evaluating an unchanged running session must be a no-op. Without the
     /// state guard, a healthy playlist poll sends SIGCONT and touches the
-    /// motion clock, which prevents the stall watchdog from ever firing.
+    /// motion clock, which postpones the actor's producer-progress verdict.
     #[tokio::test]
     async fn unchanged_flow_control_state_does_not_touch_the_motion_clock() {
         use plurx_core::store::SqliteStore;
@@ -27813,12 +27460,33 @@ mod tests {
     async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
+        use tokio::io::AsyncReadExt as _;
+
         let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("clip.mp4");
         write_real_video(&src, 60);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file_at(&store, &src.to_string_lossy()).await;
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(160),
+                height: Some(120),
+                ..Default::default()
+            },
+        )
+        .await;
+        let seeded = store
+            .get_file(file_id)
+            .await
+            .expect("read real fixture probe")
+            .expect("real fixture file");
+        assert_eq!(seeded.video_codec.as_deref(), Some("h264"));
+        assert_eq!((seeded.width, seeded.height), (Some(160), Some(120)));
         let work = crate::test_tempdir().expect("work");
         let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
@@ -27877,6 +27545,12 @@ mod tests {
             loop {
                 match session.progress.out_time_ms() {
                     Some(ms) if ms >= 3_000 => return ms,
+                    _ if session.failed.load(Acquire) => {
+                        panic!(
+                            "ffmpeg failed before its output timeline advanced: {:?}",
+                            session.failure_reason()
+                        );
+                    }
                     _ => tokio::time::sleep(Duration::from_millis(50)).await,
                 }
             }
@@ -27917,8 +27591,47 @@ mod tests {
                 "published media with an unmoved frontier is reserve; measured {ffmpeg_build}"
             );
 
+            // Publish the playlist through the same owner/authorization/EOF
+            // transaction as HTTP. The first-media handoff must happen here;
+            // neither a scratch-file refresh nor a later segment read may
+            // infer that a player has observed this generation.
+            let (playlist_bytes, playlist_owner) =
+                match mgr.playlist_with_owner(&info.session_id).await {
+                    Ok(publication) => publication,
+                    Err(_) => panic!("playlist publication failed"),
+                };
+            let playlist = std::str::from_utf8(&playlist_bytes).expect("UTF-8 playlist");
+            let newest = playlist
+                .lines()
+                .map(str::trim)
+                .rfind(|line| is_safe_segment(line) && segment_index(line).is_some())
+                .expect("advertised media segment")
+                .to_owned();
+            let playlist_deadline = Instant::now() + Duration::from_secs(5);
+            let playlist_authorization = mgr
+                .authorize_response_publication(
+                    &info.session_id,
+                    &playlist_owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    playlist_deadline,
+                )
+                .await
+                .expect("playlist response admission");
+            mgr.commit_authorized_media(playlist_authorization, true, playlist_deadline)
+                .await
+                .expect("playlist response EOF commit");
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert!(actor_delivery.playlist_ready);
+            assert!(session.first_media_handoff_applied.load(Acquire));
+            assert!(!session.actor_prepublication_producer.load(Acquire));
+
             // A window it has already exceeded suspends it, and a suspended
-            // encoder stops advancing — which is the property the watchdog relies
+            // encoder stops advancing — which is the property actor progress relies
             // on being able to tell apart from a wedge.
             mgr.flow_control(&session, &info.session_id).await;
             assert!(session.suspended.load(Relaxed), "session was held");
@@ -27939,34 +27652,42 @@ mod tests {
             // Fetch the newest published segment through the real request path.
             // That advances the download frontier, re-evaluates the same configured
             // limit, sends SIGCONT, and restarts actual encoder progress.
-            let newest = session
-                .segments
-                .lock()
+            let opened = match mgr
+                .segment_for_publication(&info.session_id, &newest)
                 .await
-                .segs
-                .last()
-                .expect("published segment")
-                .name
-                .clone();
-            assert!(mgr
-                .segment(&info.session_id, &newest)
-                .await
-                .expect("segment admission")
-                .is_some());
-            let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
-                producer_attempt: session.control.current_producer_attempt(),
-                session: Arc::clone(&session),
-            });
-            assert!(
-                mgr.commit_resolved_media(
+                .expect("segment resolution")
+            {
+                SegmentPublication::Ready(opened) => opened,
+                _ => panic!("advertised segment was not ready"),
+            };
+            let segment_owner = opened.response_owner();
+            let segment_authorization_deadline = Instant::now() + Duration::from_secs(5);
+            let segment_authorization = mgr
+                .authorize_response_publication(
                     &info.session_id,
-                    &owner,
-                    "test-segment",
-                    Some(&newest),
-                    true,
+                    &segment_owner,
+                    MediaResponsePublication::attempt_media("media-segment", Some(&newest)),
+                    segment_authorization_deadline,
                 )
                 .await
-            );
+                .expect("segment response admission");
+            let SegmentFile {
+                mut file,
+                len,
+                mut delivery,
+            } = opened;
+            let started = Instant::now();
+            let mut bytes = Vec::with_capacity(usize::try_from(len).expect("segment length"));
+            file.read_to_end(&mut bytes)
+                .await
+                .expect("read advertised segment");
+            delivery.note_read(bytes.len() as u64, started.elapsed());
+            assert_eq!(bytes.len() as u64, len, "read through advertised EOF");
+            assert!(delivery.finish(), "segment delivery reached exact EOF");
+            let segment_completion_deadline = Instant::now() + Duration::from_secs(5);
+            mgr.commit_authorized_media(segment_authorization, true, segment_completion_deadline)
+                .await
+                .expect("segment response EOF commit");
             let fetched_index = segment_index(&newest).expect("numbered segment");
             let fetched_end_ms = session
                 .segments
@@ -28098,7 +27819,27 @@ mod tests {
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
-        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        seed_file_with_probe_at(
+            store,
+            path,
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(6_000_000),
+                container: Some("mkv".into()),
+                video_codec: Some("hevc".into()),
+                width: Some(3840),
+                height: Some(2160),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn seed_file_with_probe_at(
+        store: &Arc<dyn Store>,
+        path: &str,
+        probe: plurx_core::domain::ProbeResult,
+    ) -> i64 {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
         let lib = store
             .create_library(&NewLibrary {
                 name: "L".into(),
@@ -28121,20 +27862,7 @@ mod tests {
             .await
             .expect("movie");
         store
-            .upsert_file(
-                movie,
-                path,
-                1,
-                1,
-                &ProbeResult {
-                    duration_ms: Some(6_000_000),
-                    container: Some("mkv".into()),
-                    video_codec: Some("hevc".into()),
-                    width: Some(3840),
-                    height: Some(2160),
-                    ..Default::default()
-                },
-            )
+            .upsert_file(movie, path, 1, 1, &probe)
             .await
             .expect("file")
     }
@@ -28573,25 +28301,7 @@ mod tests {
         assert_eq!(mgr.admissions.software_in_use(), 0);
     }
 
-    // ---- the copy-session compatibility watchdog (review §2.3) -------------
-
-    /// Every state that is not a stall, and the one that is. Each `Wait` here
-    /// is a healthy session the wrong verdict would kill mid-film.
-    #[test]
-    fn a_stall_is_the_only_thing_the_watchdog_calls_a_stall() {
-        let long = PROGRESS_STALL + Duration::from_secs(1);
-        let short = PROGRESS_STALL - Duration::from_secs(1);
-        // Failed elsewhere, or exited (EOF and kills both have their own
-        // reporters): the watch simply ends, whatever the clock says.
-        assert_eq!(watch_next(true, false, false, long), WatchNext::Done);
-        assert_eq!(watch_next(false, true, false, long), WatchNext::Done);
-        // Suspended: motionless on purpose, however long it lasts.
-        assert_eq!(watch_next(false, false, true, long), WatchNext::Wait);
-        // Moving recently enough.
-        assert_eq!(watch_next(false, false, false, short), WatchNext::Wait);
-        // Running, unsuspended, and the output has sat still too long.
-        assert_eq!(watch_next(false, false, false, long), WatchNext::Stall);
-    }
+    // ---- rolling session fixtures and lifecycle ----------------------------
 
     /// `moved_at_ms` freezes with the SIGSTOP — correctly — so without a
     /// resume re-baseline, the first check after SIGCONT reads the whole
@@ -28617,9 +28327,9 @@ mod tests {
         );
     }
 
-    /// A session for driving `watch_for_stall` directly: a real (harmless)
-    /// child process, a directory the test controls, and telemetry the test
-    /// can backdate.
+    /// Generic rolling-session fixture: an optional real child, test-owned
+    /// scratch, and the actor/lifecycle state shared by unrelated tests below.
+    /// The historical helper name remains to keep this mechanical cut small.
     fn watchdog_session_with_control(
         dir: &std::path::Path,
         child: Option<Child>,
@@ -28634,7 +28344,7 @@ mod tests {
             frozen_presentation: None,
             actor_managed_response_publication: actor_managed_prepublication,
             actor_managed_prepublication_process: actor_managed_prepublication,
-            actor_prepublication_transcode: Arc::new(AtomicBool::new(actor_managed_prepublication)),
+            actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),
             response_publication_transition: Mutex::new(()),
             first_media_handoff_applied: AtomicBool::new(false),
             first_media_handoff_notify: tokio::sync::Notify::new(),
@@ -28649,14 +28359,10 @@ mod tests {
                 child.map(|child| AttemptChild::new(producer_attempt, child, control.clone())),
             ),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
             #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(any(test, feature = "live-hls-recovery"))]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
             activity_detail_pause: std::sync::Mutex::new(None),
             control_applied_pause: std::sync::Mutex::new(None),
             terminal_response_pending: Arc::new(AtomicBool::new(false)),
@@ -28800,7 +28506,7 @@ mod tests {
         let admissions = Admissions::new();
         let session =
             watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
-        session.actor_prepublication_transcode.store(false, Release);
+        session.actor_prepublication_producer.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
         let reap_pause = Arc::new(LifecycleTestPause::new());
@@ -28870,7 +28576,7 @@ mod tests {
         let admissions = Admissions::new();
         let session =
             watchdog_session_with_publication(&scratch, Some(successful_child()), false, true);
-        session.actor_prepublication_transcode.store(false, Release);
+        session.actor_prepublication_producer.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         reserve_test_admissions(&session, &admissions);
 
@@ -28967,7 +28673,7 @@ mod tests {
             control.clone(),
             producer_attempt,
         );
-        session.actor_prepublication_transcode.store(false, Release);
+        session.actor_prepublication_producer.store(false, Release);
         session.first_media_handoff_applied.store(true, Release);
         *session
             .compatibility_attempt
@@ -29560,7 +29266,7 @@ mod tests {
             .expect("first-media settlement capacity");
         handoff.settle_for_test(true);
         await_lifecycle_pause(&owner_pause).await;
-        assert!(!session.actor_prepublication_transcode.load(Acquire));
+        assert!(!session.actor_prepublication_producer.load(Acquire));
         assert!(!session.first_media_handoff_applied.load(Acquire));
         assert!(
             session.prepublication_process_cleanup_required(),
@@ -30648,34 +30354,7 @@ mod tests {
         await_scratch_removed(&scratch).await;
     }
 
-    #[tokio::test]
-    async fn cancelled_copy_start_reaps_child_held_before_session_construction() {
-        let root = crate::test_tempdir().expect("cancelled copy start root");
-        let scratch = root.path().join("copy-prepublication");
-        tokio::fs::create_dir_all(&scratch)
-            .await
-            .expect("create copy prepublication scratch");
-        tokio::fs::write(scratch.join("partial.m4s"), b"unpublished")
-            .await
-            .expect("seed copy prepublication scratch");
-        let control = crate::playback_control::RollingControlHandle::spawn("copy-start-test");
-        let generation = control
-            .begin_producer_attempt()
-            .await
-            .expect("begin copy producer attempt");
-
-        {
-            let mut settlement = PrepublicationStartSettlement::new(scratch.clone());
-            settlement.hold_child(AttemptChild::new(generation, long_running_child(), control));
-            // Model cancellation while the origin probe is awaiting: no
-            // Session or manager identity exists yet, so only this guard can
-            // own both the child and its unpublished scratch.
-        }
-
-        await_scratch_removed(&scratch).await;
-    }
-
-    /// A process that outlives the test unless the watchdog kills it.
+    /// A process that outlives the test unless lifecycle cleanup reaps it.
     fn long_running_child() -> Child {
         let mut cmd = tokio::process::Command::new("sleep");
         cmd.arg("60").kill_on_drop(true);
@@ -30688,419 +30367,13 @@ mod tests {
         cmd.spawn().expect("spawn successful child")
     }
 
-    /// Backdate the motion clock so `stalled_for` reads past the threshold
-    /// without the test waiting it out.
-    fn force_stalled(p: &Progress) {
-        p.moved_at_ms.store(
-            p.started.elapsed().as_millis() as i64 - 2 * PROGRESS_STALL.as_millis() as i64,
-            Relaxed,
-        );
-    }
-
-    /// Drive virtual time in poll-sized hops until the watchdog settles.
-    ///
-    /// Hop-sized on purpose: under a paused clock, auto-advance jumps to the
-    /// *nearest* pending timer whenever every task is off doing file I/O — so
-    /// a single distant `timeout` wrapped around the watchdog is a deadline
-    /// the clock can leap straight to while the watchdog sits in a playlist
-    /// read. Small hops leave it nothing to leap past. Bounded, so a watchdog
-    /// that never reaches a verdict fails the test instead of hanging it.
-    async fn settle(handle: tokio::task::JoinHandle<()>) {
-        for _ in 0..1_000 {
-            if handle.is_finished() {
-                handle.await.expect("watchdog task");
-                return;
-            }
-            tokio::time::sleep(WATCHDOG_POLL).await;
-        }
-        panic!("the watchdog did not settle inside the bounded window");
-    }
-
-    /// THE §2.3 regression: the watchdog used to return at the first playable
-    /// segment, so a pipeline that wedged after producing was nobody's
-    /// problem — the client drained its buffer into a hang. Virtual time; the
-    /// only real thing here is the child process the verdict must kill.
-    #[tokio::test(start_paused = true)]
-    async fn the_watchdog_outlives_the_first_segment() {
-        let dir = crate::test_tempdir().expect("dir");
-        // The playlist lists a finished segment: the session HAS produced.
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        force_stalled(&session.progress);
-
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-
-        assert!(
-            session.failed.load(Relaxed),
-            "a mid-stream wedge must fail the session even though a segment was published"
-        );
-        let killed = session
-            .child
-            .lock()
-            .await
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
-        assert!(killed, "and the wedged process must be gone");
-    }
-
-    #[tokio::test]
-    async fn watchdog_failure_fences_actor_publication_before_reap_settles() {
-        let dir = crate::test_tempdir().expect("watchdog failure ordering dir");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        session
-            .control
-            .bind_response_publication_contract(
-                "watchdog-failure-ordering".to_owned(),
-                Arc::clone(&session.failed),
-            )
-            .await
-            .expect("bind compatibility response contract");
-        force_stalled(&session.progress);
-
-        let reap_pause = Arc::new(LifecycleTestPause::new());
-        {
-            let mut child = session.child.lock().await;
-            let child = child.as_mut().expect("watchdog child");
-            *child
-                .terminate_before_reap_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
-        }
-        let watchdog = tokio::spawn(watch_for_stall_claimed(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "watchdog-failure-ordering".to_owned(),
-            Duration::ZERO,
-        ));
-        await_lifecycle_pause(&reap_pause).await;
-
-        assert!(
-            session.failed.load(Acquire),
-            "the terminal failure fence must publish before confirmed reap can pause"
-        );
-        assert_eq!(
-            session
-                .control
-                .authorize_response_publication(
-                    crate::playback_control::RollingResponsePublication::attempt_media(
-                        crate::playback_control::RollingResponseObject::MediaSegment,
-                        0,
-                        Some(0),
-                    ),
-                    None,
-                    Instant::now() + Duration::from_secs(1),
-                )
-                .await,
-            Err(crate::playback_control::ResponsePublicationRejection::SessionEnded),
-            "actor admission must reject while the terminal winner is still awaiting reap"
-        );
-
-        reap_pause.release.notify_one();
-        watchdog.await.expect("watchdog task");
-    }
-
-    /// Session teardown deliberately kills a live child without failing the
-    /// session. The detached watchdog must observe that exit as `Done`, not
-    /// wait until the motion clock turns an ordinary stop into a false stall.
-    #[tokio::test(start_paused = true)]
-    async fn an_ordinary_kill_ends_the_watchdog_without_a_stall() {
-        let dir = crate::test_tempdir().expect("dir");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "ordinary-stop".into(),
-        ));
-
-        session.kill_child().await;
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-
-        assert!(
-            !session.failed.load(Relaxed),
-            "a deliberately killed child must end the watchdog without a stall verdict"
-        );
-    }
-
-    /// Reproduce the copy-segmenter's `Unsupported` transition after the
-    /// lifetime watchdog has observed its predecessor but before it acts on
-    /// that observation. The successor must survive the stale verdict, and
-    /// the same watchdog must still judge a later successor stall.
-    async fn assert_copy_replacement_invalidates_watchdog_verdict(next: WatchNext) {
-        let dir = crate::test_tempdir().expect("dir");
-        let child = match next {
-            WatchNext::Done => {
-                let mut child = tokio::process::Command::new("false")
-                    .kill_on_drop(true)
-                    .spawn()
-                    .expect("spawn failed predecessor");
-                let status = child.wait().await.expect("wait for predecessor");
-                assert!(!status.success(), "the predecessor must fail");
-                child
-            }
-            WatchNext::Stall => long_running_child(),
-            WatchNext::Wait => panic!("the race needs an actionable watchdog verdict"),
-        };
-        let session = watchdog_session(dir.path(), Some(child), false);
-        if next == WatchNext::Stall {
-            force_stalled(&session.progress);
-        }
-
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .watchdog_verdict_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "copy-replacement-race".into(),
-        ));
-
-        // The first rendezvous proves the watchdog already chose the stale
-        // predecessor verdict. Keep it paused while the exact replacement
-        // transaction used by `copyseg::Outcome::Unsupported` kills that
-        // predecessor, resets telemetry, and publishes the successor.
-        pause.wait().await;
-        *session
-            .watchdog_verdict_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let (replacement, _) = session
-            .kill_child_for_replacement()
-            .await
-            .expect("a live session may replace its child");
-        *session.child.lock().await = Some(AttemptChild::new(
-            session.control.current_producer_attempt(),
-            long_running_child(),
-            session.control.clone(),
-        ));
-        replacement.complete();
-        pause.wait().await;
-
-        // Let the resumed watchdog either act on its stale verdict (the bug)
-        // or re-evaluate the newly published producer (the contract).
-        for _ in 0..100 {
-            if session.failed.load(Relaxed) || watchdog.is_finished() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            !session.failed.load(Relaxed),
-            "the predecessor verdict must not fail the replacement"
-        );
-        assert!(
-            !watchdog.is_finished(),
-            "replacement must not permanently abandon watchdog coverage"
-        );
-        assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(None))),
-            "the replacement producer must survive the stale verdict"
-        );
-
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-        assert!(
-            session.failed.load(Relaxed),
-            "the watchdog must still fail a later stall in the replacement"
-        );
-        assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "the later successor stall must kill that producer"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn copy_replacement_invalidates_an_in_flight_stall_verdict() {
-        assert_copy_replacement_invalidates_watchdog_verdict(WatchNext::Stall).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn copy_replacement_invalidates_an_in_flight_done_verdict() {
-        assert_copy_replacement_invalidates_watchdog_verdict(WatchNext::Done).await;
-    }
-
-    /// The mirror ordering: the copy reader has already decided its stream is
-    /// unsupported, but the watchdog owns `child_transition` before the
-    /// reader can begin the replacement. A terminal predecessor verdict must
-    /// not be followed by an unmonitored successor.
-    async fn assert_watchdog_first_copy_replacement(next: WatchNext) {
-        let dir = crate::test_tempdir().expect("dir");
-        let child = match next {
-            WatchNext::Done => {
-                let mut child = tokio::process::Command::new("false")
-                    .kill_on_drop(true)
-                    .spawn()
-                    .expect("spawn failed predecessor");
-                let status = child.wait().await.expect("wait for predecessor");
-                assert!(!status.success(), "the predecessor must fail");
-                child
-            }
-            WatchNext::Stall => long_running_child(),
-            WatchNext::Wait => panic!("the race needs an actionable watchdog verdict"),
-        };
-        let session = watchdog_session(dir.path(), Some(child), false);
-        if next == WatchNext::Stall {
-            force_stalled(&session.progress);
-        }
-
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .watchdog_transition_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "watchdog-first-copy-replacement".into(),
-        ));
-
-        // The first rendezvous proves the watchdog owns the transition. The
-        // already-decided copy fallback now queues behind it, exactly the
-        // ordering missed by the replacement-first regressions above.
-        pause.wait().await;
-        *session
-            .watchdog_transition_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let replacement_session = Arc::clone(&session);
-        let replacement = tokio::spawn(async move {
-            let Some((replacement, _)) = replacement_session
-                .begin_copy_child_replacement()
-                .await
-                .expect("rolling actor must answer replacement admission")
-            else {
-                return false;
-            };
-            *replacement_session.child.lock().await = Some(AttemptChild::new(
-                replacement_session.control.current_producer_attempt(),
-                long_running_child(),
-                replacement_session.control.clone(),
-            ));
-            spawn_watch_for_stall(
-                Arc::clone(&replacement_session),
-                replacement_session.dir.clone(),
-                "watchdog-first-copy-successor".into(),
-            );
-            replacement.complete();
-            true
-        });
-        assert!(
-            !replacement.is_finished(),
-            "the decided fallback must wait behind the watchdog transition"
-        );
-        pause.wait().await;
-
-        settle(watchdog).await;
-        let installed = replacement.await.expect("copy fallback task");
-        if next == WatchNext::Done {
-            assert!(installed, "an exited predecessor may still fall back");
-            assert!(
-                session.watchdog_active.load(Acquire),
-                "the successor must have lifetime watchdog coverage before publication"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(None))),
-                "the covered successor must remain alive"
-            );
-            assert!(
-                !session.failed.load(Relaxed),
-                "Done is not a terminal session failure"
-            );
-            force_stalled(&session.progress);
-            for _ in 0..1_000 {
-                if session.failed.load(Relaxed) && !session.watchdog_active.load(Acquire) {
-                    break;
-                }
-                tokio::time::sleep(WATCHDOG_POLL).await;
-            }
-            assert!(
-                session.failed.load(Relaxed),
-                "the fresh watchdog must detect a later successor stall"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-                "the fresh watchdog must kill the later stalled successor"
-            );
-        } else {
-            assert!(
-                !installed,
-                "a terminal failed verdict must prevent a late successor"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-                "no successor may remain after the watchdog failed the session"
-            );
-            assert!(
-                session.failed.load(Relaxed),
-                "the Stall verdict must remain terminal"
-            );
-            assert!(
-                !session.watchdog_active.load(Acquire),
-                "a terminal failed session has no producer left to watch"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn winning_stall_watchdog_prevents_a_late_copy_replacement() {
-        assert_watchdog_first_copy_replacement(WatchNext::Stall).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn winning_done_watchdog_rearms_for_a_late_copy_replacement() {
-        assert_watchdog_first_copy_replacement(WatchNext::Done).await;
-    }
-
-    /// The copy reader can decide `Unsupported` immediately before a viewer
+    /// An actor-authorized replacement can begin immediately before a viewer
     /// stops the session. If replacement already owns `child_transition`,
     /// teardown must wait for successor publication and then kill that
     /// successor; removing the manager entry independently lets an untracked
     /// encoder survive the stop.
     #[tokio::test]
-    async fn stop_waits_for_copy_replacement_and_kills_its_successor() {
+    async fn stop_waits_for_replacement_and_kills_its_successor() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("dir");
@@ -31126,13 +30399,12 @@ mod tests {
         let replacement = tokio::spawn({
             let session = Arc::clone(&session);
             async move {
-                let (replacement, _) = session
-                    .begin_copy_child_replacement()
+                let (replacement, producer_attempt) = session
+                    .kill_child_for_replacement()
                     .await
-                    .expect("rolling actor must answer replacement admission")
-                    .expect("the live copy session may begin fallback");
+                    .expect("the live session may begin actor-authorized replacement");
                 *session.child.lock().await = Some(AttemptChild::new(
-                    session.control.current_producer_attempt(),
+                    producer_attempt,
                     long_running_child(),
                     session.control.clone(),
                 ));
@@ -31174,16 +30446,13 @@ mod tests {
 
         // Scratch is not the lifetime oracle. Even if a stale directory is
         // present again after teardown, the monotonic retirement verdict must
-        // refuse an already-decided `Unsupported` fallback.
+        // refuse an already-decided replacement.
         tokio::fs::create_dir_all(&session.dir)
             .await
             .expect("recreate stale scratch");
-        assert!(
-            session
-                .begin_copy_child_replacement()
-                .await
-                .expect("retired rejection is a lifecycle verdict")
-                .is_none(),
+        assert_eq!(
+            session.kill_child_for_replacement().await.err(),
+            Some(crate::playback_control::ProducerAttemptRejection::SessionEnded),
             "a retired session must never publish another producer"
         );
     }
@@ -31315,103 +30584,6 @@ mod tests {
             "fallback must not begin or publish a successor process after retirement (predecessor pid {predecessor_pid})"
         );
         assert!(child.is_none(), "the retired predecessor must be reaped");
-    }
-
-    /// Flow control SIGSTOPs a session that has run far enough ahead; that is
-    /// health, not a stall — for as long as it lasts. And the resume path
-    /// re-baselines the clock, so the suspension itself can never be read
-    /// back as one.
-    #[tokio::test(start_paused = true)]
-    async fn a_suspended_session_is_never_judged() {
-        let dir = crate::test_tempdir().expect("dir");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        session.suspended.store(true, Relaxed);
-        force_stalled(&session.progress);
-
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        ));
-        // Long enough (in virtual time) for many verdicts, were one coming.
-        tokio::time::sleep(SOFTWARE_GRACE + 20 * WATCHDOG_POLL).await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "a suspended session is motionless on purpose"
-        );
-
-        // Resume, the way `apply_ahead_window` does: clock first, flag second.
-        session.progress.touch();
-        session.suspended.store(false, Relaxed);
-        tokio::time::sleep(WATCHDOG_POLL).await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "the suspension must not be read back as a stall at resume"
-        );
-
-        // Now a real wedge: running, unsuspended, output sits still.
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-        assert!(
-            session.failed.load(Relaxed),
-            "a wedge after the resume is still caught"
-        );
-    }
-
-    /// EOF is success: the encoder finishing the film exits, and the watch
-    /// ends without a verdict — nothing here may mark that session failed.
-    #[tokio::test(start_paused = true)]
-    async fn an_exited_encoder_ends_the_watch_without_a_verdict() {
-        let dir = crate::test_tempdir().expect("dir");
-        let mut child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn true");
-        // Already exited before the watch begins — the deterministic version
-        // of "the encoder reached EOF". (tokio caches the status, so the
-        // watchdog's `try_wait` sees it.)
-        child.wait().await.expect("exit");
-        let session = watchdog_session(dir.path(), Some(child), false);
-        // Backdated clock: if the exit check did not come first, this would
-        // read as a stall — the assertion below is what makes EOF win.
-        force_stalled(&session.progress);
-
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "an exit is EOF or a kill; both already have owners reporting them"
-        );
-    }
-
-    /// A cached session has no process; every stall question about it is
-    /// about nothing, and `failed` on it would poison a finished asset other
-    /// viewers want.
-    #[tokio::test(start_paused = true)]
-    async fn a_cached_session_is_not_watched() {
-        let dir = crate::test_tempdir().expect("dir");
-        let session = watchdog_session(dir.path(), None, true);
-        force_stalled(&session.progress);
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "nothing to watch, no verdict"
-        );
     }
 
     // ---- the pre-transcode cache, serving side (PERF-PLAN §6.3) -------------
@@ -34250,34 +33422,5 @@ mod tests {
             Some(720)
         );
         drop(claim);
-    }
-
-    #[tokio::test]
-    async fn producing_requires_a_listed_segment() {
-        let dir = crate::test_tempdir().expect("tempdir");
-        // No playlist yet.
-        assert!(!session_producing(dir.path()).await);
-        // Header only, no segment listed (ffmpeg has started but nothing finished).
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n",
-        )
-        .await
-        .expect("write playlist");
-        assert!(!session_producing(dir.path()).await);
-        // A bare `seg*.ts` FILE existing must NOT count (the old bug) — only a
-        // playlist entry does.
-        tokio::fs::write(dir.path().join("seg00000.ts.tmp"), b"partial")
-            .await
-            .expect("write temp seg");
-        assert!(!session_producing(dir.path()).await);
-        // A finished, listed segment: producing.
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:4.000,\nseg00000.ts\n",
-        )
-        .await
-        .expect("write playlist with segment");
-        assert!(session_producing(dir.path()).await);
     }
 }
