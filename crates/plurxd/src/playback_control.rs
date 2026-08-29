@@ -5962,6 +5962,12 @@ impl RollingControlActor {
     ) -> bool {
         if !matches!(self.claim_expiry_at(now), RollingExpiryClaim::Live)
             || observation.producer_attempt != self.delivery.producer_attempt
+            // A retained post-publication failure freezes the exact delivery
+            // frontier that won before its proposal. An observation already
+            // sequenced ahead of that verdict is folded before the decision
+            // and still wins; one sealed afterward must not make a rejected
+            // playlist expand the media/range authorization surface.
+            || self.has_published_producer_failure_proposal()
         {
             return false;
         }
@@ -12384,6 +12390,102 @@ mod tests {
         assert_eq!(settled.executor_state, "settled");
         assert_eq!(settled.executor_last_action_failure, None);
         assert!(!actor.executor_lost);
+    }
+
+    #[test]
+    fn post_failure_observation_cannot_advance_frozen_published_frontier() {
+        let started = Instant::now();
+        let published_at = started + Duration::from_secs(2);
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                hardware_policy("presentation-frozen-frontier", "recipe-frozen-frontier"),
+            ),
+            Ok(1)
+        );
+        assert!(actor.observe_publication_at(
+            published_at - Duration::from_millis(1),
+            RollingPublicationObservation {
+                producer_attempt: 1,
+                playlist_ready: true,
+                published_segment: Some(1),
+                published_end_ms: Some(12_000),
+                next_media_sequence: 2,
+                resolved_fetched_segment: None,
+                resolved_fetched_end_ms: None,
+            },
+        ));
+        assert!(actor
+            .authorize_response_publication_at(
+                published_at,
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::VideoMediaPlaylist,
+                    1,
+                    None,
+                ),
+            )
+            .is_ok());
+
+        let deadline = actor
+            .producer_progress_deadline
+            .expect("published producer keeps its exact deadline");
+        assert!(actor.settle_due_deadlines_at(deadline.instant).is_some());
+        assert!(matches!(
+            actor.pending_decision.as_deref(),
+            Some(ProducerDecision::Fail {
+                proposal: Some(_),
+                cleanup: ProducerFailureCleanup {
+                    cleanup_policy: CleanupPolicy::RetainPublished,
+                    ..
+                },
+                ..
+            })
+        ));
+        let frozen = actor.delivery.clone();
+
+        assert!(
+            !actor.observe_publication_at(
+                deadline.instant + Duration::from_millis(1),
+                RollingPublicationObservation {
+                    producer_attempt: 1,
+                    playlist_ready: true,
+                    published_segment: Some(2),
+                    published_end_ms: Some(18_000),
+                    next_media_sequence: 3,
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                },
+            ),
+            "a playlist observation sequenced after Fail must lose"
+        );
+        assert_eq!(actor.delivery.published_segment, frozen.published_segment);
+        assert_eq!(actor.delivery.published_end_ms, frozen.published_end_ms);
+        assert_eq!(
+            actor.delivery.next_media_sequence,
+            frozen.next_media_sequence
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                deadline.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(2),
+                ),
+            ),
+            Err(ResponsePublicationRejection::DecisionCommitted)
+        );
+        assert!(actor
+            .authorize_response_publication_at(
+                deadline.instant + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(1),
+                ),
+            )
+            .is_ok());
     }
 
     #[test]

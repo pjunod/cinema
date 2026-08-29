@@ -8,46 +8,46 @@ module_root = "crates/plurxd/src"
 # validation until its ownership and M4 replacement are named here.
 
 [[symbols]]
-id = "startup-and-lifetime-watchdog"
+id = "copy-stall-watchdog"
 pattern = "watch_for_stall_claimed"
-expected_occurrences = 5
+expected_occurrences = 4
 kind = "recovery_owner"
-replacement = "retained only for published-lifetime and copy compatibility; transcode prepublication is RollingControlActor::ProducerProgressDeadline"
+replacement = "retained only for copy startup and published-lifetime compatibility; actor-managed transcodes use RollingControlActor::ProducerProgressDeadline before and after first media"
 
 [[symbols]]
 id = "software-startup-grace"
 pattern = "SOFTWARE_GRACE"
 expected_occurrences = 5
 kind = "recovery_timer"
-replacement = "retained for copy and published compatibility only; transcode startup uses the admitted actor policy"
+replacement = "retained only for copy startup; actor-managed transcodes use the admitted actor policy"
 
 [[symbols]]
 id = "advancing-progress-stall"
 pattern = "PROGRESS_STALL"
 expected_occurrences = 12
 kind = "recovery_timer"
-replacement = "actor policy budget plus the retained published-lifetime threshold; it no longer decides transcode prepublication outside the actor"
+replacement = "the actor policy budget plus the retained copy-stall threshold; it is the sole actor-managed transcode deadline before and after first media"
 
 [[symbols]]
 id = "watchdog-poll-cadence"
 pattern = "WATCHDOG_POLL"
 expected_occurrences = 7
 kind = "recovery_timer"
-replacement = "retained only for published-lifetime and copy compatibility sampling; the actor sleeps directly to its exact prepublication deadline"
+replacement = "retained only for copy compatibility sampling; the actor sleeps directly to its exact transcode deadline"
 
 [[symbols]]
 id = "detached-watchdog-launch"
 pattern = "spawn_watch_for_stall"
 expected_occurrences = 4
 kind = "recovery_owner"
-replacement = "retained compatibility launcher; actor first-media admission synchronously claims the separate published-lifetime owner"
+replacement = "retained copy-only compatibility launcher; actor-managed first-media admission continues the existing actor deadline without spawning a watcher"
 
 [[symbols]]
 id = "watchdog-election-flag"
 pattern = "watchdog_active"
-expected_occurrences = 12
+expected_occurrences = 13
 kind = "recovery_election"
-replacement = "retained only to elect one published-lifetime or copy watcher; the actor owns prepublication"
+replacement = "retained only to elect one copy watcher; actor-managed transcodes never set this compatibility latch"
 
 [[symbols]]
 id = "replacement-mask-flag"
@@ -59,9 +59,9 @@ replacement = "retained process-replacement serialization projection; actor deci
 [[symbols]]
 id = "shared-child-transition-lock"
 pattern = "child_transition\\.(?:lock|try_lock)"
-expected_occurrences = 18
+expected_occurrences = 19
 kind = "mixed_ownership_lock"
-replacement = "specific actor, attempt, response-admission, resource, or catalog-revision fences"
+replacement = "specific attempt, response-admission, copy replacement, published cleanup, retirement, resource, or catalog-revision fences"
 
 [[symbols]]
 id = "replacement-transaction"
@@ -101,9 +101,9 @@ replacement = "the actor's exact-attempt exit/classification disposition"
 [[symbols]]
 id = "direct-session-failure"
 pattern = "(?:self|session)\\.fail\\("
-expected_occurrences = 22
+expected_occurrences = 21
 kind = "failure_owner"
-replacement = "typed producer facts entering the actor; only its prepublication failure projects Session::failed"
+replacement = "typed producer facts entering the actor; only prepublication and compatibility failures project Session::failed, while published actor failures retain admitted media"
 
 [[symbols]]
 id = "supervisor-registration"
@@ -129,16 +129,16 @@ replacement = "the awaited compatibility supervisor command path; prepublication
 [[symbols]]
 id = "prepublication-replyless-termination"
 pattern = "\\.request_termination\\(\\)"
-expected_occurrences = 1
+expected_occurrences = 2
 kind = "process_action"
-replacement = "the exact-attempt cleanup owner requests termination without accumulating cancelled reply senders"
+replacement = "prepublication and published exact-attempt cleanup owners request termination without accumulating cancelled reply senders"
 
 [[symbols]]
 id = "prepublication-terminal-wait"
 pattern = "\\.wait_for_terminal\\(\\)"
-expected_occurrences = 1
+expected_occurrences = 2
 kind = "process_action"
-replacement = "the cleanup owner waits on the supervisor's shared terminal proof before releasing scratch or admission"
+replacement = "prepublication and published cleanup owners wait on the supervisor's shared terminal proof before releasing scratch or admission"
 
 [[symbols]]
 id = "raw-child-wait"
@@ -150,9 +150,9 @@ replacement = "the sole supervisor reap path; rejected candidates use the same c
 [[symbols]]
 id = "response-publication-observation"
 pattern = "\\.observe_publication\\("
-expected_occurrences = 2
+expected_occurrences = 3
 kind = "response_admission"
-replacement = "background flow refresh only; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
+replacement = "background flow refresh plus exact fixtures; HTTP playlist observation uses the separately inventoried absolute-deadline admission"
 
 [[symbols]]
 id = "http-response-publication-observation"
@@ -178,9 +178,9 @@ replacement = "response EOF enters the actor with a move-only RollingMediaCommit
 [[symbols]]
 id = "all-detached-tokio-tasks"
 pattern = "tokio::spawn\\("
-expected_occurrences = 87
+expected_occurrences = 89
 kind = "structural_task_scan"
-replacement = "every detached task requires ownership-catalog review; the bounded EOF settlement and CAS-elected cache invalidation/retirement tasks own their work after request cancellation, while producer recovery moves only to the actor executor"
+replacement = "every detached task requires ownership-catalog review; published failure, completion, and executor-loss cleanup transfer exact child ownership before awaiting, while the removed published-transcode watchdog contributes no task"
 
 [[symbols]]
 id = "all-runtime-owned-async-tasks"
@@ -192,9 +192,9 @@ replacement = "every new runtime-owned detached task requires ownership-catalog 
 [[symbols]]
 id = "all-async-sleeps"
 pattern = "tokio::time::sleep\\("
-expected_occurrences = 41
+expected_occurrences = 42
 kind = "structural_timer_scan"
-replacement = "every new sleep requires classification; producer recovery polls are deleted in favor of exact actor deadlines"
+replacement = "every new sleep requires classification; actor-managed producer verdict polls are deleted, while failed exact reap attempts retain ownership across the bounded cleanup retry cadence"
 
 [[symbols]]
 id = "all-async-intervals"
@@ -232,13 +232,6 @@ kind = "resource_owner"
 replacement = "retained until manager publication so cancellation reaps the child, clears scratch, ends the actor, and releases admissions"
 
 [[symbols]]
-id = "first-media-lifetime-handoff"
-pattern = "spawn_published_lifetime_watch_for_stall"
-expected_occurrences = 2
-kind = "recovery_owner"
-replacement = "synchronously claimed by actor response admission after prepublication closes; a bounded permit and fail-closed deadline owner retain settlement after request cancellation; the compatibility watcher never decides startup recovery"
-
-[[symbols]]
 id = "prepublication-confirmed-reap-owner"
 pattern = "own_prepublication_cleanup"
 expected_occurrences = 2
@@ -246,18 +239,39 @@ kind = "lifecycle_owner"
 replacement = "retains the exact child, scratch, and admission resources through repeated individually bounded repair attempts until physical reap is confirmed"
 
 [[symbols]]
+id = "published-attempt-cleanup-owner"
+pattern = "own_published_attempt_cleanup"
+expected_occurrences = 4
+kind = "lifecycle_owner"
+replacement = "one detached exact-attempt owner retains the published generation and process admission through confirmed failure, completion, or executor-loss reap without deleting admitted media"
+
+[[symbols]]
+id = "published-attempt-cleanup-launch"
+pattern = "spawn_published_(?:failure|completion|executor_loss)_cleanup_owner"
+expected_occurrences = 8
+kind = "lifecycle_owner"
+replacement = "typed failure, successful completion, and executor-loss paths transfer cleanup before awaiting; repeated test calls exercise the same bounded production owners"
+
+[[symbols]]
+id = "published-exact-child-settlement"
+pattern = "settle_exact_published_child"
+expected_occurrences = 2
+kind = "process_owner"
+replacement = "serializes one exact actor-selected published child with retirement and releases hardware or software capacity only after confirmed reap"
+
+[[symbols]]
 id = "prepublication-reap-attempt-timeout"
 pattern = "PREPUBLICATION_REAP_ATTEMPT_TIMEOUT"
-expected_occurrences = 3
+expected_occurrences = 5
 kind = "lifecycle_timer"
-replacement = "bounds each individual physical reap attempt; cleanup ownership persists and retries after a timeout"
+replacement = "bounds each individual prepublication or published physical reap attempt; cleanup ownership persists and retries after a timeout"
 
 [[symbols]]
 id = "prepublication-reap-retry-cadence"
 pattern = "PREPUBLICATION_REAP_RETRY"
-expected_occurrences = 3
+expected_occurrences = 5
 kind = "lifecycle_timer"
-replacement = "bounded physical-cleanup repair only; cannot retry, replace, or make a playback verdict"
+replacement = "bounded prepublication or published physical-cleanup repair only; cannot retry, replace, or make a playback verdict"
 
 # Module-wide sentinel counts cover every Rust playback-server module, not
 # only the compatibility implementation. They intentionally describe today's
@@ -288,12 +302,12 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "legacy-child-transition"
 pattern = "child_transition"
-expected_occurrences = 35
+expected_occurrences = 37
 
 [[module_symbols]]
 id = "legacy-watchdog-election"
 pattern = "watchdog_active"
-expected_occurrences = 12
+expected_occurrences = 13
 
 [[module_symbols]]
 id = "legacy-replacement-mask"
@@ -308,12 +322,12 @@ expected_occurrences = 5
 [[module_symbols]]
 id = "legacy-stall-watch-owner"
 pattern = "watch_for_stall"
-expected_occurrences = 20
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
-expected_occurrences = 65
+expected_occurrences = 74
 
 [[module_symbols]]
 id = "m4-producer-decision-poll"
@@ -338,7 +352,7 @@ expected_occurrences = 6
 [[module_symbols]]
 id = "m4-first-media-publication-handoff"
 pattern = "RollingFirstMediaPublicationHandoff"
-expected_occurrences = 19
+expected_occurrences = 20
 
 [[module_symbols]]
 id = "m4-first-media-settlement-capacity"
@@ -438,7 +452,7 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "m4-typed-segment-resolution"
 pattern = "SegmentPublication"
-expected_occurrences = 25
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -463,7 +477,7 @@ expected_occurrences = 4
 [[module_symbols]]
 id = "m4-decision-applied"
 pattern = "DecisionApplied"
-expected_occurrences = 13
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-generation-metadata-commit"
@@ -476,14 +490,14 @@ pattern = "PrepublicationStartSettlement"
 expected_occurrences = 6
 
 [[module_symbols]]
-id = "m4-first-media-lifetime-handoff"
+id = "removed-published-lifetime-watchdog-handoff"
 pattern = "spawn_published_lifetime_watch_for_stall"
-expected_occurrences = 2
+expected_occurrences = 0
 
 [[module_symbols]]
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_transcode"
-expected_occurrences = 15
+expected_occurrences = 17
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -503,12 +517,47 @@ expected_occurrences = 16
 [[module_symbols]]
 id = "m4-immutable-prepublication-process-scope"
 pattern = "actor_managed_prepublication_process"
-expected_occurrences = 8
+expected_occurrences = 15
 
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
 pattern = "first_media_handoff_applied"
-expected_occurrences = 12
+expected_occurrences = 17
+
+[[module_symbols]]
+id = "m4-published-attempt-cleanup-owner"
+pattern = "own_published_attempt_cleanup"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-published-exact-child-settlement"
+pattern = "settle_exact_published_child"
+expected_occurrences = 2
+
+[[module_symbols]]
+id = "m4-published-retention-policy"
+pattern = "RetainPublished"
+expected_occurrences = 13
+
+[[module_symbols]]
+id = "m4-successful-exit-probe"
+pattern = "RollingProducerExitProbe"
+expected_occurrences = 6
+
+[[module_symbols]]
+id = "m4-producer-completion-disposition"
+pattern = "RollingProducerCompletionDisposition"
+expected_occurrences = 20
+
+[[module_symbols]]
+id = "m4-expected-executor-settlement"
+pattern = "ExecutorSettled"
+expected_occurrences = 4
+
+[[module_symbols]]
+id = "m4-typed-published-producer-end"
+pattern = "ProducerEnded"
+expected_occurrences = 21
 
 [[module_symbols]]
 id = "m4-bounded-terminal-command-admission"
@@ -926,16 +975,21 @@ expected_occurrences = 9
 # nine net bounded test timers, and six net Barrier `wait` calls conservatively
 # matched by the process-lifecycle shape. They add no production recovery or
 # process owner.
+# The published-lifetime cut removes one compatibility-watcher task and adds
+# three cancellation-independent exact-attempt cleanup tasks, for two net
+# namespaced spawns. One cleanup retry sleep is lifecycle convergence, not a
+# producer verdict. Completion fixtures add one harmless child construction;
+# the remaining task/timer/method deltas are bounded actor and race fixtures.
 
 [[module_structures]]
 id = "namespaced-task-spawn"
 pattern = "(?:[A-Za-z_]\\w*::)+spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 356
+expected_occurrences = 358
 
 [[module_structures]]
 id = "method-spawn"
 pattern = "\\.spawn(?:_blocking|_local)?\\s*\\("
-expected_occurrences = 40
+expected_occurrences = 41
 
 [[module_structures]]
 id = "bare-task-spawn"
@@ -945,7 +999,7 @@ expected_occurrences = 2
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 503
+expected_occurrences = 511
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -960,7 +1014,7 @@ expected_occurrences = 1
 [[module_structures]]
 id = "process-command-construction"
 pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
-expected_occurrences = 62
+expected_occurrences = 63
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -968,7 +1022,7 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 177
+expected_occurrences = 181
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -993,7 +1047,7 @@ expected_occurrences = 32
 [[module_structures]]
 id = "kill-on-drop-construction"
 pattern = "kill_on_drop\\s*\\("
-expected_occurrences = 34
+expected_occurrences = 35
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
@@ -1254,8 +1308,8 @@ replacement = "session executor plus actor-classified copy outcome and one valid
 [[entrypoints]]
 id = "watchdog-verdict"
 anchor = "async fn watch_for_stall_claimed("
-owns = ["published-lifetime progress timeout", "copy compatibility failure", "copy replacement"]
-replacement = "transcode prepublication moved to one due-first actor ProducerProgressDeadline and immutable ProducerDecision"
+owns = ["copy startup timeout", "copy published-lifetime failure", "copy replacement"]
+replacement = "actor-managed transcodes use one due-first ProducerProgressDeadline and immutable ProducerDecision across prepublication and published lifetime"
 
 [[entrypoints]]
 id = "request-verdict"
