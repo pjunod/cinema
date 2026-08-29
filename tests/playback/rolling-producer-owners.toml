@@ -410,7 +410,7 @@ expected_occurrences = 7
 [[module_symbols]]
 id = "m4-typed-segment-resolution"
 pattern = "SegmentPublication"
-expected_occurrences = 28
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "m4-typed-presentation-resolution"
@@ -455,7 +455,7 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "m4-prepublication-ownership-projection"
 pattern = "actor_prepublication_producer"
-expected_occurrences = 17
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-decision-wake"
@@ -480,7 +480,7 @@ expected_occurrences = 12
 [[module_symbols]]
 id = "m4-first-media-owner-claim-latch"
 pattern = "first_media_handoff_applied"
-expected_occurrences = 17
+expected_occurrences = 18
 
 [[module_symbols]]
 id = "m4-published-attempt-cleanup-owner"
