@@ -33,6 +33,13 @@ pub struct DbSnapshotHistogram {
     pub cumulative_buckets: [u64; DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS.len()],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DbSnapshotLastOutcome {
+    pub ok: bool,
+    pub observed_at_unix_ms: u64,
+    pub elapsed_nanos: u64,
+}
+
 /// Fixed operation/outcome projection of the database snapshot hooks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DbSnapshotMetricsSnapshot {
@@ -40,6 +47,8 @@ pub struct DbSnapshotMetricsSnapshot {
     pub build_error: DbSnapshotHistogram,
     pub install_ok: DbSnapshotHistogram,
     pub install_error: DbSnapshotHistogram,
+    pub last_build: Option<DbSnapshotLastOutcome>,
+    pub last_install: Option<DbSnapshotLastOutcome>,
 }
 
 const ZERO_HISTOGRAM: DbSnapshotHistogram = DbSnapshotHistogram {
@@ -53,6 +62,8 @@ const ZERO_SNAPSHOT: DbSnapshotMetricsSnapshot = DbSnapshotMetricsSnapshot {
     build_error: ZERO_HISTOGRAM,
     install_ok: ZERO_HISTOGRAM,
     install_error: ZERO_HISTOGRAM,
+    last_build: None,
+    last_install: None,
 };
 
 /// Local-only handle with a coherent, wait-free scrape path.
@@ -85,6 +96,19 @@ fn record(operation: SnapshotOperation, ok: bool, elapsed_nanos: u64) {
     let mut snapshot = WRITER_STATE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let last = DbSnapshotLastOutcome {
+        ok,
+        observed_at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+            .unwrap_or_default(),
+        elapsed_nanos,
+    };
+    match operation {
+        SnapshotOperation::Build => snapshot.last_build = Some(last),
+        SnapshotOperation::Install => snapshot.last_install = Some(last),
+    }
     let histogram = match (operation, ok) {
         (SnapshotOperation::Build, true) => &mut snapshot.build_ok,
         (SnapshotOperation::Build, false) => &mut snapshot.build_error,
@@ -156,6 +180,14 @@ mod tests {
         assert_eq!(after.install_error.count, before.install_error.count + 1);
         assert_eq!(after.build_error.count, before.build_error.count);
         assert_eq!(after.install_ok.count, before.install_ok.count);
+        assert_eq!(after.last_build.map(|outcome| outcome.ok), Some(true));
+        assert_eq!(after.last_install.map(|outcome| outcome.ok), Some(false));
+        assert!(after
+            .last_build
+            .is_some_and(|outcome| outcome.observed_at_unix_ms > 0));
+        assert!(after
+            .last_install
+            .is_some_and(|outcome| outcome.observed_at_unix_ms > 0));
     }
 
     #[test]

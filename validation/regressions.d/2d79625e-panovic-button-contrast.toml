@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["2d79625e"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The Panovic button ink is checked against the shipped theme contrast matrix."

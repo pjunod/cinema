@@ -10,6 +10,11 @@ use tokio::sync::watch;
 use tokio::time;
 use tracing::{debug, info};
 
+// Multi-node shutdown deliberately waits 9.5 seconds for readiness propagation
+// and may then wait another five seconds for a leader. Keep enough time after
+// those waits for Raft, WAL, SQL, and client-stream teardown on a loaded host.
+pub(crate) const RAFT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[cfg(feature = "sqlite")]
 pub(crate) const DB_QUORUM_WATERMARK_MARKER: &str =
     "/* hiqlite-internal:db-quorum-watermark:v1 */ THIS IS NOT SQL";
@@ -168,6 +173,19 @@ impl Client {
         Ok(crate::LocalDbSnapshotMetrics::new())
     }
 
+    /// Obtain the process-local database WAL status handle.
+    ///
+    /// The handle reads only the live log store's owned locks and never opens
+    /// or walks WAL files. Remote clients fail immediately.
+    #[cfg(feature = "sqlite")]
+    #[must_use]
+    pub fn local_db_wal_status(&self) -> Result<hiqlite_wal::WalStatusHandle, Error> {
+        let state = self.inner.state.as_ref().ok_or_else(|| {
+            Error::Connect("local database WAL status requires a local node client".to_owned())
+        })?;
+        Ok(state.raft_db.wal_status.clone())
+    }
+
     /// Obtain a commit watermark after the database leader has confirmed its
     /// current term with a quorum and applied through the returned read index.
     ///
@@ -175,23 +193,8 @@ impl Client {
     /// leader stream. The method performs no SQL or state-machine mutation.
     #[cfg(feature = "sqlite")]
     pub async fn db_quorum_watermark(&self) -> Result<DbQuorumWatermark, Error> {
-        match self.db_quorum_watermark_req().await {
-            Ok(watermark) => Ok(watermark),
-            Err(error) => {
-                if self
-                    .was_leader_update_error(
-                        &error,
-                        &self.inner.leader_db,
-                        &self.inner.tx_client_db,
-                    )
-                    .await
-                {
-                    self.db_quorum_watermark_req().await
-                } else {
-                    Err(error)
-                }
-            }
-        }
+        self.retry_db_after_leader_change(|| self.db_quorum_watermark_req())
+            .await
     }
 
     #[cfg(feature = "sqlite")]
@@ -374,7 +377,7 @@ impl Client {
     pub async fn shutdown(&self) -> Result<(), Error> {
         let primary = if let Some(state) = &self.inner.state {
             match tokio::time::timeout(
-                Duration::from_secs(15),
+                RAFT_SHUTDOWN_TIMEOUT,
                 Self::shutdown_execute(
                     state,
                     #[cfg(feature = "cache")]
@@ -609,7 +612,17 @@ impl Client {
 
 #[cfg(all(test, feature = "sqlite"))]
 mod tests {
+    use super::RAFT_SHUTDOWN_TIMEOUT;
     use std::time::Duration;
+
+    #[test]
+    fn shutdown_timeout_leaves_room_after_deliberate_cluster_waits() {
+        let deliberate_waits = Duration::from_millis(9_500) + Duration::from_secs(5);
+        assert!(
+            RAFT_SHUTDOWN_TIMEOUT >= deliberate_waits + Duration::from_secs(10),
+            "shutdown must retain time for Raft and durable-writer drains after cluster waits"
+        );
+    }
 
     #[test]
     fn local_watch_accessor_has_no_remote_fallback() {

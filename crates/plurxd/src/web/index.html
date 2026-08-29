@@ -652,6 +652,7 @@
      which left the sticky header narrower than the body. minmax(0,…) lets the
      track shrink so the table scrolls inside its card instead. */
   .adminwrap{display:grid;grid-template-columns:minmax(0,1fr);gap:22px;max-width:960px}
+  .adminwrap.clusterwrap{max-width:1240px}
   /* Keep action cells in the table formatting context. Applying `.row`
      directly to a <td> changes it to display:flex, so its height and bottom
      rule stop following a taller multi-line row. The flex row belongs inside
@@ -668,6 +669,21 @@
      shared grid lines them all up on the longest path. */
   .stgtable{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:0 14px;align-items:baseline;line-height:1.7}
   .stgpath{font-weight:600;white-space:nowrap}
+  /* Storage paths can be much longer than the whole System card. Give the
+     rate a stable right-hand column and let only the path column wrap; the
+     previous max-content path track pushed the numbers to the card edge (or
+     beyond it) as soon as one mount listed several library roots. */
+  .storage-table{grid-template-columns:minmax(0,1fr) max-content;gap:3px 18px}
+  .storage-table .stgpath{min-width:0;white-space:normal;overflow-wrap:anywhere}
+  .storage-table .stgrate{white-space:nowrap}
+  .system-now{display:grid;gap:4px}
+  .system-now-counts{color:var(--text);font-weight:600}
+  .system-now-watch{max-width:76ch;color:var(--muted);line-height:1.55}
+  .system-now-watch b{color:var(--text);font-weight:600}
+  @media(max-width:640px){
+    .storage-table{grid-template-columns:minmax(0,1fr);gap:0}
+    .storage-table .stgrate{margin-bottom:6px;white-space:normal}
+  }
   /* Phones: a wide settings table (libraries/users) overflows the viewport,
      which used to push the sticky header out of alignment. Reflow each row into
      a self-contained card — name as a heading, labeled cells, action buttons
@@ -688,6 +704,78 @@
     padding:9px 15px;font-size:14px;font-weight:600;cursor:pointer;margin-bottom:-1px;border-radius:8px 8px 0 0}
   .settab:hover{color:var(--text);background:linear-gradient(180deg,transparent,color-mix(in srgb,var(--accent) 18%,transparent))}
   .settab.active{color:var(--text);border-bottom-color:var(--accent)}
+  /* Content analysis is an operator workspace, not a link dropped between
+     unrelated sections. These primitives are shared by its compact Activity
+     and Settings summaries and by the full queue/history page. */
+  .analysis-head{display:flex;align-items:flex-start;justify-content:space-between;gap:18px;margin:2px 0 20px}
+  .analysis-head h1{margin:0;font-size:28px;line-height:1.12}
+  .analysis-head p{margin:6px 0 0;color:var(--muted);max-width:68ch;line-height:1.5}
+  .analysis-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-wrap:wrap}
+  .analysis-live{display:inline-flex;align-items:center;gap:7px;color:var(--muted);font-size:12px;white-space:nowrap}
+  .analysis-live::before{content:"";width:7px;height:7px;border-radius:50%;background:var(--good);box-shadow:0 0 0 3px color-mix(in srgb,var(--good) 16%,transparent)}
+  .analysis-live.paused::before{background:var(--muted);box-shadow:none}
+  .analysis-metrics{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:10px;margin:14px 0 18px}
+  .analysis-metric{min-width:0;background:var(--panel);border:1px solid var(--line);border-radius:11px;padding:13px 15px}
+  .analysis-metric .n{display:block;font:700 24px/1.05 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--text)}
+  .analysis-metric .k{display:block;margin-top:5px;color:var(--muted);font-size:11px;font-weight:650;text-transform:uppercase;letter-spacing:.055em}
+  .analysis-metric.good{border-color:color-mix(in srgb,var(--good) 46%,var(--line))}
+  .analysis-metric.warn{border-color:color-mix(in srgb,var(--warn) 52%,var(--line))}
+  .analysis-metric.bad{border-color:color-mix(in srgb,var(--bad) 58%,var(--line))}
+  .analysis-metric.bad .n{color:var(--bad)}
+  .analysis-brief{background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 8%,var(--panel)),var(--panel));border:1px solid var(--line);border-radius:var(--radius);padding:17px 18px}
+  .analysis-brief-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px}
+  .analysis-brief-head h2{margin:0 0 5px;font-size:17px}
+  .analysis-brief-head p{margin:0;color:var(--muted);font-size:13px;line-height:1.5;max-width:66ch}
+  .analysis-brief-status{display:flex;gap:7px;align-items:center;flex-wrap:wrap;margin-top:13px}
+  .analysis-state{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:11.5px;font-weight:650;line-height:1.2;background:var(--panel2);white-space:nowrap}
+  .analysis-state::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--muted)}
+  .analysis-state.running::before{background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent)}
+  .analysis-state.queued::before,.analysis-state.submitted::before{background:var(--warn)}
+  .analysis-state.ready::before{background:var(--good)}
+  .analysis-state.failed::before,.analysis-state.cancelled::before{background:var(--bad)}
+  .analysis-controls{display:grid;grid-template-columns:minmax(220px,1fr) auto auto;gap:10px;align-items:center;margin:16px 0 10px}
+  .analysis-search{position:relative;min-width:0}
+  .analysis-search input{width:100%;padding-left:34px}
+  .analysis-search::before{content:"⌕";position:absolute;left:12px;top:50%;transform:translateY(-52%);color:var(--muted);font-size:18px;pointer-events:none}
+  .analysis-filters{display:flex;gap:4px;flex-wrap:wrap}
+  .analysis-filters button{background:transparent;color:var(--muted);border:1px solid var(--line);padding:7px 10px;font-size:12px}
+  .analysis-filters button.on{background:color-mix(in srgb,var(--accent) 15%,var(--panel));border-color:var(--accent);color:var(--text)}
+  .analysis-table-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+  table.analysis-table{margin:0;min-width:790px}
+  .analysis-table th{padding-top:11px;padding-bottom:11px;background:color-mix(in srgb,var(--panel2) 74%,transparent)}
+  .analysis-table td{vertical-align:top;padding-top:13px;padding-bottom:13px}
+  .analysis-file{display:block;font-weight:700;line-height:1.3}
+  .analysis-sub{margin-top:4px;color:var(--muted);font-size:11.5px;line-height:1.4;overflow-wrap:anywhere}
+  .analysis-phase{margin-top:5px;color:var(--muted);font-size:12px;line-height:1.4}
+  .analysis-error{margin-top:8px;border:1px solid color-mix(in srgb,var(--bad) 46%,var(--line));border-left:3px solid var(--bad);border-radius:8px;background:color-mix(in srgb,var(--bad) 7%,var(--panel2));padding:9px 10px;max-width:580px}
+  .analysis-error b{display:block;color:var(--bad);font-size:12.5px;line-height:1.35}
+  .analysis-error.warn{border-color:color-mix(in srgb,var(--warn) 46%,var(--line));border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,var(--panel2))}
+  .analysis-error.warn b{color:var(--warn)}
+  .analysis-error p{margin:4px 0 0;color:var(--prose);font-size:12px;line-height:1.48}
+  .analysis-error code{display:inline-block;margin-top:6px;color:var(--muted);font-size:10.5px;overflow-wrap:anywhere}
+  .analysis-diag{margin-top:8px;color:var(--muted);font-size:11.5px}
+  .analysis-diag summary{cursor:pointer;list-style:none;color:var(--accent);font-weight:600}
+  .analysis-diag summary::-webkit-details-marker{display:none}
+  .analysis-diag summary::after{content:" ›"}
+  .analysis-diag[open] summary::after{content:" ⌄"}
+  .analysis-diag-grid{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:3px 10px;margin-top:7px;padding:8px 10px;background:var(--panel2);border-radius:7px;line-height:1.45}
+  .analysis-diag-grid b{font-weight:600;color:var(--muted)}
+  .analysis-diag-grid span{color:var(--text);font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+  .analysis-pages{display:flex;align-items:center;justify-content:space-between;gap:12px;margin:11px 2px 0;color:var(--muted);font-size:12px}
+  .analysis-pages .row{gap:6px}
+  .analysis-pages select{width:auto;padding:5px 26px 5px 8px;font-size:12px}
+  .analysis-stale{margin:0 0 12px;border-left:3px solid var(--warn);padding:9px 11px;background:color-mix(in srgb,var(--warn) 8%,var(--panel));color:var(--prose);font-size:12px;border-radius:7px}
+  .mode-chip{display:inline-flex;align-items:center;border:1px solid var(--line);border-radius:999px;padding:4px 9px;font-size:11.5px;font-weight:750;letter-spacing:.01em;white-space:nowrap}
+  .mode-chip.vod{color:var(--good);border-color:color-mix(in srgb,var(--good) 55%,var(--line));background:color-mix(in srgb,var(--good) 8%,transparent)}
+  .mode-chip.live{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 55%,var(--line));background:color-mix(in srgb,var(--warn) 8%,transparent)}
+  .mode-detail{display:block;margin-top:5px;color:var(--muted);font-size:12px;line-height:1.45}
+  @media(max-width:760px){
+    .analysis-head,.analysis-brief-head{display:grid}
+    .analysis-actions{justify-content:flex-start}
+    .analysis-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+    .analysis-controls{grid-template-columns:minmax(0,1fr)}
+    .analysis-pages{align-items:flex-start;flex-direction:column}
+  }
   /* Library paths shown as distinct chips instead of a comma-run. */
   .paths{display:flex;flex-wrap:wrap;gap:5px}
   .pathchip{display:inline-block;font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
@@ -770,6 +858,15 @@
   .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
   .clleader{color:var(--accent);border-color:var(--accent)}
+  .clopshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clopsfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 14px;margin:12px 0 4px}
+  .clopsfact{border:1px solid var(--line);border-radius:8px;background:var(--panel2);padding:9px 11px;font-size:12px;line-height:1.45}
+  .clopsfact b{display:block;font-size:13px;color:var(--text)}
+  .clopsblockers{margin:8px 0 0;padding-left:20px;font-size:13px;line-height:1.5}
+  .clopsdetail{padding:6px 0;color:var(--muted);font-size:12px}
+  .clopsdetail summary{cursor:pointer;color:var(--text);font-weight:600}
+  .clopsdetail .kvgrid{margin-top:8px}
+  .clopscode{font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;font-size:11px;word-break:break-all}
   /* A join token is a complete cluster credential shown exactly once. It gets
      its own loud box so nobody mistakes it for an id they can leave on screen,
      and `user-select:all` makes copying it one gesture on a machine with no
@@ -780,6 +877,83 @@
   .clrefusal{border:1px solid var(--warn,#fbbf24);border-radius:8px;background:var(--panel2);
     padding:11px 14px;margin-top:12px;font-size:13px;line-height:1.55}
   .clrefusal b{display:block;margin-bottom:3px;color:var(--text)}
+  .cluster-dashboard{display:grid;gap:16px}
+  .cluster-health{display:grid;grid-template-columns:minmax(260px,1.7fr) repeat(3,minmax(105px,.55fr));gap:12px;align-items:stretch}
+  .cluster-health>.clstate{margin:0}
+  .clmetric{border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:12px 14px;display:flex;flex-direction:column;justify-content:center}
+  .clmetric strong{font-size:20px;line-height:1.15;color:var(--text)}
+  .clmetric span{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.35}
+  .cluster-main{display:grid;gap:16px}
+  .cluster-card{border:1px solid var(--line);border-radius:11px;background:var(--panel2);padding:15px}
+  .cluster-card h3{font-size:15px;margin:0 0 5px}
+  .cluster-card p{font-size:12.5px;line-height:1.5;color:var(--muted);margin:0}
+  .clcontextfacts{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}
+  .clcontextfact{border:1px solid var(--line);border-radius:9px;background:var(--panel);padding:10px 12px}
+  .clcontextfact>span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:4px}
+  .clcontextfact>b{display:block;font-size:12.5px;line-height:1.45;color:var(--text)}
+  .clcontextfact>small{display:block;margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.4}
+  .clopssummary{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+  .clopssummary .clstate{margin:10px 0 0}
+  .clopssummary h4{margin:0 0 3px;font-size:13.5px}
+  .clnodes{display:grid;gap:10px;margin-top:12px}
+  .clnode{border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+  .clnode.maintenance{border-color:var(--warn,#fbbf24);background:color-mix(in srgb,var(--warn) 5%,var(--panel))}
+  .clnode.stale{border-color:color-mix(in srgb,var(--bad) 55%,var(--line))}
+  .clnode>summary{position:relative;cursor:pointer;list-style:none;padding:13px 42px 13px 13px}
+  .clnode>summary::-webkit-details-marker{display:none}
+  .clnode>summary::after{content:"›";position:absolute;right:15px;top:50%;color:var(--muted);font-size:22px;line-height:1;transform:translateY(-50%) rotate(90deg);transition:transform .15s ease}
+  .clnode:not([open])>summary::after{transform:translateY(-50%) rotate(0)}
+  .clnode>summary:hover{background:color-mix(in srgb,var(--accent) 6%,transparent)}
+  .clnodesummary,.clnodefoot,.clophead{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap}
+  .clnodesummaryright{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex-wrap:wrap}
+  .clnodebody{padding:0 13px 13px;border-top:1px solid var(--line)}
+  .clnodegroups{display:grid;grid-template-columns:minmax(220px,.9fr) minmax(0,1.6fr);gap:14px}
+  .clnodegroup{min-width:0;padding-top:11px}
+  .clgrouptitle{margin-bottom:8px;color:var(--muted);font-size:10px;font-weight:700;letter-spacing:.06em;text-transform:uppercase}
+  .clnodemeta{display:grid;grid-template-columns:repeat(2,minmax(90px,1fr));gap:7px}
+  .clnodemeta div,.clnodeopmeta div{border-top:1px solid var(--line);padding-top:7px;font-size:12px;color:var(--text);min-width:0;overflow-wrap:anywhere}
+  .clnodemeta span,.clnodeopmeta span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:3px}
+  .clnodeopmeta{display:grid;grid-template-columns:repeat(3,minmax(90px,1fr));gap:7px}
+  .clnodeunknown{border:1px solid var(--line);border-radius:8px;padding:9px 10px;color:var(--muted);font-size:12px;line-height:1.45}
+  .clnodedetail{margin-top:9px;color:var(--muted);font-size:11.5px}
+  .clnodedetail>summary{cursor:pointer;color:var(--text);font-weight:600}
+  .clnodedetail .kvgrid{margin-top:8px}
+  .clnodefoot{align-items:center;margin-top:12px}
+  .clnodefoot .hint{margin:0;max-width:450px}
+  .clactions{display:grid;gap:9px;margin-top:14px}
+  .claction{border:1px solid var(--line);border-radius:9px;padding:11px 12px;background:var(--panel)}
+  .claction .row{margin-top:9px}
+  .clsteps{display:grid;gap:7px;margin:12px 0 0;padding:0;list-style:none}
+  .clsteps li{position:relative;padding-left:25px;color:var(--muted);font-size:12px;line-height:1.4}
+  .clsteps li::before{content:"";position:absolute;left:1px;top:1px;width:15px;height:15px;border:1px solid var(--line);border-radius:50%}
+  .clsteps li.done{color:var(--text)}
+  .clsteps li.done::before{content:"✓";display:grid;place-items:center;color:var(--good);border-color:var(--good);font-size:10px;font-weight:800}
+  .clrecovery{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 5%,var(--panel2))}
+  .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
+  .clvoters{display:grid;gap:6px;margin:12px 0}
+  .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
+  .cldanger{margin-top:0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:0 14px}
+  .cldanger>summary{cursor:pointer;padding:13px 0;font-weight:650;font-size:13px}
+  .cldangerbody{padding:0 0 14px}
+  .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
+  .cldialog::backdrop{background:#0009}
+  .cldialogbody{padding:20px}
+  .cldialogbody h3{margin:0 0 7px}
+  .cldialogbody p{color:var(--muted);font-size:13px;line-height:1.55}
+  .cldialogactions{display:flex;justify-content:flex-end;gap:9px;margin-top:18px}
+  @media(max-width:900px){
+    .cluster-health{grid-template-columns:repeat(3,1fr)}
+    .cluster-health>.clstate{grid-column:1/-1}
+    .clnodegroups{grid-template-columns:1fr}
+  }
+  @media(max-width:620px){
+    .cluster-health{grid-template-columns:1fr}
+    .cluster-health>.clstate{grid-column:auto}
+    .clcontextfacts{grid-template-columns:1fr}
+    .clnodemeta{grid-template-columns:repeat(2,1fr)}
+    .clnodeopmeta{grid-template-columns:repeat(2,1fr)}
+    .clnodesummaryright{justify-content:flex-start}
+  }
   /* Trakt device-link code: big, mono, unmissable — you type it on another screen */
   .traktcode{font-family:var(--font-mono);font-size:34px;font-weight:700;letter-spacing:.18em;color:var(--accent);margin:10px 0 2px;user-select:all}
   .syncnow{padding:6px 10px 2px;font-size:13px;font-weight:600}
@@ -1121,96 +1295,134 @@
     [data-theme=vhs] .pspin{background-size:100% 12px;animation:vhstrack .9s linear infinite}
     @keyframes vhstrack{from{background-position:0 0}to{background-position:0 12px}}
   }
-  /* Panoptic and Redline — dark intelligence-cockpit themes. The reference language is
+  /* Dark intelligence-cockpit themes. The reference language is
      carried by paint rather than by pretending a media library is a globe:
      signal telemetry, smoked glass, mono microcopy and fine instrument lines.
      Artwork and information hierarchy remain Cinema's. */
-  :is([data-theme=panoptic],[data-theme=redline]) body{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) body{
     background-color:var(--bg);
     background-image:
       radial-gradient(ellipse at 50% -18%,color-mix(in srgb,var(--accent) 10%,transparent),transparent 42%),
       repeating-linear-gradient(180deg,transparent 0 3px,color-mix(in srgb,var(--accent) 1.8%,transparent) 3px 4px)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) header.top,
-  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-side,
-  :is([data-theme=panoptic],[data-theme=redline])[data-layout=catalog] .px-tabs{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) header.top,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper])[data-layout=catalog] .px-side,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper])[data-layout=catalog] .px-tabs{
     background:var(--glass-strong);border-color:var(--hairline);
     -webkit-backdrop-filter:blur(24px) saturate(1.35);backdrop-filter:blur(24px) saturate(1.35);
     box-shadow:inset 0 1px rgba(255,255,255,.035),0 10px 30px rgba(0,0,0,.26)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .logo{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .logo{
     background:none;-webkit-background-clip:initial;background-clip:initial;color:var(--text);
     font-family:var(--font-mono);font-size:16px;font-weight:700;letter-spacing:.28em;
     text-transform:uppercase;text-shadow:0 0 24px var(--glow)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .logo::after{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .logo::after{
     content:"";display:inline-block;width:6px;height:6px;margin-left:8px;border:1px solid var(--accent);
     border-radius:50%;vertical-align:2px;box-shadow:0 0 9px var(--glow),inset 0 0 5px var(--glow)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) header.top nav a,
-  :is([data-theme=panoptic],[data-theme=redline]) .px-nav a,
-  :is([data-theme=panoptic],[data-theme=redline]) .th-nav a{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) header.top nav a,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .px-nav a,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .th-nav a{
     font-family:var(--font-mono);font-size:11px;letter-spacing:.09em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) h2.section{
     display:flex;align-items:center;gap:9px;font-family:var(--font-mono);font-size:11px;font-weight:700;
     letter-spacing:.22em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section::before{content:"//";color:var(--accent);text-shadow:0 0 10px var(--glow)}
-  :is([data-theme=panoptic],[data-theme=redline]) h2.section::after{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) h2.section::before{content:"//";color:var(--accent);text-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) h2.section::after{
     content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--hairline),transparent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .card,
-  :is([data-theme=panoptic],[data-theme=redline]) .version,
-  :is([data-theme=panoptic],[data-theme=redline]) .filebox,
-  :is([data-theme=panoptic],[data-theme=redline]) .amenu,
-  :is([data-theme=panoptic],[data-theme=redline]) .pmenu,
-  :is([data-theme=panoptic],[data-theme=redline]) .toast,
-  :is([data-theme=panoptic],[data-theme=redline]) .statsov{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .card,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .version,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .filebox,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .amenu,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .pmenu,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .toast,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .statsov{
     background:var(--glass);border-color:var(--hairline);
     -webkit-backdrop-filter:blur(20px) saturate(1.3);backdrop-filter:blur(20px) saturate(1.3);
     box-shadow:var(--shadow),inset 0 1px rgba(255,255,255,.035)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn){
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) button:not(.ghost):not(.pbtn){
     background:var(--accent-dim);color:var(--accent);border:1px solid color-mix(in srgb,var(--accent) 42%,transparent);
     box-shadow:inset 0 1px rgba(255,255,255,.035);letter-spacing:.02em
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button:not(.ghost):not(.pbtn):hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) button:not(.ghost):not(.pbtn):hover{
     background:var(--accent);color:var(--btn-ink);border-color:var(--accent);box-shadow:0 0 16px var(--glow)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button.ghost{
+  /* Settings tabs are navigation, not six equal primary actions. Their old
+     paint went through the generic button rule above, leaving every tab with
+     the same accent wash and border. Keep inactive tabs neutral; the current
+     one has a solid fill, heavier type and a contrasting inset marker, so the
+     state remains obvious without relying on hue alone. */
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .settabs{gap:6px;border-bottom-color:var(--hairline)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .settabs>button.settab:not(.ghost):not(.pbtn){
+    background:rgba(255,255,255,.025);color:var(--muted);border:1px solid var(--hairline);
+    border-bottom:3px solid transparent;box-shadow:none;letter-spacing:.01em
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .settabs>button.settab:not(.active):not(.ghost):not(.pbtn):hover{
+    background:color-mix(in srgb,var(--accent) 9%,transparent);color:var(--text);
+    border-color:color-mix(in srgb,var(--accent) 48%,transparent);box-shadow:none
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .settabs>button.settab.active:not(.ghost):not(.pbtn),
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .settabs>button.settab.active:not(.ghost):not(.pbtn):hover{
+    background:var(--accent);color:var(--btn-ink);border-color:var(--accent);
+    border-bottom-color:var(--btn-ink);font-weight:700;
+    box-shadow:0 0 18px var(--glow),inset 0 -2px var(--btn-ink)
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) button.ghost{
     background:rgba(255,255,255,.035);border-color:var(--hairline);color:var(--text)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) button.ghost:hover{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) button.ghost:hover{
     background:color-mix(in srgb,var(--accent) 9%,transparent);border-color:color-mix(in srgb,var(--accent) 55%,transparent);color:var(--accent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) input,
-  :is([data-theme=panoptic],[data-theme=redline]) select{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) input,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) select{
     background:color-mix(in srgb,var(--bg) 82%,transparent);border-color:var(--hairline);caret-color:var(--accent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) input:focus,
-  :is([data-theme=panoptic],[data-theme=redline]) select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
-  :is([data-theme=panoptic],[data-theme=redline]) .chip,
-  :is([data-theme=panoptic],[data-theme=redline]) .pill,
-  :is([data-theme=panoptic],[data-theme=redline]) .vbadge,
-  :is([data-theme=panoptic],[data-theme=redline]) .missbadge,
-  :is([data-theme=panoptic],[data-theme=redline]) .specs,
-  :is([data-theme=panoptic],[data-theme=redline]) .kvgrid,
-  :is([data-theme=panoptic],[data-theme=redline]) .activity{
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) input:focus,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) select:focus{border-color:var(--accent);box-shadow:0 0 0 2px var(--accent-dim)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .chip,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .pill,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .vbadge,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .missbadge,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .specs,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .activity{
     font-family:var(--font-mono);letter-spacing:.045em;text-transform:uppercase
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
-  :is([data-theme=panoptic],[data-theme=redline]) .poster:hover{
+  /* Cockpit labels benefit from terse uppercase instrumentation; values and
+     operator explanations do not. Applying tracking and text-transform to the
+     whole definition list produced the spaced all-caps paragraph in System's
+     "Right now" row and encouraged mid-word wrapping. */
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .kvgrid{font-family:var(--font-mono)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .kvgrid dt{
+    font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .kvgrid dd{
+    line-height:1.55;letter-spacing:0;text-transform:none;word-break:normal;overflow-wrap:anywhere
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .system-grid{
+    grid-template-columns:minmax(108px,max-content) minmax(0,1fr);gap:0 20px
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .system-grid>dt,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .system-grid>dd{
+    padding:8px 0;border-bottom:1px solid color-mix(in srgb,var(--hairline) 72%,transparent)
+  }
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .system-grid>:nth-last-child(-n+2){border-bottom:0}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .poster{transition:border-color 150ms ease-out,box-shadow 150ms ease-out}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .poster:hover{
     transform:none;border-color:color-mix(in srgb,var(--accent) 62%,var(--line));
     box-shadow:0 0 0 1px color-mix(in srgb,var(--accent) 18%,transparent),0 0 20px color-mix(in srgb,var(--accent) 12%,transparent)
   }
-  :is([data-theme=panoptic],[data-theme=redline]) .poster .prog>i,
-  :is([data-theme=panoptic],[data-theme=redline]) .hprog>i{box-shadow:0 0 10px var(--glow)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::selection{background:var(--accent);color:var(--btn-ink)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar{width:10px;height:10px}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-track{background:var(--bg)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb{background:var(--hairline);border:2px solid var(--bg)}
-  :is([data-theme=panoptic],[data-theme=redline]) ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .poster .prog>i,
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) .hprog>i{box-shadow:0 0 10px var(--glow)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) ::selection{background:var(--accent);color:var(--btn-ink)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) ::-webkit-scrollbar{width:10px;height:10px}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) ::-webkit-scrollbar-track{background:var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) ::-webkit-scrollbar-thumb{background:var(--hairline);border:2px solid var(--bg)}
+  :is([data-theme=panoptic],[data-theme=redline],[data-theme=panovic],[data-theme=copper]) ::-webkit-scrollbar-thumb:hover{background:var(--accent)}
   /* Paper — deliberately plain: no grain, no glow, no animated brand. The
      rule that earns its keep is the reading measure, because an editorial
      theme whose prose runs the full width of a 1400px column is not one. */
@@ -2071,7 +2283,7 @@
    arbitrary and both spellings render identically — but "no literal hex
    outside forced-colors" is a grep, not a judgement call, and a hex that is
    provably harmless still has to be explained to every future reader and every
-   future gate. --text is opaque in all twenty palettes, so it is a free
+   future gate. --text is opaque in all twenty-two palettes, so it is a free
    opaque carrier. */
 [data-layout=theater] .th-hero .th-bg{
   position:absolute; inset:0; background-size:cover; background-position:center 22%;
@@ -2649,6 +2861,17 @@ const THEMES={
   redline:{name:"Redline", darkOnly:true,
     dark:{"--bg":"#070708","--panel":"#111214","--panel2":"#191a1d","--line":"rgba(255,122,128,.17)","--text":"#f0eded","--muted":"#aaa1a3","--accent":"#ff5964","--accent2":"#d62e3d","--good":"#6ccf9a","--bad":"#ff9f70","--warn":"#f6c760","--radius":"12px","--btn-ink":"#170204","--prose":"#d4ccce","--font":FONT_INTER,"--font-mono":FONT_MONO,
       "--accent-dim":"rgba(255,89,100,.13)","--glow":"rgba(255,55,70,.32)","--glass":"rgba(16,13,15,.80)","--glass-strong":"rgba(10,9,11,.92)","--hairline":"rgba(255,122,128,.17)","--shadow":"0 12px 34px rgba(0,0,0,.62)"}},
+  // Burnt Pumpkin — the original Panovic true-black cockpit, warmed from
+  // tangerine into a deeper harvest signal. Existing `panovic` preferences
+  // intentionally migrate in place to this refined palette.
+  panovic:{name:"Burnt Pumpkin", darkOnly:true,
+    dark:{"--bg":"#000000","--panel":"#181818","--panel2":"#242424","--line":"rgba(255,255,255,.06)","--text":"#e8e6e1","--muted":"#9a9aa0","--accent":"#e8871e","--accent2":"#81420b","--good":"#5fb582","--bad":"#ff7a66","--warn":"#d9a05b","--radius":"10px","--btn-ink":"#150b00","--prose":"#c8c6c1","--font":FONT_INTER,"--font-mono":FONT_MONO,
+      "--accent-dim":"rgba(232,135,30,.12)","--glow":"rgba(232,135,30,.30)","--glass":"rgba(24,24,24,.88)","--glass-strong":"rgba(0,0,0,.94)","--hairline":"rgba(255,255,255,.06)","--shadow":"0 4px 14px rgba(0,0,0,.8)"}},
+  // Copper — the same neutral true-black cockpit with a quieter, earthier
+  // signal. Status colors stay identical so operational meaning is stable.
+  copper:{name:"Copper", darkOnly:true,
+    dark:{"--bg":"#000000","--panel":"#181818","--panel2":"#242424","--line":"rgba(255,255,255,.06)","--text":"#e8e6e1","--muted":"#9a9aa0","--accent":"#cf7643","--accent2":"#70402b","--good":"#5fb582","--bad":"#ff7a66","--warn":"#d9a05b","--radius":"10px","--btn-ink":"#160b06","--prose":"#c8c6c1","--font":FONT_INTER,"--font-mono":FONT_MONO,
+      "--accent-dim":"rgba(207,118,67,.12)","--glow":"rgba(207,118,67,.28)","--glass":"rgba(24,24,24,.88)","--glass-strong":"rgba(0,0,0,.94)","--hairline":"rgba(255,255,255,.06)","--shadow":"0 4px 14px rgba(0,0,0,.8)"}},
 };
 // Favicons: the noirr theme wears the kit icon (icon-a — n + cursor, midnight
 // in both showtimes); everything else gets a neutral play mark.
@@ -2754,6 +2977,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <div class="toast" id="toast"></div>
 
 <script src="/assets/playback-policy.js"></script>
+<script src="/assets/playback-control.js"></script>
 <script src="/assets/reader.js"></script>
 <script src="/assets/hls.min.js"></script>
 <script>
@@ -2797,12 +3021,12 @@ async function startNativeReader(token,itemId,fileId){
 window.startNativeReader=startNativeReader;
 
 // ---- api helpers ----------------------------------------------------------
-async function api(path, {method="GET", body=null, raw=false}={}){
+async function api(path, {method="GET", body=null, raw=false, signal=null}={}){
   const authGeneration=AUTH_GENERATION;
   const headers={};
   if(TOKEN) headers["authorization"]="Bearer "+TOKEN;
   if(body){ headers["content-type"]="application/json"; }
-  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null});
+  const res=await fetch(API+path,{method,headers,body:body?JSON.stringify(body):null,signal});
   if(authGeneration!==AUTH_GENERATION){
     const error=new Error("stale authorization"); error.status=401; error.staleAuth=true;
     throw error;
@@ -2898,6 +3122,8 @@ function clientLog(ev){
       file_id:p.fileId||null,
       vcodec:s.video_codec||null,
     }, ev||{});
+    const control=p.controlReporter&&p.controlReporter.legacyContext();
+    if(control && body.control==null) body.control=control;
     fetch(API+"/client-log",{method:"POST",keepalive:true,
       headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
       body:JSON.stringify(body)}).catch(()=>{});
@@ -2929,11 +3155,47 @@ function bufferRunway(v){
 // switch, quality change, rescue transcode) are far cheaper than a cold start
 // and would flatter the average.
 let ATTEMPT_SEQ=0;
+// Every full play() open supersedes the previous one, including an older call
+// still awaiting a decision or session. The token is independent of PLAYER so
+// it survives the point where a successful open replaces that object.
+function createPlaybackOpenGate(){
+  let sequence=0, replayAttempt=null;
+  const current=attempt=>!!attempt&&attempt.token===sequence;
+  return {
+    begin(kind){
+      if(kind==="replay"&&replayAttempt&&current(replayAttempt)) return null;
+      const next=sequence+1;
+      if(!Number.isSafeInteger(next)) throw new RangeError("playback open sequence exhausted");
+      const attempt=Object.freeze({token:next,kind:kind==="replay"?"replay":"open"});
+      sequence=next;
+      if(attempt.kind==="replay") replayAttempt=attempt;
+      return attempt;
+    },
+    current,
+    finish(attempt){ if(replayAttempt===attempt) replayAttempt=null; },
+    invalidate(){
+      const next=sequence+1;
+      if(!Number.isSafeInteger(next)) throw new RangeError("playback open sequence exhausted");
+      sequence=next;
+    },
+    acceptResource(attempt,resource,release){
+      if(current(attempt)) return true;
+      if(resource!=null&&typeof release==="function") release(resource);
+      return false;
+    },
+  };
+}
+const PLAY_OPEN_GATE=createPlaybackOpenGate();
 // Set by a caller that is about to re-enter play() for a reason play()
 // cannot infer — a quality change looks exactly like a resume from the
 // inside, and mislabelling it would put restart timings in the cold-start
 // bucket where they flatter the numbers.
 let PENDING_ATTEMPT_REASON=null;
+function takePlaybackAttemptReason(){
+  const reason=PENDING_ATTEMPT_REASON;
+  PENDING_ATTEMPT_REASON=null;
+  return reason;
+}
 // Set when a restart's whole point is "without the subtitles". play() re-applies
 // the server-chosen default track on arrival, and when that default is the
 // bitmap track that forced a burn — a forced-flag PGS on a foreign-dialogue
@@ -3065,14 +3327,15 @@ function noteAutoStall(p,kind,episodeAtMs){
   });
   abr.lastStallAtMs=now;
 }
-function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs){
+function recordWaitStall(p, kind, ms, runway, detail, episodeAtMs, controlTrigger){
   p.stalls=(p.stalls||0)+1;
   p.stallsByKind=p.stallsByKind||{supply:0,decode:0};
   p.stallsByKind[kind]++;
   noteAutoStall(p,kind,episodeAtMs);
   const ctx=playbackContext();
   clientLog(Object.assign({level:"warn",event:"stall",detail:detail||kind,ms,
-    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${runway==null?"?":runway}s buffered`},
+    message:`${kind} stall, ${(ms/1000).toFixed(1)}s, ${runway==null?"?":runway}s buffered`,
+    control_trigger:controlTrigger||null},
     ctx, {runway}));
 }
 // Called when playback resumes (or is abandoned). Decides, in retrospect,
@@ -3101,7 +3364,14 @@ function persistentWait(v,p,began,generation){
   const ms=Math.round(performance.now()-began), runway=p.waitRunway;
   const kind=(runway!=null && runway<SUPPLY_RUNWAY_SECS)?"supply":"decode";
   p.waitReported=true;
-  recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began);
+  // This exact transition owns the legacy reopen. Cadence alone is too late:
+  // the replacement normally stops this reporter before its next scheduled
+  // exchange, leaving the server with only the earlier `waiting` fact.
+  const controlObservation=kind==="supply"
+    ? {decoder_state:"starved"}
+    : {decoder_state:"failed",error_code:"decoder",error_detail:"persistent_decode_stall"};
+  const controlTrigger=notifyPlaybackControl("stalled",controlObservation);
+  recordWaitStall(p,kind,ms,runway,`${kind}-persistent`,began,controlTrigger);
   p.stallFrom=pbPosSec();
   const action=PlaybackPolicy.stallRecoveryAction({
     method:p.method, quality:playQuality(),
@@ -3129,7 +3399,8 @@ function persistentWait(v,p,began,generation){
   p.recoveringStall={at:performance.now(),action,kind,position:p.stallFrom,
     targetHeight:recoveryHeight};
   clientLog(Object.assign({level:"warn",event:"stall_recovery",detail:`attempt:${action}`,
-    message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`},
+    message:`persistent ${kind} stall — ${action==='transcode'?"switching to transcode":"reconnecting"}`,
+    control_trigger:controlTrigger},
     playbackContext()));
   const position=p.recoveringStall.position;
   endWait(false);
@@ -4651,11 +4922,45 @@ function specBlock(f){
     : trackFactRow("Subtitles", subs, sd&&sd.selected_index!=null?sd.selected_index:-1,
         (s,on)=>trackChip(subFactLabel(s),on),
         subs.length?preferredLanguageNote("subtitles",sd):"", true);
+  // Lead with what a viewer will actually get. "VOD index" is an internal
+  // prerequisite; VOD HLS versus Live HLS is the playback capability someone
+  // is deciding whether to use.
+  const hlsRow=f.vod_index_status==="indexed"
+    ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Fixed, seekable timeline · analysis is ready for this file</span></dd>`
+    : f.vod_index_status==="pending"
+      ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
+      : f.vod_index_status==="unsupported"
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
+  const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
     ${audRow}
     ${subRow}
-    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}`;
+    ${hlsRow}
+    <dt>File</dt><dd class="fn">${esc(f.filename)}${file?" · "+esc(file):""}</dd></dl>${prePlayPickers(f)}${analysis}`;
+}
+function analysisFileControl(f){
+  if(!ME||!ME.is_admin||!f.available||!f.video_codec) return "";
+  const rebuild=f.vod_index_status==="indexed";
+  const unsupported=f.vod_index_status==="unsupported";
+  const fileId=exactWireId(f);
+  const state=rebuild?"VOD HLS ready":f.vod_index_status==="unsupported"?"VOD analysis unsupported":"VOD analysis pending";
+  return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
+    <div class="analysis-brief-head"><div><h2>Content analysis</h2>
+      <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>
+      <div class="analysis-actions">${unsupported?"":`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>`}
+      <a class="ghost sm" href="#/analysis">View queue</a></div></div></div>`;
+}
+async function requestAnalysis(fileId,force,btn,stay=false){
+  const label=btn&&btn.textContent;
+  if(btn){ btn.disabled=true; btn.textContent=force?"Queueing rebuild…":"Queueing…"; }
+  try{
+    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index"]}});
+    toast(response.joined?"Analysis is already queued":"Analysis queued");
+    if(stay&&location.hash==="#/analysis") await renderAnalysis(PAGE_RENDER_GENERATION,true);
+    else location.hash="#/analysis";
+  }catch(error){ toast(error.message||"Couldn’t queue analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){ btn.disabled=false; btn.textContent=label; } }
 }
 // ---- pre-play audio / subtitle selection ----------------------------------
 // A choice made on the detail screen, before there is a player at all. It
@@ -5565,7 +5870,11 @@ function attachHls(video, playlistUrl, startAt){
         return;
       }
       console.warn("[cinema] hls.js fatal",d.type,d.details);
-      clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details}, playbackContext()));
+      const hlsFailure=playbackControlHlsFatal(d,!!(PLAYER&&PLAYER.started));
+      const isMedia=hlsFailure.media_failure;
+      const controlTrigger=notifyPlaybackControl("failed",hlsFailure.observation);
+      clientLog(Object.assign({level:"error",event:"hls_fatal",detail:d.type,message:d.details,
+        control_trigger:controlTrigger}, playbackContext()));
       if(finishStallRecovery("failed",String(d.details||d.type||"hls.js fatal error"))){
         showStallRecoveryFailure("hls.js could not resume the stream ("+d.details+").");
         return;
@@ -5589,8 +5898,6 @@ function attachHls(video, playlistUrl, startAt){
       // deliberately left alone: a different encode does not fix an
       // unreachable server, and re-encoding a title because the wifi dropped
       // is the "downgrade on a guess" this whole change refuses to do.
-      const isMedia=(Hls.ErrorTypes && d.type===Hls.ErrorTypes.MEDIA_ERROR)
-                    || /codec|decode|parsing/i.test(String(d.details||""));
       const fallback=PLAYER && PlaybackPolicy.fallbackAction({
         method:PLAYER.method,
         alreadyTried:PLAYER.triedFallback,
@@ -5600,7 +5907,8 @@ function attachHls(video, playlistUrl, startAt){
       if(fallback==='transcode'){
         PLAYER.triedFallback=true;
         clientLog(Object.assign({level:"warn",event:"stream_rejected",detail:d.type,
-          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding"},
+          message:"hls.js could not decode the "+PLAYER.method.replace('_',' ')+" stream ("+d.details+") — re-encoding",
+          control_trigger:controlTrigger},
           playbackContext()));
         setLoading(true,"Stream rejected — switching to transcode…",
           "this browser's decoder refused the copied stream ("+d.details+"); re-encoding instead");
@@ -5620,7 +5928,7 @@ function attachHls(video, playlistUrl, startAt){
       if(explained){
         clientLog(Object.assign({level:"error",event:"stream_refused",
           detail:STREAM_FAILURE.code||String(STREAM_FAILURE.status),
-          message:explained.detail}, playbackContext()));
+          message:explained.detail,control_trigger:controlTrigger}, playbackContext()));
         setLoading(true,explained.title,explained.detail);
         toast(explained.retryable?"Still starting…":"Playback failed");
         return;
@@ -5651,6 +5959,17 @@ function attachHls(video, playlistUrl, startAt){
 const PLAYBACK_ID=(function(){
   try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
   return "pb-"+Math.random().toString(36).slice(2)+Date.now().toString(36);
+})();
+// The control endpoint deliberately requires a UUID so an untrusted client
+// cannot create an unbounded identity vocabulary. Keep this separate from the
+// older playback_id fallback, whose server contract predates that rule.
+const CONTROL_CLIENT_ID=(function(){
+  try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
+  let seed=Date.now();
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g,c=>{
+    const r=(seed+Math.random()*16)%16|0; seed=Math.floor(seed/16);
+    return (c==='x'?r:(r&3)|8).toString(16);
+  });
 })();
 function newRequestId(){
   try{ if(crypto&&crypto.randomUUID) return crypto.randomUUID(); }catch(e){}
@@ -5714,6 +6033,203 @@ function selectedAudioIndex(player){
   const track=p&&p.audio&&p.audio[p.curAudio];
   return track?track.index:0;
 }
+function playbackControlCapabilities(){
+  const codecs=["h264"];
+  const advertised=String(PLAY_CAPS&&PLAY_CAPS.vcodec||"").split(",");
+  if(advertised.includes("hevc")) codecs.push("hevc");
+  if(advertised.includes("av1")) codecs.push("av1");
+  const ranges=["sdr"];
+  if(PLAY_CAPS&&PLAY_CAPS.hdr10t) ranges.push("hdr10");
+  if(PLAY_CAPS&&PLAY_CAPS.dv) ranges.push("dolby_vision");
+  const displayPx=Math.max((typeof screen!=="undefined"&&screen.height)||0, window.innerHeight||0)
+    * Math.max(1, window.devicePixelRatio||1);
+  const decoderPx=Number(PLAY_CAPS&&PLAY_CAPS.maxheight)||displayPx;
+  const px=Math.min(displayPx||decoderPx,decoderPx||displayPx);
+  return {platform:"web",max_height:Math.max(144,Math.min(2160,Math.round(px)||1080)),
+    codecs,dynamic_ranges:ranges,dual_player_preparation:false};
+}
+function playbackControlSelection(p){
+  const requested=playQuality();
+  const sourceHeight=Math.round(Number(p&&p.source&&p.source.height)||0);
+  const manualHeight=/^\d+$/.test(String(requested||""))?Number(requested)
+    :["original","nomse"].includes(requested)&&sourceHeight>=144?sourceHeight:null;
+  const quality=manualHeight!=null
+    ? {mode:"manual",height:Math.max(144,Math.min(2160,manualHeight))} : {mode:"auto"};
+  const selected=(p&&p.curSub>=0)?p.curSub:null;
+  const subtitle=selected==null ? {mode:"off",track:null}
+    : {mode:p.burnedSub!=null?"burn":"native",track:selected};
+  const audioTrack=Math.max(0,Math.min(1024,Math.round(selectedAudioIndex(p))));
+  const audioOffset=Math.max(-15000,Math.min(15000,Math.round(p&&p.aoffset||0)));
+  return {quality,audio_track:audioTrack,subtitle,
+    audio_offset_ms:audioOffset,codec:"auto",dynamic_range:"auto"};
+}
+function playbackControlBufferedRange(v,p,positionMs){
+  try{
+    const local=(v.currentTime||0), origin=p.offset||0;
+    for(let i=0;i<v.buffered.length;i++){
+      if(v.buffered.start(i)<=local+0.25 && v.buffered.end(i)>=local){
+        const from=Math.max(0,Math.round((origin+v.buffered.start(i))*1000));
+        const through=Math.max(positionMs,Math.round((origin+v.buffered.end(i))*1000));
+        return {from,through};
+      }
+    }
+  }catch(e){}
+  return {from:null,through:positionMs};
+}
+// Recovery handlers know facts the media element cannot expose: whether a
+// persistent wait ran out of bytes or stalled with bytes already buffered,
+// and whether hls.js stopped on a manifest, network, media, or decoder error.
+// Admit only protocol enums and a tightly-bounded single-line detail so a
+// library error object can never leak arbitrary fields into the wire request.
+function playbackControlObservationOverride(value){
+  if(!value||typeof value!=="object") return null;
+  const observation={};
+  if(["unknown","ready","starved","failed"].includes(value.decoder_state))
+    observation.decoder_state=value.decoder_state;
+  if(["network","manifest","media","decoder","drm","unknown"].includes(value.error_code))
+    observation.error_code=value.error_code;
+  if(observation.error_code && value.error_detail!=null){
+    const detail=String(value.error_detail).replace(/[\r\n\0]/g," ").slice(0,120);
+    if(detail) observation.error_detail=detail;
+  }
+  return Object.keys(observation).length?observation:null;
+}
+function playbackControlHlsFatal(data,started){
+  const detail=String(data&&data.details||"");
+  const type=String(data&&data.type||"");
+  const errorTypes=typeof Hls!=="undefined"&&Hls.ErrorTypes;
+  const mediaFailure=!!((errorTypes && data&&data.type===errorTypes.MEDIA_ERROR)
+    || /codec|decode|parsing/i.test(detail));
+  const manifestFailure=/manifest/i.test(detail);
+  const networkFailure=!mediaFailure && !!((errorTypes&&data&&data.type===errorTypes.NETWORK_ERROR)
+    || /network|loaderror|loadtimeout/i.test(type+" "+detail));
+  const observation=mediaFailure
+    ? {decoder_state:"failed",error_code:/codec|decode/i.test(detail)?"decoder":"media",
+        error_detail:detail||type||"hls_media_fatal"}
+    : {decoder_state:started?"ready":"unknown",
+        error_code:manifestFailure?"manifest":networkFailure?"network":"unknown",
+        error_detail:detail||type||"hls_fatal"};
+  return {media_failure:mediaFailure,observation};
+}
+function playbackControlSnapshot(v,p){
+  if(!v||!p) return null;
+  const seeking=!!v.seeking || p._seekPreview!=null;
+  const hinted=!p.started&&p.controlPositionHintSec!=null?p.controlPositionHintSec:null;
+  const preview=seeking&&p._seekPreview!=null
+    ? Math.max(0,p._seekPreview-((p.bookOffset||0)/1000)) : null;
+  let positionMs=Math.max(0,Math.round((hinted!=null?hinted:
+    preview!=null?preview:(p.offset||0)+(v.currentTime||0))*1000));
+  const duration=Math.max(0,Number(p.durMs||p.knownDur||0));
+  if(duration>0) positionMs=Math.min(positionMs,duration);
+  const range=hinted!=null?{from:null,through:positionMs}
+    :playbackControlBufferedRange(v,p,positionMs);
+  // `ended` means the end of the bytes the browser received, not necessarily
+  // the title. The legacy early-end handler reopens a truncated stream, so it
+  // is active failed demand until it is actually within the completion slack.
+  const terminalEnded=!!v.ended && (!(duration>0)
+    || positionMs>=Math.max(0,duration-ENDED_SLACK_SEC*1000));
+  const demand=(terminalEnded?"end":v.ended?"active":v.paused?"hold":"active");
+  let render="rendering";
+  if(v.error) render="failed";
+  else if(v.ended) render=terminalEnded?"ended":"failed";
+  else if(p.controlRenderOverride) render=p.controlRenderOverride;
+  else if(seeking) render="seeking";
+  else if(!p.started) render="starting";
+  else if(p.waitAt && performance.now()-p.waitAt>=PERSISTENT_STALL_MS) render="stalled";
+  else if(p.waitAt || (!v.paused&&v.readyState<3)) render="waiting";
+  const rate=Number(v.playbackRate||0);
+  const playbackRate=demand==="active"
+    ? Math.max(0.25,Math.min(4,rate||1)) : Math.max(0,Math.min(4,rate));
+  let dropped=null;
+  try{
+    const q=v.getVideoPlaybackQuality&&v.getVideoPlaybackQuality();
+    if(q&&Number.isFinite(q.droppedVideoFrames)) dropped=Math.max(0,Math.round(q.droppedVideoFrames));
+  }catch(e){}
+  const observation={decoder_state:v.error?"failed":render==="stalled"?"starved":p.started?"ready":"unknown"};
+  if(dropped!=null) observation.dropped_frames=dropped;
+  if(v.error){ observation.error_code="media"; observation.error_detail=`media_code_${v.error.code||0}`; }
+  // The element-level error is a generic fallback. A recovery callback may
+  // know the actual HLS class, so its bounded evidence takes precedence.
+  const triggerObservation=playbackControlObservationOverride(p.controlObservationOverride);
+  if(triggerObservation) Object.assign(observation,triggerObservation);
+  const bps=p.hls&&Number(p.hls.bandwidthEstimate);
+  return {demand,position_ms:positionMs,buffered_from_ms:range.from,
+    buffered_through_ms:range.through,playback_rate:playbackRate,render_state:render,
+    seek_target_ms:render==="seeking"?positionMs:null,
+    observed_download_bps:Number.isFinite(bps)&&bps>0?Math.round(bps):null,
+    selection:playbackControlSelection(p),capabilities:playbackControlCapabilities(),
+    observation,acknowledgement:null};
+}
+async function sendPlaybackControl(url,body,signal){
+  const response=await fetch(url,{method:"POST",signal,
+    headers:Object.assign({"content-type":"application/json"},TOKEN?{"authorization":"Bearer "+TOKEN}:{}),
+    body:JSON.stringify(body)});
+  if(!response.ok){
+    let failure=null;
+    try{ failure=await response.json(); }catch(e){}
+    const code=failure&&typeof failure.code==="string"?failure.code:null;
+    const error=new Error(code?`playback control ${code}`:"playback control HTTP "+response.status);
+    error.status=response.status; error.code=code;
+    if(failure&&typeof failure.generation==="string") error.generation=failure.generation;
+    if(failure&&Number.isSafeInteger(failure.control_epoch)) error.controlEpoch=failure.control_epoch;
+    if(failure&&Number.isSafeInteger(failure.retry_after_ms)) error.retryAfterMs=failure.retry_after_ms;
+    throw error;
+  }
+  return response.json();
+}
+function stopPlaybackControl(p){
+  if(p&&p.controlReporter){ p.controlReporter.stop(); p.controlReporter=null; }
+}
+function notifyPlaybackControl(renderOverride,observationOverride){
+  const p=PLAYER;
+  if(!p) return null;
+  if(["stalled","failed"].includes(renderOverride)) p.controlRenderOverride=renderOverride;
+  const observation=playbackControlObservationOverride(observationOverride);
+  if(observation) p.controlObservationOverride=observation;
+  return p.controlReporter?p.controlReporter.notify():null;
+}
+function startPlaybackControl(v,p,bootstrap){
+  stopPlaybackControl(p);
+  p.controlLastRequest=null;
+  p.controlLastResponse=null;
+  p.controlLastExchangeAt=null;
+  p.controlLastError=null;
+  p.controlLastFailureLogAt=null;
+  if(!bootstrap || !window.PlurxPlaybackControl) return null;
+  try{
+    const reporter=new PlurxPlaybackControl.Reporter({bootstrap,
+      clientInstanceId:CONTROL_CLIENT_ID,
+      snapshot:()=>PLAYER===p?playbackControlSnapshot(v,p):null,
+      send:sendPlaybackControl,
+      onExchange:({request,response,error})=>{
+        if(PLAYER!==p||p.controlReporter!==reporter) return;
+        p.controlLastRequest=request;
+        if(response){
+          const recovered=p.controlLastError;
+          p.controlLastResponse=response;
+          p.controlLastExchangeAt=Date.now();
+          p.controlLastError=null;
+          if(recovered) clientLog({level:"info",event:"playback_control",detail:"recovered",
+            message:"playback-control exchange recovered; legacy recovery remained authoritative"});
+        }
+        if(error){
+          const now=Date.now(), message=String(error.message||error);
+          p.controlLastError={at:now,message};
+          if(!p.controlLastFailureLogAt||now-p.controlLastFailureLogAt>=60000){
+            p.controlLastFailureLogAt=now;
+            clientLog({level:"warn",event:"playback_control",
+              detail:String(error.code||error.name||"exchange_failed"),message});
+          }
+        }
+      }});
+    p.controlReporter=reporter;
+    reporter.start();
+    return reporter;
+  }catch(error){
+    p.controlLastError={at:Date.now(),message:String(error&&error.message||error)};
+    return null;
+  }
+}
 async function openSession(fileId, opts){
   const contract=vodClientContract();
   const body=Object.assign({},opts||{},
@@ -5721,18 +6237,7 @@ async function openSession(fileId, opts){
   // A null height is the *absence* of a request, not a request for nothing:
   // sending the key would have the server clamp null to its floor.
   if(body.height==null) delete body.height;
-  const info=await api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
-  if(!info || info.vod!==true){
-    const message="This server returned the removed live HLS presentation. Update every server node before playing this title.";
-    const error=new Error(message);
-    error.status=426;
-    error.code="server_vod_required";
-    error.streamFailure=PlaybackPolicy.parseStreamFailure({status:426,body:JSON.stringify({
-      code:error.code,message
-    })});
-    throw error;
-  }
-  return info;
+  return api(`/files/${fileId}/hls/sessions`,{method:"POST",body});
 }
 // Take on a newly-opened session's identity, and attach it.
 //
@@ -5746,6 +6251,9 @@ async function openSession(fileId, opts){
 // is now the whole immutable title, so the media element seeks there directly.
 // The returned absolute position is also what the stall watchdog is armed with.
 function attachSession(v, t, info, wantSec){
+  stopPlaybackControl(t);
+  t.controlRenderOverride=null;
+  t.controlObservationOverride=null;
   t.offset=info.start_seconds||0;
   t.encoder=info.encoder||null;
   t.sessionId=info.session_id||null;
@@ -5769,7 +6277,9 @@ function attachSession(v, t, info, wantSec){
   if(t===PLAYER) renderPlayerInfo();
   t.probeUrl=info.playlist_url;
   const into = t.vod ? Math.max(0, wantSec||0) : 0;
+  t.controlPositionHintSec=(t.offset||0)+into;
   attachHls(v, info.playlist_url, into);
+  startPlaybackControl(v,t,info.control||null);
   return into + (t.offset||0);
 }
 // Tell the server we are finished with a stream. Without this the encoder
@@ -6109,7 +6619,13 @@ function qualityLabel(){
   return h?`${h}p`:"Auto";
 }
 
-async function play(fileId, title, resumeMs, knownDurMs, meta){
+async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttempt){
+  const openAttempt=reservedOpenAttempt||PLAY_OPEN_GATE.begin("open");
+  const openIsCurrent=()=>PLAY_OPEN_GATE.current(openAttempt);
+  // Consume both one-shot inputs before the first await. An overlapping play
+  // may set its own reason while this decision is in flight; reading the
+  // shared slot afterwards would steal the newer attempt's attribution.
+  const requestedAttemptReason=takePlaybackAttemptReason();
   // Consumed first, whatever happens to this attempt: a "subtitles off"
   // restart that failed at the decision must not leak its flag into the next
   // unrelated play and silently strip that one's default track.
@@ -6139,7 +6655,10 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
   // and the marked default tracks all describe the tracks that are about to
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
-  let decision; try{ decision=await api(decisionUrl(fileId, qualityForce(), selection));}catch(e){ setLoading(false); toast(e.message); return closePlayer(); }
+  let decision;
+  try{ decision=await api(decisionUrl(fileId, qualityForce(), selection));}
+  catch(e){ if(!openIsCurrent()) return; setLoading(false); toast(e.message); return closePlayer(); }
+  if(!openIsCurrent()) return;
   let retestDecodeLimit=false;
   let learnedLimitView=null;
   // A device that measured this exact media load as unstable routes straight
@@ -6173,6 +6692,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
         const d2=await api(decisionUrl(fileId, "transcode", selection));
+        if(!openIsCurrent()) return;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
           deliveredRange:d2.delivered_dynamic_range
@@ -6180,7 +6700,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
         d2.reasons=[`${learnedLimitView.reason} `+
           `(Quality → Original bypasses this measurement)`].concat(d2.reasons||[]);
         decision=d2;
-      }catch(e){ /* the limit is advice; the original decision still plays */ }
+      }catch(e){ if(!openIsCurrent()) return; /* the limit is advice; the original decision still plays */ }
     }
   }
   const startSec=(resumeMs||0)/1000;
@@ -6265,9 +6785,11 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
       failedHeights:new Set()},
     waitAt:null, waitRunway:null, waitTimer:null, waitReported:false,
     stallsByKind:null, stallRecoveries:0, recoveringStall:null, stallPrompt:false,
-    burnedSub:preBurn, vod:false, };
-  newAttempt(PENDING_ATTEMPT_REASON || (startSec>0?"resume":"cold-start"));
-  PENDING_ATTEMPT_REASON=null;
+    burnedSub:preBurn, vod:false, openToken:openAttempt.token, };
+  const openedPlayer=PLAYER;
+  const openIsAttached=()=>openIsCurrent()&&PLAYER===openedPlayer
+    &&PLAYER.openToken===openAttempt.token;
+  newAttempt(requestedAttemptReason || (startSec>0?"resume":"cold-start"));
   if(PLAYER.curAudio<0) PLAYER.curAudio=0;
   const initialAudio=selectedAudioIndex(PLAYER);
   setupAirplay(video);
@@ -6290,7 +6812,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
   // without the 400 ms guess and in every delivery method rather than only the
   // two the cold-start default is limited to.
   const defSub=PLAYER.subs.find(s=>s.default);
-  if(defSub && !skipDefaultSub && wantSub==null && decision.method!=='transcode'){ setTimeout(()=>{ if(PLAYER.fileId===fileId) setSub(defSub.index); }, 400); }
+  if(defSub && !skipDefaultSub && wantSub==null && decision.method!=='transcode'){
+    setTimeout(()=>{ if(openIsAttached()) setSub(defSub.index); }, 400);
+  }
 
   const nativeHls=useNativeHls(video);
   const segmentedRemux=segmentedRemuxOk(decision,video);
@@ -6317,10 +6841,15 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     // knows a burn is why this is a transcode at all.
     setLoading(true,"Starting the transcoder…",transcodeReason(PLAYER));
     let info; try{ info=await openSession(fileId,transcodeOpts(startSec,initialAudio));}catch(e){
-      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
       return;
     }
-    const from=attachSession(video, PLAYER, info, startSec);
+    if(!PLAY_OPEN_GATE.acceptResource(openAttempt,info&&info.session_id,releaseSession)) return;
+    if(!openIsAttached()){
+      releaseSession(info&&info.session_id);
+      return;
+    }
+    const from=attachSession(video, openedPlayer, info, startSec);
     setLoading(true,"Preparing the stream…",(PLAYER.encoder?("encoder: "+PLAYER.encoder+" — "):"")+
       (PLAYER.vod?"already transcoded — playing from the cache":"buffering the first segments"));
     armStall(from);
@@ -6341,9 +6870,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
     setLoading(true,"Preparing the stream…",
       why? `${why} — sending it as HLS so the player can buffer ahead`
          : "remuxing to HLS — keeping the original video");
-    try{ await startCopyHls(video, startSec); }
+    try{ if(!await startCopyHls(video, startSec, openIsAttached, openAttempt)) return; }
     catch(e){
-      if(!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
+      if(openIsAttached()&&!showSessionOpenFailure(e)){ setLoading(false); toast(e.message); }
       return;
     }
   } else {
@@ -6384,7 +6913,9 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
   // rather than before the route, because setSub() shifts the cues by
   // `PLAYER.offset` and the route is what sets it. A <track> is not a stream
   // restart, so the choice arrives with the first frames.
-  if(applied.textSub!=null && PLAYER.fileId===fileId) setSub(applied.textSub);
+  if(applied.textSub!=null && openIsAttached()) setSub(applied.textSub);
+
+  if(!openIsAttached()) return;
 
   // Once, per playback, as soon as the element knows what it is decoding.
   probeDecode();
@@ -6407,7 +6938,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta){
 // `live` (optional) is re-checked after the await: a seek or audio switch that
 // has since been superseded must not attach, or two hls.js instances end up
 // pulling two server sessions at once. Returns false when it bailed.
-async function startCopyHls(v, startSec, live){
+async function startCopyHls(v, startSec, live, openAttempt){
   const aidx=selectedAudioIndex(PLAYER);
   const src=PLAYER.source||{}, track=PLAYER.audio&&PLAYER.audio[PLAYER.curAudio];
   const codec=track&&track.codec;
@@ -6429,11 +6960,11 @@ async function startCopyHls(v, startSec, live){
       preserve_dolby_vision:!!PLAYER.preserveDolbyVision,start:startSec||0,audio:aidx,
       audio_offset_ms:PLAYER.aoffset||0});
   }catch(error){
+    if(live && !live()) return false;
     const fallback=PlaybackPolicy.indexPendingFallback({
       code:error&&error.code,method:PLAYER&&PLAYER.method,nativeHls:native
     });
     if(fallback!=="progressive_remux") throw error;
-    if(live && !live()) return false;
     // The immutable index is node-local and may still be catching up after a
     // deploy. This exact browser already proved it can take the progressive
     // remux; use that route instead of turning a background-cache miss into an
@@ -6453,7 +6984,12 @@ async function startCopyHls(v, startSec, live){
     v.src=remuxUrl(base,aidx,from); armStall(from,20000); v.play().catch(()=>{});
     return true;
   }
-  if(live && !live()) return false;
+  if(openAttempt&&!PLAY_OPEN_GATE.acceptResource(
+    openAttempt,info&&info.session_id,releaseSession)) return false;
+  if(live && !live()){
+    releaseSession(info&&info.session_id);
+    return false;
+  }
   PLAYER.method='remux'; PLAYER.copyHls=true;
   armStall(attachSession(v, PLAYER, info, startSec));
   return true;
@@ -7261,6 +7797,7 @@ function resetMediaSource(v){
 // with it and the callbacks run forever.
 function stopPlayerTimers(){
   if(!PLAYER) return;
+  stopPlaybackControl(PLAYER);
   clearInterval(PLAYER.timer); PLAYER.timer=null;
   clearTimeout(PLAYER.idleTimer); PLAYER.idleTimer=null;
   clearTimeout(PLAYER.stallTimer); PLAYER.stallTimer=null;
@@ -7650,6 +8187,7 @@ async function stallDiagnose(){
   if(!PLAYER || PLAYER.started) return;
   const from=(PLAYER.stallFrom!=null)?PLAYER.stallFrom:0;
   if(pbPosSec()>from+0.35) return;   // it actually started moving — never mind
+  const controlTrigger=notifyPlaybackControl("stalled");
   const hdrs={}; if(TOKEN) hdrs["authorization"]="Bearer "+TOKEN;
   const url=PLAYER.probeUrl;
   let verdict="Playback hasn't started.", detail="Open Settings → Logs and read the last plurxd::stream / transcode line.";
@@ -7680,7 +8218,8 @@ async function stallDiagnose(){
   console.warn("[cinema] playback stall diagnosis",{method:PLAYER.method,url,networkState:v&&v.networkState,readyState:v&&v.readyState,error:v&&v.error&&v.error.code,verdict});
   if(PLAYER.started) return;   // raced with a late start
   finishStallRecovery("failed",verdict);
-  clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,detail:detail});
+  clientLog({level:"warn",event:"stall",src:(url||"").split("?")[0],message:verdict,
+    detail:detail,control_trigger:controlTrigger});
   setLoading(true, verdict, detail,
     `<button onclick="retryPlayback()">Try again</button>`+
     (PLAYER.method!=='transcode'?`<button onclick="startTranscodeFallback('stall-manual')">Force transcode</button>`:``)+
@@ -7806,7 +8345,31 @@ function pbTick(){
 }
 function pbSyncPlayIcon(){ const v=document.getElementById("video"), b=document.getElementById("pbplay");
   if(b&&v){ const paused=(v.paused||v.ended); b.textContent=paused?"▶":"❚❚"; b.setAttribute("aria-label", paused?"Play":"Pause"); } }
-function togglePlay(){ const v=document.getElementById("video"); if(!v) return; if(v.paused||v.ended) v.play().catch(()=>{}); else v.pause(); playerActivity(); }
+// A control generation is terminal once the server accepts demand=end. The
+// ended media element can technically be played again, but that would reuse a
+// reporter which has deliberately stopped and, for HLS, a completed session.
+// Replay therefore takes the normal cold-open path and gets a fresh delivery
+// session, control generation, and sequence space before the first frame.
+function replayEnded(){
+  const p=PLAYER;
+  if(!p||!p.fileId) return false;
+  const openAttempt=PLAY_OPEN_GATE.begin("replay");
+  if(!openAttempt) return false;
+  PENDING_ATTEMPT_REASON="replay";
+  const opening=Promise.resolve(
+    play(p.fileId,p.title||"",0,p.knownDur||p.durMs||0,p.meta,openAttempt));
+  opening.catch(()=>{}).finally(()=>{
+    PLAY_OPEN_GATE.finish(openAttempt);
+  });
+  return true;
+}
+function togglePlay(){
+  const v=document.getElementById("video"); if(!v) return;
+  if(v.ended) replayEnded();
+  else if(v.paused) v.play().catch(()=>{});
+  else v.pause();
+  playerActivity();
+}
 // Directional nudges coalesce: accumulate against a frozen base, preview live
 // on the scrubber, and fire ONE seekTo after a short quiet — so mashing a
 // button (or an arrow) doesn't restart the transcode stream over and over.
@@ -7890,7 +8453,7 @@ function wirePlayer(){
   const p=document.getElementById("player"), v=document.getElementById("video");
   if(!p||!v) return;
   ["mousemove","pointerdown","touchstart","keydown"].forEach(ev=>p.addEventListener(ev,playerActivity));
-  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); if(first) reportTtff(); });
+  v.addEventListener("playing",()=>{ const first=!PLAYER.started; endWait(true); PLAYER.started=true; PLAYER.controlPositionHintSec=null; PLAYER.controlRenderOverride=null; PLAYER.controlObservationOverride=null; PLAYER.stallPrompt=false; clearStall(); finishStallRecovery("recovered"); setLoading(false); playerActivity(); pbTick(); pbSyncPlayIcon(); notifyPlaybackControl(); if(first) reportTtff(); });
   v.addEventListener("canplay",()=>{ if(PLAYER.started) setLoading(false); });
   // Only a stream that HAS started can "buffer". Before that, the loading
   // overlay owns the message (and a watchdog owns the deadline), so a stalled
@@ -7908,10 +8471,15 @@ function wirePlayer(){
     if(action!=='buffer') return;
     setLoading(true,"Buffering…","");
     beginWait(v);
+    notifyPlaybackControl();
   });
   // Pausing during a wait means the viewer stopped it, not the stream.
-  v.addEventListener("pause",()=>{ p.classList.remove("idle"); endWait(false); });
-  v.addEventListener("seeking",()=>{ endWait(false); });
+  v.addEventListener("pause",()=>{ p.classList.remove("idle"); endWait(false); notifyPlaybackControl(); });
+  v.addEventListener("play",notifyPlaybackControl);
+  v.addEventListener("seeking",()=>{ endWait(false); notifyPlaybackControl(); });
+  v.addEventListener("seeked",notifyPlaybackControl);
+  v.addEventListener("ratechange",notifyPlaybackControl);
+  v.addEventListener("ended",notifyPlaybackControl);
   // A media error never reaches the console on its own — surface it, always.
   // And a remux/direct stream the browser rejects gets one automatic rescue:
   // restart as a transcode session (the server re-encodes to plain H.264/AAC).
@@ -7920,6 +8488,7 @@ function wirePlayer(){
     // handing over the next stream) can raise an error event with no source
     // attached. That is us, not a broken file — never rescue-transcode on it.
     if(!v.getAttribute("src")&&!v.currentSrc) return;
+    const controlTrigger=notifyPlaybackControl("failed");
     clearStall();
     const err=v.error, code=err?err.code:0, msg=(err&&err.message)||"";
     const src=(v.currentSrc||"").split("?")[0];
@@ -7946,17 +8515,20 @@ function wirePlayer(){
     if(fallback==='transcode'){
       PLAYER.triedFallback=true;
       clientLog({level:"warn",event:"stream_rejected",code,src,
-        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding"});
+        message:"browser refused the "+PLAYER.method.replace('_',' ')+" stream — re-encoding",
+        control_trigger:controlTrigger});
       setLoading(true,"Stream rejected — switching to transcode…","the browser refused the "+PLAYER.method.replace('_',' ')+" stream (code "+code+"); re-encoding instead");
       startTranscodeFallback("stream-rejected",
         "the browser refused the "+PLAYER.method.replace('_',' ')+" stream ("+(names[code]||("error "+code))+(msg?": "+msg:"")+") — re-encoded instead");
       return;
     }
     clientLog({level:"error",event:"playback_failed",code,src,
-      message:(names[code]||("error "+code))+(msg?" ("+msg+")":"")});
+      message:(names[code]||("error "+code))+(msg?" ("+msg+")":""),
+      control_trigger:controlTrigger});
     setLoading(true,"Playback failed: "+(names[code]||("error "+code))+".",(msg?msg+" — ":"")+"see Settings → Logs for the server side");
     toast("Playback failed — "+(names[code]||("error "+code)));
   });
+  document.addEventListener("visibilitychange",notifyPlaybackControl);
   v.addEventListener("timeupdate",checkMarkers);
   // Click the picture to play/pause and double-click for fullscreen — the
   // behaviour the native controls used to give us, gone now that we draw our
@@ -8209,9 +8781,11 @@ async function handleEnded(fileId){
   // making progress and keeps its budget.
   PLAYER.endedTries=(prev!=null&&Math.abs(pos-prev)<1)?(PLAYER.endedTries||0)+1:1;
   const hopeless = PLAYER.method==='direct_play' || PLAYER.endedTries>3;
+  const controlTrigger=notifyPlaybackControl("failed");
   clientLog({level:"warn",event:"truncated_stream",
     message:`stream ended at ${Math.round(pos)}s of ${Math.round(total)}s`,
-    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}${hopeless?" giving-up":" resuming"}`});
+    detail:`method=${PLAYER.method} attempt=${PLAYER.endedTries}${hopeless?" giving-up":" resuming"}`,
+    control_trigger:controlTrigger});
   if(hopeless){
     return setLoading(true,"The stream stopped before the end.",
       "It ended "+clockFromSec(total-pos)+" short of the runtime. Your place is saved, so resuming picks up here.",
@@ -8531,6 +9105,7 @@ async function setSub(index){
   const v=document.getElementById("video"); if(!v) return;
   pbSyncSubIcon();
   clearSubs(v);
+  notifyPlaybackControl();
   if(index<0){ me._subOff=null; return; }
   const off=me.offset||0;
   me._subOff=off;                       // set before awaiting: stops pbTick re-firing
@@ -8768,19 +9343,19 @@ function statsRateTone(rate,ahead,suspended,final){
   return "good";
 }
 function vodServerState(health){
-  if(!health) return "VOD · Waiting for demand";
+  if(!health) return "VOD HLS · Waiting for demand";
   switch(health.producer_state){
-    case "running": return "VOD · Materializing";
+    case "running": return "VOD HLS · Materializing";
     case "held":
       switch(health.producer_hold){
-        case "ahead": return "VOD · Holding ahead window";
-        case "working_set": return "VOD · Holding working set";
-        case "no_room": return "VOD · Holding · no room";
-        default: return "VOD · Holding";
+        case "ahead": return "VOD HLS · Holding ahead window";
+        case "working_set": return "VOD HLS · Holding working set";
+        case "no_room": return "VOD HLS · Holding · no room";
+        default: return "VOD HLS · Holding";
       }
-    case "complete": return "VOD · Complete";
-    case "failed": return "VOD · Producer failed";
-    default: return "VOD · Waiting for demand";
+    case "complete": return "VOD HLS · Complete";
+    case "failed": return "VOD HLS · Producer failed";
+    default: return "VOD HLS · Waiting for demand";
   }
 }
 function vodHealthWord(health){
@@ -8793,6 +9368,16 @@ function vodHealthWord(health){
     default: return "VOD";
   }
 }
+function playbackModeName(player){
+  if(player&&player.vod) return "VOD HLS";
+  if(player&&player.sessionId) return "Live HLS";
+  return "Progressive file";
+}
+function playbackModeDetail(player){
+  if(player&&player.vod) return "VOD HLS · fixed, seekable timeline";
+  if(player&&player.sessionId) return "Live HLS · growing recovery timeline";
+  return "Progressive file · byte-range delivery";
+}
 function updateStats(){
   const ov=document.getElementById("statsov"); if(!ov||!ov.classList.contains("on")) return;
   const body=document.getElementById("statsbody"); if(!body) return;
@@ -8801,7 +9386,8 @@ function updateStats(){
   const baseMethod = PLAYER.method==='direct_play'?'Direct play'
     : PLAYER.method==='transcode'?('Transcode'+(PLAYER.encoder?` · ${PLAYER.encoder}`:''))
     : 'Remux';
-  const method=PLAYER.vod?`${baseMethod} · VOD`:baseMethod;
+  const playbackMode=playbackModeName(PLAYER);
+  const playbackModeLong=playbackModeDetail(PLAYER);
   // source (from the server probe — the browser never sees these numbers)
   const srcVideo=[ (s.video_codec||'').toUpperCase(), s.bit_depth?`${s.bit_depth}-bit`:null, (s.hdr_format||(s.hdr?hdrLabel(s.hdr):null)) ].filter(Boolean).join(" · ")||'—';
   const srcRes = s.width&&s.height? `${s.width}×${s.height}`:'—';
@@ -8967,6 +9553,19 @@ function updateStats(){
       srv.push({l:"Server ahead",c:statsToneClass(statsRunwayTone(h.ahead_seconds,h.suspended)),
         v:`${Math.max(0,h.ahead_seconds)} s${h.suspended?` · held${release}`:''}${transitions}`});
     }
+    if(h.production_policy==='explicit_demand'){
+      const produced=h.production_ahead_seconds==null?'waiting for publication'
+        :h.production_ahead_seconds<0
+          ?`${Math.abs(h.production_ahead_seconds)} s production deficit`
+          :`${h.production_ahead_seconds} s produced ahead`;
+      const target=h.production_target_seconds==null?'':` · target ${Math.max(0,h.production_target_seconds)} s`;
+      const demand=h.control_demand?` · ${h.control_demand}`:'';
+      const held=h.suspended?` · held (${esc(h.hold_reason||'policy')})`:'';
+      const demandTone=h.lease_state&&h.lease_state!=='active'?'warn'
+        :h.suspended&&h.hold_reason!=='demand'?'warn':'good';
+      srv.push({l:"Demand window",c:statsToneClass(demandTone),
+        v:`${produced}${target}${demand}${held}`});
+    }
     if(h.out_time_ms!=null && h.ahead_seconds==null){
       // A progressive stream has no published-media frontier to report; what
       // it can say is how much content ffmpeg has produced, which is the same
@@ -8992,6 +9591,41 @@ function updateStats(){
     const stallTone=PLAYER.stalls>=3?"bad":"warn";
     srv.push({l:"Stalls",c:statsToneClass(stallTone),
       v:`${PLAYER.stalls}${parts.length?` <span style="opacity:.78">(${parts.join(" · ")})</span>`:''}`});
+  }
+  // Control remains passive for recovery actions, but an explicit rolling
+  // session now owns liveness and producer demand. This is the join point an
+  // operator needs during the staged cutover:
+  // whether the client is exchanging, the last sequence the owner accepted,
+  // whether an event arrived while the previous exchange was in flight, and
+  // the advertised cadence/lease rather than another inferred idle clock.
+  const controlReporter=PLAYER.controlReporter;
+  const controlStatus=controlReporter&&controlReporter.status();
+  if(controlStatus){
+    const controlHealth=PLAYER.health||null;
+    const leaseMode=PlaybackPolicy.controlLeaseMode(
+      controlHealth&&controlHealth.lease_mode,PLAYER.vod,controlStatus.accepted_sequence);
+    const leasePresentation=PlaybackPolicy.controlLeasePresentation(leaseMode);
+    const leaseState=controlHealth&&controlHealth.lease_state?controlHealth.lease_state:'active';
+    const phase=controlStatus.stopped?"stopped"
+      :controlStatus.in_flight?(controlStatus.retrying?"retry in flight":"exchange in flight")
+      :controlStatus.retrying?"retry scheduled"
+      :controlStatus.pending?"new state queued":"scheduled";
+    const accepted=controlStatus.accepted_sequence
+      ?`accepted #${controlStatus.accepted_sequence}`:"awaiting first acceptance";
+    const acceptedAge=PLAYER.controlLastExchangeAt
+      ?` · ${Math.max(0,Math.round((Date.now()-PLAYER.controlLastExchangeAt)/1000))} s ago`:"";
+    srv.push({l:"Control",c:statsToneClass(PLAYER.controlLastError||leaseState!=='active'?"warn":"good"),
+      v:`${leasePresentation.ownership} · ${leaseState} · ${accepted}${acceptedAge} · ${phase}`});
+    const enforcedLease=controlHealth&&Number.isSafeInteger(controlHealth.lease_timeout_ms)
+      ?controlHealth.lease_timeout_ms:controlStatus.lease_timeout_ms;
+    srv.push({l:"Control timing",c:"stat-muted",
+      v:`${(controlStatus.next_exchange_ms/1000).toFixed(1)} s cadence · `+
+        `${Math.round(enforcedLease/1000)} s ${leasePresentation.label} lease`});
+  }
+  if(PLAYER.controlLastError){
+    const age=Math.max(0,Math.round((Date.now()-PLAYER.controlLastError.at)/1000));
+    srv.push({l:"Control failure",c:"stat-warn",note:true,
+      v:`${esc(PLAYER.controlLastError.message)} · ${age} s ago · playback recovery remains legacy-owned`});
   }
   const rate = v.playbackRate&&v.playbackRate!==1? ` · ${v.playbackRate}×`:'';
   const durTxt = PLAYER.durMs? ' / '+clockFromSec(PLAYER.durMs/1000):'';
@@ -9034,7 +9668,8 @@ function updateStats(){
   //
   // There is no `.dense` two-up variant any more. It required ten-plus rows in
   // one section and the web panel's sections have a structural ceiling of five
-  // (Playback 4, Source 4, Now decoding 5, Network 4, Server 4) — the branch
+  // (Playback 4, Source 4, Now decoding 5, Network 4, with Server allowed a
+  // small control ledger while the preview is enabled) — the branch
   // and its `@media(min-width:721px)` stylesheet block could never run. The
   // Android panel's equivalent IS reachable and is untouched; it groups rows
   // differently.
@@ -9103,7 +9738,8 @@ function updateStats(){
     // `include_str!`-embedded — so the server's stamp is also this UI's stamp.
     // That is what makes one line able to answer for both.
     {l:"Build",c:"stat-muted",v:`${esc(buildLabel())}`},
-    {l:"Method",v:`${esc(method)}`},
+    {l:"Playback mode",c:PLAYER.vod?"stat-good":PLAYER.sessionId?"stat-warn":"stat-muted",v:`${esc(playbackModeLong)}`},
+    {l:"Delivery method",v:`${esc(baseMethod)}`},
     // Said outright, because the two transports are different code paths in
     // the browser and "which one ran" was previously only inferable from
     // which other rows happened to be missing. The wire container is named
@@ -9268,7 +9904,7 @@ function updateStats(){
     :health?(health.suspended?"Held":"Active"):"Direct";
   const miniDiv=`<div class="sdiv" aria-hidden="true"></div>`;
   const miniHtml=`<div class="statsmini">`
-    +`<div class="smethod">${esc(method)}</div>`+miniDiv
+    +`<div class="smethod">${esc(playbackMode)} · ${esc(baseMethod)}</div>`+miniDiv
     +`<div class="spos">${clockFromSec((PLAYER.offset||0)+(v.currentTime||0))}${durTxt}</div>`+miniDiv
     +`<div class="sval ${statsToneClass(frameTone)}" title="${esc(rangeBadge?rangeBadge.full||rangeText:rangeText)}">${esc(tgtRes)} · ${esc(rangeShort)}</div>`+miniDiv
     +`<div class="sval sfix ${statsToneClass(runwayTone)}">${esc(buf)}</div>`+miniDiv
@@ -9281,6 +9917,9 @@ function updateStats(){
   // layout to hold in your head and half again the height for the same eleven
   // facts. Its "Playing" card is debug's "Now decoding" section under the name
   // debug already used; one name for one thing, in both sizes.
+  const standardLeasePresentation=PlaybackPolicy.controlLeasePresentation(
+    PlaybackPolicy.controlLeaseMode(health&&health.lease_mode,PLAYER.vod,
+      controlStatus&&controlStatus.accepted_sequence));
   const standardHtml=panelHtml([
     {t:"Playback",rows:[reason?{l:"Reason",note:true,v:reason}:null]},
     {t:"Source",rows:[
@@ -9296,7 +9935,12 @@ function updateStats(){
       cardRow("Dropped / total",esc(dropped+" frames"),frameTone),
       cardRow("Subtitles",esc(selectedSub))]},
     {t:"Server",rows:[
+      cardRow("Playback mode",esc(playbackModeLong),PLAYER.vod?"good":PLAYER.sessionId?"warn":"muted"),
       cardRow("Status",esc(serverState),serverTone),
+      controlStatus?cardRow("Control",controlStatus.accepted_sequence
+        ?`${standardLeasePresentation.ownership} · accepted #${controlStatus.accepted_sequence}`
+        :`${standardLeasePresentation.ownership} · connecting`,
+        PLAYER.controlLastError?"warn":"good"):null,
       (health&&health.encoder)||PLAYER.encoder?cardRow("Encoder",esc((health&&health.encoder)||PLAYER.encoder)):null,
       serverRate!=null?cardRow("Encode speed",esc(serverRate.toFixed(2)+"×"),serverRateTone):null,
       health&&health.ahead_seconds!=null?cardRow("Ahead",esc(Math.max(0,health.ahead_seconds)+" s"),statsRunwayTone(health.ahead_seconds,health.suspended)):null,
@@ -9358,6 +10002,9 @@ async function reportProgress(fileId, ended){
   try{ await api(`/items/${ITEM_FOR_FILE[fileId]}/progress`,{method:"POST",body:{position_ms:ended?(durMs||posMs):posMs,duration_ms:durMs}}); }catch(e){}
 }
 function closePlayer(){
+  // Fence a full play() still awaiting its decision/session. PLAYER identity
+  // alone cannot do that because close intentionally keeps the object around.
+  PLAY_OPEN_GATE.invalidate();
   const video=document.getElementById("video");
   const player=document.getElementById("player");
   if(player){ player.classList.remove("audio"); player.style.backgroundImage=""; }
@@ -9433,6 +10080,7 @@ const ITEM_FOR_FILE={};
 async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   layoutChrome("activity", `<h2 class="section" style="margin-top:6px">Now playing</h2>
     <div class="empty" aria-busy="true">Checking current activity…</div>
+    ${typeof ME!=="undefined"&&ME&&ME.is_admin?'<h2 class="section">Content analysis</h2>':""}
     <h2 class="section">Pre-transcoding</h2><h2 class="section">Offline downloads</h2>
     <h2 class="section">Library</h2><h2 class="section">Trakt</h2>`);
   setPagePhase("#/activity",generation,"shell");
@@ -9443,6 +10091,307 @@ async function viewActivity(generation=++PAGE_RENDER_GENERATION){
   await renderActivityBody(generation);
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity") return;
   setPageTimer(()=>renderActivityBody(generation), 3000, generation);
+}
+
+// ---- analysis status -----------------------------------------------------
+// A dedicated operator workspace backed by the replicated request and index-
+// job rows. It keeps live work, failures and recent history in one model, then
+// provides smaller projections to Activity and Settings.
+let ANALYSIS_BUSY=null, ANALYSIS_PENDING=null, ANALYSIS_SUMMARY_BUSY=null, ANALYSIS_SNAPSHOT=null, ANALYSIS_SUMMARY=null, ANALYSIS_ROW_LOOKUP=new Map(), ANALYSIS_SEARCH_TIMER=0;
+let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
+async function viewAnalysis(generation=++PAGE_RENDER_GENERATION){
+  if(!ME||!ME.is_admin){ location.hash="#/activity"; return; }
+  layoutChrome("activity",`<div class="analysis-head"><div><h1>Content analysis</h1>
+      <p>VOD HLS readiness, active index work, and recent results across the cluster.</p></div></div>
+    <div class="empty" aria-busy="true">Loading the analysis queue…</div>`);
+  setPagePhase("#/analysis",generation,"shell");
+  if(ANALYSIS_SNAPSHOT){ paintAnalysis(ANALYSIS_SNAPSHOT); setPagePhase("#/analysis",generation,"content"); }
+  await renderAnalysis(generation);
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+  setPageTimer(()=>{ if(ANALYSIS_VIEW.auto) renderAnalysisSummary(generation); },3000,generation);
+}
+function analysisPageUrl(){
+  const params=new URLSearchParams({limit:String(ANALYSIS_VIEW.pageSize),filter:ANALYSIS_VIEW.filter});
+  if(ANALYSIS_VIEW.query.trim()) params.set("q",ANALYSIS_VIEW.query.trim());
+  const cursor=ANALYSIS_VIEW.cursors[ANALYSIS_VIEW.page-1]; if(cursor) params.set("cursor",cursor);
+  return `/analysis/jobs?${params}`;
+}
+async function renderAnalysis(generation=PAGE_RENDER_GENERATION,force=false){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden") return;
+  const requestKey=analysisPageUrl();
+  if(ANALYSIS_BUSY){
+    ANALYSIS_PENDING={generation,requestKey};
+    if(force||ANALYSIS_BUSY.generation!==generation||ANALYSIS_BUSY.requestKey!==requestKey) ANALYSIS_BUSY.controller.abort();
+    return;
+  }
+  const run={generation,requestKey,controller:new AbortController()}; ANALYSIS_BUSY=run; ANALYSIS_PENDING=null;
+  try{
+    const [snapshot,summary]=await Promise.all([
+      api(requestKey,{signal:run.controller.signal}),
+      api("/analysis/summary",{signal:run.controller.signal}).catch(error=>{
+        if(error&&error.name==="AbortError") throw error;
+        return {available:false,enabled:false};
+      }),
+    ]);
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return; }
+    if(!snapshot.rows.length&&snapshot.filtered_total>0&&ANALYSIS_VIEW.page>1){
+      ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return;
+    }
+    ANALYSIS_VIEW.cursors[ANALYSIS_VIEW.page]=snapshot.next_cursor||null;
+    ANALYSIS_VIEW.cursors.length=ANALYSIS_VIEW.page+1;
+    snapshot.summary=summary; ANALYSIS_SUMMARY=summary; ANALYSIS_SNAPSHOT=snapshot; paintAnalysis(snapshot);
+    setPageFailure("#/analysis",generation,null); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
+  }catch(error){
+    if(error&&error.status===401) return;
+    if(error&&error.name==="AbortError") return;
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    if(analysisPageUrl()!==requestKey){ ANALYSIS_PENDING={generation,requestKey:analysisPageUrl()}; return; }
+    const main=document.getElementById("main");
+    if(main&&ANALYSIS_SNAPSHOT){
+      let stale=document.getElementById("analysis-stale");
+      if(!stale){ stale=document.createElement("div"); stale.id="analysis-stale"; stale.className="analysis-stale"; stale.setAttribute("role","status"); stale.setAttribute("aria-live","polite"); main.prepend(stale); }
+      stale.textContent=`Showing the last update — refresh failed: ${error.message}`;
+    }else if(main) main.innerHTML=`<div class="empty">${esc(error.message)}<div style="margin-top:12px"><button class="ghost sm" onclick="renderAnalysis()">Retry</button></div></div>`;
+    setPageFailure("#/analysis",generation,"render_error"); setPagePhase("#/analysis",generation,"content"); setPagePhase("#/analysis",generation,"settled");
+  }finally{
+    if(ANALYSIS_BUSY===run) ANALYSIS_BUSY=null;
+    const pending=ANALYSIS_PENDING;
+    if(pending&&pending.generation===PAGE_RENDER_GENERATION&&location.hash==="#/analysis"&&document.visibilityState!=="hidden"){
+      ANALYSIS_PENDING=null; Promise.resolve().then(()=>renderAnalysis(pending.generation,true));
+    }
+  }
+}
+async function renderAnalysisSummary(generation=PAGE_RENDER_GENERATION){
+  if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis"||document.visibilityState==="hidden"||!ANALYSIS_SNAPSHOT) return;
+  if(ANALYSIS_SUMMARY_BUSY){ if(ANALYSIS_SUMMARY_BUSY.generation!==generation) ANALYSIS_SUMMARY_BUSY.controller.abort(); return; }
+  const run={generation,controller:new AbortController()}; ANALYSIS_SUMMARY_BUSY=run;
+  try{
+    const summary=await api("/analysis/summary",{signal:run.controller.signal});
+    if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/analysis") return;
+    ANALYSIS_SUMMARY=summary;
+    ANALYSIS_SNAPSHOT={...ANALYSIS_SNAPSHOT,summary,enabled:summary.enabled,now_ms:summary.now_ms};
+    paintAnalysis(ANALYSIS_SNAPSHOT);
+  }catch(error){
+    if(error&&(error.status===401||error.name==="AbortError")) return;
+    if(generation===PAGE_RENDER_GENERATION&&location.hash==="#/analysis"){
+      ANALYSIS_SNAPSHOT.summary={...(ANALYSIS_SNAPSHOT.summary||{}),available:false}; paintAnalysis(ANALYSIS_SNAPSHOT);
+    }
+  }finally{ if(ANALYSIS_SUMMARY_BUSY===run) ANALYSIS_SUMMARY_BUSY=null; }
+}
+function analysisStateLabel(state){
+  return ({queued:"Queued",running:"Running",submitted:"Publishing",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
+}
+function analysisPhase(row){
+  if(row.request_state==="running") return "Hashing and verifying the source file";
+  if(row.job_state==="running") return "Building the fragment index";
+  if(row.job_state==="queued") return "Waiting for an idle media worker";
+  if(row.disposition==="automatic") return "Retry scheduled automatically";
+  if(row.request_state==="queued") return "Waiting to inspect the source";
+  if(row.request_state==="submitted"&&!row.job_id) return "Handed to the index worker";
+  if(row.state==="failed") return "Stopped with an error";
+  if(row.state==="ready") return "Published and available";
+  if(row.state==="cancelled") return "Canceled before completion";
+  return "Resolving analysis request";
+}
+function analysisErrorInfo(code){
+  const known={
+    foreground_preempted:["Paused for playback","A playback or offline job needed the shared media worker.","No action is needed; analysis retries automatically when the worker is idle.","warn"],
+    source_unavailable:["Source file is unavailable","The node could not open the media file at its catalogued location.","Check that the library mount is online and the file is readable, then retry.","bad"],
+    source_catalog_read_failed:["Catalog read failed","The server could not load the file or probe facts needed to plan analysis.","Check storage health and server logs, then retry.","bad"],
+    source_attestation_failed:["Source verification failed","The file could not be read consistently enough to prove its content identity.","Check the mount and whether another process is replacing the file, then retry.","bad"],
+    source_attestation_timeout:["Source verification timed out","Reading and hashing the source exceeded the analysis deadline.","Check source-storage latency and retry when the node is less busy.","bad"],
+    source_record_failed:["Source identity could not be saved","The source was verified, but its identity could not be committed to the store.","Check database or cluster health, then retry.","bad"],
+    source_superseded:["Source changed after this request","The catalog now points at a newer version of the file.","Queue a fresh analysis for the current file.","warn"],
+    source_changed:["Source changed during analysis","The file changed while the index was being built, so the result was discarded.","Wait for the file copy or replacement to finish, then retry.","warn"],
+    source_deleted:["Source was removed","The catalog file was deleted while analysis was pending.","No action is needed unless the deletion was unexpected.","warn"],
+    pipeline_superseded:["Analysis pipeline changed","The server’s index pipeline changed while this job was running.","Retry to build with the current pipeline.","warn"],
+    invalid_cache_identity:["Invalid cache identity","The server could not derive a safe content-addressed key for this source.","Inspect server logs; retry after correcting the source metadata.","bad"],
+    queue_write_failed:["Queue update failed","The analysis request could not be handed to the shared index queue.","Check database or cluster health; the request will retry automatically.","bad"],
+    queue_full_or_busy:["Analysis queue is busy","The shared index queue could not accept another handoff yet.","No action is needed; this request retries automatically.","warn"],
+    attempt_limit:["Retry limit reached","Repeated source or store failures exhausted the automatic retry budget.","Resolve the underlying error shown in earlier attempts, then retry manually.","bad"],
+    unsupported:["VOD analysis is not supported","The file’s codec or fragment structure cannot produce a safe VOD HLS index.","Live HLS can be used only when live recovery is enabled in Playback settings; rebuilding will not help unless the source changes.","bad"],
+    truncated:["Index output was incomplete","Analysis ended before it could describe the complete file timeline.","Check the source for damage or truncation, then retry after replacing it.","bad"],
+    encode_failed:["Index encoding failed","The index was built but could not be serialized into the cache artifact.","Inspect server logs and retry; repeated failures need a server fix.","bad"],
+    local_publish_failed:["Index could not be published","The completed artifact could not be written to this node’s index cache.","Check free space and permissions on the cache directory, then retry.","bad"],
+  };
+  const parts=known[code]||[String(code||"Analysis failed").replace(/_/g," "),"The analysis pipeline reported an unrecognized error code.","Copy the diagnostics and inspect the server logs before retrying.","bad"];
+  return {title:parts[0],detail:parts[1],next:parts[2],tone:parts[3]};
+}
+function analysisErrorHtml(code,stage){
+  if(!code) return "";
+  const info=analysisErrorInfo(code);
+  return `<div class="analysis-error ${info.tone}"><b>${esc(info.title)}</b><p>${esc(info.detail)} ${esc(info.next)}</p><code>${stage?esc(stage)+" · ":""}${esc(code)}</code></div>`;
+}
+function analysisRows(snapshot){
+  return (snapshot&&snapshot.rows)||[];
+}
+function analysisCounts(value){
+  const summary=value&&value.summary?value.summary:(value||{});
+  return {...summary,active:summary.active??summary.working??0,attention:summary.attention??summary.failed??0,expected:summary.expected??0};
+}
+function analysisSummaryCard(value,context="activity"){
+  const s=analysisCounts(value), attention=s.attention||0, active=s.active||0, expected=s.expected||0;
+  const headline=s.available===false?"Analysis status is unavailable"
+    :!s.enabled?"Analysis is paused"
+    :attention?`${attention} recent result${attention===1?' needs':'s need'} attention`
+    :active?`${active} analysis job${active===1?'':'s'} in progress`
+    :s.ready?"Recent analysis results look healthy":"No recent analysis results";
+  const detail=s.available===false?"Activity is still available. Refresh or open the workspace to retry analysis health separately."
+    :!s.enabled?"Existing indexes still serve, but new VOD HLS indexes will not be built."
+    :attention?"Open the workspace for this recent failure and the exact full-history Attention filter."
+    :active?"Source verification and index builds yield to foreground playback automatically."
+    :s.ready?`${s.ready} recent file${s.ready===1?' is':'s are'} ready for VOD HLS. The workspace retains the full searchable history.`
+    :"This compact summary covers active work and recent terminal results; open the workspace for exact retained history.";
+  const latest=s.latest_error&&s.latest_error.code?analysisErrorInfo(s.latest_error.code):null;
+  return `<div class="analysis-brief"><div class="analysis-brief-head"><div><h2>${esc(headline)}</h2><p>${esc(detail)}</p></div>
+      <div class="analysis-actions"><a class="ghost sm" href="#/analysis">Open workspace</a>${context==="activity"?`<button class="ghost sm" onclick="openAnalysisSettings()">Settings</button>`:""}</div></div>
+    <div class="analysis-brief-status">
+      <span class="analysis-state running">${active} working</span>
+      <span class="analysis-state failed">${attention} recent attention</span>
+      <span class="analysis-state cancelled">${expected} recent expected</span>
+      <span class="analysis-state ready">${s.ready||0} recent ready</span>
+      <span class="analysis-state ${s.enabled?'ready':'cancelled'}">Queue ${s.enabled?'enabled':'paused'}</span>
+    </div>${latest&&attention?`<div class="analysis-sub">Latest problem: <b>${esc(latest.title)}</b></div>`:""}</div>`;
+}
+function analysisRowKey(row){
+  return row.row_key;
+}
+function analysisDisposition(row){
+  if(row.disposition) return row.disposition;
+  const code=row.job_error_code||row.request_error_code||"";
+  if(["queued","running","submitted"].includes(row.state)) return code?"automatic":"working";
+  if(row.state==="ready") return "ready";
+  if(code==="unsupported") return "unsupported";
+  if(["source_deleted","source_superseded"].includes(code)) return "expected";
+  return "attention";
+}
+function analysisErrors(row){ return [row.request_error_code?{stage:"Request",code:row.request_error_code}:null,row.job_error_code?{stage:"Index build",code:row.job_error_code}:null].filter(Boolean); }
+function analysisAction(row){
+  if(row.action) return row.action;
+  const code=row.job_error_code||row.request_error_code||"";
+  if(code==="source_superseded") return "analyze_current";
+  if(row.state==="ready") return "rebuild";
+  return analysisDisposition(row)==="attention"?"retry":"none";
+}
+function analysisCanRetry(row){ return ["retry","analyze_current"].includes(analysisAction(row)); }
+function resetAnalysisPage(){ ANALYSIS_VIEW.page=1; ANALYSIS_VIEW.cursors=[""]; }
+function setAnalysisFilter(filter){ ANALYSIS_VIEW.filter=filter; resetAnalysisPage(); renderAnalysis(PAGE_RENDER_GENERATION,true); }
+function setAnalysisQuery(query){
+  ANALYSIS_VIEW.query=query; resetAnalysisPage(); clearTimeout(ANALYSIS_SEARCH_TIMER);
+  ANALYSIS_SEARCH_TIMER=setTimeout(()=>renderAnalysis(PAGE_RENDER_GENERATION,true),250);
+}
+function setAnalysisPage(page){
+  page=Math.max(1,Number(page)||1); if(page>1&&!ANALYSIS_VIEW.cursors[page-1]) return;
+  ANALYSIS_VIEW.page=page; renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+function setAnalysisPageSize(size){ ANALYSIS_VIEW.pageSize=Math.max(10,Math.min(100,Number(size)||25)); resetAnalysisPage(); renderAnalysis(PAGE_RENDER_GENERATION,true); }
+function toggleAnalysisAuto(){ ANALYSIS_VIEW.auto=!ANALYSIS_VIEW.auto; if(ANALYSIS_SNAPSHOT) paintAnalysis(ANALYSIS_SNAPSHOT); }
+async function refreshAnalysisNow(btn){
+  const label=btn&&btn.textContent; if(btn){btn.disabled=true;btn.textContent="Refreshing…";}
+  try{ await renderAnalysis(PAGE_RENDER_GENERATION,true); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
+}
+function openAnalysisSettings(){
+  try{ localStorage.setItem("plurx_settings_tab","analysis"); }catch(error){}
+  if(location.hash==="#/settings"||location.hash==="#/admin") viewSettings(++PAGE_RENDER_GENERATION,false);
+  else location.hash="#/settings";
+}
+function analysisDiagnosticText(row){
+  const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator"):"Background";
+  return [
+    `Title: ${row.title||`File ${row.file_id}`}`,
+    `File: ${row.file_id}`,
+    `State: ${analysisStateLabel(row.state)}`,
+    `Disposition: ${analysisDisposition(row)}`,
+    `Phase: ${analysisPhase(row)}`,
+    `Trigger: ${trigger}`,
+    row.request_id?`Request: ${row.request_id}`:null,
+    row.job_id?`Job: ${row.job_id}`:null,
+    row.owner_node_id?`Owner: ${row.owner_node_id}`:null,
+    row.target_node_id?`Target: ${row.target_node_id}`:null,
+    row.pipeline_version?`Pipeline: ${row.pipeline_version}`:null,
+    `Attempts: ${row.attempts||0}`,
+    ...analysisErrors(row).map(error=>`${error.stage} error: ${error.code}`),
+  ].filter(Boolean).join("\n");
+}
+async function copyAnalysisDetails(key,btn){
+  const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row) return;
+  try{
+    await navigator.clipboard.writeText(analysisDiagnosticText(row));
+    const label=btn.textContent; btn.textContent="Copied"; setTimeout(()=>{if(document.body.contains(btn))btn.textContent=label;},1200);
+  }catch(error){ toast("Couldn’t copy diagnostics"); }
+}
+async function retryFailedAnalysis(){
+  const rows=analysisRows(ANALYSIS_SNAPSHOT||{}).filter(analysisCanRetry);
+  if(!rows.length||!confirm(`Retry ${rows.length} analysis ${rows.length===1?'item':'items'} needing attention on this page?`)) return;
+  let queued=0;
+  for(const row of rows){
+    try{ await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:["fragment_index"]}}); queued++; }
+    catch(error){}
+  }
+  toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
+  await renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+function paintAnalysis(snapshot){
+  const main=document.getElementById("main"); if(!main) return;
+  const active=document.activeElement;
+  const focusKey=active&&(active.dataset.analysisFocus||(active.id==="analysis-search"?"search":""));
+  const selection=focusKey==="search"?[active.selectionStart,active.selectionEnd]:null;
+  const open=new Set([...main.querySelectorAll("details[data-analysis-key][open]")].map(detail=>detail.dataset.analysisKey));
+  const pageRows=analysisRows(snapshot), counts=analysisCounts(snapshot);
+  const filteredTotal=Number(snapshot.filtered_total)||0;
+  const pages=Math.max(1,Math.ceil(filteredTotal/ANALYSIS_VIEW.pageSize));
+  ANALYSIS_VIEW.page=Math.min(ANALYSIS_VIEW.page,pages);
+  ANALYSIS_ROW_LOOKUP=new Map(pageRows.map(row=>[analysisRowKey(row),row]));
+  const rows=pageRows.map(row=>{
+    const owner=row.owner_node_id||row.target_node_id||"—";
+    const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
+    const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
+    const key=analysisRowKey(row), action=analysisAction(row);
+    const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
+    const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
+    const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
+    const details=[
+      ["Request",row.request_id],["Worker job",row.job_id],
+      ["Target node",row.target_node_id],["Owner",owner!=="—"?owner:null],
+      ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
+      ["Retry",row.state==="queued"&&retryAt>snapshot.now_ms?`in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s`:null],
+      ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
+      ["Pipeline",row.pipeline_version],
+    ].filter(([,value])=>value!=null&&value!=="");
+    const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
+    return `<tr>
+      <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · ${esc(trigger)}${pipeline}</div></td>
+      <td><span class="analysis-state ${esc(row.state)}">${esc(analysisStateLabel(row.state))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+        <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
+          ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
+          <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
+        </div></details></td>
+      <td><span class="clid">${esc(owner)}</span><div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
+      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
+  }).join("");
+  const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
+  const filterButton=(id,label)=>`<button class="${ANALYSIS_VIEW.filter===id?'on':''}" data-analysis-focus="filter:${id}" aria-pressed="${ANALYSIS_VIEW.filter===id}" onclick="setAnalysisFilter('${id}')">${label}${ANALYSIS_VIEW.filter===id?` <b>${filteredTotal}</b>`:""}</button>`;
+  const shownFrom=filteredTotal?(ANALYSIS_VIEW.page-1)*ANALYSIS_VIEW.pageSize+1:0;
+  const shownTo=pageRows.length?Math.min(shownFrom+pageRows.length-1,filteredTotal):0;
+  const summaryWarning=counts.available===false?`<div class="analysis-stale" role="status" aria-live="polite">The recent summary is temporarily unavailable. The history and selected-filter total below are still current.</div>`:"";
+  main.innerHTML=`<div class="analysis-head"><div><h1>Content analysis</h1><p>Everything that determines whether a file can use fixed-timeline VOD HLS: source verification, index builds, failures, and recent published results.</p></div>
+      <div class="analysis-actions"><span class="analysis-live ${ANALYSIS_VIEW.auto?'':'paused'}" role="status" aria-live="polite">${ANALYSIS_VIEW.auto?'Summary auto-refreshing':'Summary auto-refresh paused'}</span><button class="ghost sm" data-analysis-focus="auto" aria-pressed="${ANALYSIS_VIEW.auto}" onclick="toggleAnalysisAuto()">${ANALYSIS_VIEW.auto?'Pause':'Resume'}</button><button class="ghost sm" data-analysis-focus="refresh" onclick="refreshAnalysisNow(this)">Refresh history</button><button class="ghost sm" data-analysis-focus="settings" onclick="openAnalysisSettings()">Settings</button></div></div>
+    ${summaryWarning}
+    ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
+    <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working now</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>
+    <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
+    <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
+      <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
+      ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>
+    ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
+      :`<div class="empty">${ANALYSIS_VIEW.query||ANALYSIS_VIEW.filter!=="all"?"No analysis work matches these filters.":"Nothing has been queued yet. Use Analyze now on a video’s detail page."}</div>`}
+    <div class="analysis-pages"><span>Showing ${shownFrom}–${shownTo} of ${filteredTotal}</span><div class="row"><label>Rows <select data-analysis-focus="page-size" onchange="setAnalysisPageSize(this.value)">${[10,25,50,100].map(size=>`<option value="${size}"${ANALYSIS_VIEW.pageSize===size?' selected':''}>${size}</option>`).join("")}</select></label><button class="ghost sm" data-analysis-focus="previous" ${ANALYSIS_VIEW.page<=1?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page-1})">Previous</button><span>Page ${ANALYSIS_VIEW.page} of ${pages}</span><button class="ghost sm" data-analysis-focus="next" ${!snapshot.next_cursor?'disabled':''} onclick="setAnalysisPage(${ANALYSIS_VIEW.page+1})">Next</button></div></div>`;
+  if(focusKey){
+    const target=[...main.querySelectorAll("[data-analysis-focus]")].find(element=>element.dataset.analysisFocus===focusKey);
+    if(target){ target.focus(); if(selection){try{target.setSelectionRange(selection[0],selection[1]);}catch(error){}} }
+  }
 }
 let ACTIVITY_DETAIL_BUSY=0, ACTIVITY_SNAPSHOT=null;
 function activityNodeFailures(d){
@@ -9469,6 +10418,40 @@ function detailActivitySummary(d,deliveries){
   if((d.offline||[]).length) acts.push({label:`${d.offline.length} offline download${d.offline.length===1?'':'s'}`});
   if(d.trakt&&d.trakt.syncing) acts.push({label:"Syncing Trakt"});
   return acts;
+}
+function activitySessionControlText(session){
+  if(!session) return "";
+  const facts=[];
+  if(session.lease_mode){
+    const timeout=Number.isSafeInteger(session.lease_timeout_ms)
+      ?` ${Math.round(session.lease_timeout_ms/1000)}s`:"";
+    const state=session.lease_state&&session.lease_state!=="active"
+      ?` (${session.lease_state})`:"";
+    facts.push(`${session.lease_mode} lease${timeout}${state}`);
+  }
+  if(session.control_demand) facts.push(`demand ${session.control_demand}`);
+  if(Number.isSafeInteger(session.reported_position_ms))
+    facts.push(`position ${Math.round(session.reported_position_ms/1000)}s`);
+  if(Number.isSafeInteger(session.client_runway_ms))
+    facts.push(`client runway ${Math.round(session.client_runway_ms/1000)}s`);
+  if(session.production_policy) facts.push(`production ${session.production_policy}`);
+  if(Number.isSafeInteger(session.producer_attempt))
+    facts.push(`producer attempt ${session.producer_attempt}`);
+  if(session.playlist_ready===true) facts.push("playlist ready");
+  else if(session.playlist_ready===false) facts.push("playlist waiting");
+  if(Number.isSafeInteger(session.published_segment))
+    facts.push(`published segment ${session.published_segment}`);
+  if(Number.isSafeInteger(session.next_media_sequence))
+    facts.push(`next sequence ${session.next_media_sequence}`);
+  if(Number.isSafeInteger(session.pending_fetched_segment))
+    facts.push(`fetched timing pending ${session.pending_fetched_segment}`);
+  if(Number.isSafeInteger(session.production_ahead_seconds))
+    facts.push(session.production_ahead_seconds<0
+      ?`production deficit ${Math.abs(session.production_ahead_seconds)}s`
+      :`produced ahead ${session.production_ahead_seconds}s`);
+  if(Number.isSafeInteger(session.production_target_seconds))
+    facts.push(`target ${session.production_target_seconds}s`);
+  return facts.join(" · ");
 }
 async function renderActivityBody(generation=PAGE_RENDER_GENERATION){
   if(generation!==PAGE_RENDER_GENERATION||location.hash!=="#/activity"||document.visibilityState==="hidden"||ACTIVITY_DETAIL_BUSY===generation) return;
@@ -9517,14 +10500,16 @@ function paintActivityBody(d){
   const sessionsById=Object.fromEntries((d.sessions||[]).map(se=>[se.id,se]));
   const rows=dels.map(de=>{
     const se=de.session_id?sessionsById[de.session_id]:null;
+    const control=activitySessionControlText(se);
     const flow=!se?'':se.suspended
-      ?` · held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
+      ?` · ${se.control_demand?`${esc(se.control_demand)} · `:''}held (${esc(se.hold_reason||'limit')}) · ${se.suspend_count||1} suspend${(se.suspend_count||1)===1?'':'s'}`
       :se.suspend_count?` · ${se.suspend_count} suspend${se.suspend_count===1?'':'s'} · running`:'';
+    const presentation=de.presentation==="vod"?"VOD HLS":de.presentation==="live-recovery"?"Live HLS":"";
     return `<tr>
       <td><b><a href="#/item/${de.item_id}">${esc(de.title)}</a></b></td>
       <td>${esc(de.user)}</td>
       ${attributed?`<td><span class="clid">${esc(de.node_id||"Unknown")}</span></td>`:""}
-      <td>${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${flow}</td>
+      <td>${presentation?`<span class="mode-chip ${de.presentation==="vod"?'vod':'live'}">${esc(presentation)}</span> `:""}${esc(de.method)}${de.session_id&&de.target_height?` · ${de.target_height}p`:''}${de.session_id&&de.encoder?` · ${esc(de.encoder)}`:''}${control?` · ${esc(control)}`:""}${flow}</td>
       <td class="muted">${fmtAgo(de.started_unix)}${de.idle_seconds>30?` · idle ${Math.round(de.idle_seconds)}s`:''}</td>
       <td style="text-align:right">${(ME&&ME.is_admin&&de.session_id)?`<button class="ghost sm" onclick="stopSession(${esc(JSON.stringify(de.session_id))})">Stop</button>`:''}</td></tr>`;
   }).join("");
@@ -9571,6 +10556,7 @@ function paintActivityBody(d){
     ${dels.length
       ? `<table><thead><tr><th>Title</th><th>User</th>${attributed?"<th>Node</th>":""}<th>Stream</th><th>Started</th><th></th></tr></thead><tbody>${rows}</tbody></table>`
       : `<div class="empty">Nothing streaming right now. Every delivery is listed here — direct play, remux and both HLS kinds.</div>`}
+    ${d.analysis?`<h2 class="section">Content analysis</h2>${analysisSummaryCard(d.analysis,"activity")}`:""}
     <h2 class="section">Pre-transcoding</h2>
     ${produce}
     <h2 class="section">Offline downloads</h2>
@@ -9667,19 +10653,22 @@ let SETTINGS_DATA={}, SETTINGS_LOADED=new Set(), SETTINGS_LOADS=new Map();
 const SETTINGS_ENDPOINTS={
   libs:()=>api("/libraries"),settings:()=>api("/settings"),status:()=>api("/scan/status"),
   sys:()=>api("/system"),users:()=>api("/users"),trakt:()=>api("/trakt/status"),
+  analysis:()=>api("/analysis/summary"),
   playbackEvents:()=>api(`/system/playback-events?since=${Date.now()-7*24*60*60*1000}&limit=2000`),
   cluster:()=>api("/cluster/nodes").catch(error=>{
     if(error&&error.status===401) throw error;
     return {unavailable:true,code:error.code,message:error.message};
   }),
+  clusterOps:()=>api("/cluster/status"),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
   metadata:{required:["settings","trakt"],secondary:["libs"]},
   playback:{required:["settings"],secondary:[]},
+  analysis:{required:["settings","analysis"],secondary:[]},
   users:{required:["users"],secondary:[]},
   system:{required:["sys"],secondary:["playbackEvents"]},
-  cluster:{required:["cluster"],secondary:[]},
+  cluster:{required:["cluster"],secondary:["clusterOps"]},
 };
 function cacheSettings(value){
   SETTINGS=value; SETTINGS_DATA.settings=value; SETTINGS_LOADED.add("settings");
@@ -9718,7 +10707,7 @@ function settingsTabsHtml(tab){
   return SET_TABS.map(([id,label])=>`<button class="settab${tab===id?' active':''}" onclick="setSettingsTab('${id}')">${label}</button>`).join("");
 }
 function settingsShell(tab){
-  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
+  return `<div class="settabs">${settingsTabsHtml(tab)}</div><div class="adminwrap${tab==="cluster"?" clusterwrap":""}" id="setbody"><div class="empty">Loading ${esc(SET_TABS.find(row=>row[0]===tab)[1])}…</div></div>`;
 }
 function patchSettingsSecondary(tab,key){
   if(tab==="metadata"&&key==="libs"){
@@ -9728,6 +10717,9 @@ function patchSettingsSecondary(tab,key){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
+  }
+  if(tab==="cluster"&&key==="clusterOps"){
+    renderSettings();
   }
 }
 function patchSettingsSecondaryError(tab,key,error){
@@ -9739,6 +10731,10 @@ function patchSettingsSecondaryError(tab,key,error){
   if(tab==="system"&&key==="playbackEvents"){
     const mount=document.getElementById("settings-playback-events");
     if(mount) mount.innerHTML=`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Playback history is unavailable: ${message}</span></div>`;
+  }
+  if(tab==="cluster"&&key==="clusterOps"){
+    const mount=document.getElementById("cluster-operations");
+    if(mount) mount.innerHTML=clusterOperationsUnavailable(message);
   }
 }
 async function loadSettingsTab(generation,tab){
@@ -9787,7 +10783,7 @@ async function viewSettings(generation=++PAGE_RENDER_GENERATION,reset=true){
   if(loaded) setPageTimer(()=>settingsTick(generation,tab), 2000, generation);
 }
 // ---- settings tabs (grouped so the page isn't one long scroll) ------------
-const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["users","Users"],["system","System"],["cluster","Cluster"]];
+const SET_TABS=[["libraries","Libraries"],["metadata","Metadata"],["playback","Playback"],["analysis","Analysis"],["users","Users"],["system","System"],["cluster","Cluster"]];
 function settingsTab(){ let t="libraries"; try{ t=localStorage.getItem("plurx_settings_tab")||"libraries"; }catch(e){} return SET_TABS.some(x=>x[0]===t)?t:"libraries"; }
 // Leaving the tab drops any minted join token: it is bearer material, and the
 // operator who switched away is done with it whether or not they said so.
@@ -9818,6 +10814,7 @@ function renderSettings(){
 function settingsPanel(tab,d){
   if(tab==="metadata") return metadataPanel(d.settings,d.trakt);
   if(tab==="playback") return playbackPanel(d.settings);
+  if(tab==="analysis") return analysisSettingsPanel(d.settings,d.analysis);
   if(tab==="users")    return usersPanel(d.users);
   if(tab==="system")   return systemPanel(d.sys,d.playbackEvents);
   if(tab==="cluster")  return clusterPanel(d);
@@ -10059,6 +11056,21 @@ function presetOpts(pairs, cur, label){
   if(cur!=="" && !opts.some(([v])=>v===cur)) opts.unshift([cur, label?label(cur):cur]);
   return opts.map(([v,l])=>`<option value="${esc(v)}" ${cur===v?'selected':''}>${esc(l)}</option>`).join("");
 }
+function analysisSettingsPanel(settings,snapshot){
+  return `<div id="analysis-settings-summary">${analysisSummaryCard(snapshot||{enabled:false},"settings")}</div>
+    <div class="card"><h2 class="section" style="margin-top:0">Index analysis</h2>
+      <p class="muted" style="margin-top:0;max-width:72ch">Content analysis verifies each source and builds the fragment index used by <b>VOD HLS</b>. It runs only while the media worker is idle, so foreground playback always wins.</p>
+      <label class="row" style="margin:0 0 16px;font-size:14px;color:var(--text)"><input type="checkbox" id="an-enabled" ${settings.vod_index_cluster_cache?'checked':''} style="width:auto;margin-right:9px"> Enable the durable analysis queue and shared index cache</label>
+      <div class="row" style="align-items:end">
+        <div><label>Background analysis</label><select id="an-every" style="width:auto;min-width:220px">${presetOpts([["0","Paused"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
+      </div>
+      <div class="hint">Manual Analyze and Retry actions use the durable queue. Background analysis discovers eligible files on this cadence. Pausing either does not remove completed indexes; titles without one use Live HLS when live recovery is enabled in Playback.</div>
+      <div class="err" id="an-error"></div><div class="analysis-actions" style="justify-content:flex-start;margin-top:10px"><button onclick="saveAnalysisSettings()">Save analysis settings</button><a class="ghost sm" href="#/analysis">Open analysis workspace</a></div>
+    </div>
+    <div class="card"><h2 class="section" style="margin-top:0">How a file becomes VOD HLS ready</h2>
+      <div class="analysis-diag-grid"><b>1 · Verify</b><span>Read and hash the exact source without blocking playback.</span><b>2 · Index</b><span>Build a complete fragment timeline on an eligible media worker.</span><b>3 · Publish</b><span>Store the content-addressed artifact and mark the file VOD HLS ready.</span></div>
+    </div>`;
+}
 function playbackPanel(settings){
   const vodWorking=Number(settings.vod_working_set_bytes)||(8*1024*1024*1024);
   const vodMaterialize=Number(settings.vod_materialize_budget_secs)||30;
@@ -10076,15 +11088,16 @@ function playbackPanel(settings){
       <h2 class="section">Automatic quality</h2>
       <label class="row" style="margin:0;font-size:14px;color:var(--text)"><input type="checkbox" id="pabr" ${settings.playback_auto_abr?'checked':''} style="width:auto;margin-right:9px"> Adjust Auto quality while playing</label>
       <p class="muted" style="margin-top:8px">Off keeps the server's initial Auto choice and the full manual quality menu, but makes no client-side rung changes or supply-stall restart. Off is the default until the Auto acceptance week is complete.</p>
-      <h2 class="section">Film-addressed VOD</h2>
-      <p class="muted" style="margin-top:0">Every HLS session is one immutable film timeline. Segments are made only when a player asks for them; native seeks stay in the same session. An unindexed or unsupported title is refused explicitly and never routed through the removed growing live presentation.</p>
+      <h2 class="section">HLS playback modes</h2>
+      <p class="muted" style="margin-top:0"><b>VOD HLS</b> is the preferred fixed, seekable timeline. <b>Live HLS</b> is the growing recovery stream used when a file’s VOD analysis is unavailable.</p>
       <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvod" ${settings.vod_presentation?'checked':''} style="width:auto;margin-right:9px"> Accept VOD session creation</label>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pvlr" ${settings.vod_live_recovery?'checked':''} style="width:auto;margin-right:9px"> Use live HLS when a VOD prerequisite is unavailable</label>
+      <label class="row" style="margin:0 0 12px;font-size:14px;color:var(--text)"><input type="checkbox" id="pcpv1" ${settings.playback_control_protocol_v1?'checked':''} style="width:auto;margin-right:9px"> Advertise playback control protocol v1 <span class="muted" style="font-size:12px;margin-left:6px">· passive preview; no automatic actions yet</span></label>
       <div class="row" style="align-items:end">
-        <div><label>Build indexes</label><select id="pvi" style="width:auto;min-width:190px">${presetOpts([["0","Never"],["15","Every 15 minutes"],["60","Hourly"],["360","Every 6 hours"],["1440","Daily"]],settings.vod_index_mins)}</select></div>
         <div><label>Working set</label><select id="pvws" style="width:auto;min-width:190px">${presetOpts([[String(2*1024**3),"2 GB"],[String(4*1024**3),"4 GB"],[String(8*1024**3),"8 GB — recommended"],[String(16*1024**3),"16 GB"],[String(32*1024**3),"32 GB"]],vodWorking)}</select></div>
         <div><label>Producer deadline</label><select id="pvmb" style="width:auto;min-width:190px">${presetOpts([["30","30 seconds — recommended"],["45","45 seconds"],["60","60 seconds"]],vodMaterialize,v=>`${v} seconds`)}</select></div>
       </div>
-      <div class="hint">Indexing reads each eligible file once and is node-local; 15 minutes is the default. Disabling VOD or pausing indexing can make HLS titles unavailable — neither setting restores live HLS. The web client declares an 8-second request deadline under its explicit 10-second first-byte timer; the producer deadline bounds repeated 503s.</div>
+      <div class="hint">The item page and Playback info name the active mode explicitly. Index schedules, queue health, failures, and retries now live in <button class="ghost sm" onclick="openAnalysisSettings()">Analysis settings</button>.</div>
       <h2 class="section">Measured playback limits</h2>
       <p class="muted" style="margin-top:0">When an original stream loses visible frames, this browser remembers that
         exact media load — codec/profile, resolution, bit depth, dynamic range, and a 10 Mb/s bitrate band — and lets
@@ -10209,18 +11222,18 @@ function storageHtml(st){
   const rows=(st.mounts||[]).map(m=>{
     const roots=esc((m.roots||[]).join(", "));
     if(m.read_bps==null){
-      return `<span class="stgpath">${roots}</span><span style="color:var(--bad)">${esc(m.note||"not measured")}</span>`;
+      return `<span class="stgpath">${roots}</span><span class="stgrate" style="color:var(--bad)">${esc(m.note||"not measured")}</span>`;
     }
     // MB/s alongside Mb/s because the two get confused constantly and every
     // other tool an operator reaches for (dd, iostat) reports bytes.
     const rate=`${(m.read_bps/1e6).toFixed(0)} Mb/s <span class="muted">(${(m.read_bps/8e6).toFixed(0)} MB/s)</span>`;
     const seek=m.seek_ms!=null?` <span class="muted">· seek ${m.seek_ms.toFixed(1)} ms</span>`:"";
     const warn=m.cache_suspect?`<span class="stgpath"></span><span class="muted" style="color:var(--warn,#fbbf24)">${esc(m.note||"")}</span>`:"";
-    return `<span class="stgpath">${roots}</span><span>${rate}${seek}</span>${warn}`;
+    return `<span class="stgpath">${roots}</span><span class="stgrate">${rate}${seek}</span>${warn}`;
   }).join("");
   const hint=rows?`<div class="muted" style="font-size:12px;margin-top:4px">A remux or direct play needs its own bitrate sustained from here.</div>`:"";
   const when=st.measured_at?`<span class="muted" style="font-size:12px">measured ${fmtAgo(st.measured_at)}</span>`:"";
-  return `${rows?`<div class="stgtable">${rows}</div>`:`<span class="muted">no libraries to measure</span>`}${hint}
+  return `${rows?`<div class="stgtable storage-table">${rows}</div>`:`<span class="muted">no libraries to measure</span>`}${hint}
     <div class="row" style="margin-top:8px;gap:10px;align-items:center">
       <button class="ghost sm" onclick="remeasureStorage(this)">Re-measure</button>${when}</div>`;
 }
@@ -10270,7 +11283,7 @@ function systemPanel(sys,playbackEvents){
   const pills=[["NVENC",enc.nvenc],["QuickSync",enc.qsv],["VA-API",enc.vaapi],["VideoToolbox",enc.videotoolbox]]
     .map(([n,ok])=>`<span class="pill" style="${ok?'color:var(--good);border-color:var(--good)':''}">${n} ${ok?'✓':'—'}</span>`).join(" ");
   return `<div class="card"><h2 class="section" style="margin-top:0">Server</h2>
-      <dl class="kvgrid">
+      <dl class="kvgrid system-grid">
         <dt>Server</dt><dd>${esc(sys.name)} · ${APP_NAME} ${esc(sys.version)}${buildTag(sys)} · up ${fmtUptime(sys.uptime_seconds)}</dd>
         <dt>Data dir</dt><dd>${esc(sys.data_dir)}</dd>
         <dt>ffmpeg</dt><dd>${sys.ffmpeg_version?esc(sys.ffmpeg_version):`<span style="color:var(--bad)">not found at \`${esc(sys.ffmpeg)}\` — scanning and transcoding will fail</span>`}</dd>
@@ -10278,7 +11291,10 @@ function systemPanel(sys,playbackEvents){
         <dt>Transcoder</dt><dd>${esc(sys.encoder_selected)} <span class="muted">(preference: ${esc(sys.hwaccel_pref)})</span></dd>
         <dt>HDR tone-map</dt><dd>${toneMapHtml(sys.tone_map)}</dd>
         <dt>Storage</dt><dd>${storageHtml(sys.storage)}</dd>
-        <dt>Right now</dt><dd>${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'} · Watch state: ${replicationText(sys.replication)}</dd>
+        <dt>Right now</dt><dd><div class="system-now">
+          <div class="system-now-counts">${sys.active_transcodes} active stream${sys.active_transcodes===1?'':'s'} · ${sys.libraries} librar${sys.libraries===1?'y':'ies'} · ${sys.users} user${sys.users===1?'':'s'}</div>
+          <div class="system-now-watch"><b>Watch state</b> · ${replicationText(sys.replication)}</div>
+        </div></dd>
       </dl></div>
     <div id="settings-playback-events">${SETTINGS_LOADED.has("playbackEvents")?playbackSummaryCard(playbackEvents):`<div class="card"><h2 class="section" style="margin-top:0">Playback <span class="muted">(7 days)</span></h2><span class="muted">Loading playback history…</span></div>`}</div>
     <div class="card"><h2 class="section" style="margin-top:0">Logs</h2>
@@ -10415,6 +11431,24 @@ function membershipRefusalText(code,message){
       "This learner has not yet published a fresh zero-lag apply proof. Leave it running until its Read worker badge says ready, then retry promotion.",
     voter_storage_preflight_failed:
       "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
+    maintenance_conflict:
+      "Maintenance and membership changes are mutually exclusive. Let the active operation settle, refresh the roster, and retry this action.",
+    cluster_operation_pending:
+      "Another node already owns the cluster's planned-outage lease. Finish or cancel that restart preparation or maintenance operation, then refresh and retry.",
+    maintenance_would_lose_quorum:
+      "Restarting this voter would leave fewer reachable voters than quorum requires. Restore the missing voter or add capacity before retrying maintenance.",
+    maintenance_resume_unsafe:
+      "The target process has not yet proved its maintenance acknowledgement, catch-up, and complete local workload drain. Open that node directly, let it settle, and retry there.",
+    maintenance_node_mismatch:
+      "Open the target node directly. Only that running process can fence and drain its own work or clear its durable maintenance fence.",
+    maintenance_preflight_unsafe:
+      "Direct cluster observations do not currently prove this node safe to maintain. Keep every available voter running and clear the Operations blockers first.",
+    election_quorum_unavailable:
+      "Raft cannot elect a leader without a reachable voter majority. Restore an original voter instead of repeatedly forcing elections.",
+    election_candidate_unavailable:
+      "No reachable follower has published a fresh zero-lag apply proof. Restore or catch up a follower, then retry the election.",
+    election_lifecycle_pending:
+      "A maintenance, promotion, join, or removal operation is still pending. Let it settle before changing leadership.",
   };
   if(REFUSALS[code]) return REFUSALS[code];
   return message?`The server refused this cluster operation: ${message}`
@@ -10422,7 +11456,97 @@ function membershipRefusalText(code,message){
 }
 // last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
 // Feeding it milliseconds prints a healthy node as decades stale.
-function clusterNodeRow(n,localNodeId){
+function clusterDirectMaintenanceStatus(ops,nodeId){
+  const row=clusterDirectOperationRow(ops,nodeId);
+  return row&&row.observation==="answered"&&row.status?row.status:null;
+}
+function clusterDirectOperationRow(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
+}
+function clusterMaintenanceEntryVerdict(ops,nodeId){
+  if(!ops||ops.unavailable) return null;
+  return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
+}
+function clusterMaintenanceReady(n,ops){
+  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
+  return Boolean(n.maintenance_ready&&direct&&direct.process&&direct.process.live&&
+    direct.serving&&direct.serving.reason==="maintenance"&&direct.media&&
+    direct.media.drained&&Number(direct.media.admissions_in_flight||0)===0);
+}
+function clusterMaintenanceResumeReady(n,ops){
+  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
+  return Boolean(n.maintenance&&n.maintenance_acknowledged&&n.reachable&&
+    n.apply_lag_entries===0&&Number(n.active_media_sessions||0)===0&&direct&&
+    direct.process&&direct.process.live&&direct.serving&&
+    direct.serving.reason==="maintenance"&&direct.media&&direct.media.drained&&
+    Number(direct.media.admissions_in_flight||0)===0);
+}
+function clusterNodeOperationsBadge(n,ops){
+  if(!ops) return `<span class="pill">Collecting status</span>`;
+  if(ops.unavailable) return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Status unavailable</span>`;
+  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  if(!row||row.observation!=="answered"||!s)
+    return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Not observed</span>`;
+  const wal=s.wal&&s.wal.snapshot;
+  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  if(!s.process||!s.process.live||!s.serving||!s.serving.ready||!s.raft||!s.raft.sample_valid||!s.raft.watermark_valid||!walHealthy)
+    return `<span class="pill" style="color:var(--warn);border-color:var(--warn)">Needs attention</span>`;
+  return `<span class="pill" style="color:var(--good);border-color:var(--good)">Direct status ready</span>`;
+}
+function clusterNodeOperationsHtml(n,ops){
+  if(!ops) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeunknown">Collecting direct process, serving, Raft, WAL, snapshot, media, and build evidence…</div></section>`;
+  if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
+  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  if(!row||row.observation!=="answered"||!s){
+    const why=clusterOperationReason(row&&(row.error_class||row.observation)||"not_observed");
+    return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+      <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
+  }
+  const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
+  const process=s.process&&s.process.live
+    ? `<span style="color:var(--good)">Live</span> · ${esc(clusterOperationAge(row.sample_age_ms))}`
+    : `<span style="color:var(--bad)">Not live</span>`;
+  const serving=s.serving&&s.serving.ready
+    ? `<span style="color:var(--good)">Ready</span>`
+    : `<span style="color:var(--bad)">Fenced: ${esc(clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
+  const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
+  const raftText=raft.sample_valid&&raft.watermark_valid
+    ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
+    : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
+  const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
+  const walText=wal
+    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const snapshotText=snap.available
+    ? snap.last_build_outcome
+      ? `build ${esc(snap.last_build_outcome)} ${snap.last_build_unix_ms?esc(fmtAgo(Math.floor(snap.last_build_unix_ms/1000))):"at unknown time"}`
+      : `builds ${esc(String(snap.build_ok_count))} ok · ${esc(String(snap.build_error_count))} errors`
+    : `<span style="color:var(--bad)">Unavailable</span>`;
+  const mediaText=`${esc(String(media.local_active_sessions||0))} session${Number(media.local_active_sessions||0)===1?"":"s"} · ${media.drained?"drained":"draining"}`;
+  const lastError=wal&&wal.last_error?wal.last_error.message:"None";
+  const recovery=wal&&wal.last_recovery?`${wal.last_recovery.operation}: ${wal.last_recovery.outcome}`:"None observed";
+  return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
+    <div class="clnodeopmeta"><div><span>Process</span>${process}</div><div><span>Serving</span>${serving}</div>
+      <div><span>Raft</span>${raftText}</div><div><span>WAL</span>${walText}</div>
+      <div><span>Snapshot</span>${snapshotText}</div><div><span>Media / build</span>${mediaText}<br><span class="clopscode">${esc(s.build)}</span></div></div>
+    <details class="clnodedetail"><summary>WAL, snapshot, and protocol details</summary>
+      <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
+        <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
+        <dt>Applied / commit</dt><dd>${raft.applied_index===null||raft.applied_index===undefined?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null||raft.commit_index===undefined?"unknown":esc(String(raft.commit_index))}</dd>
+        <dt>Raft sample</dt><dd>${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}</dd>
+        <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
+        <dt>WAL durable index</dt><dd>${wal&&wal.last_durable_index!==null?esc(String(wal.last_durable_index)):"unknown"}</dd>
+        <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
+        <dt>Last WAL error</dt><dd>${esc(lastError)}</dd><dt>Last recovery</dt><dd>${esc(recovery)}</dd>
+        <dt>Snapshot outcomes</dt><dd>build ${esc(String(snap.build_ok_count||0))} ok / ${esc(String(snap.build_error_count||0))} error; install ${esc(String(snap.install_ok_count||0))} ok / ${esc(String(snap.install_error_count||0))} error</dd>
+        <dt>Last snapshot install</dt><dd>${snap.last_install_outcome?`${esc(snap.last_install_outcome)} ${snap.last_install_unix_ms?esc(fmtAgo(Math.floor(snap.last_install_unix_ms/1000))):"at unknown time"}`:"none observed"}</dd>
+        <dt>Direct play</dt><dd>Unknown here — drain proxy connections separately.</dd></dl></details>
+  </section>`;
+}
+function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
   const voter=n.is_voter;
   const admittedVoter=n.role==="voter";
   const role=voter
@@ -10437,6 +11561,7 @@ function clusterNodeRow(n,localNodeId){
   const leader=n.is_leader?`<span class="pill clleader">Leader</span>`:"";
   const local=n.node_id===localNodeId?`<span class="pill">This node</span>`:"";
   const pending=n.removal_pending?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Removal pending</span>`:"";
+  const maintenance=n.maintenance?`<span class="pill" style="color:var(--warn);border-color:var(--warn)">Maintenance</span>`:"";
   const worker=!voter&&n.role==="learner"
     ? n.bounded_read_ready
       ? `<span class="pill" style="color:var(--good);border-color:var(--good)">Read worker ready</span>`
@@ -10445,19 +11570,258 @@ function clusterNodeRow(n,localNodeId){
   const hostname=n.hostname||n.node_id;
   const advertised=n.advertised_host
     ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
+  const lifecycleLocked=Boolean(context.lifecycleLocked);
+  const localTarget=n.node_id===localNodeId;
+  const directReady=clusterMaintenanceReady(n,context.operations);
+  const resumeReady=clusterMaintenanceResumeReady(n,context.operations);
   const promote=!voter&&n.role==="learner"
-    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
+    ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready&&!lifecycleLocked?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
     : "";
-  const action=n.node_id===localNodeId
-    ? `<span class="muted">Use graceful leave below</span>`
-    : `${promote}<button class="ghost sm" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove"}</button>`;
-  return `<tr><td class="libname clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${worker}</div>
-      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></td>
-    <td data-label="Raft id" class="muted">${esc(String(n.raft_id))}</td>
-    <td data-label="Role">${role}</td>
-    <td data-label="Heartbeat">${heartbeat}</td>
-    <td data-label="Last seen" class="muted">${seen}</td>
-    <td class="rowactions"><div class="row" style="justify-content:flex-end">${action}</div></td></tr>`;
+  const maintenanceAction=n.maintenance
+    ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
+    : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
+  const remove=n.node_id===localNodeId
+    ? `<span class="muted">Use graceful leave in Danger zone</span>`
+    : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
+  const direct=clusterDirectMaintenanceStatus(context.operations,n.node_id);
+  const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
+  const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
+  const note=n.maintenance
+    ? directReady
+      ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
+      : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
+    : "Maintenance is reversible and does not remove this node from membership.";
+  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()">
+    <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
+      ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
+    <div class="clnodebody"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
+      <div class="clnodemeta"><div><span>Heartbeat</span>${heartbeat} · ${seen}</div><div><span>Raft ID</span>${esc(String(n.raft_id))}</div>
+        <div><span>Apply lag</span>${esc(lag)}</div><div><span>Active streams</span>${sessions}</div></div></section>
+      ${clusterNodeOperationsHtml(n,context.operations)}</div>
+      <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div></div>
+  </details>`;
+}
+function clusterRecoveryState(cluster){
+  if(cluster.recovery) return cluster.recovery;
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const required=Math.floor(voters.length/2)+1;
+  const reachable=voters.filter(n=>n.reachable).length;
+  const leader=voters.some(n=>n.is_leader);
+  return {required:voters.length>1&&(reachable<required||!leader),quorum_available:reachable>=required,
+    reachable_voters:reachable,required_voters:required,leader_elected:leader,
+    permanent_majority_loss_supported:false};
+}
+function clusterRecoveryPanel(cluster,recovery,active,ops){
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const maintenanceActive=Boolean(active);
+  const electionCandidate=voters.some(n=>n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+  const electionReady=recovery.quorum_available&&electionCandidate&&!maintenanceActive;
+  const title=recovery.quorum_available?"Leader election required":"Recovery required";
+  const badge=recovery.quorum_available?"Leader unavailable":"Quorum unavailable";
+  const rows=voters.map(n=>`<div class="clvoter"><span>${esc(n.hostname||n.node_id)}${n.is_leader?" · last known leader":""}</span>
+    <b style="color:${n.reachable?'var(--good)':'var(--bad)'}">${n.reachable?"heartbeat fresh":"unreachable / stale"}</b></div>`).join("");
+  const recoverySummary=recovery.quorum_available
+    ? maintenanceActive
+      ? "A voter majority is reachable, but maintenance is still active. Restore and resume the fenced target before requesting an election."
+      : "A voter majority is reachable, but no leader is currently elected. A bounded election is safe to request."
+    : "The voter majority cannot be proved. Normal cluster mutations are locked.";
+  const maintained=active?`<div class="claction"><b>Restore the maintenance target first: ${esc(active.hostname||active.node_id)}</b><p>Its durable work fence is still active. Start this original node with its existing data and identity, then open it directly to verify catch-up and local drain before resuming service.</p></div>${clusterMaintenanceProgress(active,ops,cluster.local_node_id,true)}`:"";
+  return `<section class="cluster-card clrecovery"><div class="clophead"><div><h3>${title}</h3>
+      <p>${recoverySummary}</p></div><span class="pill" style="color:var(--bad);border-color:var(--bad)">${badge}</span></div>
+    <div class="recovery-count">${recovery.reachable_voters} / ${recovery.required_voters}</div><p>reachable voters needed for quorum</p>
+    <div class="clvoters">${rows}</div>
+    ${maintained}
+    ${recovery.quorum_available?`<div class="claction"><b>Request an election</b><p>A healthy caught-up voter will campaign. Raft still requires the reachable majority and chooses the winner.</p><div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div>${forceElectionDialog(electionReady)}`:
+    `<div class="claction"><b>Recommended recovery</b><p>Restore any missing original voter with its existing data directory and identity. Do not initialize a replacement cluster over these files.</p></div>
+    <div class="claction"><b>Permanent majority loss</b><p>This release does not support force-reconfiguring around lost voters. Preserve every surviving data directory before taking any recovery action.</p>
+      <div class="row"><button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+      <button class="ghost sm" onclick="downloadClusterDiagnostics()">Download roster snapshot</button>
+      <button class="ghost sm" onclick="toggleRecoveryChecklist(this)">Preservation checklist</button></div>
+      <div id="clpreserve" class="hint" hidden>Stop writes, copy each surviving data directory independently, record node IDs and Raft IDs, and keep the originals untouched until recovery is verified.</div></div>
+    <button class="ghost sm" disabled title="Raft cannot elect a leader without quorum">Force election unavailable without quorum</button>`}
+  </section>`;
+}
+function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
+  const direct=clusterDirectMaintenanceStatus(ops,active.node_id);
+  const media=direct&&direct.media;
+  const sessions=media?Number(media.local_active_sessions||0):Number(active.active_media_sessions||0);
+  const directReady=clusterMaintenanceReady(active,ops);
+  const resumeReady=clusterMaintenanceResumeReady(active,ops);
+  const localTarget=active.node_id===localNodeId;
+  return `<ol class="clsteps"><li class="${active.maintenance_acknowledged?'done':''}">Target acknowledged the replicated work fence</li>
+    <li class="${!active.is_leader?'done':''}">Leadership is on another voter</li>
+    <li class="${active.reachable&&active.apply_lag_entries===0?'done':''}">Node is reachable and fully caught up</li>
+    <li class="${media&&media.drained&&Number(media.admissions_in_flight||0)===0?'done':''}">Direct process work drained (${sessions} local operation${sessions===1?'':'s'})</li></ol>
+    <div class="claction"><b>${directReady?"Ready to update, reboot, or resume":resumeReady&&active.is_leader?"Ready to hand off leadership and resume":recovering?"Restore this fenced node":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only from the target node after direct process evidence is current; if it became leader during recovery, resume first hands leadership to a caught-up voter.</p>
+      <div class="row"><button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Direct drain proof is required.':'Open the maintenance target directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>`;
+}
+function clusterOperationsPanel(cluster,ops){
+  const recovery=clusterRecoveryState(cluster);
+  const active=(cluster.nodes||[]).find(n=>n.maintenance);
+  if(recovery.required) return clusterRecoveryPanel(cluster,recovery,active,ops);
+  if(active){
+    return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance in progress</h3><p>${esc(active.hostname||active.node_id)}</p></div><span class="pill" style="color:var(--warn);border-color:var(--warn)">Fenced</span></div>
+      ${clusterMaintenanceProgress(active,ops,cluster.local_node_id)}
+    </section>`;
+  }
+  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
+  const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+  const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
+  const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Maintenance &amp; leadership</h3><p>Planned work without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
+    <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
+      <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
+        <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
+    ${forceElectionDialog(electionReady)}
+  </section>`;
+}
+function forceElectionDialog(enabled){
+  return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
+    <p>This briefly interrupts writes while a caught-up follower campaigns. The current voter majority stays unchanged, and Raft—not this screen—selects the next leader.</p>
+    <ol class="clsteps"><li class="done">A voter quorum is reachable</li><li class="done">A caught-up follower is available</li><li class="done">No maintenance or removal is pending</li></ol>
+    <label class="row" style="margin-top:16px;font-size:13px"><input id="clelectionconfirm" type="checkbox" style="width:auto" onchange="document.getElementById('clelectiongo').disabled=!this.checked"> I understand this may briefly pause writes</label>
+    <div class="cldialogactions"><button class="ghost sm" onclick="this.closest('dialog').close()">Cancel</button><button id="clelectiongo" disabled onclick="forceClusterElection(this)">Force election</button></div>
+  </div></dialog>`;
+}
+function clusterOperationAge(ms){
+  if(ms===null||ms===undefined) return "unknown age";
+  if(ms<1000) return "now";
+  const seconds=Math.floor(ms/1000);
+  if(seconds<60) return `${seconds}s ago`;
+  const minutes=Math.floor(seconds/60);
+  return minutes<60?`${minutes}m ago`:`${Math.floor(minutes/60)}h ago`;
+}
+function clusterOperationReason(value){
+  return String(value||"unknown").replaceAll("_"," ");
+}
+function clusterOperationsUnavailable(message){
+  return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
+      <p class="muted" style="margin:0">Direct voter observations and the guarded rollout verdict.</p></div>
+      <button class="ghost sm" onclick="refreshClusterOperations(this)">Retry status</button></div>
+    <div class="clstate warn" role="status"><h3>Do not restart another voter</h3>
+      <p>The bounded operations status could not be collected: ${message||"request failed"}. Keep every available voter running and retry; a roster heartbeat is not a substitute for a direct peer observation.</p></div></div>`;
+}
+function clusterRestartPreparationHtml(localRow){
+  const media=localRow&&localRow.status&&localRow.status.media;
+  if(!media||!media.new_admissions_blocked) return "";
+  const commands=media.restart_commands||[];
+  const expires=media.preparation_expires_at_unix_ms
+    ? `${Math.max(0,Math.ceil((media.preparation_expires_at_unix_ms-Date.now())/1000))}s`
+    : "unknown";
+  const commandHtml=media.drained&&commands.length
+    ? `<p><b>This node is drained.</b> Remove it from new proxy traffic, confirm direct-play connections are zero, then run exactly one command for this host:</p>
+       <dl class="kvgrid">${commands.map(row=>`<dt>${esc(clusterOperationReason(row.supervisor))}</dt><dd><code>${esc(row.command)}</code></dd>`).join("")}</dl>`
+    : `<p>Waiting for ${esc(String(media.local_active_sessions))} owned session${media.local_active_sessions===1?"":"s"} and ${esc(String(media.admissions_in_flight))} admission${media.admissions_in_flight===1?"":"s"} in flight. Existing streams keep serving.</p>`;
+  return `<div class="clstate ${media.drained?"good":"warn"}" role="status"><h3>${media.drained?"Prepared and drained":"Preparing this voter for restart"}</h3>
+    ${commandHtml}<p>Preparation expires in ${esc(expires)}. Direct-play connections are not counted here; drain them at the proxy.</p>
+    <button class="ghost sm" onclick='cancelLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Cancel preparation</button></div>`;
+}
+function clusterOperationsCard(ops){
+  if(!ops) return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
+      <p class="muted" style="margin:0">Collecting direct voter observations and the guarded rollout verdict…</p></div></div></div>`;
+  if(ops.unavailable) return clusterOperationsUnavailable(esc(ops.message||"request failed"));
+  const rows=ops.nodes||[], answered=rows.filter(row=>row.observation==="answered"&&row.status);
+  const voters=rows.filter(row=>row.membership&&row.membership.is_voter);
+  const ready=answered.filter(row=>row.membership.is_voter&&row.status.serving&&row.status.serving.ready).length;
+  const q=clusterQuorum(voters.length);
+  const leader=answered.find(row=>row.status.raft&&row.status.raft.is_leader===true);
+  const terms=[...new Set(answered.map(row=>row.status.raft&&row.status.raft.current_term).filter(value=>value!==null&&value!==undefined))];
+  const builds=[...new Set(answered.map(row=>row.status.build))];
+  const lags=answered.map(row=>row.status.raft&&row.status.raft.apply_lag_entries).filter(value=>value!==null&&value!==undefined);
+  const sessions=answered.reduce((sum,row)=>sum+(row.status.media&&row.status.media.local_active_sessions||0),0);
+  const oldest=rows.reduce((age,row)=>Math.max(age,row.sample_age_ms||0),0);
+  const localRow=rows.find(row=>row.membership&&ops.membership&&row.membership.node_id===ops.membership.local_node_id);
+  const safe=ops.verdict&&ops.verdict.safe_to_restart_one;
+  const title=safe?"Ready to restart one voter":"Do not restart another voter";
+  const blockers=(ops.verdict&&ops.verdict.blockers)||[];
+  const warnings=(ops.verdict&&ops.verdict.warnings)||[];
+  const findings=[...blockers,...warnings];
+  const findingHtml=findings.length?`<ul class="clopsblockers">${findings.map(f=>`<li><b>${esc(clusterOperationReason(f.code))}</b>${f.node_id?` on ${esc(f.node_id)}`:""}: ${esc(f.message)}</li>`).join("")}</ul>`
+    : `<p class="hint">No rollout blockers are present. The candidate is ${esc(ops.verdict.candidate_node_id)}; prepare and drain that exact node before restarting it.</p>`;
+  const canPrepare=safe&&localRow&&ops.verdict.candidate_node_id===localRow.membership.node_id;
+  const prepareAction=canPrepare
+    ? `<button class="ghost sm" onclick='prepareLocalRestart(this,${esc(JSON.stringify(localRow.membership.node_id))})'>Prepare this voter for restart</button>`
+    : safe?`<span class="hint">Open ${esc(ops.verdict.candidate_node_id)} directly to prepare that voter.</span>`:"";
+  return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
+      <p class="muted" style="margin:0">Cluster-wide verdict from the direct evidence shown inside each node.</p></div>
+      <div class="row">${prepareAction}<button class="ghost sm" onclick="downloadClusterSupportBundle(this)">Export support bundle</button>
+      <button class="ghost sm" onclick="refreshClusterOperations(this)">Refresh status</button></div></div>
+    <div class="clstate ${safe?"good":"warn"}" role="status"><h3>${esc(title)}</h3>
+      <p>${safe?`The observed voters preserve majority after one restart. Prepare only ${esc(ops.verdict.candidate_node_id)} and re-check before touching another node.`:
+        "At least one direct safety condition is missing or unhealthy. Keep the available voters running until every blocker below clears."}</p>${findingHtml}</div>
+    ${clusterRestartPreparationHtml(localRow)}
+    <div class="clopsfacts"><div class="clopsfact"><span class="muted">Quorum</span><b>${voters.length} voters · majority ${q.majority} · ${ready} ready</b></div>
+      <div class="clopsfact"><span class="muted">Leader and term</span><b>${leader?esc(leader.membership.hostname||leader.membership.node_id):"Unknown"} · ${terms.length===1?`term ${esc(String(terms[0]))}`:"term disagreement"}</b></div>
+      <div class="clopsfact"><span class="muted">Build convergence</span><b>${builds.length===1?esc(builds[0]):`${builds.length} observed builds`}</b></div>
+      <div class="clopsfact"><span class="muted">Commit / apply</span><b>maximum lag ${lags.length?esc(String(Math.max(...lags))):"unknown"}</b></div>
+      <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
+      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(clusterOperationAge(oldest))}</b></div></div></div>`;
+}
+async function refreshClusterOperations(btn){
+  const generation=PAGE_RENDER_GENERATION;
+  if(btn) btn.disabled=true;
+  SETTINGS_LOADED.delete("clusterOps");
+  const mount=document.getElementById("cluster-operations");
+  if(mount) mount.innerHTML=clusterOperationsCard(null);
+  try{
+    const ops=await loadSettingsKey("clusterOps",generation);
+    if(settingsCurrent(generation,"cluster")){
+      SETTINGS_DATA.clusterOps=ops;
+      renderSettings();
+    }
+  }catch(error){
+    if(settingsCurrent(generation,"cluster")){
+      const current=document.getElementById("cluster-operations");
+      if(current) current.innerHTML=clusterOperationsUnavailable(esc(error&&error.message||"request failed"));
+    }
+  }finally{ if(btn) btn.disabled=false; }
+}
+async function prepareLocalRestart(btn,nodeId){
+  if(!confirm(`Prepare ${nodeId} for restart?\n\nThis blocks new mutable-media work on this process for 15 minutes. Existing sessions keep serving; membership does not change and plurxd will not invoke the host supervisor.`)) return;
+  if(btn) btn.disabled=true;
+  try{
+    await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/restart-preparation`,{method:"POST",body:{expires_in_seconds:900}});
+    toast("Restart preparation started");
+    await refreshClusterOperations();
+    pollLocalRestart(nodeId,PAGE_RENDER_GENERATION);
+  }catch(error){ toast(error&&error.message||"Restart preparation was refused"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+async function cancelLocalRestart(btn,nodeId){
+  if(btn) btn.disabled=true;
+  try{
+    await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/restart-preparation`,{method:"DELETE"});
+    toast("Restart preparation canceled");
+    await refreshClusterOperations();
+  }catch(error){ toast(error&&error.message||"Cancellation failed"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+async function pollLocalRestart(nodeId,generation){
+  while(settingsCurrent(generation,"cluster")){
+    await new Promise(resolve=>setTimeout(resolve,2000));
+    if(!settingsCurrent(generation,"cluster")) return;
+    try{
+      const ops=await api("/cluster/status");
+      if(!settingsCurrent(generation,"cluster")) return;
+      SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+      renderSettings();
+      const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
+      const media=local&&local.status&&local.status.media;
+      if(!media||!media.new_admissions_blocked||media.drained) return;
+    }catch(error){ return; }
+  }
+}
+async function downloadClusterSupportBundle(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const response=await api("/cluster/support-bundle",{raw:true});
+    const blob=await response.blob();
+    const url=URL.createObjectURL(blob), link=document.createElement("a");
+    link.href=url; link.download="plurx-cluster-support.zip"; link.style.display="none";
+    document.body.appendChild(link); link.click(); link.remove(); URL.revokeObjectURL(url);
+    toast("Redacted support bundle downloaded");
+  }catch(error){ toast(error&&error.message||"Support bundle failed"); }
+  finally{ if(btn) btn.disabled=false; }
 }
 function clusterPanel(d){
   // Belt and braces: viewSettings already turns a non-admin away at the door,
@@ -10474,38 +11838,120 @@ function clusterPanel(d){
   // the same renderer as Settings → System.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication);
   const capacity=clustered&&cluster.capacity;
-  const capacityText=capacity
-    ? `${capacity.ready_read_workers} ready non-voting read worker${capacity.ready_read_workers===1?"":"s"}; `+
-      `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}; `+
-      `${capacity.voting_nodes} voters, quorum ${capacity.voting_quorum}, tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}.`
-    : "Capacity details unavailable.";
+  const capacityHeadline=capacity
+    ? `${capacity.ready_read_workers} ready read worker${capacity.ready_read_workers===1?"":"s"} · ${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}`
+    : "Capacity details unavailable";
+  const capacityDetail=capacity
+    ? `${capacity.voting_nodes} voters · quorum ${capacity.voting_quorum} · tolerates ${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}. Read capacity and replicated copies do not increase voting redundancy.`
+    : "Read capacity and voting redundancy could not be read.";
+  const maintenanceActive=nodes.some(node=>node.maintenance);
+  const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<table><thead><tr><th>Host</th><th>Raft id</th><th>Role</th><th>Heartbeat</th><th>Last seen</th><th></th></tr></thead>
-       <tbody>${nodes.map(node=>clusterNodeRow(node,cluster.local_node_id)).join("")}</tbody></table>`
+    ? `<div class="clnodes" id="cluster-node-list">${nodes.map(node=>{
+        const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
+        return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
+      }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
-  return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
-    <div class="clstate ${state.tone}"><h3>${esc(state.title)}</h3><p>${esc(state.body)}</p></div>
-    ${roster}
-    <div class="hint">Heartbeat freshness is the last committed node heartbeat, not a direct network probe.
-      Leader, commit, and apply-lag readings below describe Raft replication health.</div>
-    <div class="hint">Watch state: ${replication?replicationText(replication):"status unavailable"}
-      — the same reading as the Server card on the System tab.</div>
-    <div class="hint">Capacity: ${esc(capacityText)} Read capacity and replicated copies do not increase voting redundancy.</div>
-    ${statusFailure?`<div class="row" style="margin-top:10px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
+  const operations=clustered?`<div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>`:"";
+  const recovery=clustered?clusterRecoveryState(cluster):null;
+  const leader=nodes.find(n=>n.is_leader);
+  const reachable=nodes.filter(n=>n.reachable).length;
+  return `<div class="cluster-dashboard"><div class="cluster-health"><div class="clstate ${recovery&&recovery.required?'warn':state.tone}"><h3>${esc(recovery&&recovery.required?'Recovery required':state.title)}</h3><p>${esc(recovery&&recovery.required?'The cluster cannot currently prove both an elected leader and the reachable voter majority required for safe writes.':state.body)}</p></div>
+    <div class="clmetric"><strong>${leader?esc(leader.hostname||leader.node_id):"—"}</strong><span>Current leader</span></div>
+    <div class="clmetric"><strong>${clustered?`${reachable} / ${nodes.length}`:"—"}</strong><span>Fresh heartbeats</span></div>
+    <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div></div>
+    <div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+      <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
+      <div class="clcontextfacts"><div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>Same authoritative reading as the System tab.</small></div>
+        <div class="clcontextfact"><span>Capacity</span><b>${esc(capacityHeadline)}</b><small>${esc(capacityDetail)}</small></div></div>
+      ${operations}${roster}</section>
+      ${clustered?clusterOperationsPanel(cluster,d.clusterOps):""}</div>
+    ${statusFailure?`<div class="row"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}
     ${clusterRefusalHtml()}
-    ${clustered?joinPanel()+leavePanel(cluster.local_node_id):""}</div>
-    <div class="card"><h2 class="section" style="margin-top:0">Cluster log</h2>
+    ${clustered?`<details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details>`:""}
+    <details class="cldanger"><summary>Cluster diagnostics</summary><div class="cldangerbody"><h2 class="section" style="margin-top:0">Cluster log</h2>
       <div class="row"><select id="clloglvl" style="max-width:120px" onchange="refreshClusterLogs()">
           <option value="info" selected>Info+</option><option value="warn">Warnings+</option>
           <option value="error">Errors</option><option value="debug">Debug+</option></select>
         <label class="row" style="margin:0;font-size:13px;color:var(--muted)"><input type="checkbox" id="cllogauto" checked style="width:auto"> auto-refresh</label>
         <button class="ghost sm" onclick="refreshClusterLogs()">Refresh</button></div>
       <div class="hint">Membership, Hiqlite, and Raft events are kept here instead of the general System log.</div>
-      <div class="logbox" id="cllogbox">Loading…</div></div>`;
+      <div class="logbox" id="cllogbox">Loading…</div></div></details></div>`;
+}
+function toggleClusterNodes(btn){
+  const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
+  const expand=cards.some(card=>!card.open);
+  cards.forEach(card=>{ card.open=expand; });
+  syncClusterNodeToggle();
+  if(btn) btn.focus();
+}
+function syncClusterNodeToggle(){
+  const btn=document.getElementById("clnodes-toggle");
+  if(!btn) return;
+  const cards=[...document.querySelectorAll("#cluster-node-list>.clnode")];
+  const allOpen=cards.length>0&&cards.every(card=>card.open);
+  btn.textContent=allOpen?"Collapse all":"Expand all";
+  btn.setAttribute("aria-expanded",String(allOpen));
 }
 function retryCluster(){
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
   viewSettings(++PAGE_RENDER_GENERATION,false);
+}
+async function setNodeMaintenance(nodeId,enter){
+  if(enter&&!confirm(`Enter maintenance on ${nodeId}?\n\nNew work will be fenced and existing streams will drain. If this node is leader, leadership moves before it is marked ready.`)) return;
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  let changed=false;
+  try{
+    const cluster=await api(`/cluster/nodes/${encodeURIComponent(nodeId)}/maintenance`,{method:enter?"POST":"DELETE",body:enter?{}:undefined});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    SETTINGS_LOADED.delete("clusterOps"); delete SETTINGS_DATA.clusterOps; changed=true;
+    toast(enter?"Maintenance requested":"Node returned to service");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:nodeId,code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")){
+    renderSettings();
+    if(changed) await refreshClusterOperations();
+  }
+}
+function openElectionDialog(){
+  const dialog=document.getElementById("clelection");
+  if(dialog) dialog.showModal();
+}
+async function forceClusterElection(btn){
+  CLUSTER_REFUSAL=null;
+  const generation=PAGE_RENDER_GENERATION;
+  btn.disabled=true; btn.textContent="Electing…";
+  try{
+    const cluster=await api("/cluster/election",{method:"POST",body:{}});
+    if(!settingsCurrent(generation,"cluster")) return;
+    SETTINGS_DATA.cluster=cluster; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+    toast("Leader election completed");
+  }catch(e){
+    if(e&&e.status===401) return;
+    if(!settingsCurrent(generation,"cluster")) return;
+    CLUSTER_REFUSAL={node_id:"Cluster",code:e.code,message:e.message};
+  }
+  if(settingsCurrent(generation,"cluster")) renderSettings();
+}
+function downloadClusterDiagnostics(){
+  const cluster=SETTINGS_DATA&&SETTINGS_DATA.cluster;
+  if(!cluster) return;
+  const logs=document.getElementById("cllogbox")?.textContent||"Cluster log is not loaded.";
+  const blob=new Blob([JSON.stringify({captured_at:new Date().toISOString(),cluster,logs},null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob),a=document.createElement("a");
+  a.href=url; a.download=`plurx-cluster-diagnostics-${Date.now()}.json`; a.click();
+  setTimeout(()=>URL.revokeObjectURL(url),0);
+}
+function toggleRecoveryChecklist(btn){
+  const checklist=document.getElementById("clpreserve");
+  if(!checklist) return;
+  checklist.hidden=!checklist.hidden;
+  btn.textContent=checklist.hidden?"Preservation checklist":"Hide checklist";
 }
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
@@ -10514,7 +11960,7 @@ function clusterRefusalHtml(){
 }
 // Minting is separated from showing because the token exists exactly once: the
 // server hands back the only copy and keeps nothing but its digest.
-function joinPanel(){
+function joinPanel(lifecycleLocked=false){
   if(CLUSTER_TOKEN) return joinTokenHtml(CLUSTER_TOKEN);
   return `<h2 class="section">Add a node</h2>
     <div class="row" style="gap:10px;align-items:center">
@@ -10527,11 +11973,11 @@ function joinPanel(){
         <select id="clrole" style="max-width:150px;font-size:12px;padding:3px 6px">
           <option value="voter" selected>Voting member</option>
           <option value="learner">Read worker</option></select></span>
-      <button onclick="mintJoinToken(this)">Create a join token</button></div>
+      <button ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick="mintJoinToken(this)">Create a join token</button></div>
     <div class="hint">A join token is single-use and short-lived, and it is shown once. Create it when the
       other machine is ready to start, not before.</div>`;
 }
-function leavePanel(localNodeId){
+function leavePanel(localNodeId,lifecycleLocked=false){
   if(CLUSTER_LEAVING) return `<h2 class="section">Remove this node</h2>
     <div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
       Cinema node is draining connections and will shut down.</p></div>`;
@@ -10539,7 +11985,7 @@ function leavePanel(localNodeId){
     <div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
       leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
   return `<h2 class="section">Remove this node</h2>
-    <button class="ghost sm" onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+    <button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
       its owned offline work and coordinates a safe membership change with the surviving quorum. It then
       drains and shuts down. Rejoining this machine requires a fresh data directory and
@@ -10735,6 +12181,31 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       if(!settingsCurrent(generation,tab)) return;
       if(JSON.stringify(t)!==JSON.stringify(TRAKT)){ cacheTrakt(t); paintTrakt(); }
     }
+    if(tab==="analysis"){
+      const snapshot=await api("/analysis/summary");
+      if(!settingsCurrent(generation,tab)) return;
+      SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
+      const mount=document.getElementById("analysis-settings-summary");
+      if(mount) mount.innerHTML=analysisSummaryCard(snapshot,"settings");
+    }
+    if(tab==="cluster"){
+      const current=SETTINGS_DATA.cluster;
+      const recovery=current&&!current.unavailable?clusterRecoveryState(current):null;
+      const live=current&&!current.unavailable&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
+      if(live){
+        const snapshot=await api("/cluster/nodes");
+        if(!settingsCurrent(generation,tab)) return;
+        const operational=cluster=>JSON.stringify({
+          recovery:clusterRecoveryState(cluster),
+          nodes:(cluster.nodes||[]).map(n=>({id:n.node_id,leader:n.is_leader,reachable:n.reachable,
+            lag:n.apply_lag_entries,maintenance:n.maintenance,ack:n.maintenance_acknowledged,
+            ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
+        });
+        const changed=operational(current)!==operational(snapshot);
+        SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+        if(changed) renderSettings();
+      }
+    }
     await Promise.all(secondary);
   }catch(e){ if(e&&e.status===401) return; }
   finally{ if(SETTINGS_TICKING===owner) SETTINGS_TICKING=null; }
@@ -10833,6 +12304,19 @@ const LANG_CHOICES=[["eng","English"],["jpn","Japanese"],["spa","Spanish"],["fre
   ["tha","Thai"],["vie","Vietnamese"],["ukr","Ukrainian"],["ces","Czech"],["ell","Greek"],
   ["heb","Hebrew"],["hun","Hungarian"],["ron","Romanian"]];
 function langOpts(cur){ return LANG_CHOICES.map(([v,l])=>`<option value="${v}" ${cur===v?'selected':''}>${l}</option>`).join(""); }
+async function saveAnalysisSettings(){
+  const err=document.getElementById("an-error"); if(err) err.textContent="";
+  try{
+    cacheSettings(await api("/settings",{method:"PUT",body:{
+      vod_index_mins:Number(document.getElementById("an-every").value),
+      vod_index_cluster_cache:document.getElementById("an-enabled").checked,
+    }}));
+    const snapshot=await api("/analysis/summary");
+    SETTINGS_DATA.analysis=snapshot; SETTINGS_LOADED.add("analysis");
+    if(settingsCurrent(PAGE_RENDER_GENERATION,"analysis")) renderSettings();
+    toast("Analysis settings saved");
+  }catch(error){ if(err) err.textContent=error.message; }
+}
 async function savePlayback(){
   const err=document.getElementById("perr"); err.textContent="";
   try{
@@ -10847,7 +12331,8 @@ async function savePlayback(){
       hls_ahead_max_secs:document.getElementById("pha").value,
       hls_typeless_sliding:document.getElementById("phs").checked,
       vod_presentation:document.getElementById("pvod").checked,
-      vod_index_mins:Number(document.getElementById("pvi").value),
+      vod_live_recovery:document.getElementById("pvlr").checked,
+      playback_control_protocol_v1:document.getElementById("pcpv1").checked,
       vod_working_set_bytes:document.getElementById("pvws").value,
       vod_block_budget_secs:"8",
       vod_materialize_budget_secs:document.getElementById("pvmb").value}}));
@@ -11890,7 +13375,7 @@ function theaterHeroHtml(pick){
   // No backdrop — which is most home media, most episodes, and every photo —
   // degrades to the token-mixed wash painted by .th-hero itself. Nothing to
   // load, nothing to wait for, and it is a --bg/--accent mix so it is on-theme
-  // in all twenty palettes rather than a grey rectangle.
+  // in all twenty-two palettes rather than a grey rectangle.
   const bg=it.backdrop
     ? `<div class="th-bg" style="background-image:url(${esc(tok(it.backdrop))})" aria-hidden="true"></div>` : "";
   // The kicker carries the show name for an episode, so the headline can be
@@ -12627,6 +14112,7 @@ window.addEventListener("beforeunload",()=>{ if(READER){ readerFlushKeepalive(RE
 let PAGE_TIMER=null, PAGE_RENDER_GENERATION=0;
 function pagePhaseName(route){
   if(route==="#/activity") return "activity";
+  if(route==="#/analysis") return "analysis";
   if(route==="#/settings"||route==="#/admin") return "settings";
   return "home";
 }
@@ -12692,6 +14178,7 @@ async function render(){
     else if(h.startsWith("#/category/")) await viewCategory(decodeURIComponent(h.split("/")[2]||""));
     else if(h.startsWith("#/search/")) await viewSearch(decodeURIComponent(h.split("/")[2]||""));
     else if(h==="#/activity") await viewActivity(generation);
+    else if(h==="#/analysis") await viewAnalysis(generation);
     else if(h==="#/admin"||h==="#/settings") await viewSettings(generation);
     else await viewHome(generation);
     // Converted routes restore at the moment their content lands; this catches

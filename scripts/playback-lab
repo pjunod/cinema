@@ -1472,6 +1472,19 @@ async function startServer(options, fixtureDirectory) {
     body: { username: "playback-lab", password: "playback-lab" },
   });
   const token = setup.token;
+  if (options.enable_vod) {
+    // VOD indexing is default-on. Pause it before publishing the fixture
+    // library so the startup scheduler cannot index the first scanned file,
+    // stamp the 15-minute cadence, and leave the suite's later file pending.
+    // An empty startup pass deliberately does not stamp, so re-enabling after
+    // the completed scan guarantees one fresh pass over the whole fixture.
+    process.stdout.write("INDEX   pause VOD until the fixture scan completes\n");
+    await api(baseUrl, "/settings", {
+      token,
+      method: "PUT",
+      body: { vod_index_mins: 0 },
+    });
+  }
   const library = await api(baseUrl, "/libraries", {
     token,
     method: "POST",
@@ -1569,6 +1582,28 @@ function cdpBrowserArgs(options, baseUrl, profile) {
   ].filter(Boolean);
 }
 
+async function findOrCreateCdpPageTarget(jsonBase, baseUrl, request = fetch) {
+  const response = await request(`${jsonBase}/json/list`, {
+    signal: AbortSignal.timeout(1000),
+  });
+  const targets = await response.json();
+  const existing = targets.find((candidate) => candidate.type === "page");
+  if (existing) return existing;
+
+  // Chrome normally creates a page for the positional URL, but the
+  // Playwright headless-shell build used by CI can expose only the browser
+  // target after a cold launch. Ask DevTools to create the page explicitly
+  // instead of waiting forever for a target that will never appear. The
+  // endpoint is local to this freshly spawned, isolated browser profile.
+  const created = await request(
+    `${jsonBase}/json/new?${encodeURIComponent(baseUrl)}`,
+    { method: "PUT", signal: AbortSignal.timeout(1000) },
+  );
+  if (!created.ok) return null;
+  const candidate = await created.json();
+  return candidate.type === "page" ? candidate : null;
+}
+
 class CdpDriver {
   constructor(options, baseUrl, runtime, browserName) {
     this.options = options;
@@ -1615,11 +1650,11 @@ class CdpDriver {
     }, CDP_DEVTOOLS_TIMEOUT_MS, `${this.browserName} DevTools`, 100);
     const parsed = new URL(devtools);
     const jsonBase = `http://${parsed.host}`;
-    const target = await waitFor(async () => {
-      const response = await fetch(`${jsonBase}/json/list`, { signal: AbortSignal.timeout(1000) });
-      const targets = await response.json();
-      return targets.find((candidate) => candidate.type === "page") || null;
-    }, 10_000, `${this.browserName} page target`);
+    const target = await waitFor(
+      () => findOrCreateCdpPageTarget(jsonBase, this.baseUrl),
+      10_000,
+      `${this.browserName} page target`,
+    );
     this.ws = new WebSocket(target.webSocketDebuggerUrl);
     await new Promise((resolve, reject) => {
       this.ws.addEventListener("open", resolve, { once: true });
@@ -3341,6 +3376,7 @@ module.exports = {
   ShapingProxy,
   TokenBucket,
   cdpBrowserArgs,
+  findOrCreateCdpPageTarget,
   completedFragmentIndexPass,
   diagnosticPath,
   deviceRunCommand,

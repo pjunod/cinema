@@ -16,9 +16,40 @@ compile_error!("features `cast_ints` and `cast_ints_unchecked` are mutually excl
 static GLOBAL: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
 pub use hiqlite_wal::LogSync;
+#[cfg(feature = "sqlite")]
+pub use hiqlite_wal::{
+    BoundedWalError, WalRecoveryObservation, WalRuntimeState, WalStatusHandle, WalStatusSnapshot,
+};
 pub use openraft::SnapshotPolicy;
 use serde::{Deserialize, Serialize};
 use std::fmt::{Debug, Display};
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+use std::time::Duration;
+
+/// Maximum time detached client recovery may spend discovering a new leader.
+///
+/// The caller's operation deadline may expire first; discovery intentionally
+/// continues in its spawned task so a bounded exact-state retry can use the
+/// newly authenticated leader without restarting the election wait.
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+pub const LEADER_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// Bound for one authenticated API WebSocket connection attempt.
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+pub const LEADER_STREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// End-to-end bound for handing a discovered leader to the stream manager.
+///
+/// The manager receives leader changes on a dedicated control channel even
+/// while a connection attempt is in progress. The extra second above
+/// [`LEADER_STREAM_CONNECT_TIMEOUT`] covers enqueueing and task scheduling;
+/// acknowledgement is sent only after the replacement stream is usable.
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+pub const LEADER_STREAM_HANDOFF_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Whole detached recovery bound before one retried operation is issued.
+#[cfg(any(feature = "sqlite", feature = "cache"))]
+pub const LEADER_RETRY_RECOVERY_TIMEOUT: Duration = Duration::from_secs(14);
 
 #[cfg(feature = "sqlite")]
 pub use crate::client::{
@@ -27,8 +58,8 @@ pub use crate::client::{
 };
 #[cfg(feature = "sqlite")]
 pub use crate::snapshot_metrics::{
-    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotMetricsSnapshot,
-    LocalDbSnapshotMetrics,
+    DB_SNAPSHOT_HISTOGRAM_BOUNDS_NANOS, DbSnapshotHistogram, DbSnapshotLastOutcome,
+    DbSnapshotMetricsSnapshot, LocalDbSnapshotMetrics,
 };
 #[cfg(feature = "sqlite")]
 use crate::store::state_machine::sqlite::state_machine::Response;

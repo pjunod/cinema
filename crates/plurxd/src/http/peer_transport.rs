@@ -58,11 +58,65 @@ impl PeerTransport {
         expected_node_id: &str,
         base: &str,
         method: reqwest::Method,
-        path: &'static str,
+        path: &str,
         body: Vec<u8>,
         deadline: tokio::time::Instant,
         max_response_bytes: usize,
         auth_mode: PeerAuthMode,
+    ) -> Result<PeerResponse, PeerTransportError> {
+        self.request_with_optional_header(
+            expected_node_id,
+            base,
+            method,
+            path,
+            body,
+            deadline,
+            max_response_bytes,
+            auth_mode,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn request_with_static_header(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+        max_response_bytes: usize,
+        auth_mode: PeerAuthMode,
+        header: (&'static str, &'static str),
+    ) -> Result<PeerResponse, PeerTransportError> {
+        self.request_with_optional_header(
+            expected_node_id,
+            base,
+            method,
+            path,
+            body,
+            deadline,
+            max_response_bytes,
+            auth_mode,
+            Some(header),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn request_with_optional_header(
+        &self,
+        expected_node_id: &str,
+        base: &str,
+        method: reqwest::Method,
+        path: &str,
+        body: Vec<u8>,
+        deadline: tokio::time::Instant,
+        max_response_bytes: usize,
+        auth_mode: PeerAuthMode,
+        extra_header: Option<(&'static str, &'static str)>,
     ) -> Result<PeerResponse, PeerTransportError> {
         let Some(url) = peer_url(base, path) else {
             return Err(PeerTransportError::Unreachable);
@@ -95,6 +149,9 @@ impl PeerTransport {
             SignedPeerAuth::Activity(auth) => signed_headers(request, &auth),
             SignedPeerAuth::Exact(auth) => signed_headers(request, &auth),
         };
+        if let Some((name, value)) = extra_header {
+            request = request.header(name, value);
+        }
         if !body.is_empty() {
             request = request
                 .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -122,7 +179,7 @@ impl PeerTransport {
         expected_node_id: &str,
         base: &str,
         method: reqwest::Method,
-        path: &'static str,
+        path: &str,
         body: Vec<u8>,
         deadline: tokio::time::Instant,
         auth_mode: PeerAuthMode,

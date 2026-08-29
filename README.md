@@ -33,8 +33,11 @@ for running it day to day and reading every status and log line it shows you, wi
 decisions (why one binary clusters without external infra), and
 [docs/VALIDATION.md](docs/VALIDATION.md) explains the functionality-point
 catalog — how a changed path selects behavior contracts, which checks run at
-commit, CI, and full depth, and how to add a regression without losing it —
-with [docs/CI_TEST_OVERHAUL_PLAN.md](docs/CI_TEST_OVERHAUL_PLAN.md) recording
+commit, CI, and full depth, and how to add a regression without losing it.
+[docs/DEVELOPMENT_PIPELINE.md](docs/DEVELOPMENT_PIPELINE.md) explains the
+effort-branch lane for large projects: compile quickly during task integration,
+then run one complete exact-tree qualification before merging to `main`.
+[docs/CI_TEST_OVERHAUL_PLAN.md](docs/CI_TEST_OVERHAUL_PLAN.md) records
 the measured failure order, docs-only lane, suite split, and safe rebase-result
 reuse roadmap. Then
 [docs/PLAYBACK.md](docs/PLAYBACK.md) traces the end-to-end path a file takes to

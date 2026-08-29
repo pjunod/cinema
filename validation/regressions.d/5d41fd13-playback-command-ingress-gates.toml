@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["5d41fd13"]
+reason = "This commit records the completed local review and gate evidence for PR #624 in the playback-control handoff and Markdown/HTML project status; it changes no runtime behavior."
+ignore = true

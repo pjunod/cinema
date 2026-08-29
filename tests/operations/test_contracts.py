@@ -39,23 +39,52 @@ class OperationsContractCase(unittest.TestCase):
     def test_ui_baseline_starts_poll_observation_after_route_settles(self):
         script = read("scripts/ui-baseline")
 
-        self.assertIn('if name in {"home", "activity", "settings"}:', script)
+        self.assertIn(
+            'if name in {"home", "activity", "analysis", "settings"}:', script
+        )
         self.assertIn('[data-phase="settled"]', script)
         self.assertIn('wait_until="domcontentloaded"', script)
         self.assertIn("activity_poll_paused = pause_activity_polling", script)
         self.assertIn('page.wait_for_load_state("networkidle"', script)
         self.assertIn("resume_activity_polling(page)", script)
+        self.assertIn('api_calls.count("GET /api/v1/scan/status") < 3', script)
+        self.assertIn('api_calls.count("GET /api/v1/activity") < 2', script)
+        self.assertIn('if name == "analysis":', script)
+        self.assertIn("if (PAGE_TIMER) clearInterval(PAGE_TIMER);", script)
+        self.assertIn("if (ACT_TIMER) clearInterval(ACT_TIMER);", script)
+        player_open = script.index(
+            'if route.get("player"):', script.index("def capture_route")
+        )
+        self.assertLess(
+            script.index("pause_activity_polling(page, name, args.timeout)", player_open),
+            script.index("open_player(page, args.timeout)", player_open),
+        )
         self.assertLess(
             script.index('[data-phase="settled"]'),
             script.index("resume_activity_polling(page)", script.index("def capture_route")),
         )
         self.assertLess(
             script.index("resume_activity_polling(page)", script.index("def capture_route")),
-            script.index("page.wait_for_timeout(args.settle_ms)"),
+            script.index("page.wait_for_timeout(settle_ms)"),
         )
 
-    def test_ui_baseline_releases_and_retries_real_player_captures(self):
+    def test_ui_baseline_pins_vod_index_status_before_seeding_libraries(self):
         script = read("scripts/ui-baseline")
+        seed = script.index("    def seed(self):")
+        pinned = script.index('{"vod_index_mins": 0}', seed)
+        libraries = script.index("for name, kind, share in LIBRARIES:", seed)
+
+        self.assertLess(pinned, libraries)
+
+    def test_ui_baseline_releases_players_and_narrowly_retries_root_attachment(self):
+        script = read("scripts/ui-baseline")
+        contract = runpy.run_path(
+            str(ROOT / "scripts/ui-baseline"), run_name="ui_baseline_contract"
+        )
+        should_retry = contract["should_retry_capture"]
+        classify_root = contract["root_attach_failure"]
+        fail = contract["Fail"]
+        root_attach = contract["RetryableRootAttach"]
 
         self.assertIn("releaseSession(PLAYER.sessionId);", script)
         self.assertIn(
@@ -66,8 +95,25 @@ class OperationsContractCase(unittest.TestCase):
             "releaseSession(PLAYER.sessionId);", script.index("def capture_route")
         )
         self.assertNotIn("closePlayer();", script[cleanup : cleanup + 500])
-        self.assertIn('attempts = 2 if route.get("player") else 1', script)
+        self.assertIn("class RetryableRootAttach(Fail):", script)
+        self.assertIn("except PlaywrightTimeoutError as error:", script)
+        self.assertIn("attempts = 2", script)
+        self.assertIn(
+            "if should_retry_capture(route, e, attempt, attempts):",
+            script,
+        )
         self.assertIn('print(f"RETRY   {key}: {e}"', script)
+        self.assertIn('print(f"FAIL    {key}: {e}"', script)
+        semantic_root = classify_root("library", "#main", ["pageerror: boot failed"])
+        transient_root = classify_root("library", "#main", [])
+        self.assertIs(type(semantic_root), fail)
+        self.assertIs(type(transient_root), root_attach)
+        self.assertFalse(should_retry({}, semantic_root, 0, 2))
+        self.assertTrue(should_retry({}, root_attach("root"), 0, 2))
+        self.assertFalse(should_retry({}, root_attach("root"), 1, 2))
+        self.assertFalse(should_retry({}, fail("semantic"), 0, 2))
+        self.assertTrue(should_retry({"player": True}, fail("legacy player"), 0, 2))
+        self.assertFalse(should_retry({"player": True}, fail("legacy player"), 1, 2))
         self.assertLess(
             cleanup,
             script.index("page.close()", script.index("def capture_route")),
@@ -111,6 +157,9 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn('${PLURX_GDM_PORT:-32414}:32414/udp', compose)
         self.assertIn('user: "${PUID:-1000}:${PGID:-1000}"', compose)
         self.assertIn('PLURX_BUILD_REF: ${PLURX_BUILD_REF:-}', compose)
+        self.assertIn(
+            "stop_grace_period: ${PLURX_STOP_GRACE_PERIOD:-65m}", compose
+        )
         self.assertIn(
             'PLURX_NODE_HOSTNAME: "${PLURX_NODE_HOSTNAME:-${HOSTNAME:-}}"',
             compose,
@@ -206,6 +255,13 @@ class OperationsContractCase(unittest.TestCase):
         deploy_readme = read("deploy/README.md")
         self.assertIn("There is no direct-install step for the fleet", deploy_readme)
 
+    def test_ship_has_no_obsolete_nuc4_port_exception(self):
+        ship = read("scripts/ship")
+        self.assertNotIn(
+            "nuc4's port is held by Plex; that is accepted, not a failure",
+            ship,
+        )
+
     def test_ship_selects_mobile_tags_and_optional_vars_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             environment = os.environ.copy()
@@ -292,7 +348,10 @@ class OperationsContractCase(unittest.TestCase):
             workflow.index("name: Audit corrective-history evidence"),
             workflow.index("name: Check validation catalog and contract unit tests"),
         )
-        self.assertIn("name: PR validation gate", workflow)
+        self.assertIn("name: Main promotion gate", workflow)
+        self.assertIn("branches: [main]", workflow)
+        self.assertIn("scope_event=effort_qualification", workflow)
+        self.assertIn("qualification: ${{ steps.scope.outputs.qualification }}", workflow)
         fast_rust = workflow.split("  check:", 1)[1].split(
             "\n  cluster_auth:", 1
         )[0]
@@ -311,6 +370,11 @@ class OperationsContractCase(unittest.TestCase):
         )[0]
         self.assertIn("if: needs.scope.outputs.web_layout == 'true'", web_layout)
         self.assertIn("if: needs.scope.outputs.android_device == 'true'", android_device)
+        vod_web = workflow.split("\n  vod_web:", 1)[1].split(
+            "\n  web_layout:", 1
+        )[0]
+        self.assertIn("--case suspend-resume", vod_web)
+        self.assertIn("docs/VOD-STEADY-ACCEPTANCE-HANDOFF.md", vod_web)
         self.assertIn("if: needs.scope.outputs.release_build == 'true'", workflow)
         self.assertIn("needs.scope.outputs.hiqlite_spike == 'true'", workflow)
         self.assertIn("needs.scope.outputs.cluster_auth == 'true'", workflow)
@@ -369,6 +433,7 @@ class OperationsContractCase(unittest.TestCase):
 
         coverage = workflow.split("  coverage:", 1)[1].split("\n  build:", 1)[0]
         self.assertIn("if: github.ref == 'refs/heads/main'", coverage)
+        self.assertIn("--failure-mode all", coverage)
         # Instrumenting the cluster harness made the diagnostic badge depend on
         # replicated-store deadlines and turned one slow worker into a red CI
         # badge. Keep coverage on the same runner-neutral lane as `check`.
@@ -430,10 +495,12 @@ class OperationsContractCase(unittest.TestCase):
             workflow,
         )
 
-    def test_the_merge_queue_is_the_full_fan_out_and_prs_are_the_fast_lane(self):
+    def test_main_qualification_is_full_and_effort_prs_are_compile_only(self):
         workflow = read(".github/workflows/ci.yml")
+        effort = read(".github/workflows/effort-ci.yml")
         lint = read(".github/workflows/lint.yml")
         makefile = read("Makefile")
+        precommit = read("scripts/pre-commit")
 
         # The single required aggregate workflow must fire on merge_group.
         # The badge-only lint workflow runs after merge; Clippy already belongs
@@ -447,9 +514,34 @@ class OperationsContractCase(unittest.TestCase):
         )
         # Queue runs must never be cancelled by a later PR push.
         self.assertIn(
-            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            "github.event_name == 'push' && github.ref == 'refs/heads/main'",
             workflow,
         )
+
+        # Task PRs target effort/** and get one always-present aggregate. The
+        # lane compiles every affected language but executes none of the slow
+        # release suites; an effort/** -> main PR is expanded above instead.
+        self.assertIn('      - "effort/**"', effort)
+        self.assertIn("name: Effort development gate", effort)
+        self.assertIn("run: make effort-rust-check", effort)
+        self.assertIn("run: make apple-build", effort)
+        self.assertIn("run: make android", effort)
+        self.assertIn("run: make web-check", effort)
+        self.assertNotIn("make ci-rust-gate", effort)
+        self.assertNotIn("make cluster-", effort)
+        self.assertNotIn("make apple-test", effort)
+        self.assertNotIn("make android-test", effort)
+        self.assertNotIn("android-instrumentation", effort)
+        self.assertNotIn("ui-check", effort)
+        self.assertNotIn("playback-lab", effort)
+        self.assertNotIn("docker/build-push-action", effort)
+        self.assertIn("$(CARGO) check --workspace --locked --all-targets", makefile)
+        self.assertIn('"${PLURX_EFFORT_COMMIT:-}" = "1"', precommit)
+        self.assertIn(
+            "make history-check validation-lint operations-check effort-rust-check",
+            precommit,
+        )
+        self.assertIn("scripts/validate run --profile commit --staged", precommit)
 
         # Exactly four Rust test lanes own the PR: the fast gate plus three
         # independently selected replicated/daemon jobs.
@@ -565,24 +657,52 @@ class OperationsContractCase(unittest.TestCase):
         self.assertIn("cache-from: type=gha", docker)
         self.assertIn("cache-to: type=gha,mode=min", docker)
 
+    def test_hiqlite_shutdown_budget_covers_its_deliberate_cluster_waits(self):
+        management = read("vendor/hiqlite/src/client/mgmt.rs")
+        signal_handler = read("vendor/hiqlite/src/client/shutdown_handle.rs")
+
+        self.assertIn(
+            "RAFT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30)",
+            management,
+        )
+        self.assertIn("tokio::time::timeout(\n                RAFT_SHUTDOWN_TIMEOUT", management)
+        self.assertIn("use super::mgmt::RAFT_SHUTDOWN_TIMEOUT", signal_handler)
+        self.assertIn("time::timeout(\n            RAFT_SHUTDOWN_TIMEOUT", signal_handler)
+
     def test_ci_artifacts_are_bounded_and_pr_builds_do_not_retain_binaries(self):
         workflow = read(".github/workflows/ci.yml")
 
-        # Every artifact emitted by the high-frequency CI workflow expires
-        # quickly; durable release evidence belongs to publish-release.yml.
+        # Every artifact has an explicit bound. Only the tiny qualification
+        # receipt outlives the one-day diagnostic binaries.
         self.assertEqual(
             workflow.count("uses: actions/upload-artifact@v4"),
-            workflow.count("retention-days: 1"),
+            workflow.count("retention-days:"),
         )
+        self.assertIn("retention-days: 14", workflow)
 
-        # PR and merge-queue builds prove both release targets compile, but no
-        # downstream job consumes those binaries. Only push/tag runs retain
-        # them, avoiding two large duplicate artifacts on every validation.
+        # Ordinary PRs prove both release targets compile but retain no large
+        # artifacts. Final effort qualifications retain the exact binaries and
+        # checksums so the tested candidate can be inspected or staged.
         build = workflow.split("  build:", 1)[1].split("\n  publish:", 1)[0]
-        self.assertIn("name: Retain release binary for push and tag runs", build)
-        self.assertIn("if: github.event_name == 'push'", build)
-        self.assertIn("continue-on-error: true", build)
+        self.assertIn(
+            "name: Retain release binary for push, tag, and qualification runs",
+            build,
+        )
+        self.assertIn("needs.scope.outputs.qualification == 'true'", build)
+        self.assertIn("plurxd.sha256", build)
+        self.assertIn(
+            "continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}",
+            build,
+        )
         self.assertIn("name: plurxd-${{ matrix.target }}", build)
+
+        gate = workflow.split("  pr_gate:", 1)[1]
+        self.assertIn("python3 -m validation.qualification", gate)
+        self.assertIn("qualification-receipt.json", gate)
+        self.assertIn(
+            "name: effort-qualification-${{ github.event.pull_request.number }}",
+            gate,
+        )
 
     def test_release_registry_and_weekly_readiness_match_ci(self):
         ci = read(".github/workflows/ci.yml")
@@ -604,6 +724,7 @@ class OperationsContractCase(unittest.TestCase):
     def test_every_actions_job_has_an_explicit_timeout(self):
         for path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
             ".github/workflows/lint.yml",
             ".github/workflows/publish-release.yml",
             ".github/workflows/release-readiness.yml",
@@ -654,13 +775,16 @@ class OperationsContractCase(unittest.TestCase):
             "macos-26",
             '\"macOS\",\"ARM64\",\"lab\",\"apple\",\"xcode-26\"',
         )
+        hosted_linux_24 = "    runs-on: ubuntu-24.04"
         hosted_linux = "    runs-on: ubuntu-latest"
 
         for path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
             ".github/workflows/fix-evidence.yml",
             ".github/workflows/lint.yml",
             ".github/workflows/release-readiness.yml",
+            ".github/workflows/rust-audit.yml",
             ".github/workflows/validation-nightly.yml",
         ):
             for name, block in workflow_job_blocks(path).items():
@@ -669,7 +793,12 @@ class OperationsContractCase(unittest.TestCase):
                     self.assertIn("\n    uses:", block, f"{path}:{name} has no runner")
                     continue
                 expected = general
-                if path == ".github/workflows/ci.yml" and name == "apple":
+                if (
+                    path == ".github/workflows/ci.yml" and name == "apple"
+                ) or (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "apple_compile"
+                ):
                     expected = apple
                 elif path == ".github/workflows/ci.yml" and name in {
                     "cluster_daemon",
@@ -685,11 +814,26 @@ class OperationsContractCase(unittest.TestCase):
                     "docker",
                 }:
                     expected = high_cpu
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "rust_compile"
+                ):
+                    expected = high_cpu
                 elif path == ".github/workflows/ci.yml" and name in {
                     "android_jvm",
                     "android_device",
                 }:
                     expected = android
+                elif (
+                    path == ".github/workflows/effort-ci.yml"
+                    and name == "android_compile"
+                ):
+                    expected = android
+                elif (
+                    path == ".github/workflows/validation-nightly.yml"
+                    and name == "ffmpeg8-pacing"
+                ):
+                    expected = hosted_linux_24
                 elif (
                     "uses: ./.github/actions/ffmpeg" in block
                     and "container: ubuntu:26.04" not in block
@@ -697,21 +841,44 @@ class OperationsContractCase(unittest.TestCase):
                     expected = ffmpeg6
                 self.assertEqual(expected, runs_on.group(0), f"{path}:{name}")
 
-        for path in (
-            ".github/workflows/publish-release.yml",
-            ".github/workflows/rust-audit.yml",
-        ):
+        for path in (".github/workflows/publish-release.yml",):
             for name, block in workflow_job_blocks(path).items():
                 runs_on = re.search(r"(?m)^    runs-on: .+$", block)
                 self.assertIsNotNone(runs_on, f"{path}:{name} has no runner")
                 self.assertEqual(hosted_linux, runs_on.group(0), f"{path}:{name}")
 
+        for name, block in workflow_job_blocks(
+            ".github/workflows/rust-audit.yml"
+        ).items():
+            self.assertIn(
+                "uses: dtolnay/rust-toolchain@1.97.1",
+                block,
+                f"rust-audit:{name} does not provision the pinned Cargo toolchain",
+            )
+
+    def test_job_containers_never_use_persistent_self_hosted_workspaces(self):
+        workflow_root = ROOT / ".github/workflows"
+        for path in sorted(workflow_root.glob("*.y*ml")):
+            relative = path.relative_to(ROOT).as_posix()
+            for name, block in workflow_job_blocks(relative).items():
+                if "\n    container:" not in block:
+                    continue
+                runs_on = re.search(r"(?m)^    runs-on: .+$", block)
+                self.assertIsNotNone(runs_on, f"{relative}:{name} has no runner")
+                self.assertNotIn(
+                    "self-hosted",
+                    runs_on.group(0),
+                    f"{relative}:{name} runs a root container on persistent storage",
+                )
+
     def test_ci_runner_mode_has_one_validated_operator_switch(self):
         ci = read(".github/workflows/ci.yml")
+        audit = read(".github/workflows/rust-audit.yml")
         script = ROOT / "scripts/ci-runner-mode"
 
         self.assertIn("CI_RUNNER_MODE must be self-hosted or github", ci)
         self.assertIn("vars.CI_RUNNER_MODE == 'github'", ci)
+        self.assertEqual(audit.count("vars.CI_RUNNER_MODE == 'github'"), 2)
         self.assertTrue(script.stat().st_mode & 0o111)
         subprocess.run(
             [str(script), "--help"],

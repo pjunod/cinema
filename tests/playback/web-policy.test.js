@@ -104,6 +104,40 @@ test("playback info exposes and remembers the shared three-mode contract", () =>
   assert.match(SHIPPED_UI, /function statsRateTone\(rate,ahead,suspended,final\)/);
 });
 
+test("Activity renders explicit lease and demand-window instrumentation", () => {
+  const source = shippedSource("activitySessionControlText");
+  const render = new Function(`${source}; return activitySessionControlText;`)();
+  assert.equal(
+    render({
+      lease_mode: "explicit",
+      lease_state: "active",
+      lease_timeout_ms: 30_000,
+      control_demand: "active",
+      reported_position_ms: 12_000,
+      client_runway_ms: 8_000,
+      production_policy: "explicit_demand",
+      production_ahead_seconds: -3,
+      production_target_seconds: 18,
+    }),
+    "explicit lease 30s · demand active · position 12s · client runway 8s · " +
+      "production explicit_demand · production deficit 3s · target 18s",
+  );
+});
+
+test("playback info explicitly separates playback mode from delivery method", () => {
+  const modes = new Function(
+    `${shippedSource("playbackModeName")}\n${shippedSource("playbackModeDetail")}\nreturn {playbackModeName,playbackModeDetail};`,
+  )();
+  assert.equal(modes.playbackModeName({ vod: true }), "VOD HLS");
+  assert.equal(modes.playbackModeName({ sessionId: "live-1" }), "Live HLS");
+  assert.equal(modes.playbackModeName({}), "Progressive file");
+  assert.match(modes.playbackModeDetail({ vod: true }), /fixed, seekable timeline/);
+  assert.match(modes.playbackModeDetail({ sessionId: "live-1" }), /growing recovery timeline/);
+  const stats = shippedSource("updateStats");
+  assert.match(stats, /cardRow\("Playback mode"/);
+  assert.match(stats, /Delivery method/);
+});
+
 asyncTest("every web HLS session requests the bounded VOD presentation", async () => {
   const requests = [];
   let requestId = 0;
@@ -169,7 +203,7 @@ test("the VOD fetch contract stays below hls.js and beyond the producer watchdog
   );
 });
 
-asyncTest("a server that returns the removed live presentation is refused", async () => {
+asyncTest("a temporary live recovery presentation remains playable", async () => {
   const build = new Function(
     "api",
     "newRequestId",
@@ -187,10 +221,8 @@ asyncTest("a server that returns the removed live presentation is refused", asyn
     () => ({ session: { presentation: "vod", block_budget_secs: 8 } }),
     policy,
   );
-  await assert.rejects(
-    () => openSession(42, { copy: true }),
-    error => error.code === "server_vod_required" && error.status === 426,
-  );
+  const started = await openSession(42, { copy: true });
+  assert.equal(started.vod, false);
 });
 
 test("an initial VOD refusal stays visible instead of closing the player", () => {
@@ -208,33 +240,41 @@ test("VOD diagnostics describe materialization instead of claiming a cache hit",
     "health",
     `${shippedSource("vodServerState")}\nreturn vodServerState(health);`,
   );
-  assert.equal(status(null), "VOD · Waiting for demand");
-  assert.equal(status({ producer_state: "running" }), "VOD · Materializing");
+  assert.equal(status(null), "VOD HLS · Waiting for demand");
+  assert.equal(status({ producer_state: "running" }), "VOD HLS · Materializing");
   assert.equal(
     status({ producer_state: "held", producer_hold: "working_set" }),
-    "VOD · Holding working set",
+    "VOD HLS · Holding working set",
   );
   assert.equal(
     status({ producer_state: "held", producer_hold: "ahead" }),
-    "VOD · Holding ahead window",
+    "VOD HLS · Holding ahead window",
   );
-  assert.equal(status({ producer_state: "complete" }), "VOD · Complete");
+  assert.equal(status({ producer_state: "complete" }), "VOD HLS · Complete");
   assert.doesNotMatch(status({ producer_state: "complete" }), /cache/i);
 });
 
-test("an operator can provision or stop VOD without restoring live HLS", () => {
+test("analysis controls are first-class settings separate from playback mode controls", () => {
   const panel = shippedSource("playbackPanel");
   const save = shippedSource("savePlayback");
+  const analysisPanel = shippedSource("analysisSettingsPanel");
+  const saveAnalysis = shippedSource("saveAnalysisSettings");
   assert.match(panel, /id="pvod"/);
-  assert.match(panel, /id="pvi"/);
+  assert.match(panel, /id="pvlr"/);
+  assert.doesNotMatch(panel, /id="pvi"/);
+  assert.match(analysisPanel, /id="an-every"/);
+  assert.match(analysisPanel, /id="an-enabled"/);
   assert.match(panel, /id="pvws"/);
   assert.match(panel, /id="pvmb"/);
   assert.match(save, /vod_presentation:/);
-  assert.match(save, /vod_index_mins:/);
+  assert.match(save, /vod_live_recovery:/);
+  assert.doesNotMatch(save, /vod_index_mins:/);
+  assert.match(saveAnalysis, /vod_index_mins:/);
+  assert.match(saveAnalysis, /vod_index_cluster_cache:/);
   assert.match(save, /vod_materialize_budget_secs:/);
   assert.match(save, /vod_block_budget_secs:"8"/);
-  assert.match(panel, /neither setting restores live HLS/);
-  assert.doesNotMatch(panel, /falls back safely/);
+  assert.match(panel, /VOD HLS/);
+  assert.match(panel, /Live HLS/);
 });
 
 test("estimated skip markers are hedged without rebuilding each tick", () => {
@@ -918,13 +958,16 @@ test("every shipped stall report carries the wait's start as its identity", () =
     /noteAutoStall\(p,[^;]*p\.waitAt\)/,
     "the hls.js bufferStalledError report must key on the open wait",
   );
-  for (const caller of ["endWait", "persistentWait"]) {
-    assert.match(
-      shippedSource(caller),
-      /recordWaitStall\(p,kind,ms,runway,[^;]*,began\)/,
-      `${caller} must report the stall against the instant the wait began`,
-    );
-  }
+  assert.match(
+    shippedSource("endWait"),
+    /recordWaitStall\(p,kind,ms,runway,[^;]*,began\)/,
+    "endWait must report the stall against the instant the wait began",
+  );
+  assert.match(
+    shippedSource("persistentWait"),
+    /recordWaitStall\(p,kind,ms,runway,[^;]*,began,controlTrigger\)/,
+    "persistentWait must preserve the wait instant and its exact control trigger",
+  );
 });
 
 // Both automatic rescues open a replacement session and both yield at that
@@ -1593,6 +1636,16 @@ test("each refusal the server names reaches the overlay as itself", () => {
     [
       502,
       {
+        code: "producer_ended",
+        message:
+          "the server's encoder ended after publishing part of this stream (progress deadline elapsed); media already listed remains available",
+      },
+      "Playback failed to start.",
+      "already listed remains available",
+    ],
+    [
+      502,
+      {
         code: "session_failed",
         message: "the server could not build this stream: the encoder never produced any video",
       },
@@ -1899,7 +1952,7 @@ function shippedBinding(keyword, name) {
 
 // The detail screen with no browser: format helpers that are not under test are
 // stubbed, everything that decides what a viewer READS is shipped code.
-function detailHarness({ decisions = {} } = {}) {
+function detailHarness({ decisions = {}, admin = false } = {}) {
   const requested = [];
   const build = new Function(
     "document",
@@ -1910,6 +1963,8 @@ function detailHarness({ decisions = {} } = {}) {
     "fmtSize",
     "fmtDur",
     "fmtMbps",
+    "ME",
+    "exactWireId",
     [
       shippedSource("esc"),
       shippedSource("fmtChannels"),
@@ -1924,6 +1979,7 @@ function detailHarness({ decisions = {} } = {}) {
       shippedSource("trackChip"),
       shippedSource("trackFactRow"),
       shippedSource("preferredLanguageNote"),
+      shippedSource("analysisFileControl"),
       shippedSource("specBlock"),
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -1936,7 +1992,7 @@ function detailHarness({ decisions = {} } = {}) {
       shippedSource("prePlayBurnNeeded"),
       shippedSource("prePlayApplication"),
       shippedSource("prePlayPreview"),
-      "return {specBlock, prePlayPickers, setPrePlay, clearPrePlay," +
+      "return {specBlock, analysisFileControl, prePlayPickers, setPrePlay, clearPrePlay," +
         " prePlaySelection, decisionUrl, prePlayApplication, prePlayBurnNeeded," +
         " preferredLanguageNote};",
     ].join("\n"),
@@ -1957,6 +2013,8 @@ function detailHarness({ decisions = {} } = {}) {
     () => "3.4 GB",
     () => "1h 52m",
     () => "8.1 Mb/s",
+    { is_admin: admin },
+    (file) => String(file.id),
   );
   return { ...shipped, requested };
 }
@@ -2047,6 +2105,24 @@ test("the detail screen names every subtitle track, its format and its markers",
     2,
     "exactly one audio and one subtitle track carry the marker",
   );
+});
+
+test("the detail screen names the supported HLS mode before playback", () => {
+  const indexed = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "indexed" });
+  assert.match(indexed, /<dt>HLS capability<\/dt><dd><span class="mode-chip vod">VOD HLS<\/span>/);
+  assert.match(indexed, /Fixed, seekable timeline/);
+  const pending = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "pending" });
+  assert.match(pending, /<span class="mode-chip live">Live HLS fallback<\/span>/);
+  assert.match(pending, /while VOD analysis is pending/);
+  assert.match(pending, /when live recovery is enabled in Playback settings/);
+  const unsupported = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "unsupported" });
+  assert.match(unsupported, /cannot use the VOD indexer/);
+  assert.match(unsupported, /Live HLS requires live recovery to be enabled/);
+  const adminControl=detailHarness({admin:true}).analysisFileControl({
+    ...MOVIE_FILE,available:true,vod_index_status:"unsupported",
+  });
+  assert.match(adminControl,/VOD analysis unsupported/);
+  assert.doesNotMatch(adminControl,/Analyze now/);
 });
 
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {
@@ -2373,6 +2449,7 @@ function carryHarness(player) {
     "location",
     "setTimeout",
     "prePlayPreview",
+    "PLAY_OPEN_GATE",
     [
       shippedBinding("let", "PREPLAY"),
       shippedSource("prePlaySelection"),
@@ -2401,6 +2478,7 @@ function carryHarness(player) {
     { hash: "#/" },
     () => {},
     () => {},
+    { invalidate() {} },
   );
 }
 
@@ -2725,10 +2803,14 @@ test("a session that lands on a different range repaints the badge", () => {
     "PLAYER",
     "renderPlayerInfo",
     "attachHls",
+    "stopPlaybackControl",
+    "startPlaybackControl",
     [shippedSource("attachSession"), "return {attachSession};"].join("\n"),
   );
   const player = { deliveredRange: "hdr10" };
-  const { attachSession } = build(player, () => { repaints += 1; }, () => {});
+  const { attachSession } = build(
+    player, () => { repaints += 1; }, () => {}, () => {}, () => {},
+  );
 
   attachSession({}, player, {
     start_seconds: 0,
@@ -2796,6 +2878,29 @@ test("HDR10 Auto leaves the cold-start height to the grade-aware server", () => 
     /const autoStartHeight=[\s\S]{0,520}decision\.delivered_dynamic_range!==['"]hdr10['"]/,
     "a persisted 720p SDR rung must not override the server's proved HDR10 ceiling",
   );
+});
+
+test("control lease labels distinguish legacy, explicit, and VOD delivery", () => {
+  assert.equal(policy.controlLeaseMode(null, false, 0), "legacy");
+  assert.equal(policy.controlLeaseMode(null, false, 7), "explicit");
+  assert.equal(policy.controlLeaseMode(null, true, 0), "vod");
+  assert.equal(
+    policy.controlLeaseMode("explicit", true, 0),
+    "explicit",
+    "a server-reported mode wins once health arrives",
+  );
+  assert.deepEqual(policy.controlLeasePresentation("legacy"), {
+    ownership: "passive",
+    label: "legacy",
+  });
+  assert.deepEqual(policy.controlLeasePresentation("explicit"), {
+    ownership: "demand-owned",
+    label: "explicit",
+  });
+  assert.deepEqual(policy.controlLeasePresentation("vod"), {
+    ownership: "immutable VOD",
+    label: "VOD",
+  });
 });
 
 test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {

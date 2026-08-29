@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7cae225b"]
+points = ["cluster.auth", "playback.pipeline", "web.experience"]
+checks = ["cluster-auth", "playback-shaping", "web-layout", "rust-gate"]
+reason = "The real compacted-growth harness retains 10,000 unique bounded settings so its negative control must violate both the physical-commit and compacted-byte budgets instead of letting repeated overwrites disappear during compaction. The playback shaping contract drives the CDP target helper through an empty headless-shell target list and requires the local DevTools PUT to create the encoded page target. The structural UI gate includes the analysis status route in every supported layout and viewport, waits for its named settled phase, and records exactly one queue snapshot; together these checks reproduce each red #606 merge job and fail if any repair is reverted."

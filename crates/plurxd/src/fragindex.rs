@@ -34,6 +34,11 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::ffmpeg::ffmpeg_bin;
 
+#[cfg(unix)]
+type SourceFd = std::os::fd::RawFd;
+#[cfg(not(unix))]
+type SourceFd = i32;
+
 /// Matches [`crate::copyseg::READ_CHUNK`]'s reasoning: large enough that a
 /// fast copy is not a syscall storm, small enough that the reader parks in one
 /// `read` rather than holding a large buffer.
@@ -225,26 +230,37 @@ pub async fn index_stream<R: AsyncRead + Unpin>(
         }
     }
 
+    let promotion = promotion.unwrap_or_default();
+    let Some(mut served_init) = init.clone() else {
+        return IndexOutcome::Unsupported(
+            "the index pipe ended without an init to validate".into(),
+        );
+    };
+    if let Err(error) =
+        fmp4::promote_hevc_parameter_sets_from(&mut served_init, &promotion.parameter_sets)
+    {
+        return IndexOutcome::Unsupported(format!(
+            "the HEVC decoder configuration could not be completed: {error}"
+        ));
+    }
+    if let Err(error) = fmp4::validate_hevc_decoder_configuration(&served_init) {
+        return IndexOutcome::Unsupported(format!(
+            "validating the HEVC decoder configuration: {error}"
+        ));
+    }
+
     let mut built = FragmentIndex::new(timescale, rows, init_sha, identity);
-    built.promotion = promotion.unwrap_or_default();
+    built.promotion = promotion;
     built.parameter_sets_constant = parameter_sets_constant;
     IndexOutcome::Built(Box::new(built))
 }
 
 /// The identity a file's index is keyed by, for this build of ffmpeg.
-pub fn identity_for(
-    file: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
-) -> SourceIdentity {
+pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> SourceIdentity {
     SourceIdentity::new(
         file.size.max(0) as u64,
         file.mtime,
-        plurx_core::segplan::argv_fingerprint(&transcode::copy_video_args(
-            file,
-            have_dovi_bsf,
-            preserve_dolby_vision,
-        )),
+        plurx_core::segplan::argv_fingerprint(&transcode::copy_video_args(file, video)),
     )
 }
 
@@ -255,13 +271,59 @@ pub fn identity_for(
 /// until the process restarts.
 pub async fn build(
     file: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: transcode::CopyVideoOptions,
     runtime_cache: &Path,
     budget: Duration,
 ) -> IndexOutcome {
-    let args = transcode::copy_index_pipe_args(file, have_dovi_bsf, preserve_dolby_vision);
-    let identity = identity_for(file, have_dovi_bsf, preserve_dolby_vision);
+    let args = transcode::copy_index_pipe_args(file, video);
+    build_with_args(file, args, None, video, runtime_cache, budget).await
+}
+
+/// Build from the exact file descriptor whose complete digest was observed.
+/// The parent retains ownership; the child receives a duplicate as fd 3.
+#[cfg(unix)]
+pub async fn build_from_attested_file(
+    file: &MediaFile,
+    source: &std::fs::File,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
+    use std::os::fd::AsRawFd;
+
+    let args = transcode::copy_index_pipe_args_with_input(file, "/dev/fd/3", video);
+    build_with_args(
+        file,
+        args,
+        Some(source.as_raw_fd()),
+        video,
+        runtime_cache,
+        budget,
+    )
+    .await
+}
+
+#[cfg(not(unix))]
+pub async fn build_from_attested_file(
+    file: &MediaFile,
+    _source: &std::fs::File,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
+    build(file, video, runtime_cache, budget).await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn build_with_args(
+    file: &MediaFile,
+    args: Vec<String>,
+    source_fd: Option<SourceFd>,
+    video: transcode::CopyVideoOptions,
+    runtime_cache: &Path,
+    budget: Duration,
+) -> IndexOutcome {
+    let identity = identity_for(file, video);
     // The probe's duration, carried in so a short read is caught. Passed in
     // milliseconds and converted against the pipe's own timescale inside the
     // reader, because the timescale is not known until the moov arrives.
@@ -270,6 +332,27 @@ pub async fn build(
 
     let mut command = tokio::process::Command::new(ffmpeg_bin());
     crate::transcode::configure_ffmpeg_runtime(&mut command, runtime_cache);
+    #[cfg(unix)]
+    if let Some(source_fd) = source_fd {
+        unsafe {
+            command.pre_exec(move || {
+                let duplicate = libc::fcntl(source_fd, libc::F_DUPFD_CLOEXEC, 10);
+                if duplicate == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::dup2(duplicate, 3) == -1 {
+                    libc::close(duplicate);
+                    return Err(std::io::Error::last_os_error());
+                }
+                libc::close(duplicate);
+                let flags = libc::fcntl(3, libc::F_GETFD);
+                if flags == -1 || libc::fcntl(3, libc::F_SETFD, flags & !libc::FD_CLOEXEC) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
     let mut child = match command
         .args(&args)
         .stdin(Stdio::null())
@@ -314,8 +397,29 @@ pub async fn build(
                 rows: 0,
             },
         };
-    // Dropping the pipe already sends ffmpeg EPIPE; this only reaps the child.
-    let _ = child.start_kill();
+    let status = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
+    let outcome = match (outcome, status) {
+        (IndexOutcome::Built(_), Ok(Ok(status))) if !status.success() => IndexOutcome::Truncated {
+            reason: format!("index pipe exited with {status}"),
+            rows: 0,
+        },
+        (outcome, Ok(Ok(_))) => outcome,
+        (IndexOutcome::Built(_), Ok(Err(error))) => IndexOutcome::Truncated {
+            reason: format!("waiting for the index pipe: {error}"),
+            rows: 0,
+        },
+        (IndexOutcome::Built(_), Err(_)) => {
+            let _ = child.start_kill();
+            IndexOutcome::Truncated {
+                reason: "index pipe did not exit after closing stdout".to_owned(),
+                rows: 0,
+            }
+        }
+        (outcome, _) => {
+            let _ = child.start_kill();
+            outcome
+        }
+    };
     if let IndexOutcome::Built(ref index) = outcome {
         tracing::info!(
             file_id = file.id,
@@ -384,6 +488,30 @@ mod tests {
         testfixtures::run(&mut command)
     }
 
+    fn replace_hvcc_array_type(bytes: &mut [u8], from: u8, to: u8) {
+        let kind_at = bytes
+            .windows(4)
+            .position(|window| window == b"hvcC")
+            .expect("hvcC box");
+        let payload = kind_at + 4;
+        let arrays = usize::from(bytes[payload + 22]);
+        let mut pos = payload + 23;
+        for _ in 0..arrays {
+            let array_kind = bytes[pos] & 0x3f;
+            let count = u16::from_be_bytes([bytes[pos + 1], bytes[pos + 2]]) as usize;
+            if array_kind == from {
+                bytes[pos] = (bytes[pos] & 0xc0) | to;
+                return;
+            }
+            pos += 3;
+            for _ in 0..count {
+                let len = u16::from_be_bytes([bytes[pos], bytes[pos + 1]]) as usize;
+                pos += 2 + len;
+            }
+        }
+        panic!("hvcC carried no type-{from} array");
+    }
+
     #[tokio::test]
     async fn a_real_pipe_reports_its_parameter_sets_constant() {
         // The scan-time check plan §2.2's ruling asks for. Every clean
@@ -405,6 +533,20 @@ mod tests {
             index.promotion.is_empty(),
             "ordinary HEVC carries its parameter sets in hvcC, not in band"
         );
+    }
+
+    #[tokio::test]
+    async fn emitted_hvc1_refuses_an_incomplete_decoder_configuration_without_a_probe_hint() {
+        let mut bytes = index_pipe_bytes("closed-gop");
+        // Keep the hvcC structurally valid but turn its PPS array into a
+        // duplicate SPS array. The ordinary fixture pipe has already removed
+        // in-band sets, so there is no hidden PPS from which to "succeed".
+        replace_hvcc_array_type(&mut bytes, 34, 33);
+        let outcome = index_stream(std::io::Cursor::new(bytes), identity(), None).await;
+        let IndexOutcome::Unsupported(reason) = outcome else {
+            panic!("an incomplete emitted hvcC must not be indexed: {outcome:?}");
+        };
+        assert!(reason.contains("complete VPS/SPS/PPS"), "{reason}");
     }
 
     #[tokio::test]

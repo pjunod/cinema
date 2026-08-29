@@ -125,7 +125,19 @@ const PRE_LEARNER_HEARTBEAT_ENV: &str = "PLURX_VALIDATION_PRE_LEARNER_HEARTBEAT"
 const WATERMARK_STREAM_COMPAT_PROBE: &str = "SELECT 1 AS hiqlite_watermark_stream_compat_v1";
 pub const INSTANCE_ID: &str = "m1b-cluster-check";
 const START_TIMEOUT: Duration = Duration::from_secs(45);
+/// A newly admitted learner may need to install the compacted state-machine
+/// snapshot before Hiqlite can report the database healthy. Keep this aligned
+/// with the learner catch-up proof later in the lifecycle scenario.
+const LEARNER_START_TIMEOUT: Duration = Duration::from_secs(120);
+/// Let the voter report its own typed startup timeout before the controller
+/// gives up on the protocol stream at the same instant.
+const START_RESPONSE_GRACE: Duration = Duration::from_secs(5);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(12);
+/// The no-quorum write exercises the production exact-state retry envelope:
+/// five three-second attempts with four 100 ms gaps. Give the voter enough
+/// time to return its own bounded failure instead of severing the harness
+/// response stream first; ordinary requests retain [`REQUEST_TIMEOUT`].
+const WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT: Duration = Duration::from_secs(17);
 const COMPACTION_RESPONSE_TIMEOUT: Duration = Duration::from_secs(75);
 /// The interface every harness listener binds. hiqlite composes each listener
 /// from this and the port half of the node's own `addr_raft`/`addr_api`
@@ -173,6 +185,14 @@ pub const GROWTH_COMPACTION_LOGS: u64 = 10_000;
 const GROWTH_SETTLED_LOG_TAIL: u64 = 512;
 /// Maximum net compacted directory growth per incoming heartbeat.
 pub const GROWTH_BYTES_PER_BEAT_BUDGET: u64 = 512;
+/// Payload retained by each uncoalesced control write.
+///
+/// The former control repeatedly overwrote 80 progress rows. A compacted
+/// database is expected to collapse those versions, so that workload could
+/// prove the commit budget but not the independent retained-byte budget. One
+/// bounded, unique setting per beat gives the negative control exactly the
+/// high-cardinality retained state that the byte gate is meant to reject.
+const GROWTH_RAW_VALUE_BYTES: usize = GROWTH_BYTES_PER_BEAT_BUDGET as usize + 128;
 /// One extra commit window per stream above the deterministic cadence result.
 pub const GROWTH_COMMIT_HEADROOM_PER_STREAM: u64 = 1;
 /// Maximum accepted lag or internal-entry drift in the sampled applied index.
@@ -3436,23 +3456,74 @@ async fn run_membership_lifecycle_case() -> Result<()> {
         bail!("failed repair retries wrote inside the active lease");
     }
     tokio::time::sleep(Duration::from_millis(repair_lease_ms + 30)).await;
-    let old_fence = match cluster
-        .request(
+    let initial_term = u64::try_from(
+        initial_fence
+            .as_ref()
+            .context("initial leader did not return its repair fence")?
+            .leader_term,
+    )
+    .context("initial artwork repair term was negative")?;
+    let stable_claim_deadline = Instant::now() + CONVERGENCE_TIMEOUT;
+    let old_fence = loop {
+        match cluster.request(leader, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == leader && current_term == initial_term => {}
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                ..
+            } if current_leader == leader && current_term == initial_term => {
+                // The lease has expired, but loaded runners can briefly miss
+                // the production one-second quorum-freshness window. Wait for
+                // a current acknowledgement before attempting the CAS.
+                if Instant::now() >= stable_claim_deadline {
+                    bail!("stable-term artwork re-repair never regained a fresh quorum lease");
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                continue;
+            }
+            Response::Metrics { .. } => {
+                bail!("artwork repair topology changed during the stable-term lease proof")
+            }
+            response => bail!("unexpected stable-term repair metrics response: {response:?}"),
+        }
+        if let Some(fence) = claim_artwork_repair_fence_once(
+            &mut cluster,
             leader,
-            Request::ClaimArtworkRepairFence {
-                item_id: repair_item,
-                lease_ms: repair_lease_ms,
-                inject_leader_change: false,
-            },
+            repair_item,
+            repair_lease_ms,
+            false,
         )
         .await?
-    {
-        Response::ArtworkRepairFence { fence: Some(fence) } => fence,
-        response => bail!("stable-term artwork re-repair stayed fenced: {response:?}"),
+        {
+            if u64::try_from(fence.leader_term).ok() != Some(initial_term) {
+                bail!("artwork repair term changed during the stable-term generation CAS");
+            }
+            break fence;
+        }
+        // `None` explicitly proves the server reached no generation CAS. A
+        // quorum acknowledgement can age between the preflight and the claim,
+        // so only this confirmed no-op is safe to retry.
+        if Instant::now() >= stable_claim_deadline {
+            bail!("stable-term artwork re-repair stayed fenced after the bounded retry window");
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     };
     let same_term_after = match cluster.request(leader, Request::Metrics).await? {
-        Response::Metrics { applied_index, .. } => {
+        Response::Metrics {
+            applied_index,
+            leader: Some(current_leader),
+            current_term,
+            ..
+        } if current_leader == leader && current_term == initial_term => {
             applied_index.context("stable-term repair reuse missing applied index")?
+        }
+        Response::Metrics { .. } => {
+            bail!("artwork repair topology changed during the stable-term generation CAS")
         }
         response => bail!("unexpected stable-term repair metrics: {response:?}"),
     };
@@ -3549,7 +3620,6 @@ async fn run_membership_lifecycle_case() -> Result<()> {
                 if observation_confirmed_at.elapsed() < repair_lease {
                     bail!("artwork repair successor did not wait one complete monotonic lease");
                 }
-                break observed;
             }
             Response::Metrics { .. } => {
                 // A new term invalidates the receiver-local observation. The
@@ -3558,31 +3628,54 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
             response => bail!("unexpected post-wait successor metrics response: {response:?}"),
         }
+
+        let Some((before_repeat_fence, before_repeat_index)) =
+            try_read_artwork_repair_observation(&mut cluster, observed.0, repair_item).await?
+        else {
+            continue;
+        };
+        let repeat = cluster
+            .request(
+                observed.0,
+                Request::ObserveArtworkRepair {
+                    item_id: repair_item,
+                    inject_leader_change: false,
+                },
+            )
+            .await?;
+        if !repeatable_artwork_observation_succeeded(repeat)? {
+            // A loaded runner can spend the one-second quorum-freshness
+            // window in the read-only evidence requests above. Re-enter the
+            // bounded successor proof and require another complete local
+            // lease; never advance to the generation CAS on this stale view.
+            continue;
+        }
+        let Some((after_repeat_fence, after_repeat_index)) =
+            try_read_artwork_repair_observation(&mut cluster, observed.0, repair_item).await?
+        else {
+            continue;
+        };
+        if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
+            bail!(
+                "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
+                 {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
+                 {after_repeat_index:?}"
+            );
+        }
+        match cluster.request(observed.0, Request::Metrics).await? {
+            Response::Metrics {
+                leader: Some(current_leader),
+                current_term,
+                quorum_acknowledged: true,
+                ..
+            } if current_leader == observed.0 && current_term == observed.1 => break observed,
+            Response::Metrics { .. } => {
+                // The repeat was read-only, so retrying the stable-term proof
+                // cannot duplicate a mutation or weaken the lease boundary.
+            }
+            response => bail!("unexpected repeat-observation metrics response: {response:?}"),
+        }
     };
-    let (before_repeat_fence, before_repeat_index) =
-        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
-    match cluster
-        .request(
-            handoff,
-            Request::ObserveArtworkRepair {
-                item_id: repair_item,
-                inject_leader_change: false,
-            },
-        )
-        .await?
-    {
-        Response::Flag { value: true } => {}
-        response => bail!("mature repair observation was not repeatable: {response:?}"),
-    }
-    let (after_repeat_fence, after_repeat_index) =
-        read_artwork_repair_observation(&mut cluster, handoff, repair_item).await?;
-    if after_repeat_fence != before_repeat_fence || after_repeat_index != before_repeat_index {
-        bail!(
-            "read-only repair observation changed durable state: fence {before_repeat_fence:?} -> \
-             {after_repeat_fence:?}, applied index {before_repeat_index:?} -> \
-             {after_repeat_index:?}"
-        );
-    }
     let mut handoff_winners = Vec::new();
     let mut new_fence = None;
     for node_id in 1..=3 {
@@ -3616,18 +3709,11 @@ async fn run_membership_lifecycle_case() -> Result<()> {
             }
         }
     }
-    match cluster.request(handoff, Request::Metrics).await? {
-        Response::Metrics {
-            leader: Some(current_leader),
-            current_term,
-            quorum_acknowledged: true,
-            ..
-        } if current_leader == handoff && current_term == handoff_term => {}
-        Response::Metrics { .. } => {
-            bail!("artwork repair topology changed during the generation CAS")
-        }
-        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
-    }
+    require_artwork_repair_cas_topology(
+        cluster.request(handoff, Request::Metrics).await?,
+        handoff,
+        handoff_term,
+    )?;
     if handoff_winners != [handoff] {
         bail!("new leader did not exclusively fence artwork repair: {handoff_winners:?}");
     }
@@ -4515,18 +4601,71 @@ async fn read_artwork_repair_observation(
     node_id: u64,
     item_id: i64,
 ) -> Result<(Option<ArtworkRepairFence>, Option<u64>)> {
+    try_read_artwork_repair_observation(cluster, node_id, item_id)
+        .await?
+        .context("repair observation changed leader during a required evidence read")
+}
+
+/// Read both pieces of durable repeat evidence, preserving a typed routing
+/// transition so the caller may retry only this non-mutating operation.
+async fn try_read_artwork_repair_observation(
+    cluster: &mut ClusterProcesses,
+    node_id: u64,
+    item_id: i64,
+) -> Result<Option<(Option<ArtworkRepairFence>, Option<u64>)>> {
     let fence = match cluster
         .request(node_id, Request::ReadArtworkRepairFence { item_id })
         .await?
     {
         Response::ArtworkRepairFence { fence } => fence,
+        Response::MembershipLeaderChange { .. } => return Ok(None),
         response => bail!("unexpected repair fence read response: {response:?}"),
     };
     let applied_index = match cluster.request(node_id, Request::Metrics).await? {
         Response::Metrics { applied_index, .. } => applied_index,
         response => bail!("unexpected repair observation metrics: {response:?}"),
     };
-    Ok((fence, applied_index))
+    Ok(Some((fence, applied_index)))
+}
+
+/// Classify the read-only repeat probe. A stale quorum view or typed routing
+/// transition is safe to retry because this request cannot reach the repair
+/// generation CAS; every other response is a semantic harness failure.
+fn repeatable_artwork_observation_succeeded(response: Response) -> Result<bool> {
+    match response {
+        Response::Flag { value: true } => Ok(true),
+        Response::Flag { value: false } | Response::MembershipLeaderChange { .. } => Ok(false),
+        response => bail!("mature repair observation was not repeatable: {response:?}"),
+    }
+}
+
+/// Verify the topology identity that fenced the mutating repair claim. Quorum
+/// freshness is deliberately not part of this post-CAS proof: the claim
+/// itself refuses a stale quorum before submitting its Raft write, while the
+/// following loser probes can legitimately consume the one-second freshness
+/// window on a loaded runner. A changed leader or term still invalidates the
+/// generation proof.
+fn require_artwork_repair_cas_topology(
+    response: Response,
+    expected_leader: u64,
+    expected_term: u64,
+) -> Result<()> {
+    match response {
+        Response::Metrics {
+            leader: Some(current_leader),
+            current_term,
+            ..
+        } if current_leader == expected_leader && current_term == expected_term => Ok(()),
+        Response::Metrics {
+            leader,
+            current_term,
+            ..
+        } => bail!(
+            "artwork repair topology changed during the generation CAS: expected leader \
+             {expected_leader} term {expected_term}, observed leader {leader:?} term {current_term}"
+        ),
+        response => bail!("unexpected post-CAS successor metrics response: {response:?}"),
+    }
 }
 
 /// A potentially mutating repair claim is sent exactly once. In particular,
@@ -4538,17 +4677,26 @@ async fn claim_artwork_repair_fence_once(
     lease_ms: u64,
     inject_leader_change: bool,
 ) -> Result<Option<ArtworkRepairFence>> {
-    match cluster
-        .request(
-            node_id,
-            Request::ClaimArtworkRepairFence {
-                item_id,
-                lease_ms,
-                inject_leader_change,
-            },
-        )
-        .await?
-    {
+    classify_artwork_repair_claim_response(
+        cluster
+            .request(
+                node_id,
+                Request::ClaimArtworkRepairFence {
+                    item_id,
+                    lease_ms,
+                    inject_leader_change,
+                },
+            )
+            .await?,
+    )
+}
+
+/// Only an explicit no-fence response proves the mutating request reached no
+/// generation CAS and is therefore safe for a bounded caller to retry.
+fn classify_artwork_repair_claim_response(
+    response: Response,
+) -> Result<Option<ArtworkRepairFence>> {
+    match response {
         Response::ArtworkRepairFence { fence } => Ok(fence),
         Response::MembershipLeaderChange { .. } => {
             bail!("mutating artwork repair claim was ambiguous and was not retried")
@@ -5420,6 +5568,16 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
         );
     }
     let promoted_spec = specs[(PROMOTED - 1) as usize].clone();
+    // A real replacement daemon is configured from the current roster, which
+    // excludes tombstoned node 4. Feeding the removed endpoint to Hiqlite here
+    // makes startup discovery spend its entire bounded wait on a peer the
+    // scenario has already proved cannot return. Keep the durable Raft ids
+    // sparse instead of turning a removed learner into a bootstrap peer.
+    let promoted_specs = specs
+        .iter()
+        .filter(|spec| spec.id != LEARNER)
+        .cloned()
+        .collect::<Vec<_>>();
     cluster
         .request(
             leader,
@@ -5444,7 +5602,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()).as_learner(),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs.clone()).as_learner(),
         )
         .await?;
     cluster
@@ -5540,7 +5698,7 @@ async fn run_learner_membership_case() -> Result<failure_drills::LearnerDrillObs
     cluster
         .spawn_node(
             &executable,
-            NodeLaunch::voter(PROMOTED, cluster_root.clone(), specs.clone()),
+            NodeLaunch::voter(PROMOTED, cluster_root.clone(), promoted_specs),
         )
         .await?;
     cluster
@@ -5871,17 +6029,12 @@ async fn compacted_growth_gate(root: Option<PathBuf>) -> Result<()> {
     let raw_before_bytes = after_bytes;
     let raw_snapshot = snapshot_index(&metrics_client).await?;
     let raw_applied_before = applied_index(&metrics_client).await?;
+    let raw_value = "x".repeat(GROWTH_RAW_VALUE_BYTES);
     for beat in 0..GROWTH_INCOMING_BEATS {
-        let user_id = users[usize::try_from(beat % GROWTH_ACTIVE_STREAMS)?];
         store
-            .put_progress(
-                user_id,
-                item_id,
-                i64::try_from((beat / GROWTH_ACTIVE_STREAMS + 1) * 1_000)?,
-                Some(10_000_000),
-            )
+            .put_setting(&format!("cluster-check.raw-growth.{beat:05}"), &raw_value)
             .await
-            .context("raw induced-regression progress write")?;
+            .context("raw induced-regression retained-state write")?;
     }
     let raw_applied_after = applied_index(&metrics_client).await?;
     let raw_measured_snapshot =
@@ -6290,6 +6443,9 @@ async fn run_failure_case(
     let survivor = (1..=3)
         .find(|node_id| *node_id != target_id)
         .context("choose survivor")?;
+    println!(
+        "CLUSTER_FAILURE_START target={failure_name} initial_leader={leader} failed_node={target_id} request_target={survivor}"
+    );
     let mut loss_started = None;
     let mut recovery_millis = None;
     let mut request_errors = 0_u64;
@@ -6329,8 +6485,9 @@ async fn run_failure_case(
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     if request_errors != 0 {
+        let recovered_leader = cluster.leader().await?;
         bail!(
-            "{failure_name} loss produced {request_errors} failed requests in the fixed 64-write workload"
+            "{failure_name} loss produced {request_errors} failed requests in the fixed 64-write workload; initial leader {leader}, failed node {target_id}, request target {survivor}, recovered leader {recovered_leader}"
         );
     }
     let recovery_millis = recovery_millis.context("post-loss workload never recovered")?;
@@ -6629,6 +6786,14 @@ impl NodeLaunch {
     pub fn as_learner(mut self) -> Self {
         self.role = ClusterRole::Learner;
         self
+    }
+
+    fn startup_timeout(&self) -> Duration {
+        if self.role.is_learner() {
+            LEARNER_START_TIMEOUT
+        } else {
+            START_TIMEOUT
+        }
     }
 }
 
@@ -6975,6 +7140,7 @@ impl Request {
     fn response_timeout(&self) -> Duration {
         match self {
             Self::ForceCompaction { .. } => COMPACTION_RESPONSE_TIMEOUT,
+            Self::WriteWithoutQuorum => WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT,
             Self::RemoveVoter { .. }
             | Self::RemoveNode { .. }
             | Self::PromoteLearner { .. }
@@ -7601,8 +7767,13 @@ impl NodeProcess {
     }
 
     pub async fn wait_ready(&mut self) -> Result<()> {
+        self.wait_ready_with_timeout(START_TIMEOUT + START_RESPONSE_GRACE)
+            .await
+    }
+
+    async fn wait_ready_with_timeout(&mut self, timeout: Duration) -> Result<()> {
         let response = self
-            .read_response(START_TIMEOUT)
+            .read_response(timeout)
             .await
             .with_context(|| format!("voter {} startup response", self.id))?;
         match response {
@@ -7961,8 +8132,9 @@ impl ClusterProcesses {
         if self.nodes[index].is_some() {
             bail!("voter {} is already running", launch.node_id);
         }
+        let response_timeout = launch.startup_timeout() + START_RESPONSE_GRACE;
         let mut process = NodeProcess::spawn(executable, &launch)?;
-        process.wait_ready().await?;
+        process.wait_ready_with_timeout(response_timeout).await?;
         self.nodes[index] = Some(process);
         Ok(())
     }
@@ -8512,33 +8684,44 @@ struct NodeMutableState {
 /// Run one embedded voter: start hiqlite, announce readiness, then serve the
 /// line-delimited request protocol until stdin closes.
 pub async fn node(launch: NodeLaunch) -> Result<()> {
-    install_crypto_provider();
-    plurx_core::store::validation_set_store_operation_instrumentation(
-        launch.instrument_store_operations,
-    );
     let node_started = Instant::now();
-    let listeners = voter_listen_addrs(&launch)?;
-    let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
-    let client = match hiqlite::start_node(node_config(&launch)?).await {
-        Ok(client) => client,
-        Err(error) => {
+    let startup_timeout = launch.startup_timeout();
+    let startup = tokio::time::timeout(startup_timeout, async {
+        install_crypto_provider();
+        plurx_core::store::validation_set_store_operation_instrumentation(
+            launch.instrument_store_operations,
+        );
+        let listeners = voter_listen_addrs(&launch)?;
+        let _ = ServerTlsConfig::server_config_self_signed(&launch.listen_addr).await;
+        let client = hiqlite::start_node(node_config(&launch)?)
+            .await
+            .context("start hiqlite voter")?;
+        client.wait_until_healthy_db().await;
+        prove_listeners_bound(&listeners).await?;
+        Ok::<_, anyhow::Error>(client)
+    })
+    .await;
+    let client = match startup {
+        Ok(Ok(client)) => client,
+        Ok(Err(error)) => {
             write_response(&Response::Error {
-                message: format!("start hiqlite voter: {error}"),
+                message: format!("{error:#}"),
             })
             .await?;
-            return Err(error).context("start hiqlite voter");
+            return Err(error);
+        }
+        Err(_) => {
+            let message = format!(
+                "voter startup timed out after {} seconds",
+                startup_timeout.as_secs()
+            );
+            write_response(&Response::Error {
+                message: message.clone(),
+            })
+            .await?;
+            bail!(message);
         }
     };
-    tokio::time::timeout(START_TIMEOUT, client.wait_until_healthy_db())
-        .await
-        .context("voter health timed out")?;
-    if let Err(error) = prove_listeners_bound(&listeners).await {
-        write_response(&Response::Error {
-            message: format!("{error:#}"),
-        })
-        .await?;
-        return Err(error);
-    }
     let replication = ReplicationMonitor::replicated(client.clone());
     let (passive_shutdown, passive_shutdown_signal) = tokio::sync::oneshot::channel();
     tokio::spawn(replication.clone().passive_metrics_loop(async move {
@@ -9071,13 +9254,22 @@ async fn handle_request(
             }
         }
         Request::ReadArtworkRepairFence { item_id } => {
-            let mut rows = client
+            let rows = client
                 .query_consistent_map::<HarnessArtworkRepairRow, _>(
                     "SELECT owner_node_id, leader_term, generation \
                      FROM cluster_artwork_repairs WHERE item_id = $1",
                     params!(item_id),
                 )
-                .await?;
+                .await;
+            let mut rows = match rows {
+                Ok(rows) => rows,
+                Err(error) if error.is_forward_to_leader().is_some() => {
+                    return Ok(Response::MembershipLeaderChange {
+                        message: error.to_string(),
+                    });
+                }
+                Err(error) => return Err(error.into()),
+            };
             if rows.len() > 1 {
                 bail!("artwork repair primary key returned multiple rows");
             }
@@ -12056,6 +12248,63 @@ mod tests {
     }
 
     #[test]
+    fn read_only_repair_repeat_retries_only_stale_or_rerouted_observations() {
+        assert!(
+            repeatable_artwork_observation_succeeded(Response::Flag { value: true })
+                .expect("a successful read-only repeat is classified")
+        );
+        assert!(
+            !repeatable_artwork_observation_succeeded(Response::Flag { value: false })
+                .expect("a stale read-only repeat is classified")
+        );
+        assert!(
+            !repeatable_artwork_observation_succeeded(Response::MembershipLeaderChange {
+                message: "election".to_owned(),
+            })
+            .expect("a rerouted read-only repeat is classified")
+        );
+        assert!(repeatable_artwork_observation_succeeded(Response::Ok).is_err());
+    }
+
+    #[test]
+    fn post_cas_repair_proof_distinguishes_quorum_age_from_topology_change() {
+        let metrics = |leader, current_term, quorum_acknowledged| Response::Metrics {
+            leader,
+            current_term,
+            voters: vec![1, 2, 3],
+            members: vec![1, 2, 3],
+            applied_index: Some(41),
+            quorum_acknowledged,
+        };
+
+        require_artwork_repair_cas_topology(metrics(Some(2), 9, true), 2, 9)
+            .expect("fresh matching topology is valid");
+        require_artwork_repair_cas_topology(metrics(Some(2), 9, false), 2, 9)
+            .expect("aged quorum freshness does not rewrite committed topology");
+        assert!(require_artwork_repair_cas_topology(metrics(Some(3), 9, true), 2, 9).is_err());
+        assert!(require_artwork_repair_cas_topology(metrics(Some(2), 10, true), 2, 9).is_err());
+        assert!(require_artwork_repair_cas_topology(metrics(None, 9, false), 2, 9).is_err());
+    }
+
+    #[test]
+    fn read_only_repair_evidence_preserves_forward_to_leader_as_typed() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .rsplit_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        let handler = production
+            .rsplit_once("Request::ReadArtworkRepairFence { item_id } => {")
+            .expect("repair evidence request handler")
+            .1
+            .split_once("Request::ClaimArtworkRepair")
+            .expect("next request handler")
+            .0;
+        assert!(handler.contains("error.is_forward_to_leader().is_some()"));
+        assert!(handler.contains("Response::MembershipLeaderChange"));
+    }
+
+    #[test]
     fn mutating_artwork_claim_helper_has_exactly_one_dispatch() {
         let source = include_str!("lib.rs");
         let helper = source
@@ -12068,6 +12317,55 @@ mod tests {
         assert_eq!(helper.matches(".request(").count(), 1);
         assert!(helper.contains("Response::MembershipLeaderChange"));
         assert!(helper.contains("was ambiguous and was not retried"));
+    }
+
+    #[test]
+    fn mutating_artwork_claim_retries_only_a_confirmed_noop() {
+        let fence = ArtworkRepairFence {
+            item_id: 17,
+            owner_node_id: "node-2".to_owned(),
+            leader_term: 9,
+            generation: 3,
+        };
+        assert_eq!(
+            classify_artwork_repair_claim_response(Response::ArtworkRepairFence {
+                fence: Some(fence.clone()),
+            })
+            .expect("a committed repair claim is classified"),
+            Some(fence)
+        );
+        assert!(
+            classify_artwork_repair_claim_response(Response::ArtworkRepairFence { fence: None })
+                .expect("an explicit no-op repair claim is classified")
+                .is_none()
+        );
+        assert!(
+            classify_artwork_repair_claim_response(Response::MembershipLeaderChange {
+                message: "acknowledgement lost after submission".to_owned(),
+            })
+            .is_err()
+        );
+        assert!(classify_artwork_repair_claim_response(Response::Ok).is_err());
+    }
+
+    #[test]
+    fn stable_term_rerepair_reestablishes_quorum_before_the_cas() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .rsplit_once("\n#[cfg(test)]\nmod tests {")
+            .expect("test module boundary")
+            .0;
+        let proof = production
+            .split_once("let stable_claim_deadline")
+            .expect("stable-term repair proof")
+            .1
+            .split_once("let same_term_after")
+            .expect("stable-term repair proof boundary")
+            .0;
+        assert!(proof.contains("CONVERGENCE_TIMEOUT"));
+        assert!(proof.contains("quorum_acknowledged: true"));
+        assert!(proof.contains("claim_artwork_repair_fence_once"));
+        assert!(!proof.contains("Request::ClaimArtworkRepairFence"));
     }
 
     #[test]
@@ -12107,6 +12405,10 @@ mod tests {
         };
         assert!(request.response_timeout() > Duration::from_secs(60));
         assert_eq!(Request::Metrics.response_timeout(), REQUEST_TIMEOUT);
+        assert_eq!(
+            Request::WriteWithoutQuorum.response_timeout(),
+            WRITE_WITHOUT_QUORUM_RESPONSE_TIMEOUT
+        );
     }
 
     fn test_launch(root: &Path, read_pool_size: usize) -> NodeLaunch {

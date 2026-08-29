@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f1f3f21d"]
+points = ["web.experience"]
+checks = ["web-static"]
+reason = "The retained cockpit Settings regression pins distinct inactive and selected tab paint for Panoptic and Redline, natural-case System values, a shrinking storage-path column, and the System markup classes that keep long operational status readable."

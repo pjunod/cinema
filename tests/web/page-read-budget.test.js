@@ -343,6 +343,29 @@ test("Settings polls only the visible data panel and never overlaps", async () =
   assert.equal(requests.length, 2);
 });
 
+test("cockpit Settings makes the active tab and long System values distinct", async () => {
+  // Panoptic and Redline once painted every tab through the generic accent
+  // button rule. The selected tab therefore differed only by a two-pixel edge
+  // in the same hue. Its own filled state must outrank that generic rule.
+  assert.match(
+    SHIPPED_UI,
+    /\.settabs>button\.settab\.active:not\(\.ghost\):not\(\.pbtn\)[\s\S]*?background:var\(--accent\);color:var\(--btn-ink\)/,
+  );
+  assert.match(
+    SHIPPED_UI,
+    /\.settabs>button\.settab:not\(\.ghost\):not\(\.pbtn\)[\s\S]*?background:rgba\(255,255,255,\.025\)/,
+  );
+
+  // System's values are prose and paths, not cockpit labels. Keep the label
+  // treatment on dt, restore natural case/wrapping on dd, and give storage's
+  // potentially huge root list the shrinking column rather than max-content.
+  assert.match(SHIPPED_UI, /\.kvgrid dd\{[\s\S]*?text-transform:none;word-break:normal/);
+  assert.match(SHIPPED_UI, /\.storage-table\{grid-template-columns:minmax\(0,1fr\) max-content/);
+  assert.match(shippedSource("storageHtml"), /class="stgtable storage-table"/);
+  assert.match(shippedSource("systemPanel"), /class="kvgrid system-grid"/);
+  assert.match(shippedSource("systemPanel"), /class="system-now-watch"/);
+});
+
 test("an old Settings tick cannot block or release a newer generation", async () => {
   const location={hash:"#/settings"}, requests=[]; let tab="libraries";
   const document={visibilityState:"visible",getElementById:()=>null};
@@ -596,9 +619,10 @@ test("Settings loads only the active tab manifest", () => {
     libraries: { required: ["settings", "libs", "status"], secondary: [] },
     metadata: { required: ["settings", "trakt"], secondary: ["libs"] },
     playback: { required: ["settings"], secondary: [] },
+    analysis: { required: ["settings", "analysis"], secondary: [] },
     users: { required: ["users"], secondary: [] },
     system: { required: ["sys"], secondary: ["playbackEvents"] },
-    cluster: { required: ["cluster"], secondary: [] },
+    cluster: { required: ["cluster"], secondary: ["clusterOps"] },
   });
   const view = shippedSource("viewSettings");
   assert.doesNotMatch(view, /Promise\.all\(\[\s*api/,
@@ -615,10 +639,252 @@ test("Settings loads only the active tab manifest", () => {
   assert.match(loadTab, /patchSettingsSecondary/);
   assert.match(loadTab, /settingsCurrent\(generation,tab\)/);
   assert.match(loadTab, /patchSettingsSecondaryError/);
-  for (const endpoint of ["/libraries", "/settings", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
+  for (const endpoint of ["/libraries", "/settings", "/analysis/summary", "/scan/status", "/system", "/users", "/trakt/status", "/cluster/nodes"]) {
     assert.match(SHIPPED_UI, new RegExp(`api\\(${JSON.stringify(endpoint).replace("/", "\\/")}`),
       `Settings endpoint map includes ${endpoint}`);
   }
+});
+
+test("Analysis workspace uses server pages and separates expected outcomes", () => {
+  const main={innerHTML:"",querySelectorAll:()=>[]};
+  const document={activeElement:null,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
+  const harness=new Function(
+    "document","esc","fmtAgo","fmtBytes",
+    `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:true,cursors:[""]};
+     ${shippedSource("analysisStateLabel")}
+     ${shippedSource("analysisPhase")}
+     ${shippedSource("analysisErrorInfo")}
+     ${shippedSource("analysisErrorHtml")}
+     ${shippedSource("analysisRows")}
+     ${shippedSource("analysisCounts")}
+     ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisDisposition")}
+     ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAction")}
+     ${shippedSource("analysisCanRetry")}
+     ${shippedSource("analysisPageUrl")}
+     ${shippedSource("paintAnalysis")}
+     return {
+       paint:(snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);},
+       page:(page,snapshot)=>{ANALYSIS_VIEW.page=page;paintAnalysis(snapshot);},
+       url:(view)=>{Object.assign(ANALYSIS_VIEW,view);return analysisPageUrl();},
+       disposition:analysisDisposition,retry:analysisCanRetry,
+       error:analysisErrorInfo,html:()=>document.getElementById("main").innerHTML,
+     };`,
+  )(document,(value)=>String(value??""),()=>"just now",(value)=>`${value} B`);
+  const rows=Array.from({length:25},(_,index)=>({
+    row_key:`job:job-${index}`,request_id:"",job_id:`job-${index}`,
+    file_id:String(index+1),item_id:String(index+100),title:`Movie ${index}`,
+    state:"ready",request_state:"",job_state:"ready",disposition:"ready",
+    updated_at_ms:100-index,attempts:1,owner_node_id:"node-a",
+    target_node_id:"",pipeline_version:"0123456789ab",source_size:123,
+    request_error_code:"",job_error_code:"",action:"rebuild",
+  }));
+  const summary={available:true,enabled:true,scope:"active_and_recent_terminal",terminal_window:8192,total:26,active:0,attention:0,expected:0,ready:26};
+  harness.paint({enabled:true,now_ms:200,filtered_total:26,next_cursor:"5|76|job:job-24",rows,summary});
+  assert.match(harness.html(),/Showing 1–25 of 26/);
+  assert.match(harness.html(),/Page 1 of 2/);
+  assert.match(harness.html(),/Summary window/);
+  assert.match(harness.html(),/All <b>26<\/b>/);
+  assert.match(harness.html(),/<th scope="col">Actions<\/th>/);
+  assert.doesNotMatch(harness.html(),/Attention <b>/,
+    "sampled summary values are never presented as exact full-history filter counts");
+  assert.doesNotMatch(SHIPPED_UI,/Analysis is caught up/);
+  harness.page(2,{enabled:true,now_ms:200,filtered_total:26,next_cursor:null,rows:[rows[0]],summary});
+  assert.match(harness.html(),/Showing 26–26 of 26/);
+  assert.match(harness.html(),/Page 2 of 2/);
+  assert.equal(
+    harness.url({filter:"attention",query:"mount offline",page:2,pageSize:50,cursors:["","3|20|request:r1"]}),
+    "/analysis/jobs?limit=50&filter=attention&q=mount+offline&cursor=3%7C20%7Crequest%3Ar1",
+  );
+  const unsupported={state:"failed",request_error_code:"unsupported",job_error_code:"",action:"none"};
+  const deleted={state:"cancelled",request_error_code:"source_deleted",job_error_code:"",action:"none"};
+  const failed={state:"failed",request_error_code:"source_unavailable",job_error_code:"",action:"retry"};
+  const superseded={state:"cancelled",request_error_code:"source_superseded",job_error_code:"",action:"analyze_current"};
+  assert.equal(harness.disposition(unsupported),"unsupported");
+  assert.equal(harness.disposition(deleted),"expected");
+  assert.equal(harness.retry(unsupported),false);
+  assert.equal(harness.retry(deleted),false);
+  assert.equal(harness.retry(failed),true);
+  assert.equal(harness.retry(superseded),true);
+  harness.page(1,{enabled:true,now_ms:200,filtered_total:0,next_cursor:null,rows:[],summary:{...summary,total:0,ready:0}});
+  assert.match(harness.html(),/Showing 0–0 of 0/);
+  assert.doesNotMatch(harness.html(),/Showing 0–-1/);
+  const sourceFailure=harness.error("source_unavailable");
+  assert.equal(sourceFailure.title,"Source file is unavailable");
+  assert.match(sourceFailure.next,/mount is online/);
+  const unknown=harness.error("future_failure_code");
+  assert.match(unknown.detail,/unrecognized error code/);
+  assert.match(unknown.next,/Copy the diagnostics/);
+});
+
+test("Analysis refresh preserves stale data, focus, and accessible state", () => {
+  const refresh=shippedSource("renderAnalysis");
+  assert.match(refresh,/if\(main&&ANALYSIS_SNAPSHOT\)/);
+  assert.match(refresh,/Showing the last update — refresh failed/);
+  assert.match(refresh,/aria-live","polite"/);
+  const paint=shippedSource("paintAnalysis");
+  assert.match(paint,/dataset\.analysisFocus/);
+  assert.match(paint,/target\.focus\(\)/);
+  assert.match(paint,/setSelectionRange/);
+  assert.match(paint,/aria-pressed=/);
+  assert.match(paint,/role="status" aria-live="polite"/);
+  const view=shippedSource("viewAnalysis");
+  assert.match(view,/setPageTimer\(\(\)=>\{ if\(ANALYSIS_VIEW\.auto\) renderAnalysisSummary\(generation\)/,
+    "the workspace polls only the compact summary, never the full history query");
+  assert.doesNotMatch(view,/setPageTimer\([^\n]*renderAnalysis\(generation\)/);
+});
+
+test("Analysis summary polling refreshes queue state and countdown time", async () => {
+  const api=async()=>({available:true,enabled:false,now_ms:42_000,active:0,total:0});
+  const document={visibilityState:"visible"};
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_SUMMARY_BUSY=null;
+     let ANALYSIS_SUMMARY=null;
+     let ANALYSIS_SNAPSHOT={enabled:true,now_ms:1_000,rows:[],summary:{enabled:true,now_ms:1_000}};
+     const painted=[];
+     const paintAnalysis=(snapshot)=>painted.push({...snapshot});
+     ${shippedSource("renderAnalysisSummary")}
+     return {run:()=>renderAnalysisSummary(1),painted,snapshot:()=>ANALYSIS_SNAPSHOT};`,
+  )(api,document,{hash:"#/analysis"});
+
+  await harness.run();
+  assert.equal(harness.snapshot().enabled,false,"the paused banner follows the compact summary");
+  assert.equal(harness.snapshot().now_ms,42_000,"lease and retry countdowns advance with the summary clock");
+  assert.equal(harness.painted.length,1);
+});
+
+test("Analysis refresh queues changed views and never paints an obsolete response", async () => {
+  const jobReads=[];
+  const api=(url)=>{
+    if(url==="/analysis/summary") return Promise.resolve({available:true,enabled:true});
+    return new Promise(resolve=>jobReads.push({url,resolve}));
+  };
+  const main={innerHTML:"",prepend:()=>{}};
+  const document={
+    visibilityState:"visible",activeElement:null,body:{contains:()=>true},
+    getElementById:(id)=>id==="main"?main:null,createElement:()=>({setAttribute:()=>{}}),
+  };
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=null;
+     let ANALYSIS_SNAPSHOT=null,ANALYSIS_SUMMARY=null;
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     const painted=[];
+     const paintAnalysis=(snapshot)=>painted.push(snapshot.marker);
+     const setPageFailure=()=>{},setPagePhase=()=>{},esc=String;
+     ${shippedSource("analysisPageUrl")}
+     ${shippedSource("renderAnalysis")}
+     return {
+       start:()=>renderAnalysis(1),
+       change:()=>{ANALYSIS_VIEW.filter="attention";return renderAnalysis(1,true);},
+       painted,
+     };`,
+  )(api,document,{hash:"#/analysis"});
+
+  const first=harness.start();
+  assert.match(jobReads[0].url,/filter=all/);
+  await harness.change();
+  jobReads[0].resolve({marker:"obsolete",rows:[],filtered_total:0,next_cursor:null});
+  await first;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(jobReads.length,2,"the changed filter is fetched after the active read settles");
+  assert.match(jobReads[1].url,/filter=attention/);
+  assert.deepEqual(harness.painted,[],"the old filter response is never painted");
+  jobReads[1].resolve({marker:"current",rows:[],filtered_total:0,next_cursor:null});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(harness.painted,["current"]);
+});
+
+test("Analysis re-entry aborts an older generation and immediately loads the current one", async () => {
+  const reads=[];
+  const api=(url,{signal}={})=>new Promise((resolve,reject)=>{
+    const read={url,resolve,reject,signal}; reads.push(read);
+    if(signal) signal.addEventListener("abort",()=>{
+      const error=new Error("aborted"); error.name="AbortError"; reject(error);
+    },{once:true});
+  });
+  const document={visibilityState:"visible",getElementById:()=>null};
+  const harness=new Function(
+    "api","document","location",
+    `let PAGE_RENDER_GENERATION=1,ANALYSIS_BUSY=null,ANALYSIS_PENDING=null;
+     let ANALYSIS_SNAPSHOT=null,ANALYSIS_SUMMARY=null;
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     const paintAnalysis=()=>{},setPageFailure=()=>{},setPagePhase=()=>{},esc=String;
+     ${shippedSource("analysisPageUrl")}
+     ${shippedSource("renderAnalysis")}
+     return {
+       start:()=>renderAnalysis(1),
+       reenter:()=>{PAGE_RENDER_GENERATION=2;return renderAnalysis(2);},
+     };`,
+  )(api,document,{hash:"#/analysis"});
+
+  const old=harness.start();
+  assert.equal(reads.length,2,"history and compact summary start together");
+  await harness.reenter();
+  await old;
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(reads[0].signal.aborted,true);
+  assert.equal(reads[1].signal.aborted,true);
+  assert.equal(reads.length,4,"the current generation starts without waiting for a timer");
+  reads[2].resolve({rows:[],filtered_total:0,next_cursor:null});
+  reads[3].resolve({available:true,enabled:true});
+  await Promise.resolve();
+  await Promise.resolve();
+});
+
+test("Analysis repaint restores row-link and disclosure focus with stable keys", () => {
+  let focusKey="item:job:one",focused=[];
+  const target={dataset:{analysisFocus:focusKey},focus:()=>focused.push(focusKey)};
+  const openDetail={dataset:{analysisKey:"job:one"}};
+  const main={
+    innerHTML:"",
+    querySelectorAll:(selector)=>selector.startsWith("details")?[openDetail]:[target],
+  };
+  const active={dataset:{analysisFocus:focusKey}};
+  const document={activeElement:active,body:{contains:()=>true},getElementById:(id)=>id==="main"?main:null};
+  const harness=new Function(
+    "document","esc","fmtAgo","fmtBytes",
+    `let ANALYSIS_SNAPSHOT=null,ANALYSIS_ROW_LOOKUP=new Map();
+     let ANALYSIS_VIEW={filter:"all",query:"",page:1,pageSize:25,auto:false,cursors:[""]};
+     ${shippedSource("analysisStateLabel")}
+     ${shippedSource("analysisPhase")}
+     ${shippedSource("analysisErrorInfo")}
+     ${shippedSource("analysisErrorHtml")}
+     ${shippedSource("analysisRows")}
+     ${shippedSource("analysisCounts")}
+     ${shippedSource("analysisRowKey")}
+     ${shippedSource("analysisDisposition")}
+     ${shippedSource("analysisErrors")}
+     ${shippedSource("analysisAction")}
+     ${shippedSource("analysisCanRetry")}
+     ${shippedSource("paintAnalysis")}
+     return (snapshot)=>{ANALYSIS_SNAPSHOT=snapshot;paintAnalysis(snapshot);};`,
+  )(document,String,()=>"just now",value=>`${value} B`);
+  const row={
+    row_key:"job:one",request_id:"",job_id:"one",file_id:"1",item_id:"2",title:"Movie",
+    state:"ready",request_state:"",job_state:"ready",disposition:"ready",action:"rebuild",
+    updated_at_ms:100,attempts:1,owner_node_id:"node-a",target_node_id:"",
+    pipeline_version:"0123456789ab",source_size:123,request_error_code:"",job_error_code:"",
+  };
+  const snapshot={enabled:false,now_ms:200,filtered_total:1,next_cursor:null,rows:[row],summary:{available:true,total:1,ready:1}};
+  harness(snapshot);
+  assert.deepEqual(focused,["item:job:one"]);
+  assert.match(main.innerHTML,/data-analysis-focus="item:job:one"/);
+  assert.match(main.innerHTML,/data-analysis-focus="details:job:one"/);
+  assert.match(main.innerHTML,/data-analysis-focus="paused-settings"/);
+  assert.match(main.innerHTML,/data-analysis-key="job:one" open/);
+
+  focusKey="details:job:one";
+  active.dataset.analysisFocus=focusKey;
+  target.dataset.analysisFocus=focusKey;
+  harness(snapshot);
+  assert.deepEqual(focused,["item:job:one","details:job:one"]);
 });
 
 test("Settings drops a node-local scan error superseded by replicated success", () => {
@@ -660,9 +926,10 @@ test("Settings executes exact required and secondary waves for every tab", async
     libraries:{required:["/settings","/libraries","/scan/status"],secondary:[]},
     metadata:{required:["/settings","/trakt/status"],secondary:["/libraries"]},
     playback:{required:["/settings"],secondary:[]},
+    analysis:{required:["/settings","/analysis/summary"],secondary:[]},
     users:{required:["/users"],secondary:[]},
     system:{required:["/system"],secondary:["playback-events","system-log"]},
-    cluster:{required:["/cluster/nodes"],secondary:["cluster-log"]},
+    cluster:{required:["/cluster/nodes"],secondary:["/cluster/status","cluster-log"]},
   };
   for(const [tab,expected] of Object.entries(cases)){
     const requests=[], phases=[], logReleases=[];

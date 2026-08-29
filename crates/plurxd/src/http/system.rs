@@ -463,6 +463,32 @@ pub struct ClientPlaybackSnapshot {
     pub server: Option<ClientServerSnapshot>,
 }
 
+/// Last control snapshot the server accepted before a legacy client recovery.
+/// M2 keeps the legacy recovery authoritative, but preserving this join makes
+/// shadow comparisons possible without inferring client state after the fact.
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlSnapshot {
+    pub generation: Option<String>,
+    pub control_epoch: Option<u64>,
+    pub sequence: Option<u64>,
+    pub demand: Option<String>,
+    pub render_state: Option<String>,
+    pub position_ms: Option<i64>,
+    pub buffered_through_ms: Option<i64>,
+    pub observed_download_bps: Option<u64>,
+    pub observation: Option<ClientControlObservation>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+pub struct ClientControlObservation {
+    pub dropped_frames: Option<u64>,
+    pub decoder_state: Option<String>,
+    pub error_code: Option<String>,
+    pub error_detail: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 pub struct ClientLog {
@@ -530,6 +556,11 @@ pub struct ClientLog {
     pub session_id: Option<String>,
     /// Correlated AVPlayer and last-polled server state for stall attribution.
     pub snapshot: Option<ClientPlaybackSnapshot>,
+    /// Client-reported last accepted protocol state preceding this event.
+    /// It is evidence, not an authoritative server join.
+    pub control: Option<ClientControlSnapshot>,
+    /// Current trigger state sampled immediately before legacy recovery.
+    pub control_trigger: Option<ClientControlSnapshot>,
 }
 
 /// Sustained rate and burst allowance for `/client-log`, in reports per minute.
@@ -749,6 +780,7 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
     event.ahead_seconds = info.ahead_seconds;
     event.suspended = Some(info.suspended);
     event.hold_reason = info.hold_reason.map(|reason| match reason {
+        crate::transcode::AheadHoldReason::Demand => "demand".to_owned(),
         crate::transcode::AheadHoldReason::Time => "time".to_owned(),
         crate::transcode::AheadHoldReason::Bytes => "bytes".to_owned(),
         crate::transcode::AheadHoldReason::Global => "global".to_owned(),
@@ -774,12 +806,33 @@ fn join_session_truth(event: &mut PlaybackEvent, info: &crate::transcode::Sessio
             "readrate": info.readrate,
             "suspend_count": info.suspend_count,
             "progress_idle_ms": info.progress_idle_ms,
+            "producer_state": info.producer_state,
+            "producer_exit_success": info.producer_exit_success,
+            "producer_exit_code": info.producer_exit_code,
+            "producer_exit_signal": info.producer_exit_signal,
+            "producer_exit_idle_ms": info.producer_exit_idle_ms,
+            "producer_attempt": info.producer_attempt,
+            "playlist_ready": info.playlist_ready,
+            "published_segment": info.published_segment,
             "published_end_ms": info.published_end_ms,
+            "next_media_sequence": info.next_media_sequence,
             "fetched_end_ms": info.fetched_end_ms,
             "fetched_segment": info.fetched_segment,
+            "pending_fetched_segment": info.pending_fetched_segment,
             "first_retained_segment": info.first_retained_segment,
             "playlist_shape": info.playlist_shape,
             "last_request": info.last_request,
+            "lease_mode": info.lease_mode,
+            "lease_state": info.lease_state,
+            "lease_timeout_ms": info.lease_timeout_ms,
+            "control_demand": info.control_demand,
+            "reported_position_ms": info.reported_position_ms,
+            "client_runway_ms": info.client_runway_ms,
+            "render_state": info.render_state,
+            "production_policy": info.production_policy,
+            "production_ahead_seconds": info.production_ahead_seconds,
+            "production_target_seconds": info.production_target_seconds,
+            "producer_control": info.producer_control,
             "last_request_idle_ms": i64::try_from(info.idle_seconds)
                 .unwrap_or(i64::MAX)
                 .saturating_mul(1_000)
@@ -814,6 +867,96 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
             Some((index, _)) => Some(value[..index].to_owned()),
             None => Some(value.to_owned()),
         }
+    }
+    fn control_context(value: &ClientControlSnapshot) -> Option<serde_json::Value> {
+        const MAX_MEDIA_MS: i64 = 366 * 24 * 60 * 60 * 1_000;
+        const MAX_DOWNLOAD_BPS: u64 = 10_000_000_000_000;
+        let mut context = serde_json::Map::new();
+        if let Some(generation) = clipped(&value.generation, 64)
+            .filter(|generation| uuid::Uuid::parse_str(generation).is_ok())
+        {
+            let hash = crate::transcode::session_log_id(&generation);
+            context.insert(
+                "generation".to_owned(),
+                format!("g-{}", hash.trim_start_matches("s-")).into(),
+            );
+        }
+        for (key, number) in [
+            (
+                "control_epoch",
+                value.control_epoch.filter(|number| *number > 0),
+            ),
+            ("sequence", value.sequence.filter(|number| *number > 0)),
+        ] {
+            if let Some(number) = number {
+                context.insert(key.to_owned(), number.into());
+            }
+        }
+        if let Some(demand) = clipped(&value.demand, 16)
+            .filter(|demand| matches!(demand.as_str(), "active" | "hold" | "end"))
+        {
+            context.insert("demand".to_owned(), demand.into());
+        }
+        if let Some(render) = clipped(&value.render_state, 16).filter(|render| {
+            matches!(
+                render.as_str(),
+                "starting" | "rendering" | "waiting" | "stalled" | "seeking" | "ended" | "failed"
+            )
+        }) {
+            context.insert("render_state".to_owned(), render.into());
+        }
+        let position = value
+            .position_ms
+            .filter(|number| (0..=MAX_MEDIA_MS).contains(number));
+        if let Some(number) = position {
+            context.insert("position_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value.buffered_through_ms.filter(|number| {
+            (0..=MAX_MEDIA_MS).contains(number)
+                && position.is_none_or(|position| *number >= position)
+        }) {
+            context.insert("buffered_through_ms".to_owned(), number.into());
+        }
+        if let Some(number) = value
+            .observed_download_bps
+            .filter(|number| *number <= MAX_DOWNLOAD_BPS)
+        {
+            context.insert("observed_download_bps".to_owned(), number.into());
+        }
+        if let Some(value) = value.observation.as_ref() {
+            let mut observation = serde_json::Map::new();
+            if let Some(number) = value
+                .dropped_frames
+                .filter(|number| *number <= 1_000_000_000)
+            {
+                observation.insert("dropped_frames".to_owned(), number.into());
+            }
+            if let Some(state) = clipped(&value.decoder_state, 16).filter(|state| {
+                matches!(state.as_str(), "unknown" | "ready" | "starved" | "failed")
+            }) {
+                observation.insert("decoder_state".to_owned(), state.into());
+            }
+            let error_code = clipped(&value.error_code, 16).filter(|code| {
+                matches!(
+                    code.as_str(),
+                    "network" | "manifest" | "media" | "decoder" | "drm" | "unknown"
+                )
+            });
+            if let Some(code) = error_code {
+                observation.insert("error_code".to_owned(), code.into());
+                if let Some(detail) = clipped(&value.error_detail, 120).filter(|detail| {
+                    !detail
+                        .bytes()
+                        .any(|byte| matches!(byte, b'\r' | b'\n' | b'\0'))
+                }) {
+                    observation.insert("error_detail".to_owned(), detail.into());
+                }
+            }
+            if !observation.is_empty() {
+                context.insert("observation".to_owned(), observation.into());
+            }
+        }
+        (!context.is_empty()).then_some(serde_json::Value::Object(context))
     }
     let mut extra = serde_json::Map::new();
     for (key, value) in [
@@ -937,6 +1080,12 @@ fn client_playback_event(ev: &ClientLog, user_id: i64) -> PlaybackEvent {
         if !client.is_empty() {
             extra.insert("client".to_owned(), client.into());
         }
+    }
+    if let Some(control) = ev.control.as_ref().and_then(control_context) {
+        extra.insert("control_accepted_client".to_owned(), control);
+    }
+    if let Some(control) = ev.control_trigger.as_ref().and_then(control_context) {
+        extra.insert("control_trigger_client".to_owned(), control);
     }
     let runway = ev
         .runway
@@ -1174,6 +1323,12 @@ pub struct SettingsDto {
     /// VOD availability kill switch. On by default; turning it off refuses
     /// HLS session creation and never restores the removed live presentation.
     pub vod_presentation: bool,
+    /// Temporary growing-HLS fallback for typed VOD prerequisite failures.
+    /// On by default while the recovery feature is compiled in.
+    pub vod_live_recovery: bool,
+    /// Additive, behavior-neutral playback-control v1 advertisement. Off by
+    /// default until clients ship passive reporters.
+    pub playback_control_protocol_v1: bool,
     /// Node-wide byte budget for un-admitted VOD working sets. Empty = the
     /// built-in default. Never zero — "no working set" is not a configuration
     /// this accepts (M3 handoff §6).
@@ -1185,6 +1340,9 @@ pub struct SettingsDto {
     /// Node-local fragment-index pass interval. Defaults to 15 minutes; 0 is
     /// an explicit pause, in which case an unindexed title is refused.
     pub vod_index_mins: i64,
+    /// Default-off content-addressed cluster queue and peer hydration for VOD
+    /// indexes. The cadence above remains the operator's I/O budget.
+    pub vod_index_cluster_cache: bool,
     /// Cluster-wide opt-in for placing new HLS workers on another voter. The
     /// readiness bit is true only while the replicated flag is enabled and
     /// every committed voter publishes the current media protocol.
@@ -1391,10 +1549,15 @@ async fn settings_dto(state: &AppState) -> Result<SettingsDto, ApiError> {
         hls_typeless_sliding: setting(keys::HLS_TYPELESS_SLIDING)
             .is_some_and(|value| value.trim() == "1"),
         vod_presentation: setting(keys::VOD_PRESENTATION).as_deref() != Some("0"),
+        vod_live_recovery: setting(keys::VOD_LIVE_RECOVERY).as_deref() != Some("0"),
+        playback_control_protocol_v1: setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1).as_deref()
+            == Some("1"),
         vod_working_set_bytes: setting(keys::VOD_WORKING_SET_BYTES).unwrap_or_default(),
         vod_block_budget_secs: setting(keys::VOD_BLOCK_BUDGET_SECS).unwrap_or_default(),
         vod_materialize_budget_secs: setting(keys::VOD_MATERIALIZE_BUDGET_SECS).unwrap_or_default(),
         vod_index_mins: setting(keys::VOD_INDEX_MINS).map_or(15, |value| mins(Some(value))),
+        vod_index_cluster_cache: setting(keys::VOD_INDEX_CLUSTER_CACHE)
+            .is_some_and(|value| value.trim() == "1"),
         cluster_media_pool_enabled,
         cluster_media_pool_ready,
         cluster_session_takeover_enabled,
@@ -1445,10 +1608,13 @@ pub struct UpdateSettings {
     /// absent leaves each as-is. Disabling refuses HLS rather than restoring
     /// the removed live engine. `vod_working_set_bytes` refuses 0.
     pub vod_presentation: Option<bool>,
+    pub vod_live_recovery: Option<bool>,
+    pub playback_control_protocol_v1: Option<bool>,
     pub vod_working_set_bytes: Option<String>,
     pub vod_block_budget_secs: Option<String>,
     pub vod_materialize_budget_secs: Option<String>,
     pub vod_index_mins: Option<i64>,
+    pub vod_index_cluster_cache: Option<bool>,
     /// Playback language defaults. ISO 639 codes ("eng"); mode is
     /// "auto" | "always" | "off".
     pub default_audio_lang: Option<String>,
@@ -1617,6 +1783,27 @@ pub async fn update_settings(
         state
             .store
             .put_setting(keys::VOD_PRESENTATION, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.vod_live_recovery {
+        state
+            .store
+            .put_setting(keys::VOD_LIVE_RECOVERY, if on { "1" } else { "0" })
+            .await?;
+    }
+    if let Some(on) = req.playback_control_protocol_v1 {
+        state
+            .store
+            .put_setting(
+                keys::PLAYBACK_CONTROL_PROTOCOL_V1,
+                if on { "1" } else { "0" },
+            )
+            .await?;
+    }
+    if let Some(on) = req.vod_index_cluster_cache {
+        state
+            .store
+            .put_setting(keys::VOD_INDEX_CLUSTER_CACHE, if on { "1" } else { "0" })
             .await?;
     }
     if let Some(raw) = req
@@ -2016,6 +2203,7 @@ struct ActivityNodeStatus {
 #[derive(Serialize)]
 struct ClusterDelivery {
     method: String,
+    presentation: Option<String>,
     user: String,
     file_id: i64,
     item_id: i64,
@@ -2032,6 +2220,7 @@ impl ClusterDelivery {
     fn local(delivery: Delivery, node_id: &str) -> Self {
         Self {
             method: delivery.method.to_owned(),
+            presentation: delivery.presentation.map(str::to_owned),
             user: delivery.user,
             file_id: delivery.file_id,
             item_id: delivery.item_id,
@@ -2048,6 +2237,7 @@ impl ClusterDelivery {
     fn peer(delivery: ActivityDelivery, node_id: String) -> Self {
         Self {
             method: delivery.method,
+            presentation: delivery.presentation,
             user: delivery.user,
             file_id: delivery.file_id,
             item_id: delivery.item_id,
@@ -2460,6 +2650,8 @@ async fn local_activity(state: &AppState) -> Result<Vec<Activity>, ApiError> {
 pub struct Delivery {
     /// `direct` · `remux` · `hls-copy` · `transcode`.
     pub method: &'static str,
+    /// Present for HLS: `vod` or `live-recovery`.
+    pub presentation: Option<&'static str>,
     /// Who is watching. Exactly what `sessions[].user_name` has always
     /// carried on this endpoint — see the handler's note on who may look. This
     /// array names no one a `sessions` row would not have named.
@@ -2497,6 +2689,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
         .iter()
         .map(|(s, method)| Delivery {
             method: method.as_str(),
+            presentation: Some(s.presentation),
             user: s.user_name.clone(),
             file_id: s.file_id,
             item_id: s.item_id,
@@ -2516,6 +2709,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     for stream in state.streams.list() {
         out.push(Delivery {
             method: crate::delivery::Method::Remux.as_str(),
+            presentation: None,
             user: stream.user_name,
             file_id: stream.file_id,
             item_id: stream.item_id,
@@ -2532,6 +2726,7 @@ async fn deliveries(state: &AppState) -> (Vec<crate::transcode::SessionInfo>, Ve
     for play in state.direct_plays.list() {
         out.push(Delivery {
             method: crate::delivery::Method::Direct.as_str(),
+            presentation: None,
             user: play.user_name,
             file_id: play.file_id,
             item_id: play.item_id,
@@ -2587,7 +2782,7 @@ async fn title_of(state: &AppState, item_id: i64, seen: &mut HashMap<i64, String
 /// authenticated user may look (it's their household server); the stop action
 /// below is admin-only.
 pub async fn activity_detail(
-    _user: AuthUser,
+    user: AuthUser,
     State(state): State<AppState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     // `sessions` is untouched — native clients parse it — and `deliveries` is
@@ -2659,6 +2854,22 @@ pub async fn activity_detail(
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
+    // Analysis is an operator concern: keep it out of ordinary household
+    // responses, but make it a first-class part of the admin Activity page.
+    // This is folded into the existing page read rather than making the web
+    // client add a second polling loop beside /activity/detail.
+    if user.0.is_admin {
+        response["analysis"] = match super::analysis::activity_summary(&state).await {
+            Ok(summary) => summary,
+            Err(error) => {
+                tracing::warn!(?error, "analysis summary unavailable for activity");
+                serde_json::json!({
+                    "available": false,
+                    "enabled": state.jobs.analysis_queue_enabled().await,
+                })
+            }
+        };
+    }
     Ok(Json(response))
 }
 
@@ -2693,17 +2904,24 @@ pub async fn stop_session(
     let session_id = candidates
         .into_iter()
         .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
-    let stopped = match session_id {
-        Some(session_id) => {
-            state
-                .transcode
-                .stop_session(&session_id, "stopped by admin")
-                .await
-        }
-        None => false,
-    };
-    if !stopped {
+    let Some(session_id) = session_id else {
         return Err(ApiError::NotFound("session"));
+    };
+    let status = super::hls::release_with_terminal(
+        state,
+        session_id,
+        crate::vodserve::Terminal::AdminStop,
+        "stopped by admin",
+    )
+    .await;
+    if status != StatusCode::NO_CONTENT {
+        return Err(if status == StatusCode::SERVICE_UNAVAILABLE {
+            ApiError::ServiceUnavailable(
+                "the session stop is still being durably reconciled; retry shortly".to_owned(),
+            )
+        } else {
+            ApiError::Internal(format!("unexpected session release status {status}"))
+        });
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -3074,10 +3292,11 @@ pub(crate) async fn metrics(
          # HELP plurx_transcode_sessions_active Live transcode sessions.\n\
          # TYPE plurx_transcode_sessions_active gauge\n\
          plurx_transcode_sessions_active {sessions}\n\
-         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{playback_metrics}",
+         {scans}{store_metrics}{membership_metrics}{raft_metrics}{process_metrics}{takeover_metrics}{control_metrics}{playback_metrics}",
         version = crate::version::SEMVER,
         build = crate::version::BUILD,
         takeover_metrics = crate::media_sessions::prometheus(),
+        control_metrics = crate::playback_control::prometheus(),
         playback_metrics = crate::telemetry::prometheus(),
     );
     (
@@ -3098,6 +3317,7 @@ mod tests {
     fn test_delivery(method: &'static str, started_unix: i64) -> Delivery {
         Delivery {
             method,
+            presentation: Some("live-recovery"),
             user: "paul".to_owned(),
             file_id: started_unix,
             item_id: started_unix + 100,
@@ -3119,6 +3339,7 @@ mod tests {
                     node_id: "node-b".to_owned(),
                     deliveries: vec![ActivityDelivery {
                         method: "direct".to_owned(),
+                        presentation: None,
                         user: "viewer".to_owned(),
                         file_id: 2,
                         item_id: 102,
@@ -3299,7 +3520,9 @@ mod tests {
         let rendered = render_passive_raft_metrics(PassiveRaftMetricsView {
             local_source: true,
             sample: Some(PassiveRaftSample {
+                node_id: 1,
                 current_term: 7,
+                leader_id: Some(1),
                 last_applied_index: Some(42),
                 leader_known: true,
                 is_leader: true,
@@ -3327,6 +3550,8 @@ mod tests {
                 build_error: zero_snapshot_histogram,
                 install_ok: zero_snapshot_histogram,
                 install_error: zero_snapshot_histogram,
+                last_build: None,
+                last_install: None,
             }),
         });
 
@@ -3368,7 +3593,9 @@ mod tests {
             ..PassiveRaftMetricsView {
                 local_source: true,
                 sample: Some(PassiveRaftSample {
+                    node_id: 2,
                     current_term: 7,
+                    leader_id: Some(1),
                     last_applied_index: Some(42),
                     leader_known: true,
                     is_leader: false,
@@ -3439,6 +3666,8 @@ mod tests {
             decode_smooth: None,
             session_id: None,
             snapshot: None,
+            control: None,
+            control_trigger: None,
         }
     }
 
@@ -3629,6 +3858,7 @@ mod tests {
         let event = client_playback_event(&beacon, 7);
         let info = crate::transcode::SessionInfo {
             id: "session-a".into(),
+            presentation: "live-recovery",
             file_id: 42,
             item_id: 4,
             item_title: "not persisted".into(),
@@ -3638,10 +3868,72 @@ mod tests {
             started_unix: 0,
             idle_seconds: 0,
             last_request: "segment",
+            lease_mode: "explicit",
+            lease_state: "active",
+            lease_timeout_ms: Some(30_000),
+            control_demand: Some("active"),
+            reported_position_ms: Some(9_000),
+            client_runway_ms: Some(20_000),
+            render_state: Some("stalled"),
+            production_policy: "explicit_demand",
+            production_ahead_seconds: Some(35),
+            production_target_seconds: Some(50),
+            producer_control: Some(
+                crate::playback_control::RollingProducerOperationalSnapshot {
+                    phase: "held",
+                    deadline_attempt: None,
+                    deadline_mode: None,
+                    deadline_remaining_ms: None,
+                    due_attempt: None,
+                    due_mode: None,
+                    due_overdue_ms: None,
+                    process_exit_attempt: None,
+                    process_exit_due: false,
+                    physical_flow: "held",
+                    last_flow_applied_sequence: 11,
+                    last_applied_sequence: 17,
+                    observation_only: true,
+                    action_owner: "legacy_compatibility",
+                    startup_kind: None,
+                    presentation_contract_fingerprint: None,
+                    metadata_response_authorized: false,
+                    producer_media_published: false,
+                    retry_state: "legacy_compatibility",
+                    decision_sequence: None,
+                    decision_reason: None,
+                    executor_state: "registered",
+                    executor_pending_decision_age_ms: None,
+                    executor_last_observed_sequence: 0,
+                    executor_last_action_failure: None,
+                    executor_registered: true,
+                    decision_applied_sequence: None,
+                    decision_installed_attempt: None,
+                    pending_probe_sequence: None,
+                    pending_probe_attempt: None,
+                    pending_probe_deadline_remaining_ms: None,
+                    last_probe_outcome: "none",
+                    producer_ended_with_proposal: false,
+                    proposal: None,
+                    completion: "incomplete",
+                    completion_attempt: None,
+                    completion_final_segment: None,
+                    completion_final_end_ms: None,
+                },
+            ),
+            producer_state: "held",
+            producer_attempt: Some(3),
+            playlist_ready: Some(true),
+            published_segment: Some(5),
+            next_media_sequence: Some(6),
+            pending_fetched_segment: None,
             speed: Some(2.0),
             recent_speed: Some(1.7),
             out_time_ms: Some(10_000),
             progress_idle_ms: 15,
+            producer_exit_success: Some(false),
+            producer_exit_code: Some(23),
+            producer_exit_signal: None,
+            producer_exit_idle_ms: Some(7),
             published_end_ms: Some(44_000),
             fetched_end_ms: 10_000,
             fetched_segment: Some(4),
@@ -3693,10 +3985,34 @@ mod tests {
             serde_json::from_str(row.extra.as_deref().expect("joined status JSON"))
                 .expect("valid joined status JSON");
         assert_eq!(extra["server"]["progress_idle_ms"], 15);
+        assert_eq!(extra["server"]["producer_state"], "held");
+        assert_eq!(extra["server"]["producer_exit_success"], false);
+        assert_eq!(extra["server"]["producer_exit_code"], 23);
+        assert_eq!(
+            extra["server"]["producer_exit_signal"],
+            serde_json::Value::Null
+        );
+        assert_eq!(extra["server"]["producer_exit_idle_ms"], 7);
+        assert_eq!(extra["server"]["producer_attempt"], 3);
+        assert_eq!(extra["server"]["playlist_ready"], true);
+        assert_eq!(extra["server"]["published_segment"], 5);
         assert_eq!(extra["server"]["published_end_ms"], 44_000);
+        assert_eq!(extra["server"]["next_media_sequence"], 6);
         assert_eq!(extra["server"]["fetched_segment"], 4);
         assert_eq!(extra["server"]["playlist_shape"], "sliding");
         assert_eq!(extra["server"]["last_request"], "segment");
+        assert_eq!(extra["server"]["lease_mode"], "explicit");
+        assert_eq!(extra["server"]["lease_state"], "active");
+        assert_eq!(extra["server"]["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["server"]["control_demand"], "active");
+        assert_eq!(extra["server"]["production_policy"], "explicit_demand");
+        assert_eq!(extra["server"]["production_ahead_seconds"], 35);
+        assert_eq!(extra["server"]["production_target_seconds"], 50);
+        assert_eq!(extra["server"]["producer_control"]["phase"], "held");
+        assert_eq!(
+            extra["server"]["producer_control"]["last_applied_sequence"],
+            17
+        );
     }
 
     #[test]
@@ -3748,6 +4064,72 @@ mod tests {
         let line = client_log_line(&event, 0);
         assert!(line.contains("runway=0.4s"), "{line}");
         assert!(line.contains("bw=12345kbps"), "{line}");
+    }
+
+    #[test]
+    fn legacy_recovery_keeps_the_preceding_control_snapshot() {
+        let mut event = beacon("stall_recovery", 8_000);
+        event.control = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: Some(23),
+            demand: Some("active".into()),
+            render_state: Some("stalled".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(3),
+                decoder_state: Some("starved".into()),
+                error_code: None,
+                error_detail: None,
+            }),
+        });
+        event.control_trigger = Some(ClientControlSnapshot {
+            generation: Some("11111111-1111-4111-8111-111111111111".into()),
+            control_epoch: Some(17),
+            sequence: None,
+            demand: Some("active".into()),
+            render_state: Some("failed".into()),
+            position_ms: Some(90_000),
+            buffered_through_ms: Some(90_400),
+            observed_download_bps: Some(1_500_000),
+            observation: Some(ClientControlObservation {
+                dropped_frames: Some(4),
+                decoder_state: Some("failed".into()),
+                error_code: Some("decoder".into()),
+                error_detail: Some("persistent_decode_stall".into()),
+            }),
+        });
+
+        let persisted = client_playback_event(&event, 7);
+        let extra: serde_json::Value =
+            serde_json::from_str(persisted.extra.as_deref().expect("control snapshot JSON"))
+                .expect("valid control snapshot JSON");
+        let accepted = &extra["control_accepted_client"];
+        assert_eq!(accepted["sequence"], 23);
+        assert_eq!(accepted["render_state"], "stalled");
+        assert_eq!(accepted["buffered_through_ms"], 90_400);
+        assert_eq!(accepted["observed_download_bps"], 1_500_000);
+        assert_eq!(accepted["observation"]["decoder_state"], "starved");
+        assert!(accepted["generation"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("g-")));
+        assert!(!persisted
+            .extra
+            .as_deref()
+            .unwrap_or_default()
+            .contains("11111111-1111-4111-8111-111111111111"));
+        assert_eq!(extra["control_trigger_client"]["render_state"], "failed");
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_code"],
+            "decoder"
+        );
+        assert_eq!(
+            extra["control_trigger_client"]["observation"]["error_detail"],
+            "persistent_decode_stall"
+        );
+        assert!(extra["control_trigger_client"].get("sequence").is_none());
     }
 
     #[test]

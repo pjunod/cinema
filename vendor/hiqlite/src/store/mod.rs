@@ -53,6 +53,7 @@ pub(crate) async fn start_raft_db(
         node_config.wal_size,
     )
     .await?;
+    let wal_status = log_store.status_handle();
     let state_machine_store = StateMachineSqlite::new(
         &node_config.data_dir,
         &node_config.filename_db,
@@ -112,6 +113,7 @@ pub(crate) async fn start_raft_db(
     Ok(StateRaftDB {
         raft,
         shutdown_handle,
+        wal_status,
         sql_writer,
         read_pool,
         log_statements: node_config.log_statements,

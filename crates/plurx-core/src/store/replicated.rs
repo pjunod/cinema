@@ -325,6 +325,48 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
         shape: TransactionShape::ReadBranchWrite,
     },
     SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "enqueue_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_analysis_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "submit_fragment_index_analysis",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "claim_cluster_fragment_index",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "complete_cluster_fragment_index",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
+        method: "prune_cluster_fragment_indexes",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
         module: "sessions.rs",
         method: "claim_media_session_request",
         is_async: true,
@@ -334,6 +376,48 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "sessions.rs",
         method: "activate_media_session",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "settle_media_session_activation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "publish_media_session_activation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "arm_media_session_handoff",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "arm_media_session_terminal_projection",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "complete_media_session_handoff",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "complete_media_session_terminal_projection",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -355,6 +439,20 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     SqliteTransactionSite {
         module: "sessions.rs",
         method: "end_media_session",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "end_media_session_if_owner",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
+        method: "record_media_session_terminal_ack",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
         shape: TransactionShape::ReadBranchWrite,
@@ -497,6 +595,10 @@ mod tests {
         ("cache.rs", include_str!("sqlite/cache.rs")),
         ("coordination.rs", include_str!("sqlite/coordination.rs")),
         ("fragindex.rs", include_str!("sqlite/fragindex.rs")),
+        (
+            "fragment_index_cluster.rs",
+            include_str!("sqlite/fragment_index_cluster.rs"),
+        ),
         ("library.rs", include_str!("sqlite/library.rs")),
         ("media.rs", include_str!("sqlite/media.rs")),
         ("mod.rs", include_str!("sqlite/mod.rs")),
@@ -611,7 +713,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 34);
+        assert_eq!(methods.len(), 48);
     }
 
     #[test]

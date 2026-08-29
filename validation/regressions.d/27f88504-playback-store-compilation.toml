@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["27f88504"]
+points = ["core.media", "playback.pipeline", "persistence.upgrades"]
+checks = ["rust-gate", "rust-gate-ci", "database-upgrades"]
+reason = "The retained SQLite and Hiqlite session projection contracts compile the exact end/projection return paths and both fresh and direct-upgrade schema shapes. The Rust gates retain the existing replicated route helper calls, the owned SQLite Option return after in-place mutation, and the parent-module migration constants required by the direct v9 upgrade regression."

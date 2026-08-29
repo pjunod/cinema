@@ -10,7 +10,7 @@
 //! attach our bearer token. Same model Plex uses; also what Phase 4 wants,
 //! since any cluster node can serve a session id without seeing the login.
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -18,24 +18,28 @@ use axum::Json;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use plurx_core::domain::{
-    MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRequestClaim,
-    MediaSessionRoute, SubtitleStream,
+    MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRequestClaim,
+    MediaSessionRoute, MediaSessionTerminalAck, SubtitleStream, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
+use plurx_core::error::StoreError;
 use plurx_core::playback::PlaybackMethod;
 use plurx_core::tracks::is_native_text_subtitle;
 
 use super::error::ApiError;
 use super::extract::AuthUser;
+use super::peer_transport::PeerTransportError;
 use crate::media_pool::MediaOfferRequest;
 use crate::media_sessions::{
-    unix_ms, worker_session_request_is_valid, RelayHeaders, RelayRequest, RelayResource,
-    RemoteAbortRequest, RemoteStartRequest, RemoteStartResponse, ACTIVATION_CONFIRMATION_WINDOW,
-    ACTIVATION_FAST_RECONCILIATION, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS,
-    OWNER_ASSIGNMENT_DEADLINE, REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE,
+    unix_ms, worker_session_request_is_valid, DurableRouteResolution, RelayHeaders, RelayRequest,
+    RelayResource, ReleaseAdmission, ReleaseSettlement, RemoteAbortRequest, RemoteStartRequest,
+    RemoteStartResponse, ACTIVATION_STORE_DEADLINE, LEASE_TTL_MS, MAX_ADMITTED_MEDIA_BODY_LIFETIME,
+    MEDIA_BODY_NO_PROGRESS_TIMEOUT, OWNER_ASSIGNMENT_DEADLINE,
+    REMOTE_ACTIVATION_CONFIRMATION_WINDOW, START_DEADLINE, TERMINAL_PROJECTION_SAFETY_WINDOW,
 };
 use crate::state::AppState;
 use crate::transcode::{ClusterReplacementGuard, PlaylistError};
@@ -48,6 +52,48 @@ use crate::transcode::{ClusterReplacementGuard, PlaylistError};
 /// skipped inspection rather than a truncated response.
 const INIT_INSPECTION_LIMIT_BYTES: u64 = 1024 * 1024;
 const MIN_RESOLVED_REPLAY_REMAINING_MS: i64 = 1_000;
+/// One absolute bound for the actor/manager portion of response publication.
+/// Storage and network streaming have their own budgets; this prevents a live
+/// HTTP request or detached EOF owner from waiting forever on control state.
+const RESPONSE_PUBLICATION_LIFECYCLE_BUDGET: Duration = Duration::from_secs(5);
+/// A segment request may legitimately spend up to the configured 30-second
+/// VOD blocked-GET cap before response publication. The extra publication
+/// budget is an outer request fence for lookup, resurrection and preparation;
+/// actor admission still receives the shorter five-second sub-deadline.
+const SEGMENT_REQUEST_LIFECYCLE_BUDGET: Duration = Duration::from_secs(35);
+/// Completed streams retain one permit from pre-exposure admission through
+/// exact EOF settlement. This bounds both active settlement ownership and the
+/// detached tasks that can be alive at once.
+const RESPONSE_COMPLETION_CAPACITY: usize = 256;
+/// Public capability releases detach once admitted so request cancellation
+/// cannot strand a committed tombstone without exact-owner cleanup. A fixed
+/// settlement pool prevents slow durable storage from creating unbounded
+/// detached work under random capability probes.
+const SESSION_RELEASE_CAPACITY: usize = 128;
+const REMOTE_RELEASE_ATTEMPTS: usize = 3;
+const REMOTE_RELEASE_RETRY_DELAY: Duration = Duration::from_millis(100);
+const REQUEST_CLAIM_SETTLEMENT_BUDGET: Duration = Duration::from_secs(5);
+const REQUEST_CLAIM_SETTLEMENT_RETRY_DELAY: Duration = Duration::from_millis(100);
+const PREDECESSOR_PROJECTION_FAST_WINDOW: Duration = Duration::from_secs(5);
+const PREDECESSOR_PROJECTION_RETRY_DELAY: Duration = Duration::from_secs(1);
+
+async fn pin_shared_session_for_local_start<F>(
+    deadline: tokio::time::Instant,
+    pin: F,
+) -> Result<bool, ApiError>
+where
+    F: std::future::Future<Output = Result<bool, StoreError>>,
+{
+    super::internal_media_sessions::pin_shared_session_before_deadline(deadline, pin)
+        .await
+        .map_err(|error| {
+            if crate::transcode::is_start_infrastructure_error(&error) {
+                ApiError::ServiceUnavailable(error)
+            } else {
+                ApiError::Internal(error)
+            }
+        })
+}
 
 #[derive(Deserialize)]
 pub struct StartQuery {
@@ -105,15 +151,90 @@ pub struct StartResponse {
     /// the store mid-request: the client keeps whatever it had.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub delivered_dynamic_range: Option<String>,
+    /// Optional behavior-neutral v1 control capability. It is persisted with
+    /// the idempotent create result so a setting change cannot mutate the wire
+    /// contract of an already-open session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub control: Option<crate::playback_control::ControlBootstrap>,
 }
 
 /// Owns a published worker until the replicated activation has a definitive
 /// outcome. Request futures are cancellation points at every store/network
 /// await; tying cleanup to this value prevents a disconnected client from
 /// leaving an encoder and its durable start claim behind.
-struct StartedSessionGuard {
+pub(super) struct StartedSessionGuard {
     cleanup: Option<StartedSessionCleanup>,
-    _replacement: Option<ClusterReplacementGuard>,
+}
+
+struct MediaSessionRequestGuard {
+    cleanup: Option<(AppState, i64, String, String)>,
+}
+
+async fn settle_media_session_request_claim(
+    state: &AppState,
+    user_id: i64,
+    request_id: &str,
+    incarnation_id: &str,
+) {
+    let deadline = tokio::time::Instant::now() + REQUEST_CLAIM_SETTLEMENT_BUDGET;
+    loop {
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .fail_media_session_request(user_id, request_id, incarnation_id, unix_ms()),
+        )
+        .await
+        {
+            // `false` is also settled: the exact claim already resolved or a
+            // newer incarnation owns it, so this cleanup must not touch it.
+            Ok(Ok(_)) => return,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    user_id,
+                    "media-session request cleanup is retrying"
+                );
+            }
+            Err(_) => break,
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::time::sleep(REQUEST_CLAIM_SETTLEMENT_RETRY_DELAY.min(remaining)).await;
+    }
+    tracing::error!(
+        user_id,
+        retry_after_ms = 60_000,
+        "media-session request cleanup exhausted its bound; claim expiry remains the durable fallback"
+    );
+}
+
+impl MediaSessionRequestGuard {
+    fn new(state: AppState, user_id: i64, request_id: String, incarnation_id: String) -> Self {
+        Self {
+            cleanup: Some((state, user_id, request_id, incarnation_id)),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for MediaSessionRequestGuard {
+    fn drop(&mut self) {
+        let Some((state, user_id, request_id, incarnation_id)) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            settle_media_session_request_claim(&state, user_id, &request_id, &incarnation_id).await;
+        }));
+    }
 }
 
 struct StartedSessionCleanup {
@@ -123,10 +244,19 @@ struct StartedSessionCleanup {
     session_id: String,
     user_id: i64,
     request_id: String,
+    owns_worker: bool,
+    owns_request_claim: bool,
+    _replacement: Option<ClusterReplacementGuard>,
+    #[cfg(test)]
+    test_settlement: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    )>,
 }
 
 impl StartedSessionGuard {
-    fn new(
+    pub(super) fn new(
         state: AppState,
         owner_node_id: String,
         incarnation_id: String,
@@ -134,6 +264,122 @@ impl StartedSessionGuard {
         user_id: i64,
         request_id: String,
         replacement: Option<ClusterReplacementGuard>,
+    ) -> Self {
+        Self::with_ownership(
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            replacement,
+            true,
+            true,
+        )
+    }
+
+    pub(super) fn recovered(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
+    ) -> Self {
+        Self::with_ownership(
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            replacement,
+            false,
+            true,
+        )
+    }
+
+    /// Observe an idempotently replayed worker without acquiring cleanup
+    /// ownership of either the worker or its original durable request claim.
+    pub(super) fn replayed(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
+    ) -> Self {
+        Self::with_ownership(
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            replacement,
+            false,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn worker_only(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
+    ) -> Self {
+        Self::with_ownership(
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            replacement,
+            true,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn claim_only(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+    ) -> Self {
+        Self::with_ownership(
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            None,
+            false,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_ownership(
+        state: AppState,
+        owner_node_id: String,
+        incarnation_id: String,
+        session_id: String,
+        user_id: i64,
+        request_id: String,
+        replacement: Option<ClusterReplacementGuard>,
+        owns_worker: bool,
+        owns_request_claim: bool,
     ) -> Self {
         Self {
             cleanup: Some(StartedSessionCleanup {
@@ -143,14 +389,30 @@ impl StartedSessionGuard {
                 session_id,
                 user_id,
                 request_id,
+                owns_worker,
+                owns_request_claim,
+                _replacement: replacement,
+                #[cfg(test)]
+                test_settlement: None,
             }),
-            _replacement: replacement,
         }
     }
 
-    fn disarm(&mut self) {
+    pub(super) fn disarm(&mut self) {
         self.cleanup = None;
-        self._replacement = None;
+    }
+
+    #[cfg(test)]
+    fn hold_cleanup_for_test(
+        &mut self,
+        settled: tokio::sync::oneshot::Sender<()>,
+        release: tokio::sync::oneshot::Receiver<()>,
+        released: tokio::sync::oneshot::Sender<()>,
+    ) {
+        self.cleanup
+            .as_mut()
+            .expect("armed guard cleanup")
+            .test_settlement = Some((settled, release, released));
     }
 }
 
@@ -162,24 +424,71 @@ impl Drop for StartedSessionGuard {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
+        let StartedSessionCleanup {
+            state,
+            owner_node_id,
+            incarnation_id,
+            session_id,
+            user_id,
+            request_id,
+            owns_worker,
+            owns_request_claim,
+            _replacement,
+            #[cfg(test)]
+            test_settlement,
+        } = cleanup;
         std::mem::drop(runtime.spawn(async move {
-            abort_started_session(
-                &cleanup.state,
-                &cleanup.owner_node_id,
-                &cleanup.incarnation_id,
-                &cleanup.session_id,
-            )
-            .await;
-            let _ = cleanup
-                .state
-                .store
-                .fail_media_session_request(
-                    cleanup.user_id,
-                    &cleanup.request_id,
-                    &cleanup.incarnation_id,
-                    unix_ms(),
-                )
-                .await;
+            if owns_worker {
+                abort_started_session(&state, &owner_node_id, &incarnation_id, &session_id).await;
+            }
+            if owns_request_claim {
+                settle_media_session_request_claim(&state, user_id, &request_id, &incarnation_id)
+                    .await;
+            }
+            #[cfg(test)]
+            if let Some((settled, release, released)) = test_settlement {
+                let _ = settled.send(());
+                let _ = release.await;
+                drop(_replacement);
+                let _ = released.send(());
+                return;
+            }
+            drop(_replacement);
+        }));
+    }
+}
+
+/// Owns the gap between durable activation confirmation and publication of
+/// the corresponding create response. Confirmation deliberately leaves the
+/// request claim in `starting`; this guard races final response publication
+/// with atomic abandonment, so a healthy retry can never recover a route whose
+/// worker a delayed cleanup is about to stop.
+struct ActivationPublicationGuard {
+    cleanup: Option<(AppState, MediaSessionActivation)>,
+}
+
+impl ActivationPublicationGuard {
+    fn new(state: AppState, activation: MediaSessionActivation) -> Self {
+        Self {
+            cleanup: Some((state, activation)),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for ActivationPublicationGuard {
+    fn drop(&mut self) {
+        let Some((state, activation)) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            settle_activation_publication_cleanup(state, activation).await;
         }));
     }
 }
@@ -389,10 +698,18 @@ pub async fn create(
             "the growing live HLS presentation has been removed; request VOD",
         ));
     }
+    let ingress_serving_authority = state.serving.authority();
+    let ingress_serving_generation = ingress_serving_authority.admit().ok_or_else(|| {
+        ApiError::ServiceUnavailable("the ingress node has no serving authority".to_owned())
+    })?;
     // The source height answers three things now: Auto, the ladder in the
     // response, and the snap's source-height escape. One read, from the read
     // pool.
-    let source = state.store.get_file(id).await?;
+    let source = state
+        .store
+        .get_file(id)
+        .await
+        .map_err(|error| session_store_error("reading the source file", error))?;
     if hdr_subtitle_burn_is_refused(source.as_ref(), req.subtitle_burn, req.subtitle_burn_sdr) {
         return Err(ApiError::Unprocessable(serde_json::json!({
             "code": "hdr_subtitle_burn_refused",
@@ -414,8 +731,11 @@ pub async fn create(
             &user.password_hash,
         ));
     }
-    let network_prior =
-        super::network::stored_prior(state.store.as_ref(), identity.as_ref()).await?;
+    let network_prior = super::network::stored_prior(state.store.as_ref(), identity.as_ref())
+        .await
+        .map_err(|error| {
+            ApiError::ServiceUnavailable(format!("reading the network prior: {error:?}"))
+        })?;
     let height = match req.height {
         // Auto: the server's own choice already lands where it means to —
         // snapping it would re-decide policy (a 900p source deliberately
@@ -486,15 +806,62 @@ pub async fn create(
             now_ms,
             now_ms.saturating_add(60_000),
         )
-        .await?
+        .await
+        .map_err(|error| session_store_error("claiming the media-session request", error))?
     {
         MediaSessionRequestClaim::Acquired {
             incarnation_id: acquired,
         } => incarnation_id = acquired,
         MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
-            return serde_json::from_str::<StartResponse>(&route.response_json)
-                .map(Json)
-                .map_err(ApiError::from);
+            let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+            let _response_publication = ingress_serving_authority
+                .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
+                .await
+                .ok_or_else(|| {
+                    ApiError::ServiceUnavailable(
+                        "the ingress lost serving authority before resolved replay".to_owned(),
+                    )
+                })?;
+            let route = tokio::time::timeout_at(
+                replay_deadline,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&route.incarnation_id),
+            )
+            .await
+            .map_err(|_| {
+                ApiError::ServiceUnavailable(
+                    "resolved media-session replay freshness check timed out".to_owned(),
+                )
+            })?
+            .map_err(|error| session_store_error("rechecking the resolved replay", error))?
+            .filter(|current| {
+                replay_route_identity_matches(current, &route)
+                    && resolved_replay_is_live(current, unix_ms())
+            })
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable(
+                    "the resolved media-session replay is no longer current".to_owned(),
+                )
+            })?;
+            let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+            // Same-session owner takeover advances only the control epoch.
+            // Replaying the persisted create must not hand a restarted client
+            // the stale epoch embedded when owner 1 first activated.
+            if let Some(control) = response.control.as_ref() {
+                response.control =
+                    control.refreshed(&route.session_id, &route.incarnation_id, route.owner_epoch);
+            }
+            return Ok(Json(response));
+        }
+        MediaSessionRequestClaim::Resolved(route)
+            if route.state == "active" && route.publication_ready_at_ms != 0 =>
+        {
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "media_session_handoff_pending",
+                "the predecessor owner has not completed session handoff yet; retry shortly",
+            ));
         }
         MediaSessionRequestClaim::Resolved(_) => {
             return Err(ApiError::typed(
@@ -503,7 +870,79 @@ pub async fn create(
                 "this idempotent session was already released",
             ));
         }
-        MediaSessionRequestClaim::InFlight { .. } => {
+        MediaSessionRequestClaim::InFlight {
+            incarnation_id: in_flight_incarnation,
+            ..
+        } => {
+            let observed_at_ms = unix_ms();
+            let route = tokio::time::timeout(
+                ACTIVATION_STORE_DEADLINE,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&in_flight_incarnation),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .filter(|route| {
+                route.user_id == user.id
+                    && route.playback_id == request.playback_id
+                    && route.request_fingerprint == fingerprint
+                    && route.state == "active"
+                    && route.publication_ready_at_ms == 0
+                    && route.lease_expires_at_ms > observed_at_ms
+            });
+            if let Some(route) = route {
+                let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+                let _response_publication = ingress_serving_authority
+                    .commit_guard_before(
+                        ingress_serving_generation,
+                        publication_deadline.into_std(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "the ingress lost serving authority before replay publication"
+                                .to_owned(),
+                        )
+                    })?;
+                let route = tokio::time::timeout_at(
+                    publication_deadline,
+                    state.store.publish_media_session_activation(
+                        user.id,
+                        &request_claim_id,
+                        &in_flight_incarnation,
+                        unix_ms(),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable(
+                        "media-session replay publication exceeded its fixed deadline".to_owned(),
+                    )
+                })?
+                .map_err(|error| session_store_error("publishing the session replay", error))?
+                .filter(|published| replay_publication_matches(published, &route))
+                .ok_or_else(|| {
+                    ApiError::ServiceUnavailable(
+                        "the media-session replay lost its exact activation".to_owned(),
+                    )
+                })?;
+                state.media_sessions.cache_route(route.clone()).await;
+                if route.owner_node_id == state.node_id {
+                    state.media_sessions.seed_owned_lease(&route).await;
+                }
+                let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+                if let Some(control) = response.control.as_ref() {
+                    response.control = control.refreshed(
+                        &route.session_id,
+                        &route.incarnation_id,
+                        route.owner_epoch,
+                    );
+                }
+                return Ok(Json(response));
+            }
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "media_session_starting",
@@ -521,6 +960,23 @@ pub async fn create(
             ));
         }
     }
+    // From this point every early return must settle the exact durable claim.
+    // Once worker placement returns, its StartedSessionGuard takes over the
+    // same responsibility together with exact worker ownership.
+    let mut request_guard = MediaSessionRequestGuard::new(
+        state.clone(),
+        user.id,
+        request_claim_id.clone(),
+        incarnation_id.clone(),
+    );
+
+    let advertise_control = state
+        .store
+        .get_setting(plurx_core::store::keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+        .await
+        .map_err(|error| session_store_error("reading the control protocol gate", error))?
+        .as_deref()
+        == Some("1");
 
     let mut worker_request = request.clone();
     worker_request.request_id = Some(incarnation_id.clone());
@@ -543,42 +999,48 @@ pub async fn create(
     let recipe_json = serde_json::to_string(&remote_request)?;
     let placement_deadline = super::peer_transport::deadline_after(START_DEADLINE);
 
-    // A stall reopen must stay with its existing worker in P5: the normalized
-    // predecessor state is process-local and automatic migration does not
-    // become legal until the fenced P7 takeover protocol exists.
-    let mut expected_predecessor_incarnation_id = None;
-    let mut fence_predecessor = false;
+    // Every activation is a predecessor CAS, including an ordinary start.
+    // Capturing the exact route before worker placement gives a
+    // commit-unknown reconciler the identity it must terminalize; allowing an
+    // unfenced last-writer-wins activation loses that identity after the
+    // pointer moves to the successor.
+    let activation_predecessor = state
+        .store
+        .media_session_route_for_playback(user.id, &request.playback_id)
+        .await
+        .map_err(|error| session_store_error("reading the predecessor route", error))?;
+    if activation_predecessor
+        .as_ref()
+        .is_some_and(|route| route.state == "active" && route.publication_ready_at_ms != 0)
+    {
+        return Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "media_session_handoff_pending",
+            "the current session is still completing its predecessor handoff; retry shortly",
+        ));
+    }
+    let expected_predecessor_incarnation_id = activation_predecessor
+        .as_ref()
+        .map(|route| route.incarnation_id.clone());
+    let fence_predecessor = true;
     let pinned_owner = if let Some(previous_session_id) = request
         .previous_session_id
         .as_deref()
         .filter(|value| uuid::Uuid::parse_str(value).is_ok())
     {
-        // Bypass the positive route cache: an ended predecessor may remain
-        // cached briefly, but a reopen must bind to the durable pointer state.
-        let durable = state.store.media_session_route(previous_session_id).await?;
-        if let Some(route) = durable {
-            if route.user_id != user.id
+        if let Some(route) = activation_predecessor.as_ref() {
+            if route.session_id != previous_session_id
+                || route.user_id != user.id
                 || route.state != "active"
                 || route.lease_expires_at_ms <= unix_ms()
             {
-                let _ = state
-                    .store
-                    .fail_media_session_request(
-                        user.id,
-                        &request_claim_id,
-                        &incarnation_id,
-                        unix_ms(),
-                    )
-                    .await;
                 return Err(ApiError::typed(
                     StatusCode::CONFLICT,
                     "media_session_superseded",
                     "the session being reopened is no longer current",
                 ));
             }
-            fence_predecessor = true;
-            expected_predecessor_incarnation_id = Some(route.incarnation_id);
-            Some(route.owner_node_id)
+            Some(route.owner_node_id.clone())
         } else if state
             .transcode
             .active_session_ids()
@@ -590,7 +1052,6 @@ pub async fn create(
             // Its reopen state is nevertheless process-local, so pin that
             // rolling-upgrade legacy predecessor to this node rather than
             // ranking a peer that cannot possess it.
-            fence_predecessor = true;
             Some(state.node_id.clone())
         } else {
             None
@@ -644,6 +1105,13 @@ pub async fn create(
             break;
         }
         let result = if candidate == state.node_id {
+            if !ingress_serving_authority.is_current(ingress_serving_generation) {
+                last_error = Some(ApiError::ServiceUnavailable(
+                    "the local media worker has no serving authority".to_owned(),
+                ));
+                continue;
+            }
+            let admitted_serving_generation = ingress_serving_generation;
             // Session creation owns a child process before publishing the map
             // entry. An owned task reaches a verdict even if this request is
             // cancelled, and its returned guard cleans the exact late worker
@@ -656,30 +1124,51 @@ pub async fn create(
             let guard_incarnation = incarnation_id.clone();
             let guard_request = request_claim_id.clone();
             let guard_user = user.id;
+            let worker_serving_authority = ingress_serving_authority.clone();
             let mut start_task = tokio::spawn(async move {
-                transcode
+                let started = transcode
                     .create_cluster_session(
                         &worker_request,
                         guard_user,
                         &user_name,
                         placement_deadline,
+                        admitted_serving_generation,
                     )
-                    .await
-                    .map(|started| {
-                        let info = started.info;
-                        let session_id = info.session_id.clone();
-                        let response = RemoteStartResponse::from(info);
-                        let guard = StartedSessionGuard::new(
-                            guard_state,
-                            guard_owner,
-                            guard_incarnation,
-                            session_id,
-                            guard_user,
-                            guard_request,
-                            Some(started.replacement),
-                        );
-                        (response, guard)
-                    })
+                    .await?;
+                let crate::transcode::ClusterSessionStart {
+                    info,
+                    replacement,
+                    created,
+                } = started;
+                let session_id = info.session_id.clone();
+                let response = RemoteStartResponse::from(info);
+                let guard = Some(if created {
+                    StartedSessionGuard::new(
+                        guard_state,
+                        guard_owner,
+                        guard_incarnation,
+                        session_id,
+                        guard_user,
+                        guard_request,
+                        Some(replacement),
+                    )
+                } else {
+                    StartedSessionGuard::recovered(
+                        guard_state,
+                        guard_owner,
+                        guard_incarnation,
+                        session_id,
+                        guard_user,
+                        guard_request,
+                        Some(replacement),
+                    )
+                });
+                if !worker_serving_authority.is_current(admitted_serving_generation) {
+                    return Err(crate::transcode::serving_fence_error(
+                        "the local worker lost authority before shared-cache pinning",
+                    ));
+                }
+                Ok((response, guard, Some(admitted_serving_generation)))
             });
             match tokio::time::timeout_at(placement_deadline, &mut start_task).await {
                 Ok(Ok(result)) => result.map_err(|error| session_start_error(id, error)),
@@ -697,34 +1186,49 @@ pub async fn create(
                 }
             }
         } else {
-            state
+            match state
                 .media_sessions
                 .start_remote(&candidate, &remote_request, placement_deadline)
                 .await
-                .map(|info| {
-                    let guard = StartedSessionGuard::new(
-                        state.clone(),
-                        candidate.clone(),
-                        incarnation_id.clone(),
-                        info.session_id.clone(),
-                        user.id,
-                        request_claim_id.clone(),
-                        None,
-                    );
-                    (info, guard)
-                })
-                .map_err(|error| {
-                    ApiError::ServiceUnavailable(format!(
-                        "media worker {candidate} could not start the session: {error:?}"
-                    ))
-                })
+            {
+                Ok(started) => {
+                    let target_generation = started.info.activation_generation;
+                    let guard = match started.ownership {
+                        crate::media_sessions::RemoteSessionStartOwnership::Created
+                        | crate::media_sessions::RemoteSessionStartOwnership::Recovered => {
+                            Some(StartedSessionGuard::claim_only(
+                                state.clone(),
+                                candidate.clone(),
+                                incarnation_id.clone(),
+                                started.info.session_id.clone(),
+                                user.id,
+                                request_claim_id.clone(),
+                            ))
+                        }
+                        crate::media_sessions::RemoteSessionStartOwnership::LegacyAmbiguous => {
+                            return Err(ApiError::ServiceUnavailable(format!(
+                                "media worker {candidate} does not support safe activation ownership"
+                            )));
+                        }
+                    };
+                    let Some(target_generation) = target_generation else {
+                        return Err(ApiError::ServiceUnavailable(format!(
+                            "media worker {candidate} did not return an activation generation"
+                        )));
+                    };
+                    Ok((started.info, guard, Some(target_generation)))
+                }
+                Err(error) => Err(ApiError::ServiceUnavailable(format!(
+                    "media worker {candidate} could not start the session: {error:?}"
+                ))),
+            }
         };
         match result {
-            Ok((info, guard)) if info.is_valid() => {
-                started = Some((candidate, info, guard));
+            Ok((info, guard, serving_generation)) if info.is_valid() => {
+                started = Some((candidate, info, guard, serving_generation));
                 break;
             }
-            Ok((_info, _guard)) => {
+            Ok((_info, _guard, _serving_generation)) => {
                 // The armed guard aborts an invalid local result just as the
                 // peer transport rejects and aborts an invalid remote result.
                 tracing::warn!(
@@ -741,32 +1245,48 @@ pub async fn create(
             }
         }
     }
-    let Some((owner_node_id, info, guard)) = started else {
-        let _ = state
-            .store
-            .fail_media_session_request(user.id, &request_claim_id, &incarnation_id, unix_ms())
-            .await;
+    let Some((owner_node_id, info, guard, local_serving_generation)) = started else {
         return Err(last_error.unwrap_or_else(|| {
             ApiError::ServiceUnavailable("no eligible media worker was available".to_owned())
         }));
     };
+    request_guard.disarm();
+    if !ingress_serving_authority.is_current(ingress_serving_generation) {
+        return Err(ApiError::ServiceUnavailable(
+            "the ingress node lost serving authority during worker placement".to_owned(),
+        ));
+    }
     if owner_node_id == state.node_id {
         let provisional_pin_ms =
             i64::try_from(REMOTE_ACTIVATION_CONFIRMATION_WINDOW.as_millis()).unwrap_or(i64::MAX);
-        if !state
-            .transcode
-            .pin_shared_session(
+        if !pin_shared_session_for_local_start(
+            placement_deadline,
+            state.transcode.pin_shared_session(
                 &info.session_id,
                 &incarnation_id,
                 1,
                 unix_ms().saturating_add(provisional_pin_ms),
-            )
-            .await?
+            ),
+        )
+        .await?
         {
             return Err(ApiError::ServiceUnavailable(
                 "shared cache generation changed before session activation".to_owned(),
             ));
         }
+        if owner_node_id == state.node_id
+            && local_serving_generation
+                .is_some_and(|generation| !ingress_serving_authority.is_current(generation))
+        {
+            return Err(ApiError::ServiceUnavailable(
+                "the local media worker lost serving authority before activation".to_owned(),
+            ));
+        }
+    }
+    if !ingress_serving_authority.is_current(ingress_serving_generation) {
+        return Err(ApiError::ServiceUnavailable(
+            "the ingress node lost serving authority before owner assignment".to_owned(),
+        ));
     }
     match tokio::time::timeout(
         OWNER_ASSIGNMENT_DEADLINE,
@@ -788,13 +1308,21 @@ pub async fn create(
             ));
         }
         Ok(Err(error)) => {
-            return Err(error.into());
+            return Err(session_store_error(
+                "assigning the media-session owner",
+                error,
+            ));
         }
         Err(_) => {
             return Err(ApiError::ServiceUnavailable(
                 "session ownership assignment timed out".to_owned(),
             ));
         }
+    }
+    if !ingress_serving_authority.is_current(ingress_serving_generation) {
+        return Err(ApiError::ServiceUnavailable(
+            "the ingress node lost serving authority before session activation".to_owned(),
+        ));
     }
     // The grade the session actually built, not the one the body asked for:
     // the server refuses the HDR10 rung for a source or a rung that cannot
@@ -838,6 +1366,15 @@ pub async fn create(
         ladder: crate::transcode::advertised_ladder(source_height, ladder_ceiling),
         prior_kbps: network_prior.and_then(|prior| prior.sustained_kbps),
         delivered_dynamic_range: delivered.map(str::to_owned),
+        control: advertise_control.then(|| {
+            crate::playback_control::ControlBootstrap::new(
+                &info.session_id,
+                &incarnation_id,
+                1,
+                info.control_lease_timeout_ms,
+            )
+            .expect("new media-session owner epochs begin at one")
+        }),
     };
     let response_json = serde_json::to_string(&response)?;
     let activation_now_ms = unix_ms();
@@ -846,7 +1383,7 @@ pub async fn create(
         session_id: info.session_id.clone(),
         user_id: user.id,
         playback_id: request.playback_id.clone(),
-        expected_predecessor_incarnation_id,
+        expected_predecessor_incarnation_id: expected_predecessor_incarnation_id.clone(),
         fence_predecessor,
         request_id: Some(request_claim_id.clone()),
         request_fingerprint: fingerprint,
@@ -854,88 +1391,188 @@ pub async fn create(
         lease_expires_at_ms: activation_now_ms.saturating_add(LEASE_TTL_MS),
         recipe_json,
         response_json,
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
         media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
-    // Once activation begins, this owned task also owns the cleanup guard.
-    // A disconnected HTTP client cannot interrupt the commit-unknown
-    // reconciliation and accidentally kill an activated winner (or leak an
-    // unactivated worker).
-    let activation_state = state.clone();
-    tokio::spawn(async move {
-        let mut guard = guard;
-        match tokio::time::timeout(
-            ACTIVATION_STORE_DEADLINE,
-            activation_state.store.activate_media_session(&activation),
-        )
-        .await
-        {
-            Ok(Ok(Some(outcome))) => {
-                activation_state
-                    .media_sessions
-                    .cache_route(outcome.route.clone())
-                    .await;
-                if outcome.route.owner_node_id == activation_state.node_id {
-                    activation_state
-                        .media_sessions
-                        .seed_owned_lease(&outcome.route)
-                        .await;
-                }
-                guard.disarm();
-                if let Some(predecessor) = outcome.predecessor.as_ref() {
-                    stop_owned_session(&activation_state, predecessor).await;
-                }
-                Ok(outcome)
-            }
-            Ok(Ok(None)) => Err(ApiError::ServiceUnavailable(
-                "session ownership could not be activated".to_owned(),
-            )),
-            uncertain => {
-                let error = match uncertain {
-                    Ok(Err(error)) => error.into(),
-                    Err(_) => ApiError::ServiceUnavailable(
-                        "session activation outcome is still being reconciled".to_owned(),
-                    ),
-                    Ok(Ok(_)) => unreachable!("definitive activation outcomes returned above"),
-                };
-                let reconcile_deadline =
-                    tokio::time::Instant::now() + ACTIVATION_FAST_RECONCILIATION;
-                if let Some(route) =
-                    wait_for_exact_activation(&activation_state, &activation, reconcile_deadline)
-                        .await
-                {
-                    activation_state
-                        .media_sessions
-                        .cache_route(route.clone())
-                        .await;
-                    if route.owner_node_id == activation_state.node_id {
-                        activation_state
-                            .media_sessions
-                            .seed_owned_lease(&route)
-                            .await;
+    let publication_activation = activation.clone();
+    let mut publication_guard =
+        ActivationPublicationGuard::new(state.clone(), publication_activation.clone());
+    // The detached owner keeps both serving serialization and exact worker
+    // cleanup until the route is publishable or its fixed activation lease
+    // expires. The Store future itself may outlive its caller, so every first
+    // commit is BLOCKED and cannot be renewed or taken over before this owner
+    // confirms it.
+    let owner_activation_generation = local_serving_generation.ok_or_else(|| {
+        ApiError::ServiceUnavailable("media worker omitted its activation authority".to_owned())
+    })?;
+    let mut activation_task = if owner_node_id == state.node_id {
+        let activation_state = state.clone();
+        let activation_authority = ingress_serving_authority.clone();
+        tokio::spawn(async move {
+            activate_session_under_authority(
+                activation_state,
+                activation,
+                activation_predecessor,
+                expected_predecessor_incarnation_id,
+                activation_authority,
+                owner_activation_generation,
+                guard,
+            )
+            .await
+            .map(|_| ())
+        })
+    } else {
+        let activation_state = state.clone();
+        let activation_owner = owner_node_id.clone();
+        tokio::spawn(async move {
+            let request = crate::media_sessions::RemoteActivateRequest {
+                target_generation: owner_activation_generation,
+                activation,
+            };
+            let activation_deadline = tokio::time::Instant::now()
+                + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
+            activation_state
+                .media_sessions
+                .activate_remote(&activation_owner, &request, activation_deadline)
+                .await
+                .map_err(|error| {
+                    ApiError::ServiceUnavailable(format!(
+                        "media worker {activation_owner} could not activate the session: {error:?}"
+                    ))
+                })?;
+            let mut guard = guard;
+            let route = match wait_for_publishable_activation(
+                &activation_state,
+                &request.activation,
+                activation_deadline,
+            )
+            .await
+            {
+                PublishableActivationWait::Ready(route) => *route,
+                PublishableActivationWait::Pending => {
+                    if let Some(guard) = guard.as_mut() {
+                        guard.disarm();
                     }
-                    guard.disarm();
-                    Ok(MediaSessionActivationOutcome {
-                        route,
-                        predecessor: None,
-                    })
-                } else {
-                    // A timed-out replicated transaction may still commit
-                    // after the caller loses its response. Transfer ownership
-                    // to the bounded reconciler before disarming this guard.
-                    let reconcile_state = activation_state.clone();
-                    let reconcile_activation = activation.clone();
-                    tokio::spawn(async move {
-                        reconcile_or_abort_activation(reconcile_state, reconcile_activation, guard)
-                            .await;
-                    });
-                    Err(error)
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "media_session_handoff_pending",
+                        "the predecessor handoff remains durably owned; retry this request",
+                    ));
                 }
+                PublishableActivationWait::Gone => return Err(ApiError::ServiceUnavailable(format!(
+                    "media worker {activation_owner} did not confirm the session before its owner lease"
+                ))),
+            };
+            activation_state.media_sessions.cache_route(route).await;
+            if let Some(guard) = guard.as_mut() {
+                guard.disarm();
             }
+            Ok(())
+        })
+    };
+    let activation_deadline = activation_lease_deadline(&publication_activation);
+    match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
+        Ok(Ok(Ok(_))) => {}
+        Ok(Ok(Err(error))) => {
+            if matches!(
+                &error,
+                ApiError::Typed {
+                    code: "media_session_handoff_pending",
+                    ..
+                }
+            ) {
+                publication_guard.disarm();
+            }
+            return Err(error);
         }
-    })
+        Ok(Err(error)) => {
+            return Err(ApiError::Internal(format!(
+                "media activation task failed: {error}"
+            )))
+        }
+        Err(_) => {
+            // The HTTP deadline never cancels either ownership decision. The
+            // detached activation keeps its worker guard; this publication
+            // guard abandons a completed-but-unpublished route, but disarms
+            // when the durable predecessor handoff is intentionally pending.
+            tokio::spawn(async move {
+                match activation_task.await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error))
+                        if matches!(
+                            &error,
+                            ApiError::Typed {
+                                code: "media_session_handoff_pending",
+                                ..
+                            }
+                        ) =>
+                    {
+                        publication_guard.disarm();
+                    }
+                    Ok(Err(error)) => {
+                        tracing::warn!(?error, "detached media activation settled unsuccessfully");
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "detached media activation task failed");
+                    }
+                }
+            });
+            return Err(ApiError::ServiceUnavailable(
+                "session activation is still being reconciled".to_owned(),
+            ));
+        }
+    }
+    // The selected target owns and authority-fences the durable activation.
+    // The ingress needs only to linearize publication of this successful
+    // response against its own loss transition; retaining an ingress read
+    // guard across remote RPC/polling would delay failover for the whole owner
+    // lease. A retry through a healthy ingress can publish the starting claim if
+    // this exact ingress loses authority before response publication.
+    let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+    let _response_publication = ingress_serving_authority
+        .commit_guard_before(ingress_serving_generation, publication_deadline.into_std())
+        .await
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "the ingress lost serving authority before start response publication".to_owned(),
+            )
+        })?;
+    let published_route = tokio::time::timeout_at(
+        publication_deadline,
+        state.store.publish_media_session_activation(
+            user.id,
+            &request_claim_id,
+            &incarnation_id,
+            unix_ms(),
+        ),
+    )
     .await
-    .map_err(|error| ApiError::Internal(format!("media activation task failed: {error}")))??;
+    .map_err(|_| {
+        ApiError::ServiceUnavailable(
+            "media-session response publication exceeded its fixed deadline".to_owned(),
+        )
+    })?
+    .map_err(|error| session_store_error("publishing the media-session response", error))?
+    .filter(|route| {
+        route_matches_activation(route, &publication_activation)
+            && route.publication_ready_at_ms == 0
+    })
+    .ok_or_else(|| {
+        ApiError::ServiceUnavailable(
+            "media-session response publication lost its exact activation".to_owned(),
+        )
+    })?;
+    state
+        .media_sessions
+        .cache_route(published_route.clone())
+        .await;
+    if published_route.owner_node_id == state.node_id {
+        state
+            .media_sessions
+            .seed_owned_lease(&published_route)
+            .await;
+    }
     crate::playstart::note_playback_started(
         &state,
         user.id,
@@ -944,11 +1581,13 @@ pub async fn create(
         method,
         Some(&request.playback_id),
     );
+    publication_guard.disarm();
     Ok(Json(response))
 }
 
 fn resolved_replay_is_live(route: &MediaSessionRoute, now_ms: i64) -> bool {
     route.state == "active"
+        && route.publication_ready_at_ms == 0
         && route.lease_expires_at_ms > now_ms.saturating_add(MIN_RESOLVED_REPLAY_REMAINING_MS)
 }
 
@@ -962,10 +1601,243 @@ fn route_matches_activation(
         && route.playback_id == activation.playback_id
         && route.request_fingerprint == activation.request_fingerprint
         && route.owner_node_id == activation.owner_node_id
+        && route.owner_epoch == 1
         && route.state == "active"
         && route.lease_expires_at_ms > unix_ms()
         && route.recipe_json == activation.recipe_json
         && route.response_json == activation.response_json
+}
+
+fn replay_publication_matches(published: &MediaSessionRoute, observed: &MediaSessionRoute) -> bool {
+    replay_route_identity_matches(published, observed)
+        && published.state == "active"
+        && published.publication_ready_at_ms == 0
+        && published.lease_expires_at_ms > unix_ms()
+}
+
+fn replay_route_identity_matches(
+    current: &MediaSessionRoute,
+    observed: &MediaSessionRoute,
+) -> bool {
+    current.incarnation_id == observed.incarnation_id
+        && current.session_id == observed.session_id
+        && current.user_id == observed.user_id
+        && current.playback_id == observed.playback_id
+        && current.request_fingerprint == observed.request_fingerprint
+        && current.recipe_json == observed.recipe_json
+        && current.response_json == observed.response_json
+        && current.media_origin_ms == observed.media_origin_ms
+}
+
+fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
+    let remaining_ms = activation
+        .lease_expires_at_ms
+        .saturating_sub(activation.now_ms)
+        .clamp(0, LEASE_TTL_MS);
+    tokio::time::Instant::now()
+        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default())
+}
+
+fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivation) {
+    tokio::spawn(async move {
+        if let Err(error) = state
+            .store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Abandon,
+                unix_ms(),
+            )
+            .await
+        {
+            tracing::warn!(%error, "provisional media activation abandonment failed");
+        }
+    });
+}
+
+async fn settle_activation_publication_cleanup(
+    state: AppState,
+    activation: MediaSessionActivation,
+) {
+    let remaining_ms = activation
+        .lease_expires_at_ms
+        .saturating_sub(unix_ms())
+        .clamp(0, LEASE_TTL_MS);
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default());
+    let mut settlement_attempt = 0_u64;
+    loop {
+        settlement_attempt = settlement_attempt.saturating_add(1);
+        let now = tokio::time::Instant::now();
+        let attempt_deadline = now + ACTIVATION_STORE_DEADLINE;
+        match tokio::time::timeout_at(
+            attempt_deadline,
+            state.store.settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Abandon,
+                unix_ms(),
+            ),
+        )
+        .await
+        {
+            // Atomic response publication won the race. Preserve its worker;
+            // an idempotent retry is now entitled to recover this route.
+            Ok(Ok(Some(route)))
+                if route.state == "active"
+                    && route.publication_ready_at_ms == 0
+                    && route.lease_expires_at_ms > unix_ms() =>
+            {
+                return;
+            }
+            // Abandonment won, the route disappeared, or ownership advanced.
+            // Exact worker cleanup is idempotent in all three cases.
+            Ok(Ok(_)) => {
+                abort_started_session(
+                    &state,
+                    &activation.owner_node_id,
+                    &activation.incarnation_id,
+                    &activation.session_id,
+                )
+                .await;
+                return;
+            }
+            Ok(Err(error)) => {
+                if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
+                    tracing::warn!(
+                        %error,
+                        settlement_attempt,
+                        "activation response reaper is retrying exact settlement"
+                    );
+                }
+            }
+            Err(_) => {
+                if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
+                    tracing::warn!(
+                        settlement_attempt,
+                        "activation response reaper timed out exact settlement"
+                    );
+                }
+            }
+        }
+        let retry_delay = if tokio::time::Instant::now() < deadline {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(1)
+        };
+        tokio::time::sleep(retry_delay).await;
+    }
+}
+
+pub(super) async fn activate_session_under_authority(
+    state: AppState,
+    activation: MediaSessionActivation,
+    reconciled_predecessor: Option<MediaSessionRoute>,
+    predecessor_incarnation: Option<String>,
+    authority: crate::serving_fence::ServingAuthority,
+    admitted_generation: u64,
+    guard: Option<StartedSessionGuard>,
+) -> Result<MediaSessionActivationOutcome, ApiError> {
+    let lease_deadline = activation_lease_deadline(&activation);
+    let serving_transition = authority
+        .commit_guard_before(admitted_generation, lease_deadline.into_std())
+        .await
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "the media owner lost serving authority before durable activation".to_owned(),
+            )
+        })?;
+    let prepared = tokio::time::timeout_at(
+        lease_deadline,
+        state.store.activate_media_session(&activation),
+    )
+    .await;
+    let mut outcome = match prepared {
+        Ok(Ok(Some(outcome))) if route_matches_activation(&outcome.route, &activation) => outcome,
+        Ok(Ok(Some(_))) | Ok(Ok(None)) => {
+            spawn_activation_abandonment(state.clone(), activation.clone());
+            drop(serving_transition);
+            return Err(ApiError::ServiceUnavailable(
+                "session ownership could not be prepared".to_owned(),
+            ));
+        }
+        Ok(Err(store_error)) => {
+            let error = session_store_error("preparing the media session", store_error);
+            let Some(route) = wait_for_exact_activation(&state, &activation, lease_deadline).await
+            else {
+                spawn_activation_abandonment(state.clone(), activation.clone());
+                drop(serving_transition);
+                return Err(error);
+            };
+            MediaSessionActivationOutcome {
+                route,
+                predecessor: reconciled_predecessor,
+            }
+        }
+        Err(_) => {
+            // Prepare and Abandon are mutually excluding Store transactions.
+            // If the late prepare wins it remains BLOCKED until Abandon
+            // tombstones it; if Abandon wins the request predicate prevents
+            // the late prepare from publishing any route.
+            spawn_activation_abandonment(state.clone(), activation.clone());
+            drop(serving_transition);
+            return Err(ApiError::ServiceUnavailable(
+                "session preparation exceeded its fixed owner lease".to_owned(),
+            ));
+        }
+    };
+    if tokio::time::Instant::now() >= lease_deadline {
+        spawn_activation_abandonment(state.clone(), activation.clone());
+        drop(serving_transition);
+        return Err(ApiError::ServiceUnavailable(
+            "session preparation exhausted its publication lease".to_owned(),
+        ));
+    }
+    let confirmation_now_ms = unix_ms();
+    let publication_ready_at_ms = predecessor_incarnation.as_ref().map_or(0, |_| {
+        confirmation_now_ms.saturating_add(
+            i64::try_from(TERMINAL_PROJECTION_SAFETY_WINDOW.as_millis()).unwrap_or(i64::MAX),
+        )
+    });
+    let confirmation = tokio::time::timeout_at(
+        lease_deadline,
+        state.store.settle_media_session_activation(
+            &activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms,
+            },
+            confirmation_now_ms,
+        ),
+    )
+    .await;
+    let route = match confirmation {
+        Ok(Ok(Some(route))) if route_matches_activation(&route, &activation) => route,
+        Ok(Ok(Some(_))) | Ok(Ok(None)) | Ok(Err(_)) | Err(_) => {
+            let confirmed =
+                wait_for_confirmed_activation(&state, &activation, lease_deadline).await;
+            let Some(route) = confirmed else {
+                spawn_activation_abandonment(state.clone(), activation.clone());
+                drop(serving_transition);
+                return Err(ApiError::ServiceUnavailable(
+                    "session confirmation did not settle before its fixed owner lease".to_owned(),
+                ));
+            };
+            route
+        }
+    };
+    outcome.route = route.clone();
+    // Serving loss needs the write side of this transition, so the atomic
+    // BLOCKED-to-ready/armed confirmation above linearizes before any loss.
+    drop(serving_transition);
+    state.media_sessions.cache_route(route.clone()).await;
+    settle_activation_predecessor(
+        &state,
+        predecessor_incarnation,
+        route,
+        authority,
+        admitted_generation,
+        guard,
+    )
+    .await?;
+    Ok(outcome)
 }
 
 async fn wait_for_exact_activation(
@@ -1001,21 +1873,109 @@ async fn wait_for_exact_activation(
     }
 }
 
-async fn reconcile_or_abort_activation(
-    state: AppState,
-    activation: MediaSessionActivation,
-    mut guard: StartedSessionGuard,
-) {
-    let deadline = tokio::time::Instant::now() + ACTIVATION_CONFIRMATION_WINDOW;
-    if let Some(route) = wait_for_exact_activation(&state, &activation, deadline).await {
-        state.media_sessions.cache_route(route.clone()).await;
-        if route.owner_node_id == state.node_id {
-            state.media_sessions.seed_owned_lease(&route).await;
+pub(super) async fn wait_for_confirmed_activation(
+    state: &AppState,
+    activation: &MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> Option<MediaSessionRoute> {
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return None;
         }
-        guard.disarm();
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(&activation.incarnation_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED =>
+            {
+                return Some(route)
+            }
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED => {}
+            Ok(Ok(Some(_))) => return None,
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Err(_) => return None,
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
     }
-    // Dropping the armed guard aborts the exact worker, fails its exact claim,
-    // and releases the replacement gate only after the full bounded verdict.
+}
+
+enum PublishableActivationWait {
+    Ready(Box<MediaSessionRoute>),
+    Pending,
+    Gone,
+}
+
+async fn wait_for_publishable_activation(
+    state: &AppState,
+    activation: &MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> PublishableActivationWait {
+    let mut observed_pending_handoff = false;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return if observed_pending_handoff {
+                PublishableActivationWait::Pending
+            } else {
+                PublishableActivationWait::Gone
+            };
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(&activation.incarnation_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms == 0 =>
+            {
+                return PublishableActivationWait::Ready(Box::new(route));
+            }
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED =>
+            {
+                observed_pending_handoff = true;
+            }
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED => {}
+            Ok(Ok(Some(_))) => return PublishableActivationWait::Gone,
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Err(_) => {
+                return if observed_pending_handoff {
+                    PublishableActivationWait::Pending
+                } else {
+                    PublishableActivationWait::Gone
+                };
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return if observed_pending_handoff {
+                PublishableActivationWait::Pending
+            } else {
+                PublishableActivationWait::Gone
+            };
+        }
+        tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
+    }
 }
 
 fn valid_playback_id(playback_id: &str) -> bool {
@@ -1033,26 +1993,318 @@ async fn abort_started_session(
     session_id: &str,
 ) {
     if owner_node_id == state.node_id {
-        state
+        if !state
             .transcode
-            .stop_session_for_request(incarnation_id, session_id, "cluster start aborted")
-            .await;
-    } else {
-        state
-            .media_sessions
-            .abort_remote(
-                owner_node_id,
-                &RemoteAbortRequest {
-                    incarnation_id: incarnation_id.to_owned(),
-                    session_id: session_id.to_owned(),
-                },
-            )
-            .await;
+            .stop_session_for_owner(incarnation_id, session_id, 1, "cluster start aborted")
+            .await
+        {
+            state
+                .transcode
+                .stop_vod_session_for_request(incarnation_id, session_id, "cluster start aborted")
+                .await;
+        }
+    } else if let Err(error) = state
+        .media_sessions
+        .abort_remote(
+            owner_node_id,
+            &RemoteAbortRequest {
+                incarnation_id: incarnation_id.to_owned(),
+                session_id: session_id.to_owned(),
+                expected_owner_epoch: 1,
+                reason: None,
+            },
+        )
+        .await
+    {
+        tracing::warn!(error = ?error, "remote cluster-start abort did not settle");
     }
 }
 
-async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
-    stop_owned_session_because(state, route, "superseded by cluster session").await
+async fn settle_activation_predecessor(
+    state: &AppState,
+    predecessor_incarnation: Option<String>,
+    successor: MediaSessionRoute,
+    authority: crate::serving_fence::ServingAuthority,
+    admitted_generation: u64,
+    mut guard: Option<StartedSessionGuard>,
+) -> Result<(), ApiError> {
+    let Some(predecessor_incarnation) = predecessor_incarnation else {
+        if let Some(guard) = guard.as_mut() {
+            guard.disarm();
+        }
+        return Ok(());
+    };
+    debug_assert_ne!(
+        successor.publication_ready_at_ms,
+        MEDIA_SESSION_PUBLICATION_BLOCKED
+    );
+    let fast_deadline = tokio::time::Instant::now() + PREDECESSOR_PROJECTION_FAST_WINDOW;
+    if project_activation_predecessor_until(state, &predecessor_incarnation, fast_deadline).await {
+        match complete_activation_handoff_until(
+            state,
+            &successor,
+            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+            &authority,
+            admitted_generation,
+            fast_deadline,
+        )
+        .await
+        {
+            ActivationHandoffVerdict::Ready => {
+                if let Some(guard) = guard.as_mut() {
+                    guard.disarm();
+                }
+                return Ok(());
+            }
+            ActivationHandoffVerdict::SuccessorGone => {
+                return Err(media_session_ended());
+            }
+            ActivationHandoffVerdict::Pending => {}
+            ActivationHandoffVerdict::AuthorityLost => {
+                return Err(ApiError::ServiceUnavailable(
+                    "the media owner lost serving authority during session handoff".to_owned(),
+                ));
+            }
+        }
+    }
+
+    // Keep the activated successor's cleanup guard and replacement permit in
+    // a cancellation-independent owner. The caller gets a typed retry while
+    // this owner continues; publication cannot proceed until either the exact
+    // predecessor acknowledges terminal control or every response admitted
+    // by that generation has crossed the safety boundary.
+    let projection_state = state.clone();
+    tokio::spawn(async move {
+        let settled = settle_armed_activation_handoff(
+            &projection_state,
+            predecessor_incarnation,
+            successor,
+            authority,
+            admitted_generation,
+        )
+        .await;
+        if settled {
+            if let Some(guard) = guard.as_mut() {
+                guard.disarm();
+            }
+        }
+        // Otherwise the armed guard performs exact worker cleanup. A serving
+        // generation which has been lost can never publish the finite route.
+    });
+    Err(ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_session_handoff_pending",
+        "the predecessor handoff remains durably owned; retry this request",
+    ))
+}
+
+async fn settle_armed_activation_handoff(
+    state: &AppState,
+    predecessor_incarnation: String,
+    successor: MediaSessionRoute,
+    authority: crate::serving_fence::ServingAuthority,
+    admitted_generation: u64,
+) -> bool {
+    let remaining_ms = successor
+        .publication_ready_at_ms
+        .saturating_sub(unix_ms())
+        .max(0);
+    let boundary_deadline = tokio::time::Instant::now()
+        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or(u64::MAX));
+    let acknowledged =
+        project_activation_predecessor_until(state, &predecessor_incarnation, boundary_deadline)
+            .await;
+    if acknowledged
+        && matches!(
+            complete_activation_handoff_until(
+                state,
+                &successor,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                &authority,
+                admitted_generation,
+                boundary_deadline,
+            )
+            .await,
+            ActivationHandoffVerdict::Ready | ActivationHandoffVerdict::SuccessorGone
+        )
+    {
+        return true;
+    }
+    tracing::warn!(
+        incarnation = %predecessor_incarnation,
+        safety_window_seconds = TERMINAL_PROJECTION_SAFETY_WINDOW.as_secs(),
+        "predecessor acknowledgement was unavailable through the response-lifetime safety boundary"
+    );
+    matches!(
+        complete_activation_handoff_until(
+            state,
+            &successor,
+            MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                expected_not_before_ms: successor.publication_ready_at_ms,
+            },
+            &authority,
+            admitted_generation,
+            tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE,
+        )
+        .await,
+        ActivationHandoffVerdict::Ready | ActivationHandoffVerdict::SuccessorGone
+    )
+}
+
+enum ActivationHandoffVerdict {
+    Ready,
+    SuccessorGone,
+    Pending,
+    AuthorityLost,
+}
+
+async fn complete_activation_handoff_until(
+    state: &AppState,
+    successor: &MediaSessionRoute,
+    proof: MediaSessionProjectionCompletion,
+    authority: &crate::serving_fence::ServingAuthority,
+    admitted_generation: u64,
+    deadline: tokio::time::Instant,
+) -> ActivationHandoffVerdict {
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return ActivationHandoffVerdict::Pending;
+        }
+        let attempt_deadline = (now + ACTIVATION_STORE_DEADLINE).min(deadline);
+        let Some(serving_transition) = authority
+            .commit_guard_before(admitted_generation, attempt_deadline.into_std())
+            .await
+        else {
+            return ActivationHandoffVerdict::AuthorityLost;
+        };
+        match tokio::time::timeout_at(
+            attempt_deadline,
+            state.store.complete_media_session_handoff(
+                &successor.incarnation_id,
+                &successor.owner_node_id,
+                successor.owner_epoch,
+                proof,
+                unix_ms(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(Some(route))) => {
+                drop(serving_transition);
+                state.media_sessions.cache_route(route).await;
+                return ActivationHandoffVerdict::Ready;
+            }
+            Ok(Ok(None)) => {
+                drop(serving_transition);
+                // A terminal or replaced successor no longer needs a
+                // publication handoff; the armed cleanup guard may settle it.
+                if let Ok(Ok(Some(route))) = tokio::time::timeout_at(
+                    attempt_deadline,
+                    state
+                        .store
+                        .media_session_route_by_incarnation(&successor.incarnation_id),
+                )
+                .await
+                {
+                    if route.state != "active"
+                        || route.owner_node_id != successor.owner_node_id
+                        || route.owner_epoch != successor.owner_epoch
+                    {
+                        return ActivationHandoffVerdict::SuccessorGone;
+                    }
+                }
+            }
+            Ok(Err(error)) => {
+                drop(serving_transition);
+                tracing::warn!(
+                    error = ?error,
+                    incarnation = %successor.incarnation_id,
+                    "successor publication-fence completion is retrying"
+                );
+            }
+            Err(_) => drop(serving_transition),
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return ActivationHandoffVerdict::Pending;
+        }
+        tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
+    }
+}
+
+async fn project_activation_predecessor_until(
+    state: &AppState,
+    predecessor_incarnation: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let read_deadline = (now + ACTIVATION_STORE_DEADLINE).min(deadline);
+        let route = tokio::time::timeout_at(
+            read_deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(predecessor_incarnation),
+        )
+        .await;
+        if let Ok(Ok(Some(route))) = route {
+            if route.incarnation_id == predecessor_incarnation && route.state == "ended" {
+                let Some(terminal) = crate::vodserve::Terminal::from_durable_reason(
+                    route.terminal_reason.as_deref(),
+                ) else {
+                    tracing::error!(
+                        incarnation = %predecessor_incarnation,
+                        terminal_reason = ?route.terminal_reason,
+                        "ended activation predecessor has no valid durable terminal cause"
+                    );
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    if remaining.is_zero() {
+                        return false;
+                    }
+                    tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
+                    continue;
+                };
+                let projection_deadline = (tokio::time::Instant::now()
+                    + PREDECESSOR_PROJECTION_FAST_WINDOW)
+                    .min(deadline);
+                if matches!(
+                    tokio::time::timeout_at(
+                        projection_deadline,
+                        stop_owned_session_because(
+                            state,
+                            &route,
+                            terminal,
+                            terminal.control_reason(),
+                        ),
+                    )
+                    .await,
+                    Ok(Ok(()))
+                ) {
+                    if let Some(proof) = state
+                        .media_sessions
+                        .complete_terminal_projection(
+                            &route,
+                            MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                        )
+                        .await
+                        .filter(|proof| proof.terminal_projection_complete())
+                    {
+                        state.transcode.complete_session_release_durable(&proof);
+                        return true;
+                    }
+                }
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        tokio::time::sleep(PREDECESSOR_PROJECTION_RETRY_DELAY.min(remaining)).await;
+    }
 }
 
 /// Same teardown with an honest reason: a client DELETE is a release, not a
@@ -1060,14 +2312,16 @@ async fn stop_owned_session(state: &AppState, route: &MediaSessionRoute) {
 async fn stop_owned_session_because(
     state: &AppState,
     route: &MediaSessionRoute,
+    terminal: crate::vodserve::Terminal,
     reason: &'static str,
-) {
-    state.media_sessions.cache_miss(&route.session_id).await;
+) -> Result<(), PeerTransportError> {
     if route.owner_node_id == state.node_id {
         state
             .transcode
-            .stop_session_for_request(&route.incarnation_id, &route.session_id, reason)
+            .begin_session_terminal(&route.session_id, terminal, reason)
             .await;
+        state.transcode.complete_session_release(&route.session_id);
+        Ok(())
     } else {
         state
             .media_sessions
@@ -1076,9 +2330,11 @@ async fn stop_owned_session_because(
                 &RemoteAbortRequest {
                     incarnation_id: route.incarnation_id.clone(),
                     session_id: route.session_id.clone(),
+                    expected_owner_epoch: route.owner_epoch,
+                    reason: Some(reason.to_owned()),
                 },
             )
-            .await;
+            .await
     }
 }
 
@@ -1087,7 +2343,10 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
         return ApiError::Conflict(error);
     }
     tracing::warn!(file = file_id, "session create failed: {error}");
-    if crate::transcode::is_retryable_capacity_error(&error) {
+    if crate::transcode::is_serving_fence_error(&error)
+        || crate::transcode::is_start_infrastructure_error(&error)
+        || crate::transcode::is_retryable_capacity_error(&error)
+    {
         return ApiError::ServiceUnavailable(error);
     }
     if let Some(reason) = crate::transcode::invalid_reopen_reason(&error) {
@@ -1123,53 +2382,110 @@ fn session_start_error(file_id: i64, error: String) -> ApiError {
     ApiError::Internal(error)
 }
 
+fn session_store_error(operation: &'static str, error: plurx_core::error::StoreError) -> ApiError {
+    tracing::warn!(%error, operation, "media-session Store operation failed");
+    ApiError::ServiceUnavailable(format!("{operation}: {error}"))
+}
+
 async fn relay_if_remote(
     state: &AppState,
     session_id: &str,
     resource: RelayResource,
     headers: RelayHeaders,
+    request_deadline: Instant,
 ) -> Result<Option<Response>, ApiError> {
-    let Some(route) = state.media_sessions.route(session_id).await? else {
-        // A process upgraded with already-live sessions has no durable row;
-        // keep the established node-local capability behavior until reaping.
-        return Ok(None);
-    };
-    if route.state != "active" || route.lease_expires_at_ms <= unix_ms() {
-        return Err(ApiError::typed(
-            StatusCode::GONE,
-            "media_session_ended",
-            "this media session is no longer active",
-        ));
-    }
-    if route.owner_node_id == state.node_id {
-        return Ok(None);
-    }
-    state
+    let mut route = match state
         .media_sessions
-        .relay(
-            &route.owner_node_id,
-            &RelayRequest {
-                session_id: session_id.to_owned(),
-                resource,
-                headers,
-            },
-        )
-        .await
-        .map(Some)
-        .map_err(|error| {
-            ApiError::ServiceUnavailable(format!("media worker relay unavailable: {error:?}"))
-        })
+        .route_resolution_before(session_id, &state.node_id, request_deadline)
+        .await?
+    {
+        DurableRouteResolution::Absent | DurableRouteResolution::ActiveLocal(_) => return Ok(None),
+        DurableRouteResolution::OwnerTransition(_) | DurableRouteResolution::Terminal(_) => {
+            match state
+                .media_sessions
+                .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
+                .await?
+            {
+                DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
+                DurableRouteResolution::ActiveLocal(_) => return Ok(None),
+                DurableRouteResolution::ActiveRemote(route) => route,
+                DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+                DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+            }
+        }
+        DurableRouteResolution::ActiveRemote(route) => route,
+    };
+    for attempt in 0..2 {
+        let deadline_unix_ms =
+            resource_deadline_unix_ms(request_deadline).ok_or_else(response_publication_timeout)?;
+        let response = state
+            .media_sessions
+            .relay(
+                &route.owner_node_id,
+                &RelayRequest {
+                    session_id: session_id.to_owned(),
+                    resource: resource.clone(),
+                    deadline_unix_ms,
+                    // The relay envelope has no peer capability version.
+                    // Until both ends negotiate validator-aware Range, every
+                    // relayed request downgrades to a complete representation.
+                    headers: headers.for_unversioned_peer(),
+                },
+            )
+            .await
+            .map_err(|error| {
+                ApiError::ServiceUnavailable(format!("media worker relay unavailable: {error:?}"))
+            })?;
+        let peer_status = response.status();
+        if !relay_status_requires_reclassification(peer_status) {
+            return Ok(Some(response));
+        }
+        let resolution = state
+            .media_sessions
+            .authoritative_route_resolution_before(session_id, &state.node_id, request_deadline)
+            .await?;
+        match resolution {
+            DurableRouteResolution::Absent if peer_status == StatusCode::NOT_FOUND => {
+                return Ok(Some(response));
+            }
+            DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
+            DurableRouteResolution::ActiveLocal(_) => return Ok(None),
+            DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+            DurableRouteResolution::Terminal(_) if peer_status == StatusCode::GONE => {
+                return Ok(Some(response));
+            }
+            DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+            DurableRouteResolution::ActiveRemote(next_route) if attempt == 0 => {
+                drop(response);
+                route = next_route;
+            }
+            DurableRouteResolution::ActiveRemote(_) => return Err(media_owner_transition()),
+        }
+    }
+    unreachable!("bounded relay reclassification returns on every branch")
+}
+
+fn relay_status_requires_reclassification(status: StatusCode) -> bool {
+    matches!(
+        status,
+        StatusCode::NOT_FOUND | StatusCode::CONFLICT | StatusCode::GONE
+    )
 }
 
 /// Execute an authenticated relay on the owning worker without performing a
 /// second route lookup that could proxy back to the ingress node.
 pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Response {
+    let Some(request_deadline) = inherited_resource_deadline(&request) else {
+        return response_publication_timeout().into_response();
+    };
+    let (playlist_deadline, _) = playlist_request_deadlines_before(state, request_deadline);
     let result = match request.resource {
-        RelayResource::Status => status_local(state, &request.session_id)
-            .await
-            .map(IntoResponse::into_response),
+        RelayResource::Status => {
+            status_local_before_with_relay(state, &request.session_id, request_deadline, false)
+                .await
+        }
         RelayResource::Playlist { native, subtitle } => {
-            playlist_local(
+            playlist_local_before(
                 state,
                 &request.session_id,
                 PlaylistQuery {
@@ -1177,6 +2493,8 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                     subtitle,
                     diagnostic: None,
                 },
+                playlist_deadline,
+                request_deadline,
             )
             .await
         }
@@ -1184,7 +2502,7 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
             subtitle,
             diagnostic,
         } => {
-            master_playlist_response_local(
+            master_playlist_response_local_before(
                 state,
                 &request.session_id,
                 PlaylistQuery {
@@ -1192,26 +2510,66 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
                     subtitle,
                     diagnostic,
                 },
+                playlist_deadline,
+                request_deadline,
             )
             .await
         }
-        RelayResource::VideoPlaylist => video_playlist_local(state, &request.session_id).await,
+        RelayResource::VideoPlaylist => {
+            video_playlist_local_before(
+                state,
+                &request.session_id,
+                "video.m3u8",
+                playlist_deadline,
+                request_deadline,
+            )
+            .await
+        }
         RelayResource::SubtitlePlaylist { index } => {
-            subtitle_playlist_local(state, &request.session_id, index).await
+            subtitle_playlist_local_before(
+                state,
+                &request.session_id,
+                index,
+                playlist_deadline,
+                request_deadline,
+            )
+            .await
         }
         RelayResource::SubtitleSegment { index, segment } => {
-            subtitle_vtt_local(state, &request.session_id, index, &segment).await
+            subtitle_vtt_local_before(
+                state,
+                &request.session_id,
+                index,
+                &segment,
+                request_deadline,
+            )
+            .await
         }
         RelayResource::Segment { segment } => {
-            segment_local(state, &request.session_id, &segment, &request.headers).await
+            segment_local_before(
+                state,
+                &request.session_id,
+                &segment,
+                &request.headers,
+                request_deadline,
+            )
+            .await
         }
         RelayResource::Delete => {
-            state.media_sessions.cache_miss(&request.session_id).await;
-            state
-                .transcode
-                .stop_session(&request.session_id, "released through cluster relay")
-                .await;
-            return StatusCode::NO_CONTENT.into_response();
+            // Mixed-version peers may still send this compatibility shape.
+            // It must join the same durable first-writer transaction as the
+            // public endpoint; a process-local 204 would allow the active row
+            // to be takeover-claimed later.
+            return release_with_slots(
+                state.clone(),
+                request.session_id.clone(),
+                session_release_slots(),
+                request_deadline,
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await
+            .into_response();
         }
     };
     match result {
@@ -1231,41 +2589,381 @@ pub(crate) async fn relay_local(state: &AppState, request: RelayRequest) -> Resp
 /// Idempotent: deleting a session that has already gone is a success, because
 /// the caller's intent ("this must not be running") is satisfied either way.
 pub async fn delete(State(state): State<AppState>, AxPath(session): AxPath<String>) -> StatusCode {
-    match state.media_sessions.route(&session).await {
-        Ok(Some(_)) => {}
-        Ok(None) => {
-            state
-                .transcode
-                .stop_session(&session, "released by client")
-                .await;
-            return StatusCode::NO_CONTENT;
+    let deadline = response_publication_deadline();
+    delete_with_slots(state, session, session_release_slots(), deadline).await
+}
+
+/// Run an authenticated operator terminal through the same exact, durable
+/// release coordinator used by public capability DELETE. The first admitted
+/// terminal intent owns telemetry when concurrent callers join one settlement.
+pub(super) async fn release_with_terminal(
+    state: AppState,
+    session: String,
+    terminal: crate::vodserve::Terminal,
+    reason: &'static str,
+) -> StatusCode {
+    release_with_slots(
+        state,
+        session,
+        session_release_slots(),
+        response_publication_deadline(),
+        terminal,
+        reason,
+    )
+    .await
+}
+
+async fn delete_with_slots(
+    state: AppState,
+    session: String,
+    slots: Arc<tokio::sync::Semaphore>,
+    deadline: Instant,
+) -> StatusCode {
+    release_with_slots(
+        state,
+        session,
+        slots,
+        deadline,
+        crate::vodserve::Terminal::Deleted,
+        "released by client",
+    )
+    .await
+}
+
+async fn release_with_slots(
+    state: AppState,
+    session: String,
+    slots: Arc<tokio::sync::Semaphore>,
+    deadline: Instant,
+    terminal: crate::vodserve::Terminal,
+    reason: &'static str,
+) -> StatusCode {
+    let release_settlement = match state
+        .media_sessions
+        .begin_release_reconciliation_with_intent(
+            &session,
+            crate::media_sessions::ReleaseIntent { terminal, reason },
+        )
+        .await
+    {
+        ReleaseAdmission::Won(settlement) => settlement,
+        ReleaseAdmission::Joined(settlement) => {
+            return tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                settlement.wait(),
+            )
+            .await
+            .unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
         }
-        Err(error) => {
-            tracing::warn!(%error, "durable media-session route unavailable");
-            return StatusCode::SERVICE_UNAVAILABLE;
+        ReleaseAdmission::Full => return StatusCode::SERVICE_UNAVAILABLE,
+    };
+    // The task owns both the bounded settlement slot and the full durable
+    // end/fence/cleanup transaction. Dropping the HTTP request or timing out
+    // its wait only detaches this owner; it cannot cancel cleanup after the
+    // Store has committed the terminal row. Ownership transfers immediately
+    // after election: even cancellation while capacity is saturated cannot
+    // strand an in-flight release fence.
+    let settlement_task = tokio::spawn(async move {
+        let permit = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            slots.acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) | Err(_) => {
+                state
+                    .media_sessions
+                    .complete_release_settlement(
+                        &session,
+                        &release_settlement,
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    )
+                    .await;
+                return StatusCode::SERVICE_UNAVAILABLE;
+            }
+        };
+        let _permit = permit;
+        let worker_state = state.clone();
+        let worker_session = session.clone();
+        let worker_settlement = Arc::clone(&release_settlement);
+        match tokio::spawn(async move {
+            release_session(
+                worker_state,
+                worker_session,
+                worker_settlement,
+                terminal,
+                reason,
+            )
+            .await
+        })
+        .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                tracing::error!(
+                    %error,
+                    session = %crate::transcode::session_log_id(&session),
+                    "media-session release transaction panicked; transferred to lifecycle reconciliation"
+                );
+                state
+                    .media_sessions
+                    .defer_release_reconciliation(&session, &release_settlement)
+                    .await;
+                StatusCode::SERVICE_UNAVAILABLE
+            }
         }
+    });
+    match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), settlement_task).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(error)) => {
+            tracing::warn!(%error, "media-session release settlement task failed");
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        // Dropping JoinHandle detaches the still-owned cleanup task.
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE,
     }
-    let route = match state.store.end_media_session(&session, unix_ms()).await {
+}
+
+fn session_release_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(
+        SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(SESSION_RELEASE_CAPACITY))),
+    )
+}
+
+async fn release_session(
+    state: AppState,
+    session: String,
+    settlement: Arc<ReleaseSettlement>,
+    terminal: crate::vodserve::Terminal,
+    reason: &'static str,
+) -> StatusCode {
+    // Close publication before Store latency without choosing the local VOD
+    // tombstone cause. The Store CAS below records the first writer; phase two
+    // projects that exact durable winner.
+    state
+        .transcode
+        .begin_session_publication_fence(&session)
+        .await;
+    #[cfg(test)]
+    if let Some(pause) = release_pause_for(&session) {
+        pause.wait().await;
+        pause.wait().await;
+    }
+    // Never put an HTTP deadline around this mutation. SQLite blocking work
+    // and a submitted Raft proposal may commit after caller cancellation, so
+    // this detached capacity-owned task retains the attempt until the Store
+    // returns a definitive result.
+    let route = match end_media_session_for_release(&state, &session, terminal).await {
         Ok(route) => route,
         Err(error) => {
-            tracing::warn!(%error, "durable media-session release unavailable");
+            tracing::warn!(
+                %error,
+                session = %crate::transcode::session_log_id(&session),
+                "durable media-session release is commit-unknown; transferred to lifecycle reconciliation"
+            );
+            state
+                .media_sessions
+                .defer_release_reconciliation(&session, &settlement)
+                .await;
             return StatusCode::SERVICE_UNAVAILABLE;
         }
     };
     match route {
         Some(route) => {
-            state.media_sessions.cache_route(route.clone()).await;
-            stop_owned_session_because(&state, &route, "released by client").await;
-        }
-        None => {
-            state.media_sessions.cache_miss(&session).await;
+            // Publish the returned exact terminal owner before any local or
+            // remote stop await. A negative cache entry would look absent to
+            // ingress and reopen the still-live local fallback in this gap.
+            let projected_terminal =
+                crate::vodserve::Terminal::from_durable_reason(route.terminal_reason.as_deref())
+                    .unwrap_or(terminal);
+            let projected_reason = projected_terminal.control_reason();
             state
                 .transcode
-                .stop_session(&session, "released by client")
+                .begin_session_terminal(&session, projected_terminal, projected_reason)
                 .await;
+            let Some(durable_release) = state
+                .media_sessions
+                .complete_release_with_route(route.clone())
+                .await
+            else {
+                state
+                    .media_sessions
+                    .defer_release_reconciliation(&session, &settlement)
+                    .await;
+                return StatusCode::SERVICE_UNAVAILABLE;
+            };
+            state
+                .transcode
+                .complete_session_release_durable(&durable_release);
+            #[cfg(test)]
+            if let Some(pause) = release_after_tombstone_pause_for(&session) {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            // A remote worker must acknowledge its local terminal generation
+            // before the shared DELETE settles. The acknowledgement is fast:
+            // physical reap is already transferred to the worker's bounded
+            // lifecycle owner. If transport is unavailable, retain the exact
+            // owner route and settlement for lifecycle retry.
+            if !durable_release.terminal_projection_complete()
+                && route.owner_node_id != state.node_id
+            {
+                let mut projected = false;
+                for attempt in 0..REMOTE_RELEASE_ATTEMPTS {
+                    match stop_owned_session_because(
+                        &state,
+                        &route,
+                        projected_terminal,
+                        projected_reason,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            projected = true;
+                            break;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                session = %crate::transcode::session_log_id(&session),
+                                owner = %route.owner_node_id,
+                                attempt = attempt + 1,
+                                "exact owner terminal projection attempt failed"
+                            );
+                            if attempt + 1 < REMOTE_RELEASE_ATTEMPTS {
+                                tokio::time::sleep(REMOTE_RELEASE_RETRY_DELAY).await;
+                            }
+                        }
+                    }
+                }
+                if !projected {
+                    state
+                        .media_sessions
+                        .defer_release_reconciliation(&session, &settlement)
+                        .await;
+                    return StatusCode::SERVICE_UNAVAILABLE;
+                }
+            }
+            if !durable_release.terminal_projection_complete() {
+                let Some(projected_release) = state
+                    .media_sessions
+                    .complete_terminal_projection(
+                        &route,
+                        MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                    )
+                    .await
+                    .filter(|proof| proof.terminal_projection_complete())
+                else {
+                    state
+                        .media_sessions
+                        .defer_release_reconciliation(&session, &settlement)
+                        .await;
+                    return StatusCode::SERVICE_UNAVAILABLE;
+                };
+                state
+                    .transcode
+                    .complete_session_release_durable(&projected_release);
+            }
+        }
+        None => {
+            // Confirmed durable absence is idempotent success. The elected
+            // owner already tombstoned VOD or actor-fenced rolling and
+            // transferred physical cleanup before submitting the Store
+            // mutation, so lifting the temporary route fence cannot reopen a
+            // process-local fallback here.
+            state
+                .transcode
+                .begin_session_terminal(&session, terminal, reason)
+                .await;
+            let durable_release = state.media_sessions.complete_release_absent(&session).await;
+            state
+                .transcode
+                .complete_session_release_durable(&durable_release);
         }
     }
+    state
+        .media_sessions
+        .complete_release_settlement(&session, &settlement, StatusCode::NO_CONTENT)
+        .await;
     StatusCode::NO_CONTENT
+}
+
+async fn end_media_session_for_release(
+    state: &AppState,
+    session: &str,
+    terminal: crate::vodserve::Terminal,
+) -> Result<Option<MediaSessionRoute>, StoreError> {
+    #[cfg(test)]
+    if take_injected_release_error(session) {
+        return Err(StoreError::Database(
+            "injected commit-unknown media-session release".to_owned(),
+        ));
+    }
+    state
+        .store
+        .end_media_session(session, terminal.durable_reason(), unix_ms())
+        .await
+}
+
+#[cfg(test)]
+fn injected_release_errors() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static ERRORS: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    ERRORS.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()))
+}
+
+#[cfg(test)]
+fn inject_release_error(session: &str) {
+    injected_release_errors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(session.to_owned());
+}
+
+#[cfg(test)]
+fn take_injected_release_error(session: &str) -> bool {
+    injected_release_errors()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .remove(session)
+}
+
+#[cfg(test)]
+fn release_pauses(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn release_pause_for(session: &str) -> Option<Arc<tokio::sync::Barrier>> {
+    release_pauses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .cloned()
+}
+
+#[cfg(test)]
+fn release_after_tombstone_pauses(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>> {
+    static PAUSES: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Barrier>>>,
+    > = std::sync::OnceLock::new();
+    PAUSES.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn release_after_tombstone_pause_for(session: &str) -> Option<Arc<tokio::sync::Barrier>> {
+    release_after_tombstone_pauses()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .cloned()
 }
 
 /// GET /api/v1/files/:id/hls/start — **deprecated**; use `POST …/hls/sessions`.
@@ -1334,31 +3032,1153 @@ pub async fn status(
     AxPath(session): AxPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let request_deadline = response_publication_deadline();
     if let Some(response) = relay_if_remote(
         &state,
         &session,
         RelayResource::Status,
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    status_local(&state, &session)
-        .await
-        .map(IntoResponse::into_response)
+    status_local_before(&state, &session, request_deadline).await
 }
 
-async fn status_local(
+/// POST /api/v1/hls/:session/control — one bounded, capability-authenticated
+/// playback-control exchange. The session UUID remains the bearer capability;
+/// generation, epoch, client instance and sequence are mutation fences.
+pub async fn control(
+    State(state): State<AppState>,
+    AxPath(session): AxPath<String>,
+    body: Bytes,
+) -> Response {
+    let deadline_unix_ms = crate::media_sessions::unix_ms().saturating_add(
+        i64::try_from(crate::playback_control::EXCHANGE_DEADLINE.as_millis()).unwrap_or(i64::MAX),
+    );
+    match tokio::time::timeout(
+        crate::playback_control::EXCHANGE_DEADLINE,
+        control_inner(state, session, body, deadline_unix_ms),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the playback control exchange exceeded its deadline",
+                None,
+                None,
+                Some(500),
+                None,
+            )
+        }
+    }
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct RetainedTerminalResponse {
+    platform: crate::playback_control::ClientPlatform,
+    response: crate::playback_control::ControlResponseV1,
+}
+
+fn local_control_response(
+    route: &MediaSessionRoute,
+    start: &StartResponse,
+    recipe: &RemoteStartRequest,
+    request: &crate::playback_control::ControlRequestV1,
+    result: &crate::playback_control::LocalControlResult,
+    server_time_unix_ms: i64,
+) -> crate::playback_control::ControlResponseV1 {
+    let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
+    crate::playback_control::ControlResponseV1 {
+        protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+        generation: route.incarnation_id.clone(),
+        control_epoch: owner_epoch,
+        accepted_sequence: result.accepted_sequence,
+        server_time_unix_ms,
+        lease: crate::playback_control::PlaybackLeaseView {
+            state: result.lease_state.to_owned(),
+            renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
+            expires_at_unix_ms: if result.lease_state == "ended" {
+                server_time_unix_ms
+            } else {
+                result.lease_expires_at_unix_ms
+            },
+        },
+        delivery: crate::playback_control::DeliveryView::from_status(
+            &result.status,
+            request,
+            &route.owner_node_id,
+            owner_epoch,
+            route.media_origin_ms,
+        ),
+        effective_selection: crate::playback_control::EffectiveSelection::from_recipe(
+            recipe,
+            start.height,
+            start.delivered_dynamic_range.clone(),
+        ),
+        action: result.action.clone(),
+    }
+}
+
+struct DurableTerminalCommitter {
+    store: Arc<dyn plurx_core::store::Store>,
+    route: MediaSessionRoute,
+    start: StartResponse,
+    recipe: RemoteStartRequest,
+    request: crate::playback_control::ControlRequestV1,
+    faults: Option<Arc<TerminalCommitFaults>>,
+}
+
+const TERMINAL_COMMIT_RETRY_BUDGET: Duration = Duration::from_secs(5);
+const TERMINAL_COMMIT_RETRY_MIN: Duration = Duration::from_millis(25);
+const TERMINAL_COMMIT_RETRY_MAX: Duration = Duration::from_millis(500);
+
+fn terminal_ack_matches(
+    stored: &MediaSessionTerminalAck,
+    acknowledgement: &MediaSessionTerminalAck,
+) -> bool {
+    stored.incarnation_id == acknowledgement.incarnation_id
+        && stored.session_id == acknowledgement.session_id
+        && stored.owner_node_id == acknowledgement.owner_node_id
+        && stored.owner_epoch == acknowledgement.owner_epoch
+        && stored.client_instance_id == acknowledgement.client_instance_id
+        && stored.sequence == acknowledgement.sequence
+        && stored.request_fingerprint == acknowledgement.request_fingerprint
+        && stored.response_json == acknowledgement.response_json
+}
+
+async fn terminal_io_before<T>(
+    deadline: tokio::time::Instant,
+    operation: impl std::future::Future<Output = T>,
+) -> Option<T> {
+    tokio::time::timeout_at(deadline, operation).await.ok()
+}
+
+async fn terminal_ack_is_visible_before(
+    store: &dyn plurx_core::store::Store,
+    acknowledgement: &MediaSessionTerminalAck,
+    deadline: tokio::time::Instant,
+) -> bool {
+    terminal_io_before(
+        deadline,
+        store.media_session_terminal_ack(&acknowledgement.session_id, unix_ms()),
+    )
+    .await
+    .and_then(Result::ok)
+    .flatten()
+    .as_ref()
+    .is_some_and(|stored| terminal_ack_matches(stored, acknowledgement))
+}
+
+#[derive(Default)]
+struct TerminalCommitFaults {
+    fail_before_commit: std::sync::atomic::AtomicUsize,
+    fail_after_commit: std::sync::atomic::AtomicUsize,
+}
+
+impl TerminalCommitFaults {
+    fn consume(counter: &std::sync::atomic::AtomicUsize) -> bool {
+        counter
+            .fetch_update(
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+                |remaining| remaining.checked_sub(1),
+            )
+            .is_ok()
+    }
+}
+
+async fn persist_terminal_ack(
+    store: Arc<dyn plurx_core::store::Store>,
+    acknowledgement: MediaSessionTerminalAck,
+) -> bool {
+    persist_terminal_ack_with_faults(store, acknowledgement, None).await
+}
+
+async fn persist_terminal_ack_with_faults(
+    store: Arc<dyn plurx_core::store::Store>,
+    acknowledgement: MediaSessionTerminalAck,
+    faults: Option<&TerminalCommitFaults>,
+) -> bool {
+    let remaining_ms = acknowledgement.expires_at_ms.saturating_sub(unix_ms());
+    let Some(remaining_ms) = u64::try_from(remaining_ms)
+        .ok()
+        .filter(|remaining| *remaining > 0)
+    else {
+        return false;
+    };
+    let now = tokio::time::Instant::now();
+    let acknowledgement_deadline = now
+        .checked_add(Duration::from_millis(remaining_ms))
+        .unwrap_or(now);
+    let deadline = (now + TERMINAL_COMMIT_RETRY_BUDGET).min(acknowledgement_deadline);
+    let mut delay = TERMINAL_COMMIT_RETRY_MIN;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let fail_before =
+            faults.is_some_and(|faults| TerminalCommitFaults::consume(&faults.fail_before_commit));
+        let write = if fail_before {
+            Some(Err(()))
+        } else {
+            let write = match terminal_io_before(
+                deadline,
+                store.record_media_session_terminal_ack(&acknowledgement),
+            )
+            .await
+            {
+                Some(Ok(persisted)) => Ok(persisted),
+                Some(Err(_)) => Err(()),
+                None => return false,
+            };
+            let fail_after = write == Ok(true)
+                && faults
+                    .is_some_and(|faults| TerminalCommitFaults::consume(&faults.fail_after_commit));
+            Some(if fail_after { Err(()) } else { write })
+        };
+        match write {
+            Some(Ok(true)) => return true,
+            Some(Ok(false)) => {
+                // `false` is normally a definitive route/identity conflict,
+                // but first resolve an earlier unknown commit of these exact
+                // immutable bytes.
+                return terminal_ack_is_visible_before(store.as_ref(), &acknowledgement, deadline)
+                    .await;
+            }
+            Some(Err(_))
+                if terminal_ack_is_visible_before(store.as_ref(), &acknowledgement, deadline)
+                    .await =>
+            {
+                // The write may have committed before its answer was lost.
+                // Read-after-unknown prevents a second outcome from replacing
+                // the accepted terminal response.
+                return true;
+            }
+            Some(Err(_)) => {}
+            None => unreachable!("write outcome is always classified"),
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        let wake = now.checked_add(delay).unwrap_or(deadline).min(deadline);
+        tokio::time::sleep_until(wake).await;
+        delay = delay.saturating_mul(2).min(TERMINAL_COMMIT_RETRY_MAX);
+    }
+}
+
+impl crate::playback_control::TerminalControlCommitter for DurableTerminalCommitter {
+    fn start(
+        &self,
+        result: &crate::playback_control::LocalControlResult,
+    ) -> crate::playback_control::TerminalCommitReceipt {
+        let server_time_unix_ms = unix_ms();
+        let response = local_control_response(
+            &self.route,
+            &self.start,
+            &self.recipe,
+            &self.request,
+            result,
+            server_time_unix_ms,
+        );
+        let response_json = serde_json::to_string(&RetainedTerminalResponse {
+            platform: result.platform,
+            response: response.clone(),
+        });
+        let identity = (
+            i64::try_from(self.request.sequence),
+            self.request.fingerprint(),
+        );
+        let handoff = result.terminal_handoff.clone();
+        let (Ok(response_json), (Ok(sequence), Some(request_fingerprint))) =
+            (response_json, identity)
+        else {
+            let (receipt, sender) = crate::playback_control::TerminalCommitReceipt::pending();
+            if let Some(handoff) = handoff {
+                handoff.complete();
+            }
+            let _ = sender.send(Some(Err(())));
+            return receipt;
+        };
+        let acknowledgement = MediaSessionTerminalAck {
+            incarnation_id: self.route.incarnation_id.clone(),
+            session_id: self.route.session_id.clone(),
+            owner_node_id: self.route.owner_node_id.clone(),
+            owner_epoch: self.route.owner_epoch,
+            client_instance_id: self.request.client_instance_id.clone(),
+            sequence,
+            request_fingerprint,
+            response_json,
+            expires_at_ms: server_time_unix_ms
+                .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS),
+            updated_at_ms: server_time_unix_ms,
+        };
+        let store = Arc::clone(&self.store);
+        let faults = self.faults.clone();
+        crate::playback_control::TerminalCommitReceipt::retryable_until(
+            acknowledgement.expires_at_ms,
+            move |attempt| {
+                let store = Arc::clone(&store);
+                let acknowledgement = acknowledgement.clone();
+                let response = response.clone();
+                let handoff = handoff.clone();
+                let faults = faults.clone();
+                if let Some(handoff) = &handoff {
+                    handoff.restart();
+                }
+                tokio::spawn(async move {
+                    let persisted = match faults {
+                        Some(faults) => {
+                            persist_terminal_ack_with_faults(
+                                store,
+                                acknowledgement,
+                                Some(faults.as_ref()),
+                            )
+                            .await
+                        }
+                        None => persist_terminal_ack(store, acknowledgement).await,
+                    };
+                    if let Some(handoff) = handoff {
+                        handoff.complete();
+                    }
+                    attempt.complete(if persisted { Ok(response) } else { Err(()) });
+                });
+            },
+        )
+    }
+}
+
+pub(crate) struct TerminalAckReplay {
+    response: crate::playback_control::ControlResponseV1,
+    platform: Option<crate::playback_control::ClientPlatform>,
+}
+
+pub(crate) async fn terminal_ack_replay(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: &crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> Result<Option<TerminalAckReplay>, ()> {
+    if request.demand != crate::playback_control::PlaybackDemand::End {
+        return Ok(None);
+    }
+    let Some(acknowledgement) = state
+        .store
+        .media_session_terminal_ack(&route.session_id, unix_ms())
+        .await
+        .map_err(|_| ())?
+    else {
+        return Ok(None);
+    };
+    if acknowledgement.incarnation_id != route.incarnation_id
+        || acknowledgement.owner_node_id != route.owner_node_id
+        || acknowledgement.owner_epoch != route.owner_epoch
+        || acknowledgement.client_instance_id != request.client_instance_id
+        || u64::try_from(acknowledgement.sequence).ok() != Some(request.sequence)
+        || request.fingerprint().as_deref() != Some(acknowledgement.request_fingerprint.as_str())
+    {
+        return Ok(None);
+    }
+    let relay = crate::playback_control::ControlRelayRequest {
+        session_id: route.session_id.clone(),
+        generation: route.incarnation_id.clone(),
+        expected_owner_node_id: route.owner_node_id.clone(),
+        expected_owner_epoch: route.owner_epoch,
+        deadline_unix_ms,
+        control: request.clone(),
+    };
+    let retained = serde_json::from_str::<RetainedTerminalResponse>(&acknowledgement.response_json)
+        .map(|retained| TerminalAckReplay {
+            response: retained.response,
+            platform: Some(retained.platform),
+        })
+        // Compatibility with terminal acknowledgements written by an earlier M3
+        // build. New writes always retain platform independently of a retry's
+        // optional capabilities.
+        .or_else(|_| {
+            serde_json::from_str::<crate::playback_control::ControlResponseV1>(
+                &acknowledgement.response_json,
+            )
+            .map(|response| TerminalAckReplay {
+                response,
+                platform: request.capabilities.as_ref().map(|caps| caps.platform),
+            })
+        })
+        .map_err(|_| ())?;
+    retained
+        .response
+        .is_valid_for(&relay)
+        .then_some(retained)
+        .map(Some)
+        .ok_or(())
+}
+
+pub(crate) fn terminal_ack_response(replay: TerminalAckReplay) -> Response {
+    crate::playback_control::record(crate::playback_control::MetricOutcome::Replay);
+    if let Some(platform) = replay.platform {
+        crate::playback_control::record_platform(
+            crate::playback_control::MetricOutcome::Replay,
+            platform,
+        );
+    }
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(replay.response),
+    )
+        .into_response()
+}
+
+async fn control_inner(
+    state: AppState,
+    session: String,
+    body: Bytes,
+    deadline_unix_ms: i64,
+) -> Response {
+    if uuid::Uuid::parse_str(&session).is_err() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+        return control_error(
+            StatusCode::NOT_FOUND,
+            "session_gone",
+            "no active or durable media session has this capability",
+            None,
+            None,
+            None,
+            None,
+        );
+    }
+    let request = match serde_json::from_slice::<crate::playback_control::ControlRequestV1>(&body) {
+        Ok(request) => request,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Invalid);
+            return control_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_control",
+                "the control body is not valid protocol v1 JSON",
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    };
+    let route = match state.media_sessions.control_route(&session).await {
+        Ok(Some(route)) => route,
+        Ok(None) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::NOT_FOUND,
+                "session_gone",
+                "no active or durable media session has this capability",
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable media route is temporarily unavailable",
+                None,
+                None,
+                Some(500),
+                None,
+            );
+        }
+    };
+    let owner_epoch = match u64::try_from(route.owner_epoch)
+        .ok()
+        .filter(|epoch| *epoch > 0)
+    {
+        Some(epoch) => epoch,
+        None => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable media route has an invalid owner epoch",
+                Some(route.incarnation_id),
+                None,
+                Some(500),
+                None,
+            );
+        }
+    };
+    let start = match control_start_response(&route) {
+        Some(start) => start,
+        None => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::NOT_FOUND,
+                "session_gone",
+                "playback control was not advertised for this session",
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    };
+    let recipe = match serde_json::from_str::<RemoteStartRequest>(&route.recipe_json) {
+        Ok(recipe) => recipe,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable delivery recipe is unreadable",
+                Some(route.incarnation_id),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    };
+    if let Err(field) = request.validate(
+        start.duration_ms,
+        crate::playback_control::target_duration_ms(&recipe),
+    ) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Invalid);
+        return control_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_control",
+            "a control field is outside the bounded v1 contract",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            None,
+            Some(field),
+        );
+    }
+    if request.generation != route.incarnation_id {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+        return control_error(
+            StatusCode::CONFLICT,
+            "stale_control",
+            "the control generation is no longer current",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    if request.control_epoch != owner_epoch {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerChanged);
+        return control_error(
+            StatusCode::CONFLICT,
+            "owner_changed",
+            "the media session owner epoch changed",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    match terminal_ack_replay(&state, &route, &request, deadline_unix_ms).await {
+        Ok(Some(replay)) => return terminal_ack_response(replay),
+        Ok(None) => {}
+        Err(()) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the terminal control acknowledgement is temporarily unavailable",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    }
+    if let Err(retry_after_ms) = state.media_sessions.admit_control(&session) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+        return control_error(
+            StatusCode::TOO_MANY_REQUESTS,
+            "control_rate_limited",
+            "the ingress control budget is exhausted",
+            None,
+            None,
+            Some(retry_after_ms),
+            None,
+        );
+    }
+    if route.state != "active" {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+        return control_error(
+            StatusCode::GONE,
+            "session_ended",
+            "this media session has ended or been superseded",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    if route.publication_ready_at_ms != 0 {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+        return control_error(
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the media session publication handoff is not yet ready",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            Some(500),
+            None,
+        );
+    }
+    if route.lease_expires_at_ms <= unix_ms() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+        return control_error(
+            StatusCode::TOO_EARLY,
+            "owner_transition",
+            "the media owner lease expired and takeover is not yet settled",
+            Some(route.incarnation_id),
+            Some(owner_epoch),
+            Some(500),
+            None,
+        );
+    }
+    if route.owner_node_id != state.node_id {
+        let relay = crate::playback_control::ControlRelayRequest {
+            session_id: session.clone(),
+            generation: route.incarnation_id.clone(),
+            expected_owner_node_id: route.owner_node_id.clone(),
+            expected_owner_epoch: route.owner_epoch,
+            deadline_unix_ms,
+            control: request,
+        };
+        return match state
+            .media_sessions
+            .control(&route.owner_node_id, &relay)
+            .await
+        {
+            Ok(response) => response,
+            Err(_) => {
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "the owning media worker did not answer the control exchange",
+                    Some(route.incarnation_id),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                )
+            }
+        };
+    }
+    control_local(&state, &route, request, deadline_unix_ms).await
+}
+
+fn control_start_response(route: &MediaSessionRoute) -> Option<StartResponse> {
+    serde_json::from_str::<StartResponse>(&route.response_json)
+        .ok()
+        .filter(|response| response.control.is_some())
+}
+
+pub(crate) fn control_error(
+    status: StatusCode,
+    code: &'static str,
+    message: impl Into<String>,
+    generation: Option<String>,
+    control_epoch: Option<u64>,
+    retry_after_ms: Option<u32>,
+    invalid_field: Option<&'static str>,
+) -> Response {
+    (
+        status,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(crate::playback_control::ControlErrorBody {
+            code: code.to_owned(),
+            message: message.into(),
+            generation,
+            control_epoch,
+            retry_after_ms,
+            invalid_field: invalid_field.map(str::to_owned),
+        }),
+    )
+        .into_response()
+}
+
+/// Execute a control exchange after ingress (or the exact-write relay) has
+/// proved the durable owner tuple. The manager repeats the tuple fence against
+/// owner-local state before it can renew activity.
+pub(crate) async fn control_local(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> Response {
+    // Public ingress and the internal relay both own the absolute exchange
+    // deadline. Keep admission and every nonterminal mutation in that caller
+    // future; only an already-accepted End receives a detached continuation
+    // below for its durable acknowledgement.
+    control_local_inner(state, route, request, deadline_unix_ms).await
+}
+
+async fn control_local_inner(
+    state: &AppState,
+    route: &MediaSessionRoute,
+    request: crate::playback_control::ControlRequestV1,
+    deadline_unix_ms: i64,
+) -> Response {
+    let owner_epoch = match u64::try_from(route.owner_epoch)
+        .ok()
+        .filter(|epoch| *epoch > 0)
+    {
+        Some(epoch) => epoch,
+        None => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the local media route has an invalid owner epoch",
+                Some(route.incarnation_id.clone()),
+                None,
+                Some(500),
+                None,
+            );
+        }
+    };
+    let start = match control_start_response(route) {
+        Some(start) => start,
+        None => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::NOT_FOUND,
+                "session_gone",
+                "playback control was not advertised for this session",
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+    };
+    let recipe = match serde_json::from_str::<RemoteStartRequest>(&route.recipe_json) {
+        Ok(recipe) => recipe,
+        Err(_) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the durable delivery recipe is unreadable",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    };
+    if let Err(field) = request.validate(
+        start.duration_ms,
+        crate::playback_control::target_duration_ms(&recipe),
+    ) {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Invalid);
+        return control_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_control",
+            "a control field is outside the bounded v1 contract",
+            Some(route.incarnation_id.clone()),
+            Some(owner_epoch),
+            None,
+            Some(field),
+        );
+    }
+    if request.generation != route.incarnation_id {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+        return control_error(
+            StatusCode::CONFLICT,
+            "stale_control",
+            "the control generation is no longer current",
+            Some(route.incarnation_id.clone()),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    if request.control_epoch != owner_epoch {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerChanged);
+        return control_error(
+            StatusCode::CONFLICT,
+            "owner_changed",
+            "the media session owner epoch changed",
+            Some(route.incarnation_id.clone()),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    if request.acknowledgement.is_some() {
+        crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+        return control_error(
+            StatusCode::CONFLICT,
+            "stale_control",
+            "M1 has no replacement action to acknowledge",
+            Some(route.incarnation_id.clone()),
+            Some(owner_epoch),
+            None,
+            None,
+        );
+    }
+    let terminal_committer =
+        (request.demand == crate::playback_control::PlaybackDemand::End).then(|| {
+            Arc::new(DurableTerminalCommitter {
+                store: Arc::clone(&state.store),
+                route: route.clone(),
+                start: start.clone(),
+                recipe: recipe.clone(),
+                request: request.clone(),
+                faults: None,
+            }) as Arc<dyn crate::playback_control::TerminalControlCommitter>
+        });
+    let result = match state
+        .transcode
+        .hls_session_control_with_terminal(
+            crate::playback_control::LocalControlRequest {
+                session_id: &route.session_id,
+                generation: &route.incarnation_id,
+                owner_node_id: &route.owner_node_id,
+                owner_epoch,
+                client_instance_id: &request.client_instance_id,
+                sequence: request.sequence,
+                snapshot: crate::playback_control::PlaybackDemandSnapshot::from(&request),
+            },
+            deadline_unix_ms,
+            terminal_committer,
+        )
+        .await
+    {
+        Some(Ok(result)) => result,
+        Some(Err(crate::playback_control::ControlStateError::OwnerChanged)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::OwnerChanged);
+            return control_error(
+                StatusCode::CONFLICT,
+                "owner_changed",
+                "the owner-local control epoch changed",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::RateLimited(retry_after_ms))) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::RateLimited);
+            return control_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "control_rate_limited",
+                "the control sequence advanced faster than the per-session budget",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(retry_after_ms),
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::SessionEnded)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Gone);
+            return control_error(
+                StatusCode::GONE,
+                "session_ended",
+                "the durable media session ended before control could renew it",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::OwnerTransition)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+            return control_error(
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the media owner changed while control was being admitted",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+        Some(Err(crate::playback_control::ControlStateError::Unavailable)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the owner could not revalidate durable control authority",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+        Some(Err(_)) => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Stale);
+            return control_error(
+                StatusCode::CONFLICT,
+                "stale_control",
+                "the generation, client instance, or sequence fence is stale",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                None,
+                None,
+            );
+        }
+        None => {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Transition);
+            return control_error(
+                StatusCode::TOO_EARLY,
+                "owner_transition",
+                "the durable route is active but its local worker is not yet available",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+    };
+    let response = if result.lease_state == "ended" {
+        if request.demand != crate::playback_control::PlaybackDemand::End {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "a terminal control result did not match the requested demand",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        }
+        let Some(commit) = &result.terminal_commit else {
+            crate::playback_control::record(crate::playback_control::MetricOutcome::Unavailable);
+            return control_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "control_unavailable",
+                "the terminal control continuation was not admitted",
+                Some(route.incarnation_id.clone()),
+                Some(owner_epoch),
+                Some(500),
+                None,
+            );
+        };
+        match commit.wait().await {
+            Ok(response) => response,
+            Err(()) => {
+                crate::playback_control::record(
+                    crate::playback_control::MetricOutcome::Unavailable,
+                );
+                return control_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "control_unavailable",
+                    "the terminal control acknowledgement was not durably committed",
+                    Some(route.incarnation_id.clone()),
+                    Some(owner_epoch),
+                    Some(500),
+                    None,
+                );
+            }
+        }
+    } else {
+        local_control_response(route, &start, &recipe, &request, &result, unix_ms())
+    };
+    let outcome = match result.disposition {
+        crate::playback_control::ControlDisposition::Accepted => {
+            crate::playback_control::MetricOutcome::Accepted
+        }
+        crate::playback_control::ControlDisposition::Replay => {
+            crate::playback_control::MetricOutcome::Replay
+        }
+    };
+    crate::playback_control::record(outcome);
+    crate::playback_control::record_platform(outcome, result.platform);
+    tracing::debug!(
+        session = %crate::transcode::session_log_id(&route.session_id),
+        owner_epoch,
+        sequence = result.accepted_sequence,
+        replay = result.disposition == crate::playback_control::ControlDisposition::Replay,
+        lease_timeout_ms = result.lease_timeout_ms,
+        "playback control exchange"
+    );
+    (
+        StatusCode::OK,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(response),
+    )
+        .into_response()
+}
+
+async fn status_local_before(
     state: &AppState,
     session: &str,
-) -> Result<Json<crate::transcode::HlsSessionInfo>, ApiError> {
-    state
-        .transcode
-        .hls_session_status(session)
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    status_local_before_with_relay(state, session, request_deadline, true).await
+}
+
+async fn status_local_before_with_relay(
+    state: &AppState,
+    session: &str,
+    request_deadline: Instant,
+    relay_new_owner: bool,
+) -> Result<Response, ApiError> {
+    // Durable authority is classified before touching process-local
+    // telemetry. Random/ended/remote capabilities therefore cannot make a
+    // lingering actor do work or leak whether it still exists.
+    let resolution = state
+        .media_sessions
+        .authoritative_route_resolution_before(session, &state.node_id, request_deadline)
         .await
-        .map(Json)
-        .ok_or(ApiError::NotFound("hls session"))
+        .map_err(|_| response_publication_timeout())?;
+    let mut route = match resolution {
+        DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
+        DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+        DurableRouteResolution::OwnerTransition(_) => return Err(media_owner_transition()),
+        DurableRouteResolution::ActiveRemote(_) if !relay_new_owner => {
+            return Err(ApiError::Conflict(
+                "media owner changed during status lookup".to_owned(),
+            ))
+        }
+        DurableRouteResolution::ActiveRemote(route) => route,
+        DurableRouteResolution::ActiveLocal(admitted_route) => {
+            #[cfg(test)]
+            record_status_telemetry_lookup(session);
+            let local_publication = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(request_deadline),
+                state.transcode.hls_session_status_publication(session),
+            )
+            .await
+            .map_err(|_| response_publication_timeout())?;
+            match state
+                .media_sessions
+                .authoritative_route_resolution_before(session, &state.node_id, request_deadline)
+                .await
+                .map_err(|_| response_publication_timeout())?
+            {
+                DurableRouteResolution::ActiveLocal(current)
+                    if same_route_authority(&admitted_route, &current) =>
+                {
+                    let publication = local_publication.ok_or_else(media_owner_transition)?;
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &publication.owner,
+                        "status",
+                        None,
+                        request_deadline,
+                    )
+                    .await?;
+                    return publication
+                        .result
+                        .ok()
+                        .map(|info| Json(info).into_response())
+                        .ok_or_else(media_owner_transition);
+                }
+                DurableRouteResolution::ActiveRemote(route) if relay_new_owner => route,
+                DurableRouteResolution::ActiveRemote(_) => {
+                    return Err(ApiError::Conflict(
+                        "media owner changed during status lookup".to_owned(),
+                    ));
+                }
+                DurableRouteResolution::Absent => {
+                    return Err(ApiError::NotFound("hls session"));
+                }
+                DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+                DurableRouteResolution::OwnerTransition(_)
+                | DurableRouteResolution::ActiveLocal(_) => {
+                    return Err(media_owner_transition());
+                }
+            }
+        }
+    };
+
+    for attempt in 0..2 {
+        let deadline_unix_ms =
+            resource_deadline_unix_ms(request_deadline).ok_or_else(response_publication_timeout)?;
+        let response = state
+            .media_sessions
+            .relay(
+                &route.owner_node_id,
+                &RelayRequest {
+                    session_id: session.to_owned(),
+                    resource: RelayResource::Status,
+                    deadline_unix_ms,
+                    headers: RelayHeaders::default(),
+                },
+            )
+            .await
+            .map_err(|error| {
+                ApiError::ServiceUnavailable(format!(
+                    "media worker status relay unavailable: {error:?}"
+                ))
+            })?;
+        let peer_status = response.status();
+        if !relay_status_requires_reclassification(peer_status) {
+            return Ok(response);
+        }
+        let resolution = state
+            .media_sessions
+            .authoritative_route_resolution_before(session, &state.node_id, request_deadline)
+            .await
+            .map_err(|_| response_publication_timeout())?;
+        match resolution {
+            DurableRouteResolution::Absent if peer_status == StatusCode::NOT_FOUND => {
+                return Ok(response);
+            }
+            DurableRouteResolution::Absent => return Err(ApiError::NotFound("hls session")),
+            DurableRouteResolution::Terminal(_) if peer_status == StatusCode::GONE => {
+                return Ok(response);
+            }
+            DurableRouteResolution::Terminal(_) => return Err(media_session_ended()),
+            DurableRouteResolution::OwnerTransition(_) | DurableRouteResolution::ActiveLocal(_) => {
+                return Err(media_owner_transition())
+            }
+            DurableRouteResolution::ActiveRemote(next_route) if attempt == 0 => {
+                drop(response);
+                route = next_route;
+            }
+            DurableRouteResolution::ActiveRemote(_) => return Err(media_owner_transition()),
+        }
+    }
+    unreachable!("bounded status relay reclassification returns on every branch")
+}
+
+fn same_route_authority(left: &MediaSessionRoute, right: &MediaSessionRoute) -> bool {
+    left.incarnation_id == right.incarnation_id
+        && left.owner_node_id == right.owner_node_id
+        && left.owner_epoch == right.owner_epoch
+}
+
+#[cfg(test)]
+fn status_telemetry_observers(
+) -> &'static std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>
+{
+    static OBSERVERS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, Arc<std::sync::atomic::AtomicUsize>>>,
+    > = std::sync::OnceLock::new();
+    OBSERVERS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+#[cfg(test)]
+fn record_status_telemetry_lookup(session: &str) {
+    if let Some(observer) = status_telemetry_observers()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(session)
+        .cloned()
+    {
+        observer.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -1386,27 +4206,554 @@ fn playlist_response(bytes: Vec<u8>) -> Response {
         .into_response()
 }
 
+/// Linearize one fully prepared response against the exact rolling attempt or
+/// immutable VOD attachment that supplied it. Callers may prepare a buffered
+/// response locally, but must not expose it or construct a streaming reader or
+/// body until this succeeds.
+async fn authorize_response_publication(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+    publication: crate::transcode::MediaResponsePublication,
+    deadline: Instant,
+) -> Result<crate::transcode::MediaResponseAuthorization, ApiError> {
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state
+            .transcode
+            .authorize_response_publication(session, owner, publication, deadline),
+    )
+    .await
+    {
+        Ok(Ok(authorization)) => Ok(authorization),
+        Ok(Err(rejection)) => {
+            Err(response_publication_rejection_before(state, session, rejection, deadline).await)
+        }
+        Err(_) => Err(response_publication_timeout()),
+    }
+}
+
+/// Commit completion using the authorization issued for these exact response
+/// bytes. The opaque token prevents EOF from reconstructing authority from a
+/// reusable session id or an object name after a successor has taken over.
+async fn commit_authorized_media(
+    state: &AppState,
+    session: &str,
+    authorization: crate::transcode::MediaResponseAuthorization,
+    complete_object: bool,
+    deadline: Instant,
+) -> Result<(), ApiError> {
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state
+            .transcode
+            .commit_authorized_media(authorization, complete_object, deadline),
+    )
+    .await
+    {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(rejection)) => {
+            Err(response_publication_rejection_before(state, session, rejection, deadline).await)
+        }
+        Err(_) => Err(response_publication_timeout()),
+    }
+}
+
+/// Fence a bodyless status against the exact attempt that classified it.
+/// Dropping the authorization is intentional: no media body completed, so the
+/// response must not renew demand or advance a delivery frontier.
+async fn authorize_attempt_status(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+    kind: &'static str,
+    object_name: Option<&str>,
+    deadline: Instant,
+) -> Result<(), ApiError> {
+    let _authorization = authorize_response_publication(
+        state,
+        session,
+        owner,
+        crate::transcode::MediaResponsePublication::attempt_status(kind, object_name),
+        deadline,
+    )
+    .await?;
+    Ok(())
+}
+
+fn response_publication_deadline() -> Instant {
+    tokio::time::Instant::now().into_std() + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET
+}
+
+fn response_publication_deadline_before(request_deadline: Instant) -> Instant {
+    response_publication_deadline().min(request_deadline)
+}
+
+fn playlist_request_deadlines(state: &AppState) -> (Instant, Instant) {
+    let playlist_deadline = state.transcode.playlist_request_deadline();
+    let request_deadline = playlist_deadline + RESPONSE_PUBLICATION_LIFECYCLE_BUDGET;
+    (playlist_deadline, request_deadline)
+}
+
+fn playlist_request_deadlines_before(
+    state: &AppState,
+    request_deadline: Instant,
+) -> (Instant, Instant) {
+    let reserved = request_deadline
+        .checked_sub(RESPONSE_PUBLICATION_LIFECYCLE_BUDGET)
+        .unwrap_or(request_deadline);
+    (
+        state.transcode.playlist_request_deadline().min(reserved),
+        request_deadline,
+    )
+}
+
+fn resource_deadline_unix_ms(deadline: Instant) -> Option<i64> {
+    let now_unix_ms = unix_ms();
+    let remaining = deadline.checked_duration_since(Instant::now())?;
+    let remaining_ms = i64::try_from(remaining.as_millis())
+        .ok()
+        .filter(|ms| *ms > 0)?;
+    Some(now_unix_ms.saturating_add(remaining_ms))
+}
+
+fn inherited_resource_deadline(request: &RelayRequest) -> Option<Instant> {
+    let now = Instant::now();
+    Some(now + request.owner_budget_at(unix_ms())?)
+}
+
+fn segment_request_deadline() -> Instant {
+    tokio::time::Instant::now().into_std() + SEGMENT_REQUEST_LIFECYCLE_BUDGET
+}
+
+async fn vod_playlist_before(
+    state: &AppState,
+    session: &str,
+    deadline: Instant,
+) -> Result<Option<crate::transcode::VodResponsePublication<Vec<u8>>>, ApiError> {
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.transcode.vod_playlist(session),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())
+}
+
+async fn vod_segment_before(
+    state: &AppState,
+    session: &str,
+    segment: &str,
+    deadline: Instant,
+) -> Result<
+    Option<crate::transcode::VodResponsePublication<Option<crate::vodserve::SegmentReady>>>,
+    ApiError,
+> {
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.transcode.vod_segment(session, segment),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())
+}
+
+async fn admitted_vod_publication<T>(
+    state: &AppState,
+    session: &str,
+    publication: crate::transcode::VodResponsePublication<T>,
+    kind: &'static str,
+    object_name: Option<&str>,
+    deadline: Instant,
+) -> Result<(T, crate::transcode::MediaResponseOwner), ApiError> {
+    let crate::transcode::VodResponsePublication { result, owner } = publication;
+    match result {
+        Ok(value) => Ok((value, owner)),
+        Err(error) => {
+            authorize_attempt_status(state, session, &owner, kind, object_name, deadline).await?;
+            Err(vod_error(session, error))
+        }
+    }
+}
+
+fn response_publication_rejection(
+    rejection: crate::transcode::MediaResponsePublicationRejection,
+) -> ApiError {
+    match rejection {
+        crate::transcode::MediaResponsePublicationRejection::OwnerGone => ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_owner_transition",
+            "the stream owner changed while the response was prepared; retry shortly",
+        ),
+        crate::transcode::MediaResponsePublicationRejection::StateChanged => ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_state_changed",
+            "the stream changed state while the response was prepared; retry shortly",
+        ),
+        crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason) => {
+            let error = PlaylistError::ProducerEnded(reason);
+            ApiError::typed(StatusCode::BAD_GATEWAY, error.code(), error.message())
+        }
+    }
+}
+
+async fn response_publication_rejection_before(
+    state: &AppState,
+    session: &str,
+    rejection: crate::transcode::MediaResponsePublicationRejection,
+    deadline: Instant,
+) -> ApiError {
+    if !matches!(
+        &rejection,
+        crate::transcode::MediaResponsePublicationRejection::OwnerGone
+    ) {
+        return response_publication_rejection(rejection);
+    }
+    match state
+        .media_sessions
+        .authoritative_route_resolution_before(session, &state.node_id, deadline)
+        .await
+    {
+        Ok(DurableRouteResolution::Absent) => ApiError::NotFound("transcode session"),
+        Ok(DurableRouteResolution::Terminal(_)) => ApiError::typed(
+            StatusCode::GONE,
+            "media_session_ended",
+            "this media session is no longer active",
+        ),
+        Ok(DurableRouteResolution::OwnerTransition(_)) => media_owner_transition(),
+        Ok(DurableRouteResolution::ActiveLocal(_))
+        | Ok(DurableRouteResolution::ActiveRemote(_)) => response_publication_rejection(rejection),
+        Err(_) => ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_owner_reclassification_unavailable",
+            "the stream owner could not be reclassified before the request deadline; retry shortly",
+        ),
+    }
+}
+
+fn response_publication_timeout() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "response_publication_timeout",
+        "response publication did not settle before its control deadline; retry shortly",
+    )
+}
+
+fn response_publication_state_changed(error: &ApiError) -> bool {
+    matches!(
+        error,
+        ApiError::Typed {
+            code: "response_state_changed",
+            ..
+        }
+    )
+}
+
+fn response_completion_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    Arc::clone(
+        SLOTS.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(RESPONSE_COMPLETION_CAPACITY))),
+    )
+}
+
+async fn reserve_response_completion(
+    deadline: Instant,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    reserve_response_completion_from(response_completion_slots(), deadline).await
+}
+
+async fn reserve_response_completion_from(
+    slots: Arc<tokio::sync::Semaphore>,
+    deadline: Instant,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        slots.acquire_owned(),
+    )
+    .await
+    {
+        Ok(Ok(permit)) => Ok(permit),
+        Ok(Err(_)) | Err(_) => Err(ApiError::typed(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "response_completion_capacity",
+            "response completion capacity is full; retry shortly",
+        )),
+    }
+}
+
+/// Once storage has produced every advertised byte, completion owns its own
+/// bounded task. The body consumer is allowed to stop polling immediately
+/// after the final chunk; dropping that consumer must not discard an exact
+/// EOF token or cancel it halfway through the actor/registry projection.
+fn settle_streamed_response_completion(
+    manager: Arc<crate::transcode::TranscodeManager>,
+    session: String,
+    authorization: crate::transcode::MediaResponseAuthorization,
+    complete_object: bool,
+    permit: tokio::sync::OwnedSemaphorePermit,
+) {
+    let deadline = response_publication_deadline();
+    tokio::spawn(async move {
+        let _completion_permit = permit;
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            manager.commit_authorized_media(authorization, complete_object, deadline),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(rejection)) => tracing::debug!(
+                session = %crate::transcode::session_log_id(&session),
+                ?rejection,
+                "discarded exact response completion after publication state changed"
+            ),
+            Err(_) => tracing::warn!(
+                session = %crate::transcode::session_log_id(&session),
+                "exact response completion exceeded its control deadline"
+            ),
+        }
+    });
+}
+
+type StreamedResponseCompletion = (
+    Arc<crate::transcode::TranscodeManager>,
+    String,
+    crate::transcode::MediaResponseAuthorization,
+    bool,
+    tokio::sync::OwnedSemaphorePermit,
+);
+
+const LOCAL_MEDIA_BODY_CHANNEL_CAPACITY: usize = 1;
+
+struct DrivenLocalChunk {
+    bytes: Bytes,
+    accepted: tokio::sync::oneshot::Sender<()>,
+}
+
+#[derive(Clone)]
+struct StreamedBodyTerminal {
+    failure: Arc<std::sync::Mutex<Option<(std::io::ErrorKind, String)>>>,
+    signal: tokio_util::sync::CancellationToken,
+}
+
+impl StreamedBodyTerminal {
+    fn new() -> Self {
+        Self {
+            failure: Arc::new(std::sync::Mutex::new(None)),
+            signal: tokio_util::sync::CancellationToken::new(),
+        }
+    }
+
+    fn fail(&self, kind: std::io::ErrorKind, message: String) {
+        let mut failure = self
+            .failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if failure.is_none() {
+            *failure = Some((kind, message));
+        }
+        drop(failure);
+        self.signal.cancel();
+    }
+
+    fn take_error(&self) -> Option<std::io::Error> {
+        self.failure
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+            .map(|(kind, message)| std::io::Error::new(kind, message))
+    }
+}
+
+/// Build the public side of a driven local body. The producer task owns the
+/// file, delivery tracker, authorization, and completion permit, so socket
+/// backpressure cannot prevent either body deadline from advancing or retain
+/// those resources after the receiver disappears.
+fn driven_local_body(
+    receiver: tokio::sync::mpsc::Receiver<DrivenLocalChunk>,
+    terminal: StreamedBodyTerminal,
+    body_deadline: tokio::time::Instant,
+) -> Body {
+    let stream = futures_util::stream::unfold(
+        (receiver, terminal, body_deadline, false),
+        |(mut receiver, terminal, body_deadline, finished)| async move {
+            if finished {
+                return None;
+            }
+            if let Some(error) = terminal.take_error() {
+                return Some((Err(error), (receiver, terminal, body_deadline, true)));
+            }
+            if tokio::time::Instant::now() >= body_deadline {
+                return Some((
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    )),
+                    (receiver, terminal, body_deadline, true),
+                ));
+            }
+            let chunk = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "media response exceeded its maximum admitted body lifetime",
+                        )),
+                        (receiver, terminal, body_deadline, true),
+                    ));
+                }
+                () = terminal.signal.cancelled() => {
+                    let error = terminal
+                        .take_error()
+                        .unwrap_or_else(|| std::io::Error::other("media response producer failed"));
+                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
+                }
+                chunk = receiver.recv() => chunk,
+            };
+            let Some(chunk) = chunk else {
+                if let Some(error) = terminal.take_error() {
+                    return Some((Err(error), (receiver, terminal, body_deadline, true)));
+                }
+                return None;
+            };
+            // Recheck both fences after wakeup and before acknowledging this
+            // exact chunk. If timeout/failure won concurrently with recv, the
+            // ack sender drops, so the pump cannot count or commit the bytes.
+            if tokio::time::Instant::now() >= body_deadline || terminal.signal.is_cancelled() {
+                let error = terminal.take_error().unwrap_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    )
+                });
+                return Some((Err(error), (receiver, terminal, body_deadline, true)));
+            }
+            let _ = chunk.accepted.send(());
+            Some((Ok(chunk.bytes), (receiver, terminal, body_deadline, false)))
+        },
+    );
+    Body::from_stream(stream)
+}
+
+fn segment_publication_kind(segment: &str, requested_range: Option<(u64, u64)>) -> &'static str {
+    if requested_range.is_some() {
+        "segment-range"
+    } else if crate::transcode::is_init_object(segment) {
+        "init-segment"
+    } else {
+        "media-segment"
+    }
+}
+
+/// Publish a response whose complete HTTP body has already been prepared in
+/// memory. Constructing the value is not visibility; returning it is, so the
+/// actor/registry fence and completion commit stay immediately before return.
+fn bound_admitted_media_body(response: Response) -> Response {
+    // A prepared playlist/init/subtitle body still needs a post-header owner:
+    // without this wrapper an unpolled in-memory Body could survive forever,
+    // invalidating the shared admitted-media lifetime used by handoff and
+    // terminal fallback proofs.
+    let (parts, body) = response.into_parts();
+    let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let stream = futures_util::stream::unfold(
+        (Box::pin(body.into_data_stream()), body_deadline, false),
+        |(mut body, body_deadline, finished)| async move {
+            if finished {
+                return None;
+            }
+            let item = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    return Some((
+                        Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "prepared media response exceeded its maximum admitted body lifetime",
+                        )),
+                        (body, body_deadline, true),
+                    ));
+                }
+                item = body.next() => item,
+            };
+            match item {
+                Some(Ok(bytes)) => Some((Ok(bytes), (body, body_deadline, false))),
+                Some(Err(error)) => Some((
+                    Err(std::io::Error::other(error.to_string())),
+                    (body, body_deadline, true),
+                )),
+                None => None,
+            }
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+
+async fn complete_buffered_response_before(
+    state: &AppState,
+    session: &str,
+    owner: &crate::transcode::MediaResponseOwner,
+    publication: crate::transcode::MediaResponsePublication,
+    complete_object: bool,
+    response: Response,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let authorization =
+        authorize_response_publication(state, session, owner, publication, deadline).await?;
+    commit_authorized_media(state, session, authorization, complete_object, deadline).await?;
+    Ok(bound_admitted_media_body(response))
+}
+
 async fn session_file(
     state: &AppState,
     session: &str,
-) -> Result<(crate::transcode::HlsContext, MediaFile), ApiError> {
-    let mut context = state
-        .transcode
-        .hls_context(session)
-        .await
-        .ok_or(ApiError::NotFound("transcode session"))?;
-    let file = state
-        .store
-        .get_file(context.file_id)
-        .await?
-        .ok_or(ApiError::NotFound("file"))?;
-    context.frame_rate = state
-        .store
-        .get_file_probe_json(context.file_id)
-        .await?
-        .as_deref()
-        .and_then(video_frame_rate);
-    Ok((context, file))
+    deadline: Instant,
+) -> Result<
+    (
+        crate::transcode::HlsContext,
+        MediaFile,
+        crate::transcode::MediaResponseOwner,
+    ),
+    ApiError,
+> {
+    let mut resurrection_attempted = false;
+    loop {
+        match state
+            .transcode
+            .hls_presentation_before(session, deadline)
+            .await
+        {
+            crate::transcode::HlsPresentationResolution::Ready(context, file, owner) => {
+                return Ok((context, file, owner));
+            }
+            crate::transcode::HlsPresentationResolution::Failed(error) => {
+                return match admitted_playlist_error(state, session, error, deadline).await {
+                    Ok(error) => Err(error),
+                    Err(()) => Err(response_publication_rejection(
+                        crate::transcode::MediaResponsePublicationRejection::StateChanged,
+                    )),
+                };
+            }
+            crate::transcode::HlsPresentationResolution::StateChanged => {
+                return Err(response_publication_rejection(
+                    crate::transcode::MediaResponsePublicationRejection::StateChanged,
+                ));
+            }
+            crate::transcode::HlsPresentationResolution::Gone if !resurrection_attempted => {
+                resurrection_attempted = true;
+                match vod_resurrected_before(state, session, deadline).await {
+                    VodResurrection::Resurrected => continue,
+                    VodResurrection::Absent => {
+                        return Err(ApiError::NotFound("transcode session"));
+                    }
+                    VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::Unavailable => {
+                        return Err(vod_resurrection_unavailable());
+                    }
+                }
+            }
+            crate::transcode::HlsPresentationResolution::Gone => {
+                return Err(vod_resurrection_unavailable());
+            }
+        }
+    }
 }
 
 /// Maximum frame rate from ffprobe's persisted source description.
@@ -1414,6 +4761,7 @@ async fn session_file(
 /// Fractions are kept until the playlist is rendered so NTSC rates retain
 /// their 24000/1001 or 30000/1001 meaning. `avg_frame_rate` is preferred;
 /// `r_frame_rate` is the fallback for older probe output.
+#[cfg(test)]
 fn video_frame_rate(probe_json: &str) -> Option<f64> {
     fn fraction(raw: &str) -> Option<f64> {
         let (numerator, denominator) = raw.split_once('/')?;
@@ -1445,6 +4793,7 @@ pub async fn playlist(
     Query(query): Query<PlaylistQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
     if let Some(response) = relay_if_remote(
         &state,
         &session,
@@ -1453,41 +4802,101 @@ pub async fn playlist(
             subtitle: query.subtitle,
         },
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    playlist_local(&state, &session, query).await
+    playlist_local_before(&state, &session, query, playlist_deadline, request_deadline).await
 }
 
-async fn playlist_local(
+async fn playlist_local_before(
     state: &AppState,
     session: &str,
     query: PlaylistQuery,
+    playlist_deadline: Instant,
+    request_deadline: Instant,
 ) -> Result<Response, ApiError> {
+    let initial_vod_deadline = response_publication_deadline_before(request_deadline);
     // A VOD session's child media playlist is the plan's immutable artifact.
     // The dedicated master path wraps it when native subtitles were requested;
     // the legacy `?native=1` bridge still needs that same wrapper.
-    if let Some(answer) = state.transcode.vod_playlist(session).await {
-        let bytes = answer.map_err(|err| vod_error(session, err))?;
+    if let Some(answer) = vod_playlist_before(state, session, initial_vod_deadline).await? {
+        let (bytes, playlist_owner) = admitted_vod_publication(
+            state,
+            session,
+            answer,
+            "vod-playlist",
+            None,
+            initial_vod_deadline,
+        )
+        .await?;
         if query.native == Some(1) {
-            let (context, file) = session_file(state, session).await?;
-            let context = exact_hls_context(state, session, context).await;
-            return Ok(playlist_response(
-                master_playlist(&file, query.subtitle, &context).into_bytes(),
-            ));
+            let (context, file, owner) = session_file(state, session, initial_vod_deadline).await?;
+            let context = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(initial_vod_deadline),
+                exact_hls_context(state, session, context),
+            )
+            .await
+            .map_err(|_| response_publication_timeout())?;
+            let response =
+                playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
+            return complete_buffered_response_before(
+                state,
+                session,
+                &owner,
+                crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+                true,
+                response,
+                initial_vod_deadline,
+            )
+            .await;
         }
-        return Ok(playlist_response(bytes));
+        let response = playlist_response(bytes);
+        return complete_buffered_response_before(
+            state,
+            session,
+            &playlist_owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "playlist",
+                Some("index.m3u8"),
+            ),
+            true,
+            response,
+            initial_vod_deadline,
+        )
+        .await;
     }
     if query.native != Some(1) {
-        return video_playlist_local(state, session).await;
+        return video_playlist_local_before(
+            state,
+            session,
+            "index.m3u8",
+            playlist_deadline,
+            request_deadline,
+        )
+        .await;
     }
-    let (context, file) = session_file(state, session).await?;
-    let context = exact_hls_context(state, session, context).await;
-    Ok(playlist_response(
-        master_playlist(&file, query.subtitle, &context).into_bytes(),
-    ))
+    let deadline = response_publication_deadline_before(request_deadline);
+    let (context, file, owner) = session_file(state, session, deadline).await?;
+    let context = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        exact_hls_context(state, session, context),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let response = playlist_response(master_playlist(&file, query.subtitle, &context).into_bytes());
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+        true,
+        response,
+        deadline,
+    )
+    .await
 }
 
 /// The multivariant playlist used by Apple clients for native subtitles and
@@ -1501,6 +4910,7 @@ pub async fn master_playlist_response(
     Query(query): Query<PlaylistQuery>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
     if let Some(response) = relay_if_remote(
         &state,
         &session,
@@ -1509,21 +4919,37 @@ pub async fn master_playlist_response(
             diagnostic: query.diagnostic.clone(),
         },
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    master_playlist_response_local(&state, &session, query).await
+    master_playlist_response_local_before(
+        &state,
+        &session,
+        query,
+        playlist_deadline,
+        request_deadline,
+    )
+    .await
 }
 
-async fn master_playlist_response_local(
+async fn master_playlist_response_local_before(
     state: &AppState,
     session: &str,
     query: PlaylistQuery,
+    playlist_deadline: Instant,
+    request_deadline: Instant,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(state, session).await?;
-    let context = exact_hls_context(state, session, context).await;
+    let deadline = response_publication_deadline_before(request_deadline);
+    let (context, file, owner) = session_file(state, session, deadline).await?;
+    let context = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        exact_hls_context(state, session, context),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
     // Apple's multivariant eligibility check rejects UHD Blu-ray-style HEVC
     // High-tier declarations before VideoToolbox sees bytes it can decode.
     // With no native text renditions, the wrapper buys this session nothing:
@@ -1538,12 +4964,29 @@ async fn master_playlist_response_local(
             codecs = %context.codecs,
             "serving high-tier HEVC through the direct media-playlist envelope"
         );
-        return video_playlist_local(state, session).await;
+        return video_playlist_local_before(
+            state,
+            session,
+            "master.m3u8",
+            playlist_deadline,
+            request_deadline,
+        )
+        .await;
     }
-    Ok(playlist_response(
+    let response = playlist_response(
         master_playlist_diagnostic(&file, query.subtitle, &context, query.diagnostic.as_deref())
             .into_bytes(),
-    ))
+    );
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::generation_metadata("master-playlist"),
+        true,
+        response,
+        deadline,
+    )
+    .await
 }
 
 /// Translate a session's own verdict into the response the client acts on.
@@ -1564,9 +5007,9 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
     let status = match &err {
         PlaylistError::SessionGone => StatusCode::NOT_FOUND,
         PlaylistError::StartupTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
-        PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        PlaylistError::ProducerExited(_)
+        | PlaylistError::ProducerEnded(_)
+        | PlaylistError::SessionFailed(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
         session = %crate::transcode::session_log_id(session),
@@ -1578,43 +5021,209 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
     ApiError::typed(status, err.code(), err.message())
 }
 
+async fn admitted_playlist_error(
+    state: &AppState,
+    session: &str,
+    err: crate::transcode::PlaylistPublicationError,
+    deadline: Instant,
+) -> Result<ApiError, ()> {
+    if let Some(owner) = err.owner.as_ref() {
+        match state
+            .transcode
+            .authorize_playlist_error_publication(session, owner, &err.error, deadline)
+            .await
+        {
+            Ok(()) => {}
+            Err(crate::transcode::MediaResponsePublicationRejection::StateChanged) => {
+                // The same generation changed attempt/publication/decision
+                // state during admission. Re-resolve instead of relabeling a
+                // live producer as an anonymous fatal 404.
+                return Err(());
+            }
+            Err(crate::transcode::MediaResponsePublicationRejection::OwnerGone) => {
+                return Ok(response_publication_rejection_before(
+                    state,
+                    session,
+                    crate::transcode::MediaResponsePublicationRejection::OwnerGone,
+                    deadline,
+                )
+                .await);
+            }
+            Err(crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason)) => {
+                return Ok(playlist_error(
+                    session,
+                    PlaylistError::ProducerEnded(reason),
+                ));
+            }
+        }
+    }
+    Ok(playlist_error(session, err.error))
+}
+
 /// The video rendition referenced by the native-subtitle HLS master.
 pub async fn video_playlist(
     State(state): State<AppState>,
     AxPath(session): AxPath<String>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
     if let Some(response) = relay_if_remote(
         &state,
         &session,
         RelayResource::VideoPlaylist,
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    video_playlist_local(&state, &session).await
+    video_playlist_local_before(
+        &state,
+        &session,
+        "video.m3u8",
+        playlist_deadline,
+        request_deadline,
+    )
+    .await
 }
 
-async fn video_playlist_local(state: &AppState, session: &str) -> Result<Response, ApiError> {
-    if let Some(answer) = state.transcode.vod_playlist(session).await {
-        let bytes = answer.map_err(|err| vod_error(session, err))?;
-        return Ok(playlist_response(bytes));
+async fn video_playlist_local_before(
+    state: &AppState,
+    session: &str,
+    object_name: &'static str,
+    playlist_deadline: Instant,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    let initial_vod_deadline = response_publication_deadline_before(request_deadline);
+    if let Some(answer) = vod_playlist_before(state, session, initial_vod_deadline).await? {
+        let (bytes, owner) = admitted_vod_publication(
+            state,
+            session,
+            answer,
+            "vod-video-playlist",
+            None,
+            initial_vod_deadline,
+        )
+        .await?;
+        let response = playlist_response(bytes);
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "playlist",
+                Some(object_name),
+            ),
+            true,
+            response,
+            initial_vod_deadline,
+        )
+        .await;
     }
-    match state.transcode.playlist(session).await {
-        Ok(bytes) => Ok(playlist_response(bytes)),
-        Err(PlaylistError::SessionGone) if vod_resurrected(state, session).await => {
-            match state.transcode.vod_playlist(session).await {
-                Some(answer) => {
-                    let bytes = answer.map_err(|err| vod_error(session, err))?;
-                    Ok(playlist_response(bytes))
+    let mut publication_deadline = None;
+    for reclassification in 0..=2 {
+        match state
+            .transcode
+            .playlist_with_owner_before(session, playlist_deadline)
+            .await
+        {
+            Ok((bytes, owner)) => {
+                let response_deadline = *publication_deadline
+                    .get_or_insert_with(|| response_publication_deadline_before(request_deadline));
+                let response = playlist_response(bytes);
+                let result = complete_buffered_response_before(
+                    state,
+                    session,
+                    &owner,
+                    crate::transcode::MediaResponsePublication::attempt_media(
+                        "playlist",
+                        Some(object_name),
+                    ),
+                    true,
+                    response,
+                    response_deadline,
+                )
+                .await;
+                match result {
+                    Err(error)
+                        if response_publication_state_changed(&error)
+                            && reclassification < 2
+                            && tokio::time::Instant::now().into_std() < response_deadline =>
+                    {
+                        continue;
+                    }
+                    result => return result,
                 }
-                None => Err(playlist_error(session, PlaylistError::SessionGone)),
             }
+            Err(err) if matches!(&err.error, PlaylistError::SessionGone) => {
+                match vod_resurrected_before(state, session, playlist_deadline).await {
+                    VodResurrection::Absent => return Err(playlist_error(session, err.error)),
+                    VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
+                    VodResurrection::Resurrected => {}
+                }
+                let answer = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(playlist_deadline),
+                    state.transcode.vod_playlist(session),
+                )
+                .await
+                .map_err(|_| vod_resurrection_unavailable())?
+                .ok_or_else(vod_resurrection_unavailable)?;
+                let response_deadline = *publication_deadline
+                    .get_or_insert_with(|| response_publication_deadline_before(request_deadline));
+                let (bytes, owner) = admitted_vod_publication(
+                    state,
+                    session,
+                    answer,
+                    "vod-video-playlist",
+                    None,
+                    response_deadline,
+                )
+                .await?;
+                let response = playlist_response(bytes);
+                return complete_buffered_response_before(
+                    state,
+                    session,
+                    &owner,
+                    crate::transcode::MediaResponsePublication::attempt_media(
+                        "playlist",
+                        Some(object_name),
+                    ),
+                    true,
+                    response,
+                    response_deadline,
+                )
+                .await;
+            }
+            Err(err) => match admitted_playlist_error(
+                state,
+                session,
+                err,
+                *publication_deadline
+                    .get_or_insert_with(|| response_publication_deadline_before(request_deadline)),
+            )
+            .await
+            {
+                Ok(error) => return Err(error),
+                Err(())
+                    if reclassification < 2
+                        && tokio::time::Instant::now().into_std()
+                            < publication_deadline.expect("publication deadline initialized") =>
+                {
+                    continue;
+                }
+                Err(()) => {
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "playlist_state_changed",
+                        "the stream changed state while the playlist response was prepared; retry shortly",
+                    ));
+                }
+            },
         }
-        Err(err) => Err(playlist_error(session, err)),
     }
+    unreachable!("bounded playlist reclassification loop returns on every terminal branch")
 }
 
 /// One native WebVTT rendition's media playlist. Its segments mirror the
@@ -1625,46 +5234,227 @@ pub async fn subtitle_playlist(
     AxPath((session, index)): AxPath<(String, i64)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let (playlist_deadline, request_deadline) = playlist_request_deadlines(&state);
     if let Some(response) = relay_if_remote(
         &state,
         &session,
         RelayResource::SubtitlePlaylist { index },
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    subtitle_playlist_local(&state, &session, index).await
+    subtitle_playlist_local_before(&state, &session, index, playlist_deadline, request_deadline)
+        .await
 }
 
+#[cfg(test)]
 async fn subtitle_playlist_local(
     state: &AppState,
     session: &str,
     index: i64,
 ) -> Result<Response, ApiError> {
-    let (_, file) = session_file(state, session).await?;
-    let track = file
-        .subtitle_streams
-        .get(index as usize)
-        .ok_or(ApiError::NotFound("subtitle track"))?;
+    let (playlist_deadline, request_deadline) = playlist_request_deadlines(state);
+    subtitle_playlist_local_before(state, session, index, playlist_deadline, request_deadline).await
+}
+
+async fn subtitle_playlist_local_before(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    playlist_deadline: Instant,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    let initial_vod_deadline = response_publication_deadline_before(request_deadline);
+    // Resolve the typed rolling playlist verdict before asking for frozen
+    // subtitle facts. A failed actor is stored before End; consulting the
+    // live-only presentation facade first would erase that still-registered
+    // failure into a 404 and bypass its exact 502 owner fence.
+    if let Some(answer) = vod_playlist_before(state, session, initial_vod_deadline).await? {
+        let (video, owner) = admitted_vod_publication(
+            state,
+            session,
+            answer,
+            "vod-subtitle-playlist",
+            None,
+            initial_vod_deadline,
+        )
+        .await?;
+        return complete_subtitle_playlist_response(
+            state,
+            session,
+            index,
+            video,
+            owner,
+            initial_vod_deadline,
+        )
+        .await;
+    }
+
+    let mut publication_deadline = None;
+    for reclassification in 0..=2 {
+        let (video, owner) = match state
+            .transcode
+            .playlist_with_owner_before(session, playlist_deadline)
+            .await
+        {
+            Ok(answer) => answer,
+            Err(err) => {
+                if matches!(&err.error, PlaylistError::SessionGone) {
+                    match vod_resurrected_before(state, session, playlist_deadline).await {
+                        VodResurrection::Absent => {}
+                        VodResurrection::Ended => return Err(media_session_ended()),
+                        VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
+                        VodResurrection::Resurrected => {
+                            let answer = tokio::time::timeout_at(
+                                tokio::time::Instant::from_std(playlist_deadline),
+                                state.transcode.vod_playlist(session),
+                            )
+                            .await
+                            .map_err(|_| vod_resurrection_unavailable())?
+                            .ok_or_else(vod_resurrection_unavailable)?;
+                            let response_deadline =
+                                *publication_deadline.get_or_insert_with(|| {
+                                    response_publication_deadline_before(request_deadline)
+                                });
+                            let (video, owner) = admitted_vod_publication(
+                                state,
+                                session,
+                                answer,
+                                "vod-subtitle-playlist",
+                                None,
+                                response_deadline,
+                            )
+                            .await?;
+                            return complete_subtitle_playlist_response(
+                                state,
+                                session,
+                                index,
+                                video,
+                                owner,
+                                response_deadline,
+                            )
+                            .await;
+                        }
+                    }
+                }
+                match admitted_playlist_error(
+                    state,
+                    session,
+                    err,
+                    *publication_deadline.get_or_insert_with(|| {
+                        response_publication_deadline_before(request_deadline)
+                    }),
+                )
+                .await
+                {
+                    Ok(error) => return Err(error),
+                    Err(())
+                        if reclassification < 2
+                            && tokio::time::Instant::now().into_std()
+                                < publication_deadline
+                                    .expect("publication deadline initialized") =>
+                    {
+                        continue;
+                    }
+                    Err(()) => {
+                        return Err(ApiError::typed(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "playlist_state_changed",
+                            "the stream changed state while the subtitle playlist was prepared; retry shortly",
+                        ));
+                    }
+                }
+            }
+        };
+        let result = complete_subtitle_playlist_response(
+            state,
+            session,
+            index,
+            video,
+            owner,
+            *publication_deadline
+                .get_or_insert_with(|| response_publication_deadline_before(request_deadline)),
+        )
+        .await;
+        match result {
+            Err(error)
+                if response_publication_state_changed(&error)
+                    && reclassification < 2
+                    && tokio::time::Instant::now().into_std()
+                        < publication_deadline.expect("publication deadline initialized") =>
+            {
+                continue;
+            }
+            result => return result,
+        }
+    }
+    unreachable!("bounded subtitle playlist reclassification loop always returns")
+}
+
+async fn complete_subtitle_playlist_response(
+    state: &AppState,
+    session: &str,
+    index: i64,
+    video: Vec<u8>,
+    owner: crate::transcode::MediaResponseOwner,
+    deadline: Instant,
+) -> Result<Response, ApiError> {
+    let (_, file) = match state
+        .transcode
+        .hls_presentation_for_owner_before(session, &owner, deadline)
+        .await
+    {
+        Ok(presentation) => presentation,
+        Err(rejection) => {
+            return Err(
+                response_publication_rejection_before(state, session, rejection, deadline).await,
+            )
+        }
+    };
+    let Some(track) = file.subtitle_streams.get(index as usize) else {
+        authorize_attempt_status(state, session, &owner, "subtitle-playlist", None, deadline)
+            .await?;
+        return Err(ApiError::NotFound("subtitle track"));
+    };
     if !is_native_text_subtitle(&track.codec) {
+        authorize_attempt_status(state, session, &owner, "subtitle-playlist", None, deadline)
+            .await?;
         return Err(ApiError::BadRequest(
             "this subtitle requires burn-in".into(),
         ));
     }
-    crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-    let video = match state.transcode.vod_playlist(session).await {
-        Some(answer) => answer.map_err(|err| vod_error(session, err))?,
-        None => state
-            .transcode
-            .playlist(session)
-            .await
-            .map_err(|err| playlist_error(session, err))?,
-    };
-    Ok(playlist_response(
-        subtitle_media_playlist(&video).into_bytes(),
-    ))
+    tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let response = playlist_response(subtitle_media_playlist(&video).into_bytes());
+    #[cfg(test)]
+    state
+        .transcode
+        .pause_subtitle_playlist_commit_for_test()
+        .await;
+    // Carry the owner resolved with the exact video bytes. A rolling wait may
+    // span fallback, and a VOD attachment may be replaced under the same id;
+    // a fresh lookup here would authorize the wrong incarnation in both cases.
+    let object_name = format!("subs/{index}/index.m3u8");
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "subtitle-playlist",
+            Some(&object_name),
+        ),
+        true,
+        response,
+        deadline,
+    )
+    .await
 }
 
 /// Capability-authenticated VTT data for AVPlayer's autonomous child fetch.
@@ -1676,6 +5466,7 @@ pub async fn subtitle_vtt(
     AxPath((session, index, segment)): AxPath<(String, i64, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let request_deadline = response_publication_deadline();
     if let Some(response) = relay_if_remote(
         &state,
         &session,
@@ -1684,26 +5475,45 @@ pub async fn subtitle_vtt(
             segment: segment.clone(),
         },
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    subtitle_vtt_local(&state, &session, index, &segment).await
+    subtitle_vtt_local_before(&state, &session, index, &segment, request_deadline).await
 }
 
-async fn subtitle_vtt_local(
+async fn subtitle_vtt_local_before(
     state: &AppState,
     session: &str,
     index: i64,
     segment: &str,
+    publication_deadline: Instant,
 ) -> Result<Response, ApiError> {
-    let (context, file) = session_file(state, session).await?;
-    let track = file
-        .subtitle_streams
-        .get(index as usize)
-        .ok_or(ApiError::NotFound("subtitle track"))?;
+    let (context, file, owner) = session_file(state, session, publication_deadline).await?;
+    let Some(track) = file.subtitle_streams.get(index as usize) else {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            None,
+            publication_deadline,
+        )
+        .await?;
+        return Err(ApiError::NotFound("subtitle track"));
+    };
     if !is_native_text_subtitle(&track.codec) {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            None,
+            publication_deadline,
+        )
+        .await?;
         return Err(ApiError::BadRequest(
             "this subtitle requires burn-in".into(),
         ));
@@ -1712,49 +5522,93 @@ async fn subtitle_vtt_local(
         .strip_prefix("seg")
         .and_then(|value| value.strip_suffix(".vtt"))
         .and_then(|value| value.parse::<u64>().ok())
-        .ok_or(ApiError::NotFound("subtitle segment"))?;
-    let sequence = i64::try_from(sequence).map_err(|_| ApiError::NotFound("subtitle segment"))?;
-    let (segment_start, segment_end) = state
+        .and_then(|sequence| i64::try_from(sequence).ok());
+    let Some(sequence) = sequence else {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            None,
+            publication_deadline,
+        )
+        .await?;
+        return Err(ApiError::NotFound("subtitle segment"));
+    };
+    let window = state
         .transcode
-        .segment_window(session, sequence)
-        .await
-        .ok_or(ApiError::NotFound("subtitle segment"))?;
-    let (bytes, cache_control) =
-        match crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index).await {
-            Ok(Some(bytes)) => {
-                tracing::info!(
-                    session = %crate::transcode::session_log_id(session),
-                    file_id = file.id,
-                    index,
-                    codec = %track.codec,
-                    language = track.language.as_deref().unwrap_or("und"),
-                    title = track.title.as_deref().unwrap_or(""),
-                    start_seconds = context.start_seconds,
-                    "serving native HLS WebVTT subtitle"
-                );
-                (bytes, "private, max-age=3600")
-            }
-            Ok(None) | Err(_) => {
-                // AVPlayer gives a subtitle segment only about two seconds to
-                // answer and blocks the muxed video while it waits. Extracting an
-                // embedded text track is a full-source scan that can legitimately
-                // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
-                // here turns healthy Dolby Vision, HDR and H.264 streams into a
-                // black screen. Publish a syntactically valid empty segment now
-                // and let the deduplicated cache extraction finish independently.
-                // `no-store` lets a player retry this window once the sidecar is
-                // ready instead of pinning the temporary empty answer.
-                crate::subtitles::warm_vtt(&state.subs_dir, &file, index).await;
-                tracing::debug!(
-                    session = %crate::transcode::session_log_id(session),
-                    file_id = file.id,
-                    index,
-                    "serving an empty subtitle segment while its sidecar cache warms"
-                );
-                (b"WEBVTT\n\n".to_vec(), "no-store")
-            }
-        };
-    Ok((
+        .segment_window_for_owner_before(session, sequence, &owner, publication_deadline)
+        .await;
+    let window = match window {
+        Ok(window) => window,
+        Err(rejection) => {
+            return Err(response_publication_rejection_before(
+                state,
+                session,
+                rejection,
+                publication_deadline,
+            )
+            .await)
+        }
+    };
+    let Some((segment_start, segment_end)) = window else {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            "subtitle-segment",
+            None,
+            publication_deadline,
+        )
+        .await?;
+        return Err(ApiError::NotFound("subtitle segment"));
+    };
+    let (bytes, cache_control) = match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(publication_deadline),
+        crate::subtitles::read_cached_vtt(&state.subs_dir, &file, index),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?
+    {
+        Ok(Some(bytes)) => {
+            tracing::info!(
+                session = %crate::transcode::session_log_id(session),
+                file_id = file.id,
+                index,
+                codec = %track.codec,
+                language = track.language.as_deref().unwrap_or("und"),
+                title = track.title.as_deref().unwrap_or(""),
+                start_seconds = context.start_seconds,
+                "serving native HLS WebVTT subtitle"
+            );
+            (bytes, "private, max-age=3600")
+        }
+        Ok(None) | Err(_) => {
+            // AVPlayer gives a subtitle segment only about two seconds to
+            // answer and blocks the muxed video while it waits. Extracting an
+            // embedded text track is a full-source scan that can legitimately
+            // take minutes on a large MKV over a NAS, so awaiting `ensure_vtt`
+            // here turns healthy Dolby Vision, HDR and H.264 streams into a
+            // black screen. Publish a syntactically valid empty segment now
+            // and let the deduplicated cache extraction finish independently.
+            // `no-store` lets a player retry this window once the sidecar is
+            // ready instead of pinning the temporary empty answer.
+            tokio::time::timeout_at(
+                tokio::time::Instant::from_std(publication_deadline),
+                crate::subtitles::warm_vtt(&state.subs_dir, &file, index),
+            )
+            .await
+            .map_err(|_| response_publication_timeout())?;
+            tracing::debug!(
+                session = %crate::transcode::session_log_id(session),
+                file_id = file.id,
+                index,
+                "serving an empty subtitle segment while its sidecar cache warms"
+            );
+            (b"WEBVTT\n\n".to_vec(), "no-store")
+        }
+    };
+    let response = (
         StatusCode::OK,
         [
             (header::CONTENT_TYPE, "text/vtt; charset=utf-8"),
@@ -1773,7 +5627,21 @@ async fn subtitle_vtt_local(
             segment_end,
         ),
     )
-        .into_response())
+        .into_response();
+    let object_name = format!("subs/{index}/{segment}");
+    complete_buffered_response_before(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            "subtitle-segment",
+            Some(&object_name),
+        ),
+        true,
+        response,
+        publication_deadline,
+    )
+    .await
 }
 
 fn quoted(value: &str) -> String {
@@ -1840,7 +5708,10 @@ async fn exact_hls_context(
     // tracker that keeps this probe out of player throughput telemetry.
     let mut init = Vec::new();
     match state.transcode.vod_segment(session, &init_object).await {
-        Some(Ok(Some(ready))) => {
+        Some(crate::transcode::VodResponsePublication {
+            result: Ok(Some(ready)),
+            ..
+        }) => {
             init.reserve(ready.len.min(INIT_INSPECTION_LIMIT_BYTES) as usize);
             let mut reader = ready.file.take(INIT_INSPECTION_LIMIT_BYTES);
             if reader.read_to_end(&mut init).await.is_err() {
@@ -2663,6 +6534,7 @@ pub async fn segment(
     AxPath((session, seg)): AxPath<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, ApiError> {
+    let request_deadline = segment_request_deadline();
     if let Some(response) = relay_if_remote(
         &state,
         &session,
@@ -2670,12 +6542,20 @@ pub async fn segment(
             segment: seg.clone(),
         },
         RelayHeaders::from_http(&headers),
+        request_deadline,
     )
     .await?
     {
         return Ok(response);
     }
-    segment_local(&state, &session, &seg, &RelayHeaders::from_http(&headers)).await
+    segment_local_before(
+        &state,
+        &session,
+        &seg,
+        &RelayHeaders::from_http(&headers),
+        request_deadline,
+    )
+    .await
 }
 
 fn requested_byte_range(value: Option<&str>, len: u64) -> Result<Option<(u64, u64)>, ()> {
@@ -2711,37 +6591,130 @@ fn requested_byte_range(value: Option<&str>, len: u64) -> Result<Option<(u64, u6
     Ok(Some((start, end)))
 }
 
-fn segment_etag(session: &str, segment: &str, len: u64) -> String {
-    format!("\"{session}-{segment}-{len:x}\"")
+/// RFC 9110 If-Range is deliberately stricter than If-None-Match: only an
+/// exact strong entity-tag authorizes a partial representation. Weak tags,
+/// dates, malformed values and non-matches all ignore Range and return the
+/// current complete representation as 200.
+fn range_for_current_etag<'a>(headers: &'a RelayHeaders, etag: &str) -> Option<&'a str> {
+    let range = headers.range.as_deref()?;
+    match headers.if_range.as_deref() {
+        None => Some(range),
+        Some(candidate)
+            if !etag.starts_with("W/")
+                && !candidate.trim().starts_with("W/")
+                && candidate.trim() == etag =>
+        {
+            Some(range)
+        }
+        Some(_) => None,
+    }
+}
+
+/// Whether the resolved HTTP range carries every byte of the immutable
+/// object. Open-ended and suffix ranges can cover the full object just as a
+/// range-less 200 does; frontier semantics follow bytes, not status codes.
+fn range_covers_object(range: Option<(u64, u64)>, len: u64) -> bool {
+    match range {
+        None => true,
+        Some((0, end)) => len > 0 && end == len - 1,
+        Some(_) => false,
+    }
 }
 
 fn etag_matches(request: Option<&str>, etag: &str) -> bool {
+    let representation = etag.strip_prefix("W/").unwrap_or(etag);
     request.is_some_and(|request| {
-        request
-            .split(',')
-            .map(str::trim)
-            .any(|candidate| candidate == "*" || candidate == etag)
+        request.split(',').map(str::trim).any(|candidate| {
+            candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == representation
+        })
     })
 }
 
-/// Try to resurrect a reaped VOD session from its durable route (plan §2.5).
-/// Only an active, unexpired route this node owns qualifies — a released
-/// route (DELETE, supersession) stays dead, which is what keeps every
-/// terminal cause terminal.
-async fn vod_resurrected(state: &AppState, session: &str) -> bool {
-    let Ok(Some(route)) = state.media_sessions.route(session).await else {
-        return false;
-    };
-    if route.owner_node_id != state.node_id
-        || route.state != "active"
-        || route.lease_expires_at_ms <= unix_ms()
-    {
-        return false;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum VodResurrection {
+    Absent,
+    Ended,
+    Resurrected,
+    Unavailable,
+}
+
+fn vod_resurrection_unavailable() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "vod_resurrection_unavailable",
+        "the durable stream attachment could not be restored within this request; retry shortly",
+    )
+}
+
+fn media_session_ended() -> ApiError {
+    ApiError::typed(
+        StatusCode::GONE,
+        "media_session_ended",
+        "this media session is no longer active",
+    )
+}
+
+fn media_owner_transition() -> ApiError {
+    ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_owner_transition",
+        "the media owner is changing; retry shortly",
+    )
+}
+
+/// Try to resurrect a reaped VOD session from its durable route (plan §2.5)
+/// without minting a second HTTP wait budget. Only an active, unexpired route
+/// this node owns qualifies; Store/attachment uncertainty remains retryable
+/// and must never be relabelled as authoritative absence.
+async fn vod_resurrected_before(
+    state: &AppState,
+    session: &str,
+    deadline: Instant,
+) -> VodResurrection {
+    if tokio::time::Instant::now().into_std() >= deadline {
+        return VodResurrection::Unavailable;
     }
-    state
-        .transcode
-        .vod_resurrect(&route.recipe_json, session, route.user_id)
+    // Capture the process-local release generation before the durable route
+    // read. A DELETE may complete while that read is in flight; retaining the
+    // exact token prevents the delayed request from minting a fresh permissive
+    // gate and resurrecting a terminal capability.
+    let Some(adoption) = state.transcode.session_adoption_token(session) else {
+        tracing::warn!(
+            session = %crate::transcode::session_log_id(session),
+            "public VOD resurrection admission is full"
+        );
+        return VodResurrection::Unavailable;
+    };
+    // Lease loss also needs to classify this as VOD before the authoritative
+    // route read returns; the marker and token cover the same full window.
+    let _vod_preparing = state.transcode.begin_vod_preparation(session);
+    let route = match state
+        .media_sessions
+        .authoritative_route_resolution_before(session, &state.node_id, deadline)
         .await
+    {
+        Ok(DurableRouteResolution::Absent) => return VodResurrection::Absent,
+        Ok(DurableRouteResolution::Terminal(_)) => return VodResurrection::Ended,
+        Ok(DurableRouteResolution::OwnerTransition(_)) => return VodResurrection::Unavailable,
+        Ok(DurableRouteResolution::ActiveRemote(_)) => return VodResurrection::Unavailable,
+        Ok(DurableRouteResolution::ActiveLocal(route)) => route,
+        Err(_) => return VodResurrection::Unavailable,
+    };
+    match tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        state.transcode.vod_resurrect_before(
+            &route.recipe_json,
+            session,
+            route.user_id,
+            adoption,
+            deadline,
+        ),
+    )
+    .await
+    {
+        Ok(true) => VodResurrection::Resurrected,
+        Ok(false) | Err(_) => VodResurrection::Unavailable,
+    }
 }
 
 /// Map a VOD serving refusal to its typed response (plan §2.3).
@@ -2790,27 +6763,112 @@ fn vod_error(session: &str, err: crate::vodserve::VodError) -> ApiError {
     }
 }
 
+async fn resolved_vod_segment_response(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+    answer: crate::transcode::VodResponsePublication<Option<crate::vodserve::SegmentReady>>,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    let publication_deadline = response_publication_deadline_before(request_deadline);
+    let crate::transcode::VodResponsePublication { result, owner } = answer;
+    match result {
+        Ok(Some(ready)) => {
+            vod_segment_response_before(
+                state,
+                session,
+                seg,
+                headers,
+                ready,
+                owner,
+                request_deadline,
+            )
+            .await
+        }
+        Ok(None) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            Err(ApiError::NotFound("segment"))
+        }
+        Err(error) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            Err(vod_error(session, error))
+        }
+    }
+}
+
 /// Serve one VOD segment (or the init) with the immutable-cache headers the
 /// plan's §2.1 URIs deserve. Range and conditional requests are honoured; the
 /// Apple High-tier init rewrite is applied exactly as on the live path.
+#[cfg(test)]
 async fn vod_segment_response(
     state: &AppState,
     session: &str,
     seg: &str,
     headers: &RelayHeaders,
     ready: crate::vodserve::SegmentReady,
+    owner: crate::transcode::MediaResponseOwner,
 ) -> Result<Response, ApiError> {
+    vod_segment_response_before(
+        state,
+        session,
+        seg,
+        headers,
+        ready,
+        owner,
+        segment_request_deadline(),
+    )
+    .await
+}
+
+async fn vod_segment_response_before(
+    state: &AppState,
+    session: &str,
+    seg: &str,
+    headers: &RelayHeaders,
+    ready: crate::vodserve::SegmentReady,
+    owner: crate::transcode::MediaResponseOwner,
+    request_deadline: Instant,
+) -> Result<Response, ApiError> {
+    let publication_deadline = response_publication_deadline_before(request_deadline);
     let mut ready = ready;
     if ready.len == 0 {
+        authorize_attempt_status(
+            state,
+            session,
+            &owner,
+            segment_publication_kind(seg, None),
+            Some(seg),
+            publication_deadline,
+        )
+        .await?;
         return Err(ApiError::NotFound("segment"));
     }
     let content_type = segment_content_type(seg);
-    let etag = format!("\"{}\"", ready.etag);
-    if etag_matches(headers.if_none_match.as_deref(), &etag) {
-        return Ok((
+    let artifact_etag = format!("\"{}\"", ready.etag);
+    let buffered_init =
+        crate::transcode::is_init_object(seg) && ready.len <= INIT_INSPECTION_LIMIT_BYTES;
+    if !buffered_init && etag_matches(headers.if_none_match.as_deref(), &artifact_etag) {
+        let response = (
             StatusCode::NOT_MODIFIED,
             [
-                (header::ETAG, etag),
+                (header::ETAG, artifact_etag.clone()),
                 (header::ACCEPT_RANGES, "bytes".to_owned()),
                 (
                     header::CACHE_CONTROL,
@@ -2818,41 +6876,168 @@ async fn vod_segment_response(
                 ),
             ],
         )
-            .into_response());
+            .into_response();
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "segment-not-modified",
+                Some(seg),
+            ),
+            true,
+            response,
+            publication_deadline,
+        )
+        .await;
     }
-    let requested_range = match requested_byte_range(headers.range.as_deref(), ready.len) {
-        Ok(range) => range,
-        Err(()) => {
-            return Ok((
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [
-                    (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::ETAG, etag),
-                ],
-            )
-                .into_response());
-        }
-    };
+    let requested_range =
+        match requested_byte_range(range_for_current_etag(headers, &artifact_etag), ready.len) {
+            Ok(range) => range,
+            Err(()) if !buffered_init => {
+                let response = (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
+                        (header::ACCEPT_RANGES, "bytes".to_owned()),
+                        (header::ETAG, artifact_etag.clone()),
+                    ],
+                )
+                    .into_response();
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &owner,
+                    "segment-range-not-satisfiable",
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Ok(response);
+            }
+            // A transformed initialization response has a distinct validator.
+            // Delay its 416 until after the representation is known.
+            Err(()) => None,
+        };
     // Small objects — the init above all — are answered from memory so the
     // Apple rewrite can run; segments stream.
-    if crate::transcode::is_init_object(seg) && ready.len <= INIT_INSPECTION_LIMIT_BYTES {
+    if buffered_init {
         let mut init = Vec::with_capacity(ready.len.min(64 * 1024) as usize);
-        ready
-            .file
-            .read_to_end(&mut init)
-            .await
-            .map_err(|error| ApiError::Internal(error.to_string()))?;
-        if let Some(file_id) = state.transcode.vod_session_file_id(session).await {
-            if let Ok(Some(file)) = state.store.get_file(file_id).await {
-                if normalize_high_tier_hevc_init(&file, &mut init) {
-                    tracing::info!(
-                        session = %crate::transcode::session_log_id(session),
-                        "translated the HEVC High-tier initialization record for Apple HLS"
-                    );
-                }
+        let read = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(publication_deadline),
+            ready.file.read_to_end(&mut init),
+        )
+        .await;
+        match read {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &owner,
+                    segment_publication_kind(seg, None),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Err(ApiError::Internal(error.to_string()));
+            }
+            Err(_) => {
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &owner,
+                    segment_publication_kind(seg, None),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Err(response_publication_timeout());
             }
         }
+        if init.len() as u64 != ready.len {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(ApiError::Internal(format!(
+                "VOD init ended after {} of {} advertised bytes",
+                init.len(),
+                ready.len
+            )));
+        }
+        let mut transformed = false;
+        if let Some(file) = state.transcode.vod_file_for_owner(&owner) {
+            if normalize_high_tier_hevc_init(&file, &mut init) {
+                transformed = true;
+                tracing::info!(
+                    session = %crate::transcode::session_log_id(session),
+                    "translated the HEVC High-tier initialization record for Apple HLS"
+                );
+            }
+        }
+        let etag = if transformed {
+            format!("\"{}-apple-high-tier-v1\"", ready.etag)
+        } else {
+            artifact_etag
+        };
+        if etag_matches(headers.if_none_match.as_deref(), &etag) {
+            let response = (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (header::ETAG, etag),
+                    (header::ACCEPT_RANGES, "bytes".to_owned()),
+                    (
+                        header::CACHE_CONTROL,
+                        "private, max-age=3600, immutable".to_owned(),
+                    ),
+                ],
+            )
+                .into_response();
+            return complete_buffered_response_before(
+                state,
+                session,
+                &owner,
+                crate::transcode::MediaResponsePublication::attempt_media(
+                    "segment-not-modified",
+                    Some(seg),
+                ),
+                true,
+                response,
+                publication_deadline,
+            )
+            .await;
+        }
+        let requested_range =
+            match requested_byte_range(range_for_current_etag(headers, &etag), ready.len) {
+                Ok(range) => range,
+                Err(()) => {
+                    let response = (
+                        StatusCode::RANGE_NOT_SATISFIABLE,
+                        [
+                            (header::CONTENT_RANGE, format!("bytes */{}", ready.len)),
+                            (header::ACCEPT_RANGES, "bytes".to_owned()),
+                            (header::ETAG, etag),
+                        ],
+                    )
+                        .into_response();
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        "segment-range-not-satisfiable",
+                        Some(seg),
+                        publication_deadline,
+                    )
+                    .await?;
+                    return Ok(response);
+                }
+            };
         let (status, body, content_range) = match requested_range {
             Some((start, end)) => {
                 let start = usize::try_from(start).map_err(|_| ApiError::NotFound("segment"))?;
@@ -2881,16 +7066,56 @@ async fn vod_segment_response(
         if let Some(range) = content_range {
             headers_mut.insert(header::CONTENT_RANGE, range.parse().expect("range"));
         }
-        return Ok(response);
+        return complete_buffered_response_before(
+            state,
+            session,
+            &owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+            ),
+            range_covers_object(requested_range, ready.len),
+            response,
+            publication_deadline,
+        )
+        .await;
     }
+    let etag = artifact_etag;
     let (status, len, content_range) = match requested_range {
         Some((start, end)) => {
             use tokio::io::AsyncSeekExt;
-            ready
-                .file
-                .seek(std::io::SeekFrom::Start(start))
-                .await
-                .map_err(|error| ApiError::Internal(error.to_string()))?;
+            let seek = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(publication_deadline),
+                ready.file.seek(std::io::SeekFrom::Start(start)),
+            )
+            .await;
+            match seek {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => {
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        segment_publication_kind(seg, requested_range),
+                        Some(seg),
+                        publication_deadline,
+                    )
+                    .await?;
+                    return Err(ApiError::Internal(error.to_string()));
+                }
+                Err(_) => {
+                    authorize_attempt_status(
+                        state,
+                        session,
+                        &owner,
+                        segment_publication_kind(seg, requested_range),
+                        Some(seg),
+                        publication_deadline,
+                    )
+                    .await?;
+                    return Err(response_publication_timeout());
+                }
+            }
             (
                 StatusCode::PARTIAL_CONTENT,
                 end - start + 1,
@@ -2899,9 +7124,172 @@ async fn vod_segment_response(
         }
         None => (StatusCode::OK, ready.len, None),
     };
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
-        tokio::io::AsyncReadExt::take(ready.file, len),
-    ));
+    let complete_object = range_covers_object(requested_range, ready.len);
+    let completion_permit = match reserve_response_completion(publication_deadline).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let authorization = authorize_response_publication(
+        state,
+        session,
+        &owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            segment_publication_kind(seg, requested_range),
+            Some(seg),
+        ),
+        publication_deadline,
+    )
+    .await?;
+    let reader = tokio_util::io::ReaderStream::new(tokio::io::AsyncReadExt::take(ready.file, len));
+    let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<DrivenLocalChunk>(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
+    let terminal = StreamedBodyTerminal::new();
+    let pump_terminal = terminal.clone();
+    let pump_session = session.to_owned();
+    let completion: StreamedResponseCompletion = (
+        Arc::clone(&state.transcode),
+        pump_session.clone(),
+        authorization,
+        complete_object,
+        completion_permit,
+    );
+    tokio::spawn(async move {
+        let mut reader = reader;
+        let mut completion = Some(completion);
+        let mut delivered = 0_u64;
+        let fail = |kind, message: String| pump_terminal.fail(kind, message);
+        loop {
+            let progress_deadline =
+                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+            let next = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    fail(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime".to_owned(),
+                    );
+                    tracing::warn!(
+                        session = %crate::transcode::session_log_id(&pump_session),
+                        delivered_bytes = delivered,
+                        expected_bytes = len,
+                        "VOD response exceeded its maximum admitted body lifetime"
+                    );
+                    return;
+                }
+                () = sender.closed() => return,
+                _ = tokio::time::sleep_until(progress_deadline) => {
+                    fail(
+                        std::io::ErrorKind::TimedOut,
+                        "media response made no progress before its body deadline".to_owned(),
+                    );
+                    tracing::warn!(
+                        session = %crate::transcode::session_log_id(&pump_session),
+                        delivered_bytes = delivered,
+                        expected_bytes = len,
+                        "VOD response made no storage progress before its body deadline"
+                    );
+                    return;
+                }
+                next = reader.next() => next,
+            };
+            let bytes = match next {
+                Some(Ok(bytes)) => bytes,
+                Some(Err(error)) => {
+                    fail(error.kind(), error.to_string());
+                    return;
+                }
+                None if delivered == len => return,
+                None => {
+                    fail(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "VOD response reached EOF after {delivered} of {len} advertised bytes"
+                        ),
+                    );
+                    tracing::warn!(
+                        session = %crate::transcode::session_log_id(&pump_session),
+                        delivered_bytes = delivered,
+                        expected_bytes = len,
+                        "VOD response reached EOF before its advertised length"
+                    );
+                    return;
+                }
+            };
+            let bytes_len = bytes.len() as u64;
+            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+            let send = sender.send(DrivenLocalChunk {
+                bytes,
+                accepted: accepted_tx,
+            });
+            tokio::pin!(send);
+            let sent = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    fail(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime".to_owned(),
+                    );
+                    false
+                }
+                result = &mut send => result.is_ok(),
+            };
+            if !sent {
+                return;
+            }
+            let downstream_deadline =
+                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+            let accepted = tokio::select! {
+                biased;
+                Ok(()) = accepted_rx => true,
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    fail(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime".to_owned(),
+                    );
+                    false
+                }
+                _ = tokio::time::sleep_until(downstream_deadline) => {
+                    fail(
+                        std::io::ErrorKind::TimedOut,
+                        "media response made no downstream progress before its body deadline".to_owned(),
+                    );
+                    false
+                }
+                () = sender.closed() => false,
+            };
+            if !accepted {
+                return;
+            }
+            delivered = delivered.saturating_add(bytes_len);
+            if delivered == len {
+                if let Some((manager, session, authorization, complete_object, permit)) =
+                    completion.take()
+                {
+                    settle_streamed_response_completion(
+                        manager,
+                        session,
+                        authorization,
+                        complete_object,
+                        permit,
+                    );
+                }
+                return;
+            }
+        }
+    });
+    let body = driven_local_body(receiver, terminal, body_deadline);
     let mut response = Response::new(body);
     *response.status_mut() = status;
     let headers_mut = response.headers_mut();
@@ -2919,11 +7307,12 @@ async fn vod_segment_response(
     Ok(response)
 }
 
-async fn segment_local(
+async fn segment_local_before(
     state: &AppState,
     session: &str,
     seg: &str,
     headers: &RelayHeaders,
+    request_deadline: Instant,
 ) -> Result<Response, ApiError> {
     const APPLE_INIT_REWRITE_LIMIT_BYTES: u64 = INIT_INSPECTION_LIMIT_BYTES;
 
@@ -2931,24 +7320,91 @@ async fn segment_local(
     // falls through to the live path untouched. A session neither registry
     // knows may be a reaped VOD handle whose durable route is still live —
     // resurrect it and ask once more before giving up.
-    let mut vod_answer = state.transcode.vod_segment(session, seg).await;
-    if vod_answer.is_none()
-        && state.transcode.session_status(session).await.is_none()
-        && vod_resurrected(state, session).await
-    {
-        vod_answer = state.transcode.vod_segment(session, seg).await;
-    }
-    if let Some(answer) = vod_answer {
-        return match answer {
-            Ok(Some(ready)) => vod_segment_response(state, session, seg, headers, ready).await,
-            Ok(None) => Err(ApiError::NotFound("segment")),
-            Err(err) => Err(vod_error(session, err)),
-        };
+    if let Some(answer) = vod_segment_before(state, session, seg, request_deadline).await? {
+        return resolved_vod_segment_response(
+            state,
+            session,
+            seg,
+            headers,
+            answer,
+            request_deadline,
+        )
+        .await;
     }
 
-    let mut opened = match state.transcode.segment(session, seg).await {
-        Ok(Some(opened)) => opened,
-        Ok(None) => return Err(ApiError::NotFound("segment")),
+    let rolling = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(request_deadline),
+        state.transcode.segment_for_publication(session, seg),
+    )
+    .await
+    .map_err(|_| response_publication_timeout())?;
+    let mut opened = match rolling {
+        Ok(crate::transcode::SegmentPublication::Ready(opened)) => opened,
+        Ok(crate::transcode::SegmentPublication::Missing(owner)) => {
+            if let Some(owner) = owner.as_ref() {
+                authorize_attempt_status(
+                    state,
+                    session,
+                    owner,
+                    segment_publication_kind(seg, None),
+                    Some(seg),
+                    response_publication_deadline_before(request_deadline),
+                )
+                .await?;
+            } else if crate::transcode::is_safe_segment(seg) {
+                match vod_resurrected_before(state, session, request_deadline).await {
+                    VodResurrection::Absent => {}
+                    VodResurrection::Ended => return Err(media_session_ended()),
+                    VodResurrection::Unavailable => return Err(vod_resurrection_unavailable()),
+                    VodResurrection::Resurrected => {
+                        let answer = vod_segment_before(state, session, seg, request_deadline)
+                            .await?
+                            .ok_or_else(vod_resurrection_unavailable)?;
+                        return resolved_vod_segment_response(
+                            state,
+                            session,
+                            seg,
+                            headers,
+                            answer,
+                            request_deadline,
+                        )
+                        .await;
+                    }
+                }
+            }
+            return Err(ApiError::NotFound("segment"));
+        }
+        Ok(crate::transcode::SegmentPublication::Pending(owner)) => {
+            authorize_attempt_status(
+                state,
+                session,
+                &owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                response_publication_deadline_before(request_deadline),
+            )
+            .await?;
+            return Err(ApiError::typed(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "segment_pending",
+                "the segment is still being produced; retry shortly",
+            ));
+        }
+        Ok(crate::transcode::SegmentPublication::Failed(error)) => {
+            return match admitted_playlist_error(
+                state,
+                session,
+                error,
+                response_publication_deadline_before(request_deadline),
+            )
+            .await
+            {
+                Ok(error) => Err(error),
+                Err(()) => Err(response_publication_rejection(
+                    crate::transcode::MediaResponsePublicationRejection::StateChanged,
+                )),
+            };
+        }
         Err(crate::transcode::SegmentOpenError::Capacity) => {
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2957,17 +7413,29 @@ async fn segment_local(
             ));
         }
     };
+    let response_owner = opened.response_owner();
     // A live media object is published only after bytes exist. Treat an empty
     // file as an incomplete/corrupt publication instead of advertising the
     // saturating `0..=0` calculation below as one byte and hanging the client.
     if opened.len == 0 {
+        authorize_attempt_status(
+            state,
+            session,
+            &response_owner,
+            segment_publication_kind(seg, None),
+            Some(seg),
+            response_publication_deadline_before(request_deadline),
+        )
+        .await?;
+        opened.delivery.finish_without_body();
         return Err(ApiError::NotFound("segment"));
     }
     let content_type = segment_content_type(seg);
-    let etag = segment_etag(session, seg, opened.len);
+    let etag = response_owner
+        .rolling_etag(session, seg, opened.len)
+        .expect("a live segment carries a rolling response owner");
     if etag_matches(headers.if_none_match.as_deref(), &etag) {
-        opened.delivery.finish_without_body();
-        return Ok((
+        let response = (
             StatusCode::NOT_MODIFIED,
             [
                 (header::ETAG, etag),
@@ -2978,40 +7446,129 @@ async fn segment_local(
                 ),
             ],
         )
-            .into_response());
-    }
-    let requested_range = match requested_byte_range(headers.range.as_deref(), opened.len) {
-        Ok(range) => range,
-        Err(()) => {
+            .into_response();
+        let publication_deadline = response_publication_deadline_before(request_deadline);
+        let authorization = match authorize_response_publication(
+            state,
+            session,
+            &response_owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                "segment-not-modified",
+                Some(seg),
+            ),
+            publication_deadline,
+        )
+        .await
+        {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                opened.delivery.finish_without_body();
+                return Err(error);
+            }
+        };
+        if let Err(error) =
+            commit_authorized_media(state, session, authorization, true, publication_deadline).await
+        {
             opened.delivery.finish_without_body();
-            return Ok((
-                StatusCode::RANGE_NOT_SATISFIABLE,
-                [
-                    (header::CONTENT_RANGE, format!("bytes */{}", opened.len)),
-                    (header::ACCEPT_RANGES, "bytes".to_owned()),
-                    (header::ETAG, etag),
-                ],
-            )
-                .into_response());
+            return Err(error);
         }
-    };
+        opened.delivery.finish_without_body();
+        return Ok(response);
+    }
+    let requested_range =
+        match requested_byte_range(range_for_current_etag(headers, &etag), opened.len) {
+            Ok(range) => range,
+            Err(()) => {
+                let response = (
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    [
+                        (header::CONTENT_RANGE, format!("bytes */{}", opened.len)),
+                        (header::ACCEPT_RANGES, "bytes".to_owned()),
+                        (header::ETAG, etag),
+                    ],
+                )
+                    .into_response();
+                if let Err(error) = authorize_attempt_status(
+                    state,
+                    session,
+                    &response_owner,
+                    "segment-range-not-satisfiable",
+                    Some(seg),
+                    response_publication_deadline_before(request_deadline),
+                )
+                .await
+                {
+                    opened.delivery.finish_without_body();
+                    return Err(error);
+                }
+                opened.delivery.finish_without_body();
+                return Ok(response);
+            }
+        };
     if crate::transcode::is_init_object(seg) && opened.len <= APPLE_INIT_REWRITE_LIMIT_BYTES {
+        let publication_deadline = response_publication_deadline_before(request_deadline);
         let mut init = Vec::with_capacity(opened.len.min(64 * 1024) as usize);
         let mut delivery = opened.delivery;
         let started = Instant::now();
-        let read_elapsed = match opened
-            .file
-            .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
-            .read_to_end(&mut init)
-            .await
+        let read_elapsed = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(publication_deadline),
+            opened
+                .file
+                .take(APPLE_INIT_REWRITE_LIMIT_BYTES)
+                .read_to_end(&mut init),
+        )
+        .await
         {
-            Ok(_) => started.elapsed(),
-            Err(error) => {
+            Ok(Ok(_)) => started.elapsed(),
+            Ok(Err(error)) => {
                 delivery.fail(&error);
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &response_owner,
+                    segment_publication_kind(seg, None),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
                 return Err(ApiError::Internal(error.to_string()));
             }
+            Err(_) => {
+                delivery.finish_without_body();
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &response_owner,
+                    segment_publication_kind(seg, None),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Err(response_publication_timeout());
+            }
         };
-        if let Ok((_, file)) = session_file(state, session).await {
+        if init.len() as u64 != opened.len {
+            let error = std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                format!(
+                    "init ended after {} of {} advertised bytes",
+                    init.len(),
+                    opened.len
+                ),
+            );
+            delivery.fail(&error);
+            authorize_attempt_status(
+                state,
+                session,
+                &response_owner,
+                segment_publication_kind(seg, None),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(ApiError::Internal(error.to_string()));
+        }
+        if let Ok((_, file, _)) = session_file(state, session, publication_deadline).await {
             if normalize_high_tier_hevc_init(&file, &mut init) {
                 tracing::info!(
                     session = %crate::transcode::session_log_id(session),
@@ -3031,12 +7588,6 @@ async fn segment_local(
             }
             None => (StatusCode::OK, init, None),
         };
-        // The storage inspection reads the complete init so it can normalize
-        // codec metadata, but client-delivery accounting follows only the
-        // bytes placed in this response (especially for a Range request).
-        delivery.expect_at_most(body.len() as u64);
-        delivery.note_read(body.len() as u64, read_elapsed);
-        delivery.finish();
         let mut response = Response::builder()
             .status(status)
             .header(header::CONTENT_TYPE, content_type)
@@ -3047,9 +7598,47 @@ async fn segment_local(
         if let Some(content_range) = content_range {
             response = response.header(header::CONTENT_RANGE, content_range);
         }
-        return response
+        let response_bytes = body.len() as u64;
+        let response = response
             .body(Body::from(body))
-            .map_err(|error| ApiError::Internal(error.to_string()));
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
+        let authorization = match authorize_response_publication(
+            state,
+            session,
+            &response_owner,
+            crate::transcode::MediaResponsePublication::attempt_media(
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+            ),
+            publication_deadline,
+        )
+        .await
+        {
+            Ok(authorization) => authorization,
+            Err(error) => {
+                delivery.finish_without_body();
+                return Err(error);
+            }
+        };
+        if let Err(error) = commit_authorized_media(
+            state,
+            session,
+            authorization,
+            range_covers_object(requested_range, opened.len),
+            publication_deadline,
+        )
+        .await
+        {
+            delivery.finish_without_body();
+            return Err(error);
+        }
+        // The storage inspection reads the complete init so it can normalize
+        // codec metadata, but client-delivery accounting follows only the
+        // bytes placed in this response (especially for a Range request).
+        delivery.expect_at_most(response_bytes);
+        delivery.note_read(response_bytes, read_elapsed);
+        delivery.finish();
+        return Ok(bound_admitted_media_body(response));
     }
     if crate::transcode::is_init_object(seg) && opened.len > APPLE_INIT_REWRITE_LIMIT_BYTES {
         tracing::warn!(
@@ -3062,45 +7651,223 @@ async fn segment_local(
     let (status, start, end) = requested_range
         .map(|(start, end)| (StatusCode::PARTIAL_CONTENT, start, end))
         .unwrap_or((StatusCode::OK, 0, opened.len.saturating_sub(1)));
+    let publication_deadline = response_publication_deadline_before(request_deadline);
     if start > 0 {
-        if let Err(error) = opened.file.seek(std::io::SeekFrom::Start(start)).await {
-            opened.delivery.fail(&error);
-            return Err(ApiError::Internal(error.to_string()));
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(publication_deadline),
+            opened.file.seek(std::io::SeekFrom::Start(start)),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                opened.delivery.fail(&error);
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &response_owner,
+                    segment_publication_kind(seg, requested_range),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Err(ApiError::Internal(error.to_string()));
+            }
+            Err(_) => {
+                opened.delivery.finish_without_body();
+                authorize_attempt_status(
+                    state,
+                    session,
+                    &response_owner,
+                    segment_publication_kind(seg, requested_range),
+                    Some(seg),
+                    publication_deadline,
+                )
+                .await?;
+                return Err(response_publication_timeout());
+            }
         }
     }
     let opened_len = end.saturating_sub(start).saturating_add(1);
     let total_len = opened.len;
+    let complete_object = range_covers_object(requested_range, opened.len);
+    let completion_permit = match reserve_response_completion(publication_deadline).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            opened.delivery.finish_without_body();
+            authorize_attempt_status(
+                state,
+                session,
+                &response_owner,
+                segment_publication_kind(seg, requested_range),
+                Some(seg),
+                publication_deadline,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    let authorization = match authorize_response_publication(
+        state,
+        session,
+        &response_owner,
+        crate::transcode::MediaResponsePublication::attempt_media(
+            segment_publication_kind(seg, requested_range),
+            Some(seg),
+        ),
+        publication_deadline,
+    )
+    .await
+    {
+        Ok(authorization) => authorization,
+        Err(error) => {
+            opened.delivery.finish_without_body();
+            return Err(error);
+        }
+    };
     let reader = tokio_util::io::ReaderStream::new(opened.file.take(opened_len));
     let mut delivery = opened.delivery;
     delivery.expect_at_most(opened_len);
-    // The tracker rides the stream state rather than the handler, so it is
-    // dropped whether the body completes, errors, or is abandoned mid-flight —
-    // an abandoned body is the `response_dropped` case, and it is the only one
-    // nothing else observes.
-    let stream = futures_util::stream::unfold(
-        (Some(reader), delivery),
-        |(reader, mut delivery)| async move {
-            // `None` means a previous poll already reported a storage error.
-            // Re-polling a reader that just failed has no defined meaning, so
-            // the error is the last thing this body yields.
-            let mut reader = reader?;
+    let body_deadline = tokio::time::Instant::now() + MAX_ADMITTED_MEDIA_BODY_LIFETIME;
+    let (sender, receiver) =
+        tokio::sync::mpsc::channel::<DrivenLocalChunk>(LOCAL_MEDIA_BODY_CHANNEL_CAPACITY);
+    let terminal = StreamedBodyTerminal::new();
+    let pump_terminal = terminal.clone();
+    let pump_session = session.to_owned();
+    let completion: StreamedResponseCompletion = (
+        Arc::clone(&state.transcode),
+        pump_session.clone(),
+        authorization,
+        complete_object,
+        completion_permit,
+    );
+    // This producer is the sole owner of the file, delivery tracker, and EOF
+    // authorization after headers are exposed. Both deadlines keep advancing
+    // even if downstream stops polling; receiver Drop ends it immediately.
+    tokio::spawn(async move {
+        let mut reader = reader;
+        let mut delivery = delivery;
+        let mut completion = Some(completion);
+        let mut delivered = 0_u64;
+        let fail = |kind, message: String| pump_terminal.fail(kind, message);
+        loop {
             let started = Instant::now();
-            match reader.next().await {
-                Some(Ok(bytes)) => {
-                    delivery.note_read(bytes.len() as u64, started.elapsed());
-                    Some((Ok(bytes), (Some(reader), delivery)))
+            let progress_deadline =
+                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+            let next = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    );
+                    delivery.fail_transport(&error, "body_lifetime_exceeded");
+                    fail(error.kind(), error.to_string());
+                    return;
                 }
+                () = sender.closed() => return,
+                _ = tokio::time::sleep_until(progress_deadline) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response made no storage progress before its body deadline",
+                    );
+                    delivery.fail(&error);
+                    fail(error.kind(), error.to_string());
+                    return;
+                }
+                next = reader.next() => next,
+            };
+            let (bytes, read_elapsed) = match next {
+                Some(Ok(bytes)) => (bytes, started.elapsed()),
                 Some(Err(error)) => {
                     delivery.fail(&error);
-                    Some((Err(error), (None, delivery)))
+                    fail(error.kind(), error.to_string());
+                    return;
                 }
+                None if delivered == opened_len => return,
                 None => {
-                    delivery.finish();
-                    None
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "media response reached EOF after {delivered} of {opened_len} advertised bytes"
+                        ),
+                    );
+                    delivery.fail(&error);
+                    fail(error.kind(), error.to_string());
+                    return;
                 }
+            };
+            let bytes_len = bytes.len() as u64;
+            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+            let send = sender.send(DrivenLocalChunk {
+                bytes,
+                accepted: accepted_tx,
+            });
+            tokio::pin!(send);
+            let sent = tokio::select! {
+                biased;
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    );
+                    delivery.fail_transport(&error, "body_lifetime_exceeded");
+                    fail(error.kind(), error.to_string());
+                    false
+                }
+                result = &mut send => result.is_ok(),
+            };
+            if !sent {
+                return;
             }
-        },
-    );
+            let downstream_deadline =
+                (tokio::time::Instant::now() + MEDIA_BODY_NO_PROGRESS_TIMEOUT).min(body_deadline);
+            let accepted = tokio::select! {
+                biased;
+                Ok(()) = accepted_rx => true,
+                _ = tokio::time::sleep_until(body_deadline) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response exceeded its maximum admitted body lifetime",
+                    );
+                    delivery.fail_transport(&error, "body_lifetime_exceeded");
+                    fail(error.kind(), error.to_string());
+                    false
+                }
+                _ = tokio::time::sleep_until(downstream_deadline) => {
+                    let error = std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "media response made no downstream progress before its body deadline",
+                    );
+                    delivery.fail_transport(&error, "downstream_no_progress");
+                    fail(error.kind(), error.to_string());
+                    false
+                }
+                () = sender.closed() => false,
+            };
+            if !accepted {
+                return;
+            }
+            delivery.note_read(bytes_len, read_elapsed);
+            delivered = delivered.saturating_add(bytes_len);
+            if delivered == opened_len {
+                if delivery.finish() {
+                    if let Some((manager, session, authorization, complete_object, permit)) =
+                        completion.take()
+                    {
+                        settle_streamed_response_completion(
+                            manager,
+                            session,
+                            authorization,
+                            complete_object,
+                            permit,
+                        );
+                    }
+                }
+                return;
+            }
+        }
+    });
     let mut response = Response::builder()
         .status(status)
         .header(header::CONTENT_TYPE, content_type)
@@ -3120,7 +7887,7 @@ async fn segment_local(
         // Streamed rather than buffered: a 4K copy segment is ~35 MB, and
         // reading it into memory before the first byte goes out is an
         // allocation and a copy per request for data on its way to a socket.
-        .body(Body::from_stream(stream))
+        .body(driven_local_body(receiver, terminal, body_deadline))
         .map_err(|error| ApiError::Internal(error.to_string()))
 }
 
@@ -3143,6 +7910,1283 @@ fn segment_content_type(name: &str) -> &'static str {
 mod tests {
     use super::*;
     use crate::transcode::HlsDeliveryFixture;
+    use http_body_util::BodyExt;
+    use std::time::Duration;
+
+    async fn activate_ready(
+        store: &Arc<dyn plurx_core::store::Store>,
+        mut activation: MediaSessionActivation,
+    ) -> MediaSessionRoute {
+        activation.publication_ready_at_ms = MEDIA_SESSION_PUBLICATION_BLOCKED;
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("prepare media route")
+            .expect("media route preparation accepted");
+        let publication_ready_at_ms = activation
+            .expected_predecessor_incarnation_id
+            .as_ref()
+            .map_or(0, |_| {
+                activation
+                    .now_ms
+                    .saturating_add(plurx_core::domain::MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS)
+            });
+        store
+            .settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms,
+                },
+                activation.now_ms,
+            )
+            .await
+            .expect("confirm media route")
+            .expect("media route confirmation accepted")
+    }
+
+    #[tokio::test]
+    async fn driven_local_body_rejects_queued_data_after_terminal_failure() {
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let (accepted, rejected) = tokio::sync::oneshot::channel();
+        sender
+            .send(DrivenLocalChunk {
+                bytes: Bytes::from_static(b"stale-chunk"),
+                accepted,
+            })
+            .await
+            .expect("body receiver");
+        let terminal = StreamedBodyTerminal::new();
+        terminal.fail(
+            std::io::ErrorKind::TimedOut,
+            "body deadline expired".to_owned(),
+        );
+        drop(sender);
+
+        let mut body = driven_local_body(
+            receiver,
+            terminal,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+        );
+        let error = body
+            .frame()
+            .await
+            .expect("terminal error frame")
+            .expect_err("the driven body must expose the producer failure");
+        assert!(error.to_string().contains("body deadline expired"));
+        assert!(body.frame().await.is_none());
+        assert!(
+            rejected.await.is_err(),
+            "stale bytes must not be acknowledged"
+        );
+    }
+
+    #[test]
+    fn same_incarnation_publication_rejection_is_retryable_not_not_found() {
+        let error = response_publication_rejection(
+            crate::transcode::MediaResponsePublicationRejection::StateChanged,
+        );
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "response_state_changed",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn beyond_frontier_publication_rejection_is_typed_producer_ended() {
+        let error = response_publication_rejection(
+            crate::transcode::MediaResponsePublicationRejection::ProducerEnded(
+                "process_exit".to_owned(),
+            ),
+        );
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::BAD_GATEWAY,
+                code: "producer_ended",
+                ref message,
+            } if message.contains("process_exit")
+        ));
+    }
+
+    #[test]
+    fn if_none_match_uses_http_weak_comparison() {
+        assert!(etag_matches(Some("W/\"artifact\""), "\"artifact\""));
+        assert!(etag_matches(
+            Some("\"other\", W/\"artifact\""),
+            "\"artifact\""
+        ));
+        assert!(etag_matches(Some("*"), "\"artifact\""));
+        assert!(!etag_matches(Some("W/\"other\""), "\"artifact\""));
+    }
+
+    #[test]
+    fn vod_resurrection_uncertainty_is_retryable_not_not_found() {
+        let error = vod_resurrection_unavailable();
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "vod_resurrection_unavailable",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn publication_subdeadline_never_outlives_its_request() {
+        let request_deadline = Instant::now();
+        assert_eq!(
+            response_publication_deadline_before(request_deadline),
+            request_deadline
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prepared_body_rejects_buffered_bytes_after_absolute_lifetime() {
+        let response = bound_admitted_media_body(Response::new(Body::from("late bytes")));
+        tokio::time::advance(MAX_ADMITTED_MEDIA_BODY_LIFETIME).await;
+        let error = response
+            .into_body()
+            .into_data_stream()
+            .next()
+            .await
+            .expect("expired prepared body terminal item")
+            .expect_err("expired prepared bytes must not be exposed");
+        assert!(error.to_string().contains("maximum admitted body lifetime"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn streamed_response_settlement_capacity_is_bounded_before_visibility() {
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("first settlement permit");
+        let deadline = tokio::time::Instant::now().into_std() + Duration::from_millis(1);
+        let error = reserve_response_completion_from(slots, deadline)
+            .await
+            .expect_err("a second streamed response must not exceed settlement capacity");
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "response_completion_capacity",
+                ..
+            }
+        ));
+        drop(held);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn terminal_store_wait_uses_the_absolute_attempt_deadline() {
+        let deadline = tokio::time::Instant::now() + TERMINAL_COMMIT_RETRY_BUDGET;
+        let stalled = tokio::spawn(async move {
+            terminal_io_before(deadline, std::future::pending::<()>()).await
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(TERMINAL_COMMIT_RETRY_BUDGET).await;
+        assert_eq!(
+            stalled.await.expect("bounded Store wait task"),
+            None,
+            "a Store operation cannot outlive the terminal attempt budget"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn local_start_pin_timeout_is_retryable_service_unavailable() {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let pending = pin_shared_session_for_local_start(
+            deadline,
+            std::future::pending::<Result<bool, StoreError>>(),
+        );
+        tokio::pin!(pending);
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_secs(5)).await;
+        assert!(matches!(
+            pending.await,
+            Err(ApiError::ServiceUnavailable(message))
+                if message == crate::transcode::start_infrastructure_error(
+                    "shared cache pin exceeded the start deadline"
+                )
+        ));
+    }
+
+    #[tokio::test]
+    async fn active_durable_route_without_local_worker_maps_to_owner_transition() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-worker").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: generation.clone(),
+            user_id: 7,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: true,
+            request: crate::transcode::SessionRequest {
+                file_id: 1,
+                playback_id: "control-transition".to_owned(),
+                request_id: Some(generation.clone()),
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10: false,
+                presentation: crate::transcode::Presentation::Vod,
+                block_budget_secs: None,
+            },
+        };
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &generation,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+        };
+        let route = MediaSessionRoute {
+            incarnation_id: generation.clone(),
+            session_id,
+            user_id: 7,
+            playback_id: "control-transition".to_owned(),
+            request_fingerprint: "a".repeat(64),
+            owner_node_id: "test-node".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms() + 60_000,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+            response_json: serde_json::to_string(&start).expect("response"),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: unix_ms(),
+        };
+        let request = crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation,
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::Active,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 1.0,
+            render_state: crate::playback_control::RenderState::Rendering,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Web,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+        };
+
+        let response = control_local(&fixture.state, &route, request, i64::MAX).await;
+        assert_eq!(response.status(), StatusCode::TOO_EARLY);
+    }
+
+    #[tokio::test]
+    async fn public_delete_tombstones_expired_route_but_reports_unreachable_exact_owner() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-delete-worker").await;
+        let user = fixture
+            .store
+            .create_user("delete-transition", "hash", false)
+            .await
+            .expect("delete user");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id,
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "delete-transition".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "former-owner".to_owned(),
+                // The row is explicitly active but already outside its owner
+                // lease at current wall time: routing must call this a
+                // transition, while DELETE must still tombstone it.
+                lease_expires_at_ms: 2,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: 1,
+            },
+        )
+        .await;
+        let mut stale_cached_local = route.clone();
+        stale_cached_local.owner_node_id = fixture.state.node_id.clone();
+        fixture
+            .state
+            .media_sessions
+            .cache_route(stale_cached_local)
+            .await;
+
+        let Err(transition) = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await
+        else {
+            panic!("expired active route is not local status absence")
+        };
+        assert!(matches!(
+            transition,
+            ApiError::Typed {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                code: "media_owner_transition",
+                ..
+            }
+        ));
+
+        assert_eq!(
+            delete(State(fixture.state.clone()), AxPath(session_id.clone()),).await,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "durable termination is not a claim that unreachable owner cleanup settled"
+        );
+        let ended = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("ended route lookup")
+            .expect("ended route");
+        assert_eq!(ended.state, "ended");
+        assert_eq!(ended.owner_node_id, route.owner_node_id);
+        assert_eq!(ended.incarnation_id, route.incarnation_id);
+        let Err(terminal) = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await
+        else {
+            panic!("terminal status must not return a response")
+        };
+        assert!(matches!(
+            terminal,
+            ApiError::Typed {
+                status: StatusCode::GONE,
+                code: "media_session_ended",
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_delete_confirmed_absence_still_releases_a_local_attachment() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        assert!(fixture.worker_is_registered(&session_id).await);
+
+        assert_eq!(
+            delete(State(fixture.state.clone()), AxPath(session_id.clone()),).await,
+            StatusCode::NO_CONTENT
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.worker_is_registered(&session_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("confirmed durable absence eventually releases the rolling attachment");
+    }
+
+    #[tokio::test]
+    async fn public_delete_tombstones_and_stops_the_exact_local_owner() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "delete-exact-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let _owner = install_vod_http_session(&fixture, dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("delete-exact", "hash", false)
+            .await
+            .expect("delete exact user");
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id: incarnation_id.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "delete-exact".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+
+        assert_eq!(
+            delete(State(fixture.state.clone()), AxPath(session_id.clone()),).await,
+            StatusCode::NO_CONTENT
+        );
+        let ended = fixture
+            .store
+            .media_session_route(&session_id)
+            .await
+            .expect("ended exact route lookup")
+            .expect("ended exact route");
+        assert_eq!(ended.state, "ended");
+        assert_eq!(ended.incarnation_id, incarnation_id);
+        assert_eq!(ended.owner_node_id, route.owner_node_id);
+        assert_eq!(ended.terminal_reason.as_deref(), Some("deleted"));
+        assert_eq!(
+            ended.publication_ready_at_ms, 0,
+            "204 requires durable exact-owner projection completion"
+        );
+        assert!(
+            fixture
+                .state
+                .transcode
+                .hls_session_status(&session_id)
+                .await
+                .is_none(),
+            "204 means the exact local VOD attachment has settled, not only that its route was tombstoned"
+        );
+    }
+
+    #[tokio::test]
+    async fn durable_delete_tombstone_blocks_media_before_local_stop() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "delete-gap-unrelated").await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let _owner = install_vod_http_session(&fixture, dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("delete-gap", "hash", false)
+            .await
+            .expect("delete gap user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id,
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "delete-gap".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        release_after_tombstone_pauses()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&pause));
+        let detach_pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_vod_terminal_detach_pause_for_test(Arc::clone(&detach_pause));
+        let deletion = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move { delete(State(state), AxPath(session_id)).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
+            .await
+            .expect("VOD cleanup reached its pre-detach seam");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release reached its post-tombstone seam");
+        assert!(
+            fixture
+                .state
+                .transcode
+                .vod_has_attached_reader_for_test(&session_id)
+                .await,
+            "the barrier is specifically inside the tombstone-to-VOD-detach gap"
+        );
+        let media = playlist(
+            State(fixture.state.clone()),
+            AxPath(session_id.clone()),
+            Query(PlaylistQuery::default()),
+            HeaderMap::new(),
+        )
+        .await;
+        assert!(
+            matches!(
+                media,
+                Err(ApiError::Typed {
+                    status: StatusCode::GONE,
+                    code: "media_session_ended",
+                    ..
+                })
+            ),
+            "the cached durable tombstone must refuse media before actor cleanup"
+        );
+
+        tokio::time::timeout(Duration::from_secs(5), detach_pause.wait())
+            .await
+            .expect("release VOD detach");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release durable deletion");
+        assert_eq!(
+            deletion.await.expect("delete gap task"),
+            StatusCode::NO_CONTENT
+        );
+        release_after_tombstone_pauses()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+    }
+
+    #[tokio::test]
+    async fn lingering_local_status_cannot_publish_after_durable_owner_moves_remote() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        assert!(fixture.worker_is_registered(&session_id).await);
+        let user = fixture
+            .store
+            .create_user("status-owner-moved", "hash", false)
+            .await
+            .expect("status user");
+        activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id: uuid::Uuid::new_v4().to_string(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "status-owner-moved".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: "new-owner".to_owned(),
+                lease_expires_at_ms: unix_ms() + 60_000,
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms: unix_ms(),
+            },
+        )
+        .await;
+
+        let result = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(ApiError::Conflict(_))),
+            "a lingering predecessor actor cannot authorize stale status"
+        );
+        let rerouted = tokio::time::timeout(
+            Duration::from_millis(250),
+            status_local_before_with_relay(
+                &fixture.state,
+                &session_id,
+                Instant::now() + Duration::from_millis(200),
+                true,
+            ),
+        )
+        .await
+        .expect("status reroute is bounded by the inherited deadline");
+        assert!(matches!(rerouted, Err(ApiError::ServiceUnavailable(_))));
+    }
+
+    #[tokio::test]
+    async fn status_classifies_durable_absence_before_local_telemetry() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        assert!(fixture.worker_is_registered(&session_id).await);
+        let lookups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        status_telemetry_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&lookups));
+
+        let result = status_local_before_with_relay(
+            &fixture.state,
+            &session_id,
+            Instant::now() + Duration::from_secs(1),
+            false,
+        )
+        .await;
+        assert!(matches!(result, Err(ApiError::NotFound("hls session"))));
+        assert_eq!(
+            lookups.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "an unowned capability must not query a lingering local actor"
+        );
+        status_telemetry_observers()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+    }
+
+    #[tokio::test]
+    async fn cancelling_public_delete_does_not_cancel_its_admitted_cleanup_owner() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        release_pauses()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(session_id.clone(), Arc::clone(&pause));
+
+        let request = tokio::spawn({
+            let state = fixture.state.clone();
+            let session_id = session_id.clone();
+            async move { delete(State(state), AxPath(session_id)).await }
+        });
+        pause.wait().await;
+        request.abort();
+        assert!(request
+            .await
+            .expect_err("public DELETE request cancelled")
+            .is_cancelled());
+        pause.wait().await;
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while fixture.worker_is_registered(&session_id).await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached DELETE cleanup survives caller cancellation");
+        release_pauses()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&session_id);
+    }
+
+    #[tokio::test]
+    async fn commit_unknown_delete_stays_fenced_until_definitive_reconciliation() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        inject_release_error(&session_id);
+        let settlement = match fixture
+            .state
+            .media_sessions
+            .begin_release_reconciliation(&session_id)
+            .await
+        {
+            ReleaseAdmission::Won(settlement) => settlement,
+            ReleaseAdmission::Joined(_) | ReleaseAdmission::Full => panic!("first release wins"),
+        };
+
+        assert_eq!(
+            release_session(
+                fixture.state.clone(),
+                session_id.clone(),
+                Arc::clone(&settlement),
+                crate::vodserve::Terminal::Deleted,
+                "released by client",
+            )
+            .await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert!(
+            fixture
+                .state
+                .media_sessions
+                .route_resolution_before(
+                    &session_id,
+                    &fixture.state.node_id,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .is_err(),
+            "a commit-unknown End retains its fail-closed publication fence"
+        );
+
+        let definitive = fixture
+            .store
+            .end_media_session(&session_id, "deleted", unix_ms())
+            .await
+            .expect("idempotent release reconciliation");
+        assert!(definitive.is_none(), "fixture has no durable route");
+        fixture
+            .state
+            .media_sessions
+            .complete_release_absent(&session_id)
+            .await;
+        fixture
+            .state
+            .transcode
+            .complete_session_release(&session_id);
+        fixture
+            .state
+            .media_sessions
+            .complete_release_settlement(&session_id, &settlement, StatusCode::NO_CONTENT)
+            .await;
+        assert!(matches!(
+            fixture
+                .state
+                .media_sessions
+                .route_resolution_before(
+                    &session_id,
+                    &fixture.state.node_id,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await
+                .expect("definitive absence after reconciliation"),
+            DurableRouteResolution::Absent
+        ));
+    }
+
+    #[tokio::test]
+    async fn public_delete_refuses_visibility_when_settlement_slots_are_saturated() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "delete-slot-unrelated").await;
+        let slots = Arc::new(tokio::sync::Semaphore::new(1));
+        let held = Arc::clone(&slots)
+            .acquire_owned()
+            .await
+            .expect("hold only DELETE settlement slot");
+        let status = delete_with_slots(
+            fixture.state.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            slots,
+            Instant::now() + Duration::from_millis(10),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        drop(held);
+    }
+
+    #[tokio::test]
+    async fn terminal_control_cancellation_and_reaper_preserve_one_durable_reply() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        let user = fixture
+            .store
+            .create_user("terminal-cancellation", "hash", false)
+            .await
+            .expect("terminal cancellation user");
+        let recipe = RemoteStartRequest {
+            protocol_version: crate::media_pool::PROTOCOL_VERSION,
+            incarnation_id: generation.clone(),
+            user_id: user.id,
+            source_size: 1,
+            source_mtime: 1,
+            typeless_playlist: true,
+            request: crate::transcode::SessionRequest {
+                file_id: fixture.file_id(),
+                playback_id: "terminal-cancellation".to_owned(),
+                request_id: Some(generation.clone()),
+                automatic: true,
+                previous_session_id: None,
+                reopen_reason: None,
+                kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                start_seconds: 0.0,
+                audio_index: None,
+                subtitle_burn: None,
+                audio_offset_ms: 0,
+                hdr10: false,
+                presentation: crate::transcode::Presentation::Live,
+                block_budget_secs: None,
+            },
+        };
+        let start = StartResponse {
+            session_id: session_id.clone(),
+            playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+            duration_ms: Some(60_000),
+            start_seconds: 0.0,
+            media_origin_ms: Some(0),
+            height: 720,
+            encoder: "software".to_owned(),
+            vod: false,
+            ladder: vec![],
+            prior_kbps: None,
+            delivered_dynamic_range: Some("sdr".to_owned()),
+            control: crate::playback_control::ControlBootstrap::new(
+                &session_id,
+                &generation,
+                1,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+            ),
+        };
+        let now_ms = unix_ms();
+        let route = activate_ready(
+            &fixture.store,
+            MediaSessionActivation {
+                incarnation_id: generation.clone(),
+                session_id: session_id.clone(),
+                user_id: user.id,
+                playback_id: "terminal-cancellation".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: "a".repeat(64),
+                owner_node_id: fixture.state.node_id.clone(),
+                lease_expires_at_ms: now_ms.saturating_add(60_000),
+                recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+                response_json: serde_json::to_string(&start).expect("start response"),
+                publication_ready_at_ms: 0,
+                media_origin_ms: 0,
+                now_ms,
+            },
+        )
+        .await;
+        let request = crate::playback_control::ControlRequestV1 {
+            protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+            generation: generation.clone(),
+            control_epoch: 1,
+            client_instance_id: uuid::Uuid::new_v4().to_string(),
+            sequence: 1,
+            demand: crate::playback_control::PlaybackDemand::End,
+            position_ms: 1_000,
+            buffered_from_ms: Some(0),
+            buffered_through_ms: 10_000,
+            playback_rate: 0.0,
+            render_state: crate::playback_control::RenderState::Ended,
+            seek_target_ms: None,
+            observed_download_bps: None,
+            selection: crate::playback_control::ClientSelection {
+                quality: crate::playback_control::QualitySelection::Auto,
+                audio_track: None,
+                subtitle: crate::playback_control::SubtitleSelection {
+                    mode: crate::playback_control::SubtitleMode::Off,
+                    track: None,
+                },
+                audio_offset_ms: 0,
+                codec: crate::playback_control::CodecPolicy::Auto,
+                dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+            },
+            capabilities: Some(crate::playback_control::DynamicCapabilities {
+                platform: crate::playback_control::ClientPlatform::Apple,
+                max_height: 1080,
+                codecs: vec![crate::playback_control::CodecPolicy::H264],
+                dynamic_ranges: vec![crate::playback_control::DynamicRangePolicy::Sdr],
+                dual_player_preparation: false,
+            }),
+            observation: None,
+            acknowledgement: None,
+        };
+
+        // A future discarded before owner-local admission must not enqueue or
+        // mutate anything later.
+        drop(control_local(
+            &fixture.state,
+            &route,
+            request.clone(),
+            i64::MAX,
+        ));
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("route after unpolled control")
+                .map(|route| route.state),
+            Some("active".to_owned())
+        );
+        assert!(fixture
+            .store
+            .media_session_terminal_ack(&session_id, unix_ms())
+            .await
+            .expect("ack after unpolled control")
+            .is_none());
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_control_after_acceptance(Arc::clone(&pause));
+        let control = tokio::spawn({
+            let state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move { control_local(&state, &route, request, i64::MAX).await }
+        });
+        pause.wait().await;
+
+        let retry_a = tokio::spawn({
+            let state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move { control_local(&state, &route, request, i64::MAX).await }
+        });
+        let retry_b = tokio::spawn({
+            let state = fixture.state.clone();
+            let route = route.clone();
+            let request = request.clone();
+            async move { control_local(&state, &route, request, i64::MAX).await }
+        });
+        tokio::task::yield_now().await;
+
+        // Run the production reaper verdict after actor End but before the
+        // final status join, with two exact retries also attached. All three
+        // waiters must share the one actor-installed continuation, and the
+        // reaper must not mistake the retired actor for abandoned cleanup.
+        assert!(fixture.reaper_pass_keeps_worker(&session_id).await);
+        assert!(fixture.worker_is_registered(&session_id).await);
+        control.abort();
+        assert!(matches!(control.await, Err(error) if error.is_cancelled()));
+        pause.wait().await;
+
+        let retry_a = retry_a.await.expect("first retry task");
+        let retry_b = retry_b.await.expect("second retry task");
+        assert_eq!(retry_a.status(), StatusCode::OK);
+        assert_eq!(retry_b.status(), StatusCode::OK);
+        let retry_a = axum::body::to_bytes(retry_a.into_body(), 64 * 1024)
+            .await
+            .expect("first retry body");
+        let retry_b = axum::body::to_bytes(retry_b.into_body(), 64 * 1024)
+            .await
+            .expect("second retry body");
+        assert_eq!(retry_a, retry_b, "exact retries share one terminal result");
+
+        let acknowledgement = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(acknowledgement) = fixture
+                    .store
+                    .media_session_terminal_ack(&session_id, unix_ms())
+                    .await
+                    .expect("terminal acknowledgement")
+                {
+                    break acknowledgement;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("accepted End continuation must commit after HTTP cancellation");
+        assert_eq!(acknowledgement.sequence, 1);
+        assert_eq!(
+            fixture
+                .store
+                .media_session_route(&session_id)
+                .await
+                .expect("settled terminal route")
+                .map(|route| route.state),
+            Some("ended".to_owned())
+        );
+    }
+
+    #[tokio::test]
+    async fn settled_rolling_and_vod_routes_replay_the_durable_terminal_ack() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unrelated-worker").await;
+        let user = fixture
+            .store
+            .create_user("terminal-replay", "hash", false)
+            .await
+            .expect("terminal replay user");
+
+        for (label, presentation, lease_timeout_ms, producer_state, admitted) in [
+            (
+                "rolling",
+                crate::transcode::Presentation::Live,
+                crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
+                "exited",
+                None,
+            ),
+            (
+                "vod",
+                crate::transcode::Presentation::Vod,
+                crate::playback_control::VOD_LEASE_TIMEOUT_MS,
+                "complete",
+                Some(true),
+            ),
+        ] {
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let generation = uuid::Uuid::new_v4().to_string();
+            let client_instance_id = uuid::Uuid::new_v4().to_string();
+            let recipe = RemoteStartRequest {
+                protocol_version: crate::media_pool::PROTOCOL_VERSION,
+                incarnation_id: generation.clone(),
+                user_id: user.id,
+                source_size: 1,
+                source_mtime: 1,
+                typeless_playlist: true,
+                request: crate::transcode::SessionRequest {
+                    file_id: fixture.file_id(),
+                    playback_id: format!("terminal-{label}"),
+                    request_id: Some(generation.clone()),
+                    automatic: true,
+                    previous_session_id: None,
+                    reopen_reason: None,
+                    kind: crate::transcode::SessionKind::Transcode { height: 720 },
+                    start_seconds: 0.0,
+                    audio_index: None,
+                    subtitle_burn: None,
+                    audio_offset_ms: 0,
+                    hdr10: false,
+                    presentation,
+                    block_budget_secs: None,
+                },
+            };
+            let start = StartResponse {
+                session_id: session_id.clone(),
+                playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
+                duration_ms: Some(60_000),
+                start_seconds: 0.0,
+                media_origin_ms: Some(0),
+                height: 720,
+                encoder: "software".to_owned(),
+                vod: label == "vod",
+                ladder: vec![],
+                prior_kbps: None,
+                delivered_dynamic_range: Some("sdr".to_owned()),
+                control: crate::playback_control::ControlBootstrap::new(
+                    &session_id,
+                    &generation,
+                    1,
+                    lease_timeout_ms,
+                ),
+            };
+            let now_ms = unix_ms();
+            let route = activate_ready(
+                &fixture.store,
+                MediaSessionActivation {
+                    incarnation_id: generation.clone(),
+                    session_id: session_id.clone(),
+                    user_id: user.id,
+                    playback_id: format!("terminal-{label}"),
+                    expected_predecessor_incarnation_id: None,
+                    fence_predecessor: false,
+                    request_id: None,
+                    request_fingerprint: "a".repeat(64),
+                    owner_node_id: fixture.state.node_id.clone(),
+                    lease_expires_at_ms: now_ms.saturating_add(60_000),
+                    recipe_json: serde_json::to_string(&recipe).expect("recipe"),
+                    response_json: serde_json::to_string(&start).expect("start response"),
+                    publication_ready_at_ms: 0,
+                    media_origin_ms: 0,
+                    now_ms,
+                },
+            )
+            .await;
+            let request = crate::playback_control::ControlRequestV1 {
+                protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+                generation: generation.clone(),
+                control_epoch: 1,
+                client_instance_id: client_instance_id.clone(),
+                sequence: 7,
+                demand: crate::playback_control::PlaybackDemand::End,
+                position_ms: 1_000,
+                buffered_from_ms: Some(0),
+                buffered_through_ms: 10_000,
+                playback_rate: 0.0,
+                render_state: crate::playback_control::RenderState::Ended,
+                seek_target_ms: None,
+                observed_download_bps: None,
+                selection: crate::playback_control::ClientSelection {
+                    quality: crate::playback_control::QualitySelection::Auto,
+                    audio_track: None,
+                    subtitle: crate::playback_control::SubtitleSelection {
+                        mode: crate::playback_control::SubtitleMode::Off,
+                        track: None,
+                    },
+                    audio_offset_ms: 0,
+                    codec: crate::playback_control::CodecPolicy::Auto,
+                    dynamic_range: crate::playback_control::DynamicRangePolicy::Auto,
+                },
+                // Sequence > 1 retries may omit capabilities; replay
+                // telemetry must come from the retained accepted result.
+                capabilities: None,
+                observation: None,
+                acknowledgement: None,
+            };
+            let terminal_time_ms = unix_ms();
+            let terminal = crate::playback_control::ControlResponseV1 {
+                protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
+                generation: generation.clone(),
+                control_epoch: 1,
+                accepted_sequence: request.sequence,
+                server_time_unix_ms: terminal_time_ms,
+                lease: crate::playback_control::PlaybackLeaseView {
+                    state: "ended".to_owned(),
+                    renew_after_ms: crate::playback_control::NEXT_EXCHANGE_MS,
+                    expires_at_unix_ms: terminal_time_ms,
+                },
+                delivery: crate::playback_control::DeliveryView {
+                    presentation: if label == "vod" {
+                        "vod".to_owned()
+                    } else {
+                        "live-recovery".to_owned()
+                    },
+                    producer_state: producer_state.to_owned(),
+                    produced_through_ms: Some(60_000),
+                    fetched_through_ms: 10_000,
+                    delivered_bps: None,
+                    delivered_idle_ms: None,
+                    recent_producer_speed: None,
+                    client_runway_ms: 9_000,
+                    admitted,
+                    hold_reason: None,
+                    owner_node_hash: "n-0123456789abcdef".to_owned(),
+                    owner_epoch: 1,
+                },
+                effective_selection: crate::playback_control::EffectiveSelection {
+                    quality_auto: true,
+                    height: 720,
+                    audio_track: None,
+                    subtitle_burn: None,
+                    audio_offset_ms: 0,
+                    codec: "server_selected".to_owned(),
+                    dynamic_range: Some("sdr".to_owned()),
+                },
+                action: crate::playback_control::ControlAction::None,
+            };
+            let acknowledgement = MediaSessionTerminalAck {
+                incarnation_id: generation.clone(),
+                session_id: session_id.clone(),
+                owner_node_id: route.owner_node_id.clone(),
+                owner_epoch: route.owner_epoch,
+                client_instance_id,
+                sequence: i64::try_from(request.sequence).expect("bounded sequence"),
+                request_fingerprint: request
+                    .fingerprint()
+                    .expect("valid terminal request fingerprint"),
+                response_json: serde_json::to_string(&RetainedTerminalResponse {
+                    platform: crate::playback_control::ClientPlatform::Apple,
+                    response: terminal.clone(),
+                })
+                .expect("terminal response"),
+                expires_at_ms: terminal_time_ms.saturating_add(60_000),
+                updated_at_ms: terminal_time_ms,
+            };
+            let faults = TerminalCommitFaults::default();
+            let injected = if label == "rolling" {
+                &faults.fail_before_commit
+            } else {
+                &faults.fail_after_commit
+            };
+            injected.store(1, std::sync::atomic::Ordering::Release);
+            let terminal_store: Arc<dyn plurx_core::store::Store> = fixture.store.clone();
+            assert!(
+                persist_terminal_ack_with_faults(terminal_store, acknowledgement, Some(&faults),)
+                    .await,
+                "{label} terminal acknowledgement resolves the injected Store failure"
+            );
+            assert_eq!(
+                injected.load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "{label} consumed its injected before/after-commit failure"
+            );
+            let retained = terminal_ack_replay(
+                &fixture.state,
+                &route,
+                &request,
+                unix_ms().saturating_add(4_000),
+            )
+            .await
+            .expect("terminal acknowledgement lookup")
+            .expect("exact terminal acknowledgement");
+            assert_eq!(
+                retained.platform,
+                Some(crate::playback_control::ClientPlatform::Apple),
+                "{label} replay must retain the originally accepted platform"
+            );
+            let body = Bytes::from(serde_json::to_vec(&request).expect("terminal request"));
+            let response = control_inner(
+                fixture.state.clone(),
+                session_id,
+                body,
+                unix_ms().saturating_add(4_000),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{label} replay");
+            let response_body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .expect("bounded terminal replay body");
+            assert_eq!(
+                serde_json::from_slice::<crate::playback_control::ControlResponseV1>(
+                    &response_body,
+                )
+                .expect("decode terminal replay"),
+                terminal,
+                "{label} replay must return the exact durable acknowledgement"
+            );
+            let mut changed_payload = request.clone();
+            changed_payload.position_ms += 1;
+            let changed_response = control_inner(
+                fixture.state.clone(),
+                route.session_id.clone(),
+                Bytes::from(
+                    serde_json::to_vec(&changed_payload).expect("changed terminal request"),
+                ),
+                unix_ms().saturating_add(4_000),
+            )
+            .await;
+            assert_eq!(
+                changed_response.status(),
+                StatusCode::GONE,
+                "{label} cannot reuse the terminal sequence for a changed payload"
+            );
+        }
+    }
 
     #[test]
     fn public_playback_ids_and_segment_ranges_are_bounded() {
@@ -3171,6 +9215,244 @@ mod tests {
         assert_eq!(requested_byte_range(Some("bytes=10-9"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=100-"), 100), Err(()));
         assert_eq!(requested_byte_range(Some("bytes=0-1,3-4"), 100), Err(()));
+        assert!(range_covers_object(None, 100));
+        assert!(range_covers_object(
+            requested_byte_range(Some("bytes=0-"), 100).expect("open range"),
+            100
+        ));
+        assert!(range_covers_object(
+            requested_byte_range(Some("bytes=-200"), 100).expect("full suffix"),
+            100
+        ));
+        assert!(!range_covers_object(Some((0, 98)), 100));
+        assert!(!range_covers_object(Some((1, 99)), 100));
+
+        let mut headers = RelayHeaders {
+            range: Some("bytes=10-19".to_owned()),
+            if_range: None,
+            ..RelayHeaders::default()
+        };
+        assert_eq!(
+            range_for_current_etag(&headers, "\"current\""),
+            Some("bytes=10-19")
+        );
+        headers.if_range = Some("\"current\"".to_owned());
+        assert_eq!(
+            range_for_current_etag(&headers, "\"current\""),
+            Some("bytes=10-19"),
+            "an exact strong validator preserves Range"
+        );
+        for non_match in [
+            "W/\"current\"",
+            "\"previous\"",
+            "Sun, 23 Aug 2026 08:00:00 GMT",
+            "",
+        ] {
+            headers.if_range = Some(non_match.to_owned());
+            assert_eq!(
+                range_for_current_etag(&headers, "\"current\""),
+                None,
+                "{non_match:?} must fall back to the complete representation"
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_rollout_peer_terminal_statuses_require_fresh_route_agreement() {
+        for status in [
+            StatusCode::NOT_FOUND,
+            StatusCode::CONFLICT,
+            StatusCode::GONE,
+        ] {
+            assert!(
+                relay_status_requires_reclassification(status),
+                "{status} from one peer is not authoritative during ownership handoff"
+            );
+        }
+        assert!(!relay_status_requires_reclassification(StatusCode::OK));
+        assert!(!relay_status_requires_reclassification(
+            StatusCode::SERVICE_UNAVAILABLE
+        ));
+    }
+
+    async fn add_http_text_subtitle(fixture: &mut HlsDeliveryFixture, session_id: &str) {
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        let probe = plurx_core::domain::ProbeResult {
+            duration_ms: file.duration_ms,
+            container: file.container.clone(),
+            video_codec: file.video_codec.clone(),
+            video_profile: file.video_profile.clone(),
+            width: file.width,
+            height: file.height,
+            bit_depth: file.bit_depth,
+            hdr: file.hdr.clone(),
+            hdr_format: file.hdr_format.clone(),
+            bitrate: file.bitrate,
+            audio_streams: file.audio_streams.clone(),
+            subtitle_streams: vec![SubtitleStream {
+                index: 0,
+                codec: "subrip".into(),
+                language: Some("eng".into()),
+                title: Some("English".into()),
+                default: true,
+                forced: false,
+                hearing_impaired: false,
+            }],
+            raw_json: None,
+            creation_time: None,
+        };
+        fixture
+            .store
+            .upsert_file(
+                file.item_id,
+                file.path.to_str().expect("fixture path"),
+                file.size,
+                file.mtime,
+                &probe,
+            )
+            .await
+            .expect("install text subtitle");
+        let file = fixture
+            .store
+            .get_file(fixture.file_id())
+            .await
+            .expect("updated fixture lookup")
+            .expect("updated fixture");
+        fixture
+            .refresh_frozen_presentation_from_store(session_id)
+            .await;
+        tokio::fs::create_dir_all(&fixture.state.subs_dir)
+            .await
+            .expect("subtitle cache");
+        tokio::fs::write(
+            crate::subtitles::vtt_path(&fixture.state.subs_dir, &file, 0),
+            b"WEBVTT\n\n",
+        )
+        .await
+        .expect("published VTT sidecar");
+    }
+
+    #[tokio::test]
+    async fn real_subtitle_playlist_rebinds_after_video_attempt_handoff() {
+        let dir = crate::test_tempdir().expect("session directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "subtitle-handoff").await;
+        add_http_text_subtitle(&mut fixture, "subtitle-handoff").await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_playlist_publication(Arc::clone(&owner_pause));
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"old-zero")
+            .await
+            .expect("predecessor segment zero");
+        tokio::fs::write(dir.path().join("seg00001.ts"), b"old-one")
+            .await
+            .expect("predecessor segment one");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n",
+        )
+        .await
+        .expect("predecessor playlist");
+        let state = fixture.state.clone();
+        let waiting =
+            tokio::spawn(
+                async move { subtitle_playlist_local(&state, "subtitle-handoff", 0).await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
+            .await
+            .expect("subtitle request read predecessor playlist");
+
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"zero")
+            .await
+            .expect("segment zero");
+        tokio::fs::write(dir.path().join("seg00001.ts"), b"one")
+            .await
+            .expect("segment one");
+        tokio::fs::write(dir.path().join("seg00002.ts"), b"two")
+            .await
+            .expect("segment two");
+        tokio::fs::write(
+            dir.path().join("index.m3u8"),
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.000,\nseg00000.ts\n#EXTINF:2.000,\nseg00001.ts\n#EXTINF:2.000,\nseg00002.ts\n",
+        )
+        .await
+        .expect("successor playlist");
+        tokio::time::timeout(Duration::from_secs(5), owner_pause.wait())
+            .await
+            .expect("release predecessor playlist publication");
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("subtitle response reached the exact-owner commit seam");
+        assert!(
+            !waiting.is_finished(),
+            "subtitle response reached the exact-owner commit seam"
+        );
+        tokio::time::timeout(Duration::from_secs(5), pause.wait())
+            .await
+            .expect("release subtitle response commit");
+        let response = waiting
+            .await
+            .expect("subtitle task")
+            .expect("subtitle response commits against successor owner");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .expect("subtitle playlist body");
+        let text = String::from_utf8(body.to_vec()).expect("subtitle playlist text");
+        assert!(
+            text.lines().any(|line| line == "seg00002.vtt"),
+            "subtitle child playlist must rebind to successor-relative segment URIs: {text}"
+        );
+        assert_eq!(fixture.last_renewal_kind().await, "subtitle-playlist");
+    }
+
+    #[tokio::test]
+    async fn real_subtitle_playlist_cannot_commit_after_vod_same_id_reattachment() {
+        let dir = crate::test_tempdir().expect("VOD subtitle directory");
+        let mut fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        add_http_text_subtitle(&mut fixture, "rolling-unused").await;
+        let session_id = "vod-subtitle-replaced";
+        let _predecessor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture
+            .state
+            .transcode
+            .set_subtitle_playlist_commit_pause(Arc::clone(&pause));
+        let state = fixture.state.clone();
+        let pending =
+            tokio::spawn(async move { subtitle_playlist_local(&state, session_id, 0).await });
+        pause.wait().await;
+
+        let _successor = install_vod_http_session(&fixture, dir.path(), session_id).await;
+        let successor_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(session_id)
+            .await
+            .expect("successor touch");
+        pause.wait().await;
+
+        assert!(
+            pending.await.expect("subtitle task").is_err(),
+            "predecessor bytes must fail their exact-owner commit"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(session_id)
+                .await,
+            Some(successor_touch),
+            "stale subtitle bytes cannot renew the same-id successor"
+        );
     }
 
     #[test]
@@ -3185,6 +9467,8 @@ mod tests {
             owner_epoch: 1,
             lease_expires_at_ms: 2_001,
             state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
             produced_playable_through_ms: 0,
@@ -3195,12 +9479,536 @@ mod tests {
             updated_at_ms: 1,
         };
         assert!(resolved_replay_is_live(&route, 1_000));
+        route.publication_ready_at_ms = 1_001;
+        assert!(
+            !resolved_replay_is_live(&route, 1_000),
+            "a durable predecessor-handoff fence blocks idempotent replay"
+        );
+        route.publication_ready_at_ms = 0;
         assert!(!resolved_replay_is_live(&route, 1_001));
         route.lease_expires_at_ms = 1_000;
         assert!(
             !resolved_replay_is_live(&route, 1_000),
             "a read that returns after exact expiry must never answer a replay"
         );
+    }
+
+    #[test]
+    fn activation_confirmation_rejects_a_takeover_epoch_with_reused_ids() {
+        let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
+        let session_id = "00000000-0000-4000-8000-0000000000e2";
+        let fingerprint = "e".repeat(64);
+        let recipe_json = "{}".to_owned();
+        let response_json = r#"{"session":"confirmed"}"#.to_owned();
+        let activation = MediaSessionActivation {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "activation-confirmation".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "node-e".to_owned(),
+            recipe_json: recipe_json.clone(),
+            response_json: response_json.clone(),
+            publication_ready_at_ms: 0,
+            media_origin_ms: 0,
+            now_ms: unix_ms(),
+            lease_expires_at_ms: unix_ms() + 60_000,
+        };
+        let mut route = MediaSessionRoute {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "activation-confirmation".to_owned(),
+            request_fingerprint: fingerprint,
+            owner_node_id: "node-e".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: unix_ms() + 60_000,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json,
+            response_json,
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: unix_ms(),
+        };
+        assert!(route_matches_activation(&route, &activation));
+        route.owner_epoch = 2;
+        assert!(
+            !route_matches_activation(&route, &activation),
+            "a delayed epoch-one confirmation cannot adopt a same-id takeover"
+        );
+    }
+
+    #[test]
+    fn idempotent_publication_replay_accepts_the_current_takeover_epoch() {
+        let now_ms = unix_ms();
+        let observed = MediaSessionRoute {
+            incarnation_id: "00000000-0000-4000-8000-0000000000e3".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
+            user_id: 7,
+            playback_id: "publication-replay".to_owned(),
+            request_fingerprint: "f".repeat(64),
+            owner_node_id: "departed-owner".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: now_ms + 30_000,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json: r#"{"recipe":1}"#.to_owned(),
+            response_json: r#"{"session":"ready"}"#.to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: now_ms,
+        };
+        let mut published = observed.clone();
+        published.owner_node_id = "surviving-owner".to_owned();
+        published.owner_epoch = 2;
+        published.lease_expires_at_ms = now_ms + 60_000;
+        published.discontinuity_sequence = 1;
+        published.updated_at_ms = now_ms + 1;
+        assert!(
+            replay_publication_matches(&published, &observed),
+            "takeover may advance only mutable ownership/progress coordinates"
+        );
+        published.response_json = r#"{"session":"different"}"#.to_owned();
+        assert!(
+            !replay_publication_matches(&published, &observed),
+            "replay still requires the exact persisted response identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_start_abort_cannot_reap_takeover_or_unmapped_vod() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let fixture =
+            HlsDeliveryFixture::publish_takeover(dir.path(), &session_id, &incarnation_id, 2).await;
+
+        abort_started_session(
+            &fixture.state,
+            &fixture.state.node_id,
+            &incarnation_id,
+            &session_id,
+        )
+        .await;
+        assert!(
+            fixture.worker_is_registered(&session_id).await,
+            "the epoch-one call-site composition must leave a same-id epoch-two worker alive"
+        );
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session_for_owner(&incarnation_id, &session_id, 2, "test cleanup",)
+                .await
+        );
+
+        let vod_session = uuid::Uuid::new_v4().to_string();
+        let unmapped_incarnation = uuid::Uuid::new_v4().to_string();
+        let _vod_owner = install_vod_http_session(&fixture, dir.path(), &vod_session).await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .vod_owns_or_preparing(&vod_session)
+                .await
+        );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .stop_vod_session_for_request(
+                    &unmapped_incarnation,
+                    &vod_session,
+                    "delayed start abort",
+                )
+                .await,
+            "a real VOD capability without the exact request mapping cannot be reaped"
+        );
+        assert!(
+            fixture
+                .state
+                .transcode
+                .vod_owns_or_preparing(&vod_session)
+                .await,
+            "the rejected VOD cleanup leaves the capability intact"
+        );
+        fixture
+            .state
+            .transcode
+            .begin_session_terminal(
+                &vod_session,
+                crate::vodserve::Terminal::Replaced,
+                "test cleanup",
+            )
+            .await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn started_session_guard_holds_replacement_gate_until_cleanup_settles() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "guard-lifetime").await;
+        let request = crate::transcode::SessionRequest {
+            file_id: 1,
+            playback_id: "guard-lifetime-player".to_owned(),
+            request_id: None,
+            automatic: true,
+            previous_session_id: None,
+            reopen_reason: None,
+            kind: crate::transcode::SessionKind::Transcode { height: 720 },
+            start_seconds: 0.0,
+            audio_index: None,
+            subtitle_burn: None,
+            audio_offset_ms: 0,
+            hdr10: false,
+            presentation: crate::transcode::Presentation::Live,
+            block_budget_secs: None,
+        };
+        let replacement = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement gate");
+        let (settled_tx, settled_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let (released_tx, released_rx) = tokio::sync::oneshot::channel();
+        let mut guard = StartedSessionGuard::new(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "guard-lifetime".to_owned(),
+            7,
+            "guard-lifetime-request".to_owned(),
+            Some(replacement),
+        );
+        guard.hold_cleanup_for_test(settled_tx, release_rx, released_tx);
+        drop(guard);
+        settled_rx
+            .await
+            .expect("cleanup reached its settlement seam");
+
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let blocked = tokio::spawn({
+            let state = fixture.state.clone();
+            let request = request.clone();
+            async move {
+                let blocked = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    state.transcode.acquire_cluster_takeover_replacement(
+                        &request,
+                        7,
+                        tokio::time::Instant::now() + Duration::from_secs(10),
+                    ),
+                );
+                tokio::pin!(blocked);
+                let mut entered_tx = Some(entered_tx);
+                std::future::poll_fn(|context| {
+                    let result = std::future::Future::poll(blocked.as_mut(), context);
+                    if result.is_pending() {
+                        if let Some(entered_tx) = entered_tx.take() {
+                            let _ = entered_tx.send(());
+                        }
+                    }
+                    result
+                })
+                .await
+            }
+        });
+        entered_rx
+            .await
+            .expect("replacement waiter registered behind the cleanup-owned gate");
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(
+            blocked.await.expect("replacement waiter task").is_err(),
+            "cleanup must retain the replacement gate"
+        );
+
+        release_tx.send(()).expect("cleanup release");
+        released_rx
+            .await
+            .expect("replacement guard was dropped after cleanup settlement");
+        let reacquired = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("cleanup settlement releases the replacement gate");
+        drop(reacquired);
+
+        let replacement = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement gate for disarm");
+        let mut disarmed = StartedSessionGuard::new(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            "guard-lifetime".to_owned(),
+            7,
+            "guard-disarm-request".to_owned(),
+            Some(replacement),
+        );
+        disarmed.disarm();
+        let reacquired = fixture
+            .state
+            .transcode
+            .acquire_cluster_takeover_replacement(
+                &request,
+                7,
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("disarm releases the replacement gate synchronously");
+        drop(reacquired);
+    }
+
+    #[tokio::test]
+    async fn durable_activation_commit_cannot_straddle_serving_loss() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let authority = fence.authority();
+        let generation = authority.admit().expect("initial authority");
+        let entered = Arc::new(tokio::sync::Barrier::new(2));
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let mut commit = tokio::spawn({
+            let authority = authority.clone();
+            let entered = Arc::clone(&entered);
+            async move {
+                let transition = authority
+                    .commit_guard_before(
+                        generation,
+                        std::time::Instant::now() + Duration::from_secs(5),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "authority admitted commit could not acquire transition".to_owned(),
+                        )
+                    })?;
+                entered.wait().await;
+                release_rx.await.expect("release activation commit");
+                Ok::<_, ApiError>((7_u8, transition))
+            }
+        });
+        entered.wait().await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut commit)
+                .await
+                .is_err(),
+            "the HTTP wait may expire without cancelling the commit owner"
+        );
+        let loss = tokio::spawn(async move { fence.validation_set_ready(false).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !loss.is_finished(),
+            "serving loss waits until the bounded activation commit ends"
+        );
+        release_tx.send(()).expect("release commit");
+        let (result, transition) = commit
+            .await
+            .expect("commit task")
+            .expect("authority admitted commit");
+        assert_eq!(result, 7);
+        drop(transition);
+        loss.await.expect("serving loss task");
+
+        let stale = authority
+            .commit_guard_before(
+                generation,
+                std::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await;
+        assert!(
+            stale.is_none(),
+            "a stale activation cannot acquire a commit guard"
+        );
+    }
+
+    #[tokio::test]
+    async fn replayed_start_guard_owns_neither_worker_nor_original_claim() {
+        let dir = crate::test_tempdir().expect("state dir");
+        let session_id = "recovered-start-worker";
+        let fixture = HlsDeliveryFixture::publish(dir.path(), session_id).await;
+        let user = fixture
+            .state
+            .store
+            .create_user("replayed-guard", "hash", false)
+            .await
+            .expect("create guard user");
+        let request_id = "replayed-guard-request";
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let fingerprint = "a".repeat(64);
+        let now_ms = unix_ms();
+        assert!(matches!(
+            fixture
+                .state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "replayed-guard-player",
+                    &incarnation_id,
+                    now_ms,
+                    now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("claim original request"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        let guard = StartedSessionGuard::replayed(
+            fixture.state.clone(),
+            fixture.state.node_id.clone(),
+            incarnation_id.clone(),
+            session_id.to_owned(),
+            user.id,
+            request_id.to_owned(),
+            None,
+        );
+
+        drop(guard);
+        tokio::task::yield_now().await;
+        assert!(
+            fixture.worker_is_registered(session_id).await,
+            "a duplicate start never owns the recovered worker"
+        );
+        let retry_incarnation = uuid::Uuid::new_v4().to_string();
+        let retry_now_ms = unix_ms();
+        assert!(matches!(
+            fixture
+                .state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "replayed-guard-player",
+                    &retry_incarnation,
+                    retry_now_ms,
+                    retry_now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("inspect original claim"),
+            MediaSessionRequestClaim::InFlight {
+                incarnation_id: active,
+                ..
+            } if active == incarnation_id
+        ));
+        assert!(fixture
+            .state
+            .store
+            .fail_media_session_request(user.id, request_id, &incarnation_id, unix_ms())
+            .await
+            .expect("settle original claim"));
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session(session_id, "test")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_worker_request_guard_releases_an_owned_claim_for_immediate_retry() {
+        let (_app, state) = super::super::tests::test_app_with_state();
+        let user = state
+            .store
+            .create_user("request-guard", "hash", false)
+            .await
+            .expect("create request-guard user");
+        let request_id = "request-guard-attempt";
+        let incarnation_id = uuid::Uuid::new_v4().to_string();
+        let retry_incarnation = uuid::Uuid::new_v4().to_string();
+        let fingerprint = "b".repeat(64);
+        let now_ms = unix_ms();
+        assert!(matches!(
+            state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "request-guard-player",
+                    &incarnation_id,
+                    now_ms,
+                    now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("claim guarded request"),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+
+        drop(MediaSessionRequestGuard::new(
+            state.clone(),
+            user.id,
+            request_id.to_owned(),
+            incarnation_id,
+        ));
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        loop {
+            let retry_now_ms = unix_ms();
+            match state
+                .store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    "request-guard-player",
+                    &retry_incarnation,
+                    retry_now_ms,
+                    retry_now_ms.saturating_add(60_000),
+                )
+                .await
+                .expect("retry guarded request")
+            {
+                MediaSessionRequestClaim::Acquired { incarnation_id }
+                    if incarnation_id == retry_incarnation =>
+                {
+                    break;
+                }
+                MediaSessionRequestClaim::InFlight { .. }
+                    if tokio::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                other => panic!("guarded claim did not become retryable: {other:?}"),
+            }
+        }
+        assert!(state
+            .store
+            .fail_media_session_request(user.id, request_id, &retry_incarnation, unix_ms(),)
+            .await
+            .expect("settle retry claim"));
     }
 
     // ---- segment delivery, through the real response ------------------------
@@ -3267,6 +10075,332 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn completed_segment_eof_does_not_wait_for_a_blocked_producer_transition() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "nonblocking-eof").await;
+        let body = vec![11_u8; 12 * 1024];
+        tokio::fs::write(dir.path().join("seg00001.m4s"), &body)
+            .await
+            .expect("segment bytes");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("nonblocking-eof".to_owned(), "seg00001.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("segment response");
+
+        // Model an encoder replacement or hold/resume transition that owns
+        // the physical signal gate. EOF may commit lease/frontier state and
+        // queue flow work, but must not hold END_STREAM behind this gate.
+        let transition = fixture.hold_child_transition().await;
+        let delivered = tokio::time::timeout(
+            std::time::Duration::from_millis(250),
+            axum::body::to_bytes(response.into_body(), body.len() + 1),
+        )
+        .await
+        .expect("response EOF is independent of producer signaling")
+        .expect("segment body");
+        assert_eq!(delivered.len(), body.len());
+        drop(transition);
+    }
+
+    async fn install_vod_http_session(
+        fixture: &HlsDeliveryFixture,
+        base: &std::path::Path,
+        session_id: &str,
+    ) -> crate::transcode::MediaResponseOwner {
+        fixture
+            .state
+            .transcode
+            .install_vod_http_test_session(session_id, fixture.file_id(), base)
+            .await;
+        let publication = fixture
+            .state
+            .transcode
+            .vod_playlist(session_id)
+            .await
+            .expect("VOD fixture ownership");
+        let _playlist = publication.result.expect("VOD fixture playlist");
+        publication.owner
+    }
+
+    async fn vod_ready(
+        path: &std::path::Path,
+        advertised_len: u64,
+    ) -> crate::vodserve::SegmentReady {
+        crate::vodserve::SegmentReady {
+            file: tokio::fs::File::open(path)
+                .await
+                .expect("open VOD response object"),
+            len: advertised_len,
+            etag: format!("http-test-{advertised_len}"),
+        }
+    }
+
+    async fn vod_fetched_segment(fixture: &HlsDeliveryFixture, session_id: &str) -> Option<i64> {
+        let crate::transcode::HlsSessionInfo::Vod(status) = fixture
+            .state
+            .transcode
+            .hls_session_status(session_id)
+            .await
+            .expect("VOD fixture status")
+        else {
+            panic!("fixture was not VOD");
+        };
+        status.fetched_segment
+    }
+
+    #[tokio::test]
+    async fn vod_stream_finalizer_commits_only_exact_live_response_bodies() {
+        use futures_util::StreamExt;
+
+        let dir = crate::test_tempdir().expect("VOD HTTP directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "rolling-unused").await;
+        let headers = RelayHeaders::default();
+
+        // Exact EOF: lease and the segment frontier both commit.
+        let full_id = "vod-full";
+        let full_owner = install_vod_http_session(&fixture, dir.path(), full_id).await;
+        let full_path = dir.path().join("full.m4s");
+        let full_bytes = vec![1_u8; 24 * 1024];
+        tokio::fs::write(&full_path, &full_bytes)
+            .await
+            .expect("full VOD object");
+        let full = vod_segment_response(
+            &fixture.state,
+            full_id,
+            "seg00003.m4s",
+            &headers,
+            vod_ready(&full_path, full_bytes.len() as u64).await,
+            full_owner,
+        )
+        .await
+        .expect("full VOD response");
+        assert_eq!(
+            axum::body::to_bytes(full.into_body(), full_bytes.len() + 1)
+                .await
+                .expect("full VOD body")
+                .len(),
+            full_bytes.len()
+        );
+        assert_eq!(vod_fetched_segment(&fixture, full_id).await, Some(3));
+
+        // A strict subset Range proves demand and renews the lease, but does
+        // not claim that the client owns the complete immutable segment.
+        let range_id = "vod-range";
+        let range_owner = install_vod_http_session(&fixture, dir.path(), range_id).await;
+        let range_path = dir.path().join("range.m4s");
+        let range_bytes = vec![2_u8; 16 * 1024];
+        tokio::fs::write(&range_path, &range_bytes)
+            .await
+            .expect("range VOD object");
+        let touched_before = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(range_id)
+            .await
+            .expect("range touch before");
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        let range_headers = RelayHeaders {
+            range: Some("bytes=1024-2047".to_owned()),
+            if_range: Some(format!("\"http-test-{}\"", range_bytes.len())),
+            ..RelayHeaders::default()
+        };
+        let range = vod_segment_response(
+            &fixture.state,
+            range_id,
+            "seg00004.m4s",
+            &range_headers,
+            vod_ready(&range_path, range_bytes.len() as u64).await,
+            range_owner,
+        )
+        .await
+        .expect("range VOD response");
+        assert_eq!(range.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(
+            axum::body::to_bytes(range.into_body(), 2_048)
+                .await
+                .expect("range VOD body")
+                .len(),
+            1_024
+        );
+        assert!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(range_id)
+                .await
+                .expect("range touch after")
+                > touched_before
+        );
+        assert_eq!(vod_fetched_segment(&fixture, range_id).await, None);
+
+        // Dropping the body before EOF cannot renew or move the frontier.
+        let drop_id = "vod-drop";
+        let drop_owner = install_vod_http_session(&fixture, dir.path(), drop_id).await;
+        let drop_path = dir.path().join("drop.m4s");
+        let drop_bytes = vec![3_u8; 64 * 1024];
+        tokio::fs::write(&drop_path, &drop_bytes)
+            .await
+            .expect("drop VOD object");
+        let drop_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(drop_id)
+            .await
+            .expect("drop touch");
+        let dropped = vod_segment_response(
+            &fixture.state,
+            drop_id,
+            "seg00005.m4s",
+            &headers,
+            vod_ready(&drop_path, drop_bytes.len() as u64).await,
+            drop_owner,
+        )
+        .await
+        .expect("droppable VOD response");
+        let mut dropped = dropped.into_body().into_data_stream();
+        assert!(dropped.next().await.is_some_and(|chunk| chunk.is_ok()));
+        drop(dropped);
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(drop_id)
+                .await,
+            Some(drop_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, drop_id).await, None);
+
+        // A short object reaches storage EOF but not the promised response
+        // length, so it is not successful media delivery.
+        let short_id = "vod-short";
+        let short_owner = install_vod_http_session(&fixture, dir.path(), short_id).await;
+        let short_path = dir.path().join("short.m4s");
+        tokio::fs::write(&short_path, vec![4_u8; 1_024])
+            .await
+            .expect("short VOD object");
+        let short_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(short_id)
+            .await
+            .expect("short touch");
+        let short = vod_segment_response(
+            &fixture.state,
+            short_id,
+            "seg00006.m4s",
+            &headers,
+            vod_ready(&short_path, 2_048).await,
+            short_owner,
+        )
+        .await
+        .expect("short VOD response");
+        let mut short = short.into_body().into_data_stream();
+        assert_eq!(
+            short
+                .next()
+                .await
+                .expect("short VOD data")
+                .expect("readable short prefix")
+                .len(),
+            1_024
+        );
+        assert!(
+            short.next().await.is_some_and(|chunk| chunk.is_err()),
+            "advertised short read must terminate the HTTP body with an error"
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(short_id)
+                .await,
+            Some(short_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, short_id).await, None);
+
+        // A storage error terminates the body and discards the completion.
+        let error_id = "vod-error";
+        let error_owner = install_vod_http_session(&fixture, dir.path(), error_id).await;
+        let error_path = dir.path().join("unreadable-vod.m4s");
+        tokio::fs::create_dir(&error_path)
+            .await
+            .expect("unreadable VOD object");
+        let error_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(error_id)
+            .await
+            .expect("error touch");
+        let error = vod_segment_response(
+            &fixture.state,
+            error_id,
+            "seg00007.m4s",
+            &headers,
+            vod_ready(&error_path, 1).await,
+            error_owner,
+        )
+        .await
+        .expect("error VOD response");
+        let mut error = error.into_body().into_data_stream();
+        assert!(error.next().await.is_some_and(|chunk| chunk.is_err()));
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(error_id)
+                .await,
+            Some(error_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, error_id).await, None);
+
+        // Resolution before same-id reattachment carries the old incarnation;
+        // even exact EOF cannot touch the successor or its reader frontier.
+        let replaced_id = "vod-replaced";
+        let stale_owner = install_vod_http_session(&fixture, dir.path(), replaced_id).await;
+        let replaced_path = dir.path().join("replaced.m4s");
+        let replaced_bytes = vec![5_u8; 8 * 1024];
+        tokio::fs::write(&replaced_path, &replaced_bytes)
+            .await
+            .expect("replaced VOD object");
+        let stale_response = vod_segment_response(
+            &fixture.state,
+            replaced_id,
+            "seg00008.m4s",
+            &headers,
+            vod_ready(&replaced_path, replaced_bytes.len() as u64).await,
+            stale_owner,
+        )
+        .await
+        .expect("stale VOD response");
+        let _successor_owner = install_vod_http_session(&fixture, dir.path(), replaced_id).await;
+        let successor_touch = fixture
+            .state
+            .transcode
+            .vod_last_touch_for_test(replaced_id)
+            .await
+            .expect("successor touch");
+        assert_eq!(
+            axum::body::to_bytes(stale_response.into_body(), replaced_bytes.len() + 1)
+                .await
+                .expect("stale body remains readable")
+                .len(),
+            replaced_bytes.len()
+        );
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .vod_last_touch_for_test(replaced_id)
+                .await,
+            Some(successor_touch)
+        );
+        assert_eq!(vod_fetched_segment(&fixture, replaced_id).await, None);
+    }
+
+    #[tokio::test]
     async fn range_and_bodyless_segment_responses_keep_delivery_truth() {
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "range").await;
@@ -3292,15 +10426,79 @@ mod tests {
                 .len(),
             1_024
         );
+        let partial_delivery = fixture
+            .wait_for_delivery_projection("segment-range", None)
+            .await;
         assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert_eq!(fixture.last_renewal_kind().await, "segment-range");
+        assert_eq!(
+            fixture.fetched_segment(),
+            -1,
+            "a completed byte range proves demand but not a complete segment"
+        );
+        assert_eq!(partial_delivery.fetched_segment, None);
+
+        let mut full_span = HeaderMap::new();
+        full_span.insert(header::RANGE, "bytes=0-".parse().expect("full range"));
+        let full_span = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            full_span,
+        )
+        .await
+        .expect("full-span range response");
+        assert_eq!(full_span.status(), StatusCode::PARTIAL_CONTENT);
+        let full_span_etag = full_span
+            .headers()
+            .get(header::ETAG)
+            .cloned()
+            .expect("rolling response ETag");
+        assert_eq!(
+            axum::body::to_bytes(full_span.into_body(), body.len() + 1)
+                .await
+                .expect("full-span body")
+                .len(),
+            body.len()
+        );
+        let actor_delivery = fixture
+            .wait_for_delivery_projection("segment-range", Some(4))
+            .await;
+        assert_eq!(
+            fixture.fetched_segment(),
+            4,
+            "a Range response that contains every byte advances the frontier"
+        );
+        assert_eq!(actor_delivery.fetched_segment, Some(4));
+        assert_eq!(actor_delivery.pending_fetched_segment, Some(4));
+        let mut stale_if_range = HeaderMap::new();
+        stale_if_range.insert(
+            header::RANGE,
+            "bytes=1024-2047".parse().expect("stale conditional range"),
+        );
+        stale_if_range.insert(
+            header::IF_RANGE,
+            "W/\"stale-generation\"".parse().expect("weak If-Range"),
+        );
+        let complete = segment(
+            State(fixture.state.clone()),
+            AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
+            stale_if_range,
+        )
+        .await
+        .expect("stale If-Range response");
+        assert_eq!(complete.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(complete.into_body(), body.len() + 1)
+                .await
+                .expect("complete fallback body")
+                .len(),
+            body.len(),
+            "weak or stale If-Range must ignore Range"
+        );
+        let delivered_after_full_span = fixture.delivered_bytes();
 
         let mut conditional = HeaderMap::new();
-        conditional.insert(
-            header::IF_NONE_MATCH,
-            segment_etag("range", "seg00004.m4s", body.len() as u64)
-                .parse()
-                .expect("etag"),
-        );
+        conditional.insert(header::IF_NONE_MATCH, full_span_etag);
         let not_modified = segment(
             State(fixture.state.clone()),
             AxPath(("range".to_owned(), "seg00004.m4s".to_owned())),
@@ -3309,6 +10507,14 @@ mod tests {
         .await
         .expect("conditional response");
         assert_eq!(not_modified.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(
+            fixture.fetched_segment(),
+            4,
+            "the client has the cached object"
+        );
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, Some(4));
+        let renewal_before_rejection = fixture.last_renewal_kind().await;
+        let frontier_before_rejection = fixture.fetched_segment();
 
         let mut unsatisfiable = HeaderMap::new();
         unsatisfiable.insert(
@@ -3323,7 +10529,9 @@ mod tests {
         .await
         .expect("range response");
         assert_eq!(rejected.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-        assert_eq!(fixture.delivered_bytes(), 1_024);
+        assert_eq!(fixture.delivered_bytes(), delivered_after_full_span);
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before_rejection);
+        assert_eq!(fixture.fetched_segment(), frontier_before_rejection);
         assert!(
             fixture.settle().await.is_empty(),
             "valid partial and intentionally bodyless responses are not incomplete deliveries"
@@ -3351,6 +10559,31 @@ mod tests {
             4
         );
         assert_eq!(init_fixture.delivered_bytes(), 4);
+
+        let mut stale_init_headers = HeaderMap::new();
+        stale_init_headers.insert(header::RANGE, "bytes=0-3".parse().expect("init range"));
+        stale_init_headers.insert(
+            header::IF_RANGE,
+            "\"different-representation\""
+                .parse()
+                .expect("init If-Range"),
+        );
+        let complete_init = segment(
+            State(init_fixture.state.clone()),
+            AxPath(("init-range".to_owned(), "init.mp4".to_owned())),
+            stale_init_headers,
+        )
+        .await
+        .expect("init If-Range fallback");
+        assert_eq!(complete_init.status(), StatusCode::OK);
+        assert_eq!(
+            axum::body::to_bytes(complete_init.into_body(), 4_097)
+                .await
+                .expect("complete init body")
+                .len(),
+            4_096
+        );
+        assert_eq!(init_fixture.delivered_bytes(), 4_100);
         assert!(init_fixture.settle().await.is_empty());
     }
 
@@ -3364,6 +10597,8 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "abandoned").await;
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
         let body = vec![3_u8; 64 * 1024];
         tokio::fs::write(dir.path().join("seg00002.m4s"), &body)
             .await
@@ -3406,6 +10641,132 @@ mod tests {
             first.len() as i64,
             "only the bytes the client actually took are delivery"
         );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_before,
+            "a dropped response cannot renew the playback lease"
+        );
+        assert_eq!(
+            fixture.fetched_segment(),
+            frontier_before,
+            "a dropped response cannot advance the consumed frontier"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_resolved_before_retirement_cannot_commit_after_eof() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "retired-body").await;
+        let body = vec![7_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("retired-body".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("resolved response");
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session("retired-body", "test-retirement")
+                .await
+        );
+        let renewal_after_retirement = fixture.last_renewal_kind().await;
+        let frontier_after_retirement = fixture.fetched_segment();
+
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("already-authorized bytes")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_after_retirement,
+            "EOF from an obsolete incarnation cannot renew it"
+        );
+        assert_eq!(
+            fixture.fetched_segment(),
+            frontier_after_retirement,
+            "EOF from an obsolete incarnation cannot move its frontier"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stream_from_an_old_producer_attempt_cannot_advance_its_successor() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "old-attempt-body").await;
+        let body = vec![9_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("old-attempt-body".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("response opened on attempt zero");
+        assert_eq!(fixture.begin_producer_attempt().await, Ok(1));
+        let renewal_after_replacement = fixture.last_renewal_kind().await;
+
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), body.len() + 1)
+                .await
+                .expect("already-open predecessor bytes")
+                .len(),
+            body.len()
+        );
+        assert_eq!(
+            fixture.last_renewal_kind().await,
+            renewal_after_replacement,
+            "predecessor EOF cannot renew the successor attempt"
+        );
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
+    }
+
+    #[tokio::test]
+    async fn accepted_predecessor_eof_cannot_project_after_successor_reset() {
+        let dir = crate::test_tempdir().expect("segment directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "projection-race").await;
+        let body = vec![5_u8; 32 * 1024];
+        tokio::fs::write(dir.path().join("seg00003.m4s"), &body)
+            .await
+            .expect("segment bytes");
+        let response = segment(
+            State(fixture.state.clone()),
+            AxPath(("projection-race".to_owned(), "seg00003.m4s".to_owned())),
+            HeaderMap::new(),
+        )
+        .await
+        .expect("predecessor response");
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        fixture.pause_response_projection(Arc::clone(&pause));
+        let body_len = body.len();
+        let drain = tokio::spawn(async move {
+            axum::body::to_bytes(response.into_body(), body_len + 1)
+                .await
+                .expect("predecessor body")
+        });
+        pause.wait().await;
+        assert_eq!(
+            fixture.begin_producer_attempt().await,
+            Ok(1),
+            "successor admission resets the compatibility projection"
+        );
+        pause.wait().await;
+        assert_eq!(drain.await.expect("body task").len(), body_len);
+        assert_eq!(fixture.fetched_segment(), -1);
+        assert_eq!(fixture.actor_delivery().await.fetched_segment, None);
     }
 
     /// A storage error mid-body is its own classification, separate from an
@@ -3418,6 +10779,8 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("segment directory");
         let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable").await;
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
         // A directory opens like a file and reports a length, then fails its
         // first read with EISDIR — a storage failure the handler meets only
         // after the response headers are already on the wire.
@@ -3467,6 +10830,37 @@ mod tests {
             1,
             "one response produces one terminal classification"
         );
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before);
+        assert_eq!(fixture.fetched_segment(), frontier_before);
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_small_init_never_commits_lease_or_frontier() {
+        let dir = crate::test_tempdir().expect("init directory");
+        let fixture = HlsDeliveryFixture::publish(dir.path(), "unreadable-init").await;
+        tokio::fs::create_dir(dir.path().join("init.mp4"))
+            .await
+            .expect("unreadable init");
+        let renewal_before = fixture.last_renewal_kind().await;
+        let frontier_before = fixture.fetched_segment();
+
+        assert!(
+            segment(
+                State(fixture.state.clone()),
+                AxPath(("unreadable-init".to_owned(), "init.mp4".to_owned())),
+                HeaderMap::new(),
+            )
+            .await
+            .is_err(),
+            "the buffered init read must fail before a response is committed"
+        );
+        assert_eq!(fixture.last_renewal_kind().await, renewal_before);
+        assert_eq!(fixture.fetched_segment(), frontier_before);
+        assert!(fixture
+            .delivery_events(1)
+            .await
+            .iter()
+            .any(|event| event.reason.as_deref() == Some("storage_read_error")));
     }
 
     /// `exact_hls_context` opens `init.mp4` for the playlist generator, not
@@ -3724,7 +11118,7 @@ mod tests {
 
     /// Every playlist refusal, from the session's verdict to the wire.
     ///
-    /// All four used to be `ApiError::NotFound("transcode session")` — one
+    /// All five used to be `ApiError::NotFound("transcode session")` — one
     /// anonymous 404 that hls.js escalates to a fatal `levelLoadError`
     /// whatever caused it. The status now separates what the client can do
     /// about it, and the typed body carries the sentence a person reads.
@@ -3744,6 +11138,12 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "producer_failed",
                 "exit status: 1",
+            ),
+            (
+                PlaylistError::ProducerEnded("progress deadline elapsed".into()),
+                StatusCode::BAD_GATEWAY,
+                "producer_ended",
+                "already listed remains available",
             ),
             (
                 PlaylistError::SessionFailed("the encoder never produced any video".into()),
@@ -3770,6 +11170,7 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
             assert_eq!(json["code"], code);
             let message = json["message"].as_str().expect("message");
+            assert_eq!(err.retryable(), code == "startup_timeout", "{code}");
             assert!(
                 message.to_lowercase().contains(fragment),
                 "{code}: \"{message}\" should contain \"{fragment}\""

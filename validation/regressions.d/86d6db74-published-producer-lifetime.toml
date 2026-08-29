@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["86d6db74", "733efda1", "735fc4a3", "0c199213", "69fe9bb1", "d11fa5e1", "6e0701bd", "7fcf572f", "1fe8b57d", "f991e62f", "b683b600"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The retained playback-control and transcode regressions prove that actor-managed producers keep one advancing deadline after first media, freeze one stable failure proposal and segment frontier, reject later publication observations that would expand that frontier, retain admitted media while cancellation-safe exact-attempt owners reap the child and release capacity, distinguish expected executor settlement from loss, classify successful ENDLIST completion, and return typed producer_ended for full, range, and not-modified requests beyond the frozen frontier without imposing Debug bounds on the move-only response authorization. Retry-successor regressions require exact startup, advancing, nonzero-exit, and completion-classification evidence to survive the predecessor DecisionApplied overlap while stale predecessors and a second retry remain fenced."

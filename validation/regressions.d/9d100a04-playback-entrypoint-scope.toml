@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["9d100a04", "021a44ee"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The rolling-owner catalog's named-entrypoint table scans only transcode.rs, so it cannot own the decision poll implemented in playback_control.rs. Removing that misplaced row restores the source-local contract; whole-module exact-count sentinels still cover PollProducerDecision, RollingDecisionTransport, RollingDecisionWake, and RollingSessionExecutorInbox."

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["1dd06544", "75b60468"]
+points = ["cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained schema-parity unit contract requires the immutable Hiqlite v12 and v13 statement sets to create the exact SQLite v30 and v31 objects. The three-voter Store contract injects malformed partial v12 and v13 objects, proves each version's DDL and marker roll back together, adopts a correctly shaped object stranded by the old non-transactional release, requires v11 to stop durably at v12 when the following step fails, and then resumes the repaired v12-to-v13 upgrade without losing unrelated replicated state. Reverting either correction restores non-transactional batches or removes coverage for deployed partial-state recovery."

@@ -36,40 +36,14 @@ impl Client {
     pub async fn backup(&self) -> Result<(), Error> {
         self.rate_limit_db().await?;
 
-        match self.backup_execute().await {
-            Ok(res) => Ok(res),
-            Err(err) => {
-                let is_leader = self.is_leader_db_with_state().await.is_some();
-                error!(
-                    "Error during backup: {}\n current leader: {}\nis this leader: {}",
-                    err,
-                    self.inner.leader_db.read().await.0,
-                    is_leader
-                );
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    // TODO sometimes the backup task can get stuck here -> leader not updating properly?
-                    let is_leader = self.is_leader_db_with_state().await.is_some();
-                    error!(
-                        "was leader error during backup: {}\n current leader: {}\nis this leader: {}",
-                        err,
-                        self.inner.leader_db.read().await.0,
-                        is_leader
-                    );
-                    self.backup_execute().await
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        let ts = Utc::now().timestamp();
+        self.retry_db_after_leader_change(|| self.backup_execute(ts))
+            .await
     }
 
     #[cold]
-    async fn backup_execute(&self) -> Result<(), Error> {
+    async fn backup_execute(&self, ts: i64) -> Result<(), Error> {
         let current_leader = self.inner.leader_db.read().await.0;
-        let ts = Utc::now().timestamp();
 
         if let Some(state) = self.is_leader_db_with_state().await {
             let res = state

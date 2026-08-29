@@ -71,6 +71,30 @@ pub struct WalInspection {
     pub observations: Vec<String>,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WalLockState {
+    Missing,
+    UnlockedSentinel,
+    Locked,
+}
+
+/// Probe the actual advisory lock. A sentinel's presence alone is never
+/// treated as ownership.
+pub fn inspect_lock(base_path: &Path) -> Result<WalLockState, Error> {
+    let base = base_path
+        .to_str()
+        .ok_or(Error::InvalidPath("WAL path is not valid UTF-8"))?;
+    if !LockFile::exists(base)? {
+        return Ok(WalLockState::Missing);
+    }
+    if LockFile::is_locked(base)? {
+        Ok(WalLockState::Locked)
+    } else {
+        Ok(WalLockState::UnlockedSentinel)
+    }
+}
+
 /// Decode only the leading state-machine `last_applied_log_id` field. The
 /// remaining SQLite metadata contains membership addresses and is never
 /// returned by the diagnostic surface.
@@ -83,10 +107,7 @@ pub fn decode_state_machine_last_applied(
 
 /// Inspect a stopped Hiqlite `logs/` directory without changing it.
 pub fn inspect_logs_dir(base_path: &Path) -> Result<WalInspection, Error> {
-    let base = base_path
-        .to_str()
-        .ok_or(Error::InvalidPath("WAL path is not valid UTF-8"))?;
-    if LockFile::exists(base)? && LockFile::is_locked(base)? {
+    if inspect_lock(base_path)? == WalLockState::Locked {
         return Err(Error::Locked("refusing to inspect a live-locked WAL directory"));
     }
 

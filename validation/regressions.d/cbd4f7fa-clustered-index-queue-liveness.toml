@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["cbd4f7fa"]
+points = ["playback.pipeline", "persistence.upgrades", "cluster.auth"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The retained queue regressions require a ready fifth-attempt artifact to receive a fresh repair budget and fill all 4,096 active slots with unreadable work before advancing beyond the eligibility window, admitting, and claiming a later readable exact key. Both durable backends share the same bounded expiry and rediscovery-resurrection statements, while the request path distinguishes queued work from deferred admission."

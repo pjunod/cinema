@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["411bf818", "4d38a084"]
+points = ["core.media", "cluster.auth", "persistence.upgrades"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "database-upgrades"]
+reason = "The three-voter Store migration fixtures reconstruct exact historical schemas before lowering their markers, retain fail-closed production ALTER behavior, and prove v14 acknowledgement objects plus v16/v17 session columns at every completed upgrade."

@@ -44,10 +44,11 @@ command in its error. Once `<PLURX_DATA>/hiqlite/activation.json` exists, the
 replicated target is authoritative; do not replace `plurx.db` and assume you
 have restored current state.
 
-M6 owns the quorum-aware replicated backup, restore, and older-binary rollback
-runbook. Until that work lands, a post-activation rollback means roll forward
-with an M2-capable binary against the retained active target. The commands
-below are only for the pre-activation SQLite case.
+There is no automated quorum-aware backup, restore, or permanent-majority
+recovery path for an activated cluster. No active milestone owns one. A
+post-activation code rollback therefore means rolling forward with a binary
+that supports the active replicated schema, against the retained Hiqlite
+target. The commands below are only for the pre-activation SQLite case.
 
 ### Upgrading an activated v5, v6, v7, or v8 cluster to v9
 
@@ -88,9 +89,10 @@ of import, so each new snapshot is another copy of the same pre-activation
 state — the redeploy captures nothing written since. Restoring one does not
 roll the node back; it only makes a stale database sit beside the authoritative
 target, and `plurxd` refuses to import it precisely so that mistake cannot pass
-silently (see the refusal below). Capturing current replicated state is M6's
-quorum-aware backup work and does not exist yet; until it does, treat
-`<PLURX_DATA>/hiqlite/` itself as the thing to copy while the daemon is stopped.
+silently (see the refusal below). Capturing current replicated state as a
+portable backup does not exist. Treat each node's
+`<PLURX_DATA>/hiqlite/` directory as evidence to preserve while that daemon is
+stopped; do not treat one copied directory as a supported single-node restore.
 
 `plurxd` records `<PLURX_DATA>/hiqlite-activated.json` when it activates. If the
 replicated target is missing while that file is present, startup refuses rather
@@ -287,9 +289,11 @@ read when you open the tab, not on every Settings visit.
 | `Reconfiguration in progress — not redundant` | Two voters. Both machines are required for every write and every membership change, so this survives no failure — read the same warning in the table above. Add a third node. |
 | `Redundant — N voters` | Three or more voters. The panel names the majority required and how many nodes may be down. |
 | `… is a learner` appended to any of the above | One or more admitted non-voting members. The sentence is appended, never substituted: a learner changes none of the quorum arithmetic in front of it. |
+| `Leader election required` | A voter majority is reachable, but no leader is elected. Normal mutations stay locked; a bounded force-election request is available when a caught-up voter can campaign. |
+| `Recovery required` | The latest committed heartbeats do not prove a reachable voter majority. Force election and membership changes are unavailable because neither can bypass quorum. |
 
-The node table leads with each machine's short OS hostname, labels the current
-leader beside it, then shows the advertised host and stable node id underneath.
+The node cards lead with each machine's short OS hostname, label the current
+leader beside it, then show the advertised host and stable node id underneath.
 The advertised host may be a DNS name or IP; loopback is written `localhost`
 instead of `127.0.0.1`, and listener ports stay private. A native daemon reads
 the hostname from the OS. A container should set `PLURX_NODE_HOSTNAME` to the
@@ -301,6 +305,166 @@ the durable one the node was admitted under, not a phase of joining; a learner
 keeps it for as long as it is a member. Read the nested replication status for
 leader and apply-lag health. Media paths and token material are not in that
 payload and are not shown.
+
+Every node card starts expanded and combines two sources without pretending
+they are the same: **Membership** is committed roster state, while
+**Operations** is the bounded direct observation from that process. Collapse a
+card when you only need its hostname, role, leadership, and direct-readiness
+badge; **Collapse all** and **Expand all** change every card together. The
+cluster-wide operational verdict and its quorum/build/sample facts stay above
+the cards because they authorize one cluster action, not one machine in
+isolation. **Watch state** and **Capacity** are labeled facts above that verdict,
+not unlabeled notes after the roster.
+
+### Planned node maintenance — fence, drain, update, resume
+
+Use **Enter maintenance** for an update or reboot. Do not use **Remove** or
+**Leave this cluster**: those permanently tombstone the node identity, while
+maintenance is a reversible replicated fence.
+
+The server accepts maintenance only when every active member proves it runs a
+binary that understands the fence, no join, promotion, removal, or other
+maintenance is pending, and taking the target offline still leaves the current
+reachable voter quorum. This is based on live reachability, not only the
+configured voter count: a three-voter cluster with one voter already down also
+refuses maintenance on either survivor. A one-voter cluster may enter
+maintenance with an expected service outage.
+
+Open the exact target backend before choosing **Enter maintenance**. In a
+multi-voter cluster, the target-specific maintenance preflight requires fresh
+direct evidence from the voter set and proves that fencing this target still
+leaves the current quorum. Unlike the stricter rollout candidate, it may approve
+the current leader or a node with existing streams: the maintenance operation
+first fences new admissions, hands leadership off when needed, and lets that
+existing work drain. A stable caught-up learner may also enter maintenance
+without subtracting a vote. A directly observed one-voter server is the explicit
+service-outage exception. Sending either action through another cluster node or
+a non-sticky load balancer is refused because only the target can linearize its
+own work admissions and inspect its local process registries.
+
+Before that local fence begins, the target atomically acquires the same
+replicated planned-outage lease used by ordinary restart preparation. Only one
+node can hold it. A maintenance claimant converts its exact lease into the
+durable maintenance row in one replicated transaction after any leader
+handoff; failure releases the claim, while heartbeat cleanup expires a claim
+left by a crashed caller. That cleanup is a replicated schema trigger, so even
+a previous-release heartbeat ages out an expired claim after a full rollback.
+Replicated schema guards also reject lifecycle-begin writes from a
+previous-release join, promotion, or removal coordinator while the lease
+exists, so the exclusion remains effective throughout a rolling upgrade or
+rollback without permanently blocking later recovery.
+
+The workflow in **Maintenance & leadership** is the authoritative checklist.
+The **Operational readiness** summary above the node cards remains the stricter
+direct-peer restart verdict; each expanded node card holds that machine's WAL,
+snapshot, protocol, media, and build evidence:
+
+1. The target blocks new local admissions and waits for any admission already
+   in flight to publish or fail. Existing HLS, direct streams, publication, and
+   offline preparation remain owned and may finish; maintenance never kills
+   them implicitly.
+2. If the target is leader, a reachable zero-lag follower campaigns and a
+   stable successor is observed before the maintenance row commits.
+3. The target reads the replicated row from its local applied state, fences
+   new HTTP work and cluster-wide singleton jobs, refuses media placement, and
+   acknowledges that fence in its next heartbeat.
+4. The checklist uses direct process evidence for every local owner in addition
+   to replicated media-session leases. It becomes update/reboot ready only after
+   the existing work from step 1 has drained.
+5. **Ready to update or reboot** means the target acknowledged the fence, is
+   not leader, is reachable with zero apply lag, and the directly observed
+   process owns no local work or admission in flight. You may then update or
+   reboot it.
+6. After restart, wait for a fresh heartbeat and zero apply lag, then choose
+   **Resume service on that exact backend**. The target must directly prove its
+   current maintenance acknowledgement and empty local workload; another node
+   cannot clear the fence while the target is powered off. The delete itself
+   atomically rechecks acknowledgement, heartbeat and progress freshness,
+   current-binary capability, zero lag, and zero live replicated sessions.
+   If recovery made the target leader, the same operation first hands
+   leadership to a reachable caught-up voter and waits for the successor.
+
+The maintenance row is replicated and survives the target process restarting.
+`GET /readyz` answers `503 maintenance`, new application work answers the typed
+`node_maintenance` refusal, and the target remains a Raft member. Losing the UI
+or restarting the process cannot silently reopen it. A binary that predates
+maintenance cannot publish the transaction-local heartbeat intent; replicated
+SQLite rejects that heartbeat while the fence exists, so an accidental code
+rollback fails closed instead of serving through maintenance.
+
+The admin API is the same operation:
+
+```bash
+# Use the target's direct origin, not a load-balanced cluster origin.
+# Poll both /cluster/nodes and /cluster/status until the maintenance checklist is ready.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  "$PLURX_TARGET/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+
+# Resume from the same running target after direct local drain proof is empty.
+curl -fsS -X DELETE \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  "$PLURX_TARGET/api/v1/cluster/nodes/$PLURX_NODE_ID/maintenance"
+```
+
+### Force election — a campaign request, never a quorum override
+
+**Force election** asks one reachable, caught-up voter to campaign. When a
+leader exists, the panel requires a stable different leader before reporting
+success. When the cluster is leaderless but still has a reachable majority,
+the same action can start the election needed to restore writes.
+
+The operation is refused when no voter majority is reachable, no zero-lag
+candidate exists, maintenance or another node lifecycle is pending, or every
+active node has not proved the election capability. Raft chooses the winner;
+the selected campaign target is not a promised successor.
+
+```bash
+# Request one bounded campaign; the response is the refreshed cluster status.
+curl -fsS -X POST \
+  -H "Authorization: Bearer $PLURX_ADMIN_TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://plurx.example/api/v1/cluster/election
+```
+
+### Lost-quorum recovery — restore an original voter
+
+The Recovery workspace makes one distinction before offering an action:
+
+```text
+ voter majority reachable? ── yes ─▶ leader elected? ── no ─▶ Force election
+          │ no                         │ yes
+          ▼                            ▼
+ restore an original voter        normal operations
+ with its original identity
+          │
+          ▼
+ permanent majority lost? ──▶ preserve every node; no supported reconfigure
+```
+
+If quorum is lost, keep every surviving node and data directory unchanged.
+Restore any missing original voter with its existing data directory and node
+identity. Do not initialize a replacement cluster over those files, delete
+membership records, copy one voter's Raft directory onto another identity, or
+repeatedly press force election: none of those actions can create the missing
+majority.
+
+If the recovery began during planned maintenance, the Recovery workspace keeps
+that maintenance target and its checklist visible. Restore that original
+fenced voter first. Force election, join, promotion, and removal remain disabled
+until the running target has recovered and maintenance is safely cleared from
+the target itself.
+
+**Permanent majority loss is not recoverable by this release.** There is no
+force-reconfigure or "form new cluster" button. Stop writes, copy every
+surviving data directory independently, record node IDs and Raft IDs, and keep
+the originals untouched. **Export support bundle** downloads the bounded,
+redacted all-voter status, cluster log, README, and checksum manifest;
+**Download roster snapshot** captures the current browser roster and loaded log.
+Both are evidence for repair work, not restore artifacts.
 
 The **Cluster log** under the roster holds membership, Hiqlite, and Raft events
 in its own 2,000-line process-local ring. Those events do not consume the
@@ -1428,8 +1592,9 @@ curl -fsS "$PLURX_NODE/api/v1/cluster/media" \
 For a rolling restart, remove one voter from new load-balancer traffic without
 removing it from Raft membership. Keep its existing connections draining and
 wait for `local_active_sessions` to reach zero, then restart that same node and
-data directory. Note what that counter is: **transcode and remux sessions on
-this node only.** A direct-play viewer holds no session, so a node serving
+data directory. Note what that counter is: **HLS/transcode sessions,
+progressive remuxes, and active offline preparations on this node only.** A
+direct-play viewer holds no process-owned session, so a node serving
 nothing but direct play reports zero while a dozen people are watching — drain
 those by connection count at the load balancer, not by this number. Re-admit it only after `/readyz` succeeds and the media status
 shows the current protocol. Advance to the next voter only then. The permanent
@@ -1508,10 +1673,288 @@ backup-to-fresh-cluster procedure in this release. A minority cannot safely
 declare itself the new cluster without proving the old majority is dead; doing
 so would create split brain if those machines returned. Preserve every
 surviving data directory and secret, keep the nodes stopped, and recover the
-original majority from host/storage backups. Quorum-aware backup/restore and a
-deterministic one-node disaster-recovery drill remain the explicit M6 work in
-[CLUSTERING-PLAN.md](CLUSTERING-PLAN.md).
+original majority from host/storage backups. The offline WAL commands below
+collect and preserve bounded evidence, but deliberately do not apply a recovery
+plan or turn one surviving voter into a new cluster.
 
+### Cluster node status and guarded voter restarts
+
+Open **Settings → Cluster** for the cluster-wide view. Each node card keeps the
+authoritative committed membership beside a direct, authenticated process
+observation, while the summary above the cards gives one conservative restart
+verdict. An ordinary SQLite server continues to show **Not clustered** and has
+no direct operations evidence.
+
+The verdict is phrased as **Ready to restart one voter** or **Do not restart
+another voter**. It is an authorization for one rolling-restart step, not a
+general health badge. An unreachable voter stays visible as unreachable and
+never becomes healthy by omission. Expand a node card to see the IDs and
+protocol range that were checked, Raft term and indices, WAL durability and
+recovery observations, recent snapshot outcomes, and media-drain details.
+
+The command-line view uses the same aggregate and verdict. Point it at one
+specific backend, not a load-balancer address, because restart preparation is
+bound to the backend that answered:
+
+```bash
+export PLURX_NODE=https://plurx-a.example.net
+export PLURX_ADMIN_TOKEN_FILE=/run/secrets/plurx-admin-token
+
+plurxd cluster status \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+The token file must be a small, owner-only regular file and must not be a
+symlink. There is no raw-token argument. Use `--json` when another tool needs
+the exact API document.
+
+Restart preparation acquires one replicated, expiring planned-outage lease
+before the target fences local admissions. Maintenance uses the same lease, so
+two safe observations on different nodes cannot turn into two simultaneous
+reboots. Cancellation releases the restart claim; a failed maintenance request
+releases its exact claim; normal heartbeats remove expired claims after a
+caller crash. Reboot commands are shown only while both the replicated claim
+and the target's local drain window are active. Time spent committing the
+replicated claim consumes the requested preparation window: the local fence
+and its advertised deadline are capped at the committed lease expiry and the
+request is refused if no safe time remains.
+
+**How to read it:** every committed voter must have `PROCESS live`, a ready
+serving fence, one agreed leader and term, zero apply lag, a live owned WAL lock,
+and a durable WAL index equal to its last log index. The bottom of the report is
+the decision:
+
+```text
+safe_to_restart_one: true
+candidate_node_id: plurx-a
+```
+
+Any `BLOCKER <code> [<node>]: ...` line makes the answer no. A
+`WARNING mixed_builds` is expected only between steps of a rolling update; it
+does not hide a blocker. Exit status is stable: `0` means one named voter is
+safe, `1` means the complete evidence says no, `2` means configuration or
+authentication is invalid, and `3` means the evidence is incomplete or the
+response is incompatible.
+
+#### Daily cluster check
+
+1. Open **Settings → Cluster**, press **Refresh status**, and read the server
+   verdict before reading individual ready badges.
+2. Confirm the committed voter count and quorum, one leader and term, maximum
+   apply lag of zero, and a fresh oldest sample.
+3. Confirm every voter reports an open, locked, error-free WAL whose durable
+   index matches its last log index. Read any recorded unclean start or recovery
+   result; a recovered old event is evidence, while a current WAL error is a
+   blocker.
+4. Confirm recent snapshot build/install outcomes are successful when present.
+   "None observed" is not by itself corruption; pair it with Raft/WAL state and
+   the snapshot counters in `/metrics`.
+5. Confirm active owned media sessions and the proxy's direct-play connection
+   count are understood before maintenance.
+
+Raw checks remain useful when the admin page cannot load:
+
+```bash
+curl -fsS "$PLURX_NODE/healthz"
+curl -fsS "$PLURX_NODE/readyz"
+curl -fsS "$PLURX_NODE/api/v1/cluster/nodes" \
+  -H "Authorization: Bearer $(<"$PLURX_ADMIN_TOKEN_FILE")" | jq .
+curl -fsS "$PLURX_NODE/metrics" | \
+  rg 'plurx_(cluster|db_snapshot|replication|serving)'
+```
+
+`/healthz` proves only that the process answers. `/readyz` proves only this
+backend's serving fence. The roster and metrics do not replace the direct
+all-voter aggregate, so none of these fallbacks authorizes a restart alone.
+
+#### Rolling a code update across voters
+
+Run one voter at a time. Never start a second step merely because the first
+process exited successfully.
+
+**Preflight**
+
+1. Deploy the new image or binary so it is available to the supervisor, but do
+   not restart a voter yet.
+2. Run `plurxd cluster status` against the exact backend. Stop unless it exits
+   `0` and names that backend as `candidate_node_id`.
+3. If the report names another follower, connect directly to that node and run
+   the preflight again. Do not use the leader as a convenient substitute.
+
+**Prepare and drain one voter**
+
+```bash
+plurxd cluster prepare-restart \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+This repeats the preflight, blocks new mutable media admissions on only that
+process, and polls until owned sessions and in-flight admissions reach zero.
+Existing playback/control requests continue while they drain. A new admission
+receives retryable HTTP `503`, code `restart_drain_active`, and `Retry-After: 5`.
+Direct-play connections do not own a Plurx session, so drain them at the proxy
+before using the printed supervisor command.
+
+When the process is drained the CLI prints the exact supported choices, for
+example:
+
+```text
+Run exactly one supervisor command on plurx-a:
+  docker-compose  docker compose up -d --no-deps --force-recreate plurxd
+  systemd          sudo systemctl restart plurxd
+  ansible          ansible-playbook deploy.yml --limit <this-host>
+```
+
+Run the one command matching the installation. Do not run all three. The
+preparation expires after 15 minutes; expiration re-enables admissions rather
+than leaving a forgotten drain behind. If maintenance is abandoned, cancel it
+explicitly:
+
+```bash
+plurxd cluster cancel-restart \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE"
+```
+
+**Post-check**
+
+Wait for that same backend's `/readyz` to return success, then rerun `cluster
+status`. It must be directly observed on the intended build, at zero lag, with
+its WAL open and durable. The verdict must again name exactly one eligible
+follower before advancing. Stop the rollout on any unreachable/invalid row,
+leader or term disagreement, non-zero/unknown lag, WAL error, snapshot failure,
+protocol incompatibility, pending member removal, or an already-active restart
+preparation.
+
+#### Loss of leader or quorum
+
+Leader loss with a surviving majority should converge to one new leader and
+term. Keep the surviving voters online, stop maintenance, and watch Operations
+or `cluster status`; do not restart another voter while
+`leader_term_disagreement`, `voter_not_ready`, or `raft_sample_stale` is
+present. Preserve a support bundle if agreement does not return within the
+normal election window.
+
+Quorum loss is different: reads and writes that require a fresh serving proof
+are fenced. Restore an original voter with its original data directory,
+`membership.json`, and cluster secrets. Do not delete a lock file, edit Raft
+metadata, restore one node over another, force membership, or wipe/rejoin a node
+while the old majority might return. A permanently lost majority is an
+escalation; this build has no force-reconfigure path.
+
+#### Stalled or failing WAL and snapshots
+
+Start with the online evidence. Expand the affected node card and preserve a
+support bundle. `wal_not_healthy` means the live WAL snapshot is absent, not
+open, does not own the real lock, has a current error, or has not made its last
+log index durable. A recent failed snapshot outcome is evidence to retain; it
+does not authorize hand-editing a snapshot or WAL file.
+
+Only after the aggregate says the majority remains healthy may you stop one
+affected follower and use the offline commands against its exact data
+directory:
+
+```bash
+export PLURX_DATA=/var/lib/plurx
+export PLURX_EVIDENCE=/srv/plurx-evidence/plurx-a-$(date -u +%Y%m%dT%H%M%SZ)
+
+plurxd wal status --data-dir "$PLURX_DATA" --json
+plurxd wal verify --data-dir "$PLURX_DATA" --deep
+plurxd wal backup --data-dir "$PLURX_DATA" --output "$PLURX_EVIDENCE"
+plurxd wal recovery-plan --data-dir "$PLURX_DATA" --json
+```
+
+`wal status` probes the actual advisory lock. If a process owns it, the command
+does not walk or fingerprint live WAL files and exits `1`. `verify` reads every
+bounded retained record and checks metadata/header/CRC/index invariants without
+opening the store. `backup` is additive: the output directory must not exist,
+must be outside the source, and receives a checksum manifest. It refuses
+symlinked roots, oversized input, and unproved free space.
+
+`recovery-plan` binds its recommendation to the stable node and Raft IDs, the
+real lock state, and source fingerprints. Possible actions include
+`RESTART_NORMALLY`, `BACKUP_THEN_REMOVE_STALE_UNLOCKED_SENTINEL`,
+`BACKUP_THEN_RUN_EXISTING_INTEGRITY_RECOVERY`,
+`RESTORE_THIS_NODE_FROM_AUTHENTICATED_PEER`, and
+`STOP_AND_ESCALATE_MAJORITY_AT_RISK`. Treat the last two as stop conditions,
+not automated repair.
+
+There is intentionally **no `plurxd wal apply-plan` command in this build**.
+Do not translate a plan into lock deletion, truncation, restore, or membership
+mutation without a separately reviewed recovery procedure. The web UI and
+online API never perform raw WAL mutation.
+
+#### Member loss and replacement
+
+For a temporary loss, bring the same member back with the same stable node ID,
+Raft ID, data directory, and secrets. Readdressing the host or changing its
+container identity does not make it a new member as long as the durable
+identity and storage follow it. Verify its advertised URL, wait for `/readyz`,
+and require zero lag before maintenance continues.
+
+For a permanently lost follower while the original majority is healthy, use
+the normal committed removal flow, preserve the lost member's storage as
+evidence, then join a genuinely fresh member with a fresh token. Never copy a
+survivor's data directory to manufacture that member. A pending removal is a
+restart blocker until it completes or is resolved.
+
+If the lost node is the only surviving copy of anything, or if removing it
+would lose quorum, stop. Restore the original member from host/storage backup
+instead of attempting a replacement through the minority.
+
+#### Single-node recovery
+
+"Single-node recovery" means recovering one failed voter while a healthy
+majority still exists; it does not mean promoting one isolated voter into a new
+cluster.
+
+1. Prove the other voters form a ready majority and agree on leader and term.
+2. Stop the failed voter and preserve an additive WAL backup.
+3. Verify that `membership.json` names the expected node and Raft IDs.
+4. If status and verification say `RESTART_NORMALLY`, restart the same node and
+   storage. If the plan requires existing integrity recovery, peer restore, or
+   escalation, stop and review the captured evidence before any mutation.
+5. Require `/readyz`, direct observation, zero lag, a durable live WAL, and a
+   successful current snapshot path before returning it to the load balancer.
+
+Never run offline diagnostics concurrently with its daemon, and never reuse
+the procedure against two stopped voters at once.
+
+#### Container recreate, readdress, wipe, and rejoin
+
+| Change | Safe treatment |
+|---|---|
+| Recreate the container with the same persistent data mount and secrets | A rolling restart. Use restart preparation, recreate only the service, then perform the post-check. |
+| Change host/IP/DNS while preserving the same data and stable identity | Readdress the same member. Update routing/advertised configuration, preserve storage and secrets, and verify direct reachability. |
+| Replace lost compute while restoring that member's own data backup | Recover the same member. Confirm node/Raft IDs before it contacts the cluster. |
+| Wipe storage after a committed permanent removal | Join a new member with a fresh token. The old tombstoned directory must not return. |
+| Wipe or rejoin to cure an unexplained WAL/snapshot fault | Refused operationally. Preserve evidence and diagnose first; never erase the only path to the original majority. |
+
+#### Escalation artifacts
+
+Create the bounded, redacted online bundle before logs rotate:
+
+```bash
+plurxd cluster support-bundle \
+  --server "$PLURX_NODE" \
+  --token-file "$PLURX_ADMIN_TOKEN_FILE" \
+  --output "./plurx-cluster-support-$(date -u +%Y%m%dT%H%M%SZ).zip"
+```
+
+The output path must not already exist. The ZIP contains the aggregate status,
+a bounded redacted cluster log, a README, and a manifest of sizes and SHA-256
+hashes. It deliberately drops credential-shaped lines and path-bearing log
+text. Inspect the bundle before sharing it; redaction reduces exposure but does
+not turn operational state into public data.
+
+For a stopped-node WAL incident, attach the additive evidence directory and
+JSON outputs from `wal status`, `verify`, and `recovery-plan`. Also record the
+exact build/image digest, supervisor, topology and voter count, first observed
+time, last known successful rollout step, and whether the original majority can
+still be restored. Never attach admin token files, cluster secrets, raw media
+paths, or a copied live data directory.
 **Gracefully remove the node you are connected to.** Settings → Cluster →
 **Leave this cluster** calls the same admin-only operation. It resolves the
 node's offline work and coordinates a safe membership change with the

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7f36c341"]
+points = ["cluster.membership", "cluster.operations", "web.experience"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth", "security-boundaries", "web-membership", "operations-contract", "history-regressions"]
+reason = "The correction closes the adversarial review's safety gaps across the complete operator lifecycle: degraded voter arithmetic now preserves a live quorum, maintenance entry reuses the direct restart drain and admission fence, maintenance exit requires the target's fresh acknowledgement and zero-work inventory atomically, every membership begin excludes active maintenance, and the Cluster tab keeps recovery and maintenance constraints visible together. Rust unit and HTTP tests exercise the transaction boundaries and direct-node contract, web-membership executes the shipped operator UI, cluster-auth and security-boundaries retain the multi-node authority surface, operations-contract retains the documented recovery workflow, and history-regressions keeps this corrective commit tied to that evidence."

@@ -28,10 +28,11 @@ jobs:
   # cleared before any dependency moves into this audited workspace.
   workspace:
     name: RustSec workspace advisory scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Restore patched crates to registry provenance for advisory matching
         run: scripts/vendor-audit-lock --output target/vendor-audit/Cargo.lock
       # v2.0.0, pinned so the security gate cannot move without review.
@@ -51,10 +52,11 @@ jobs:
 
   fuzz:
     name: RustSec fuzz advisory scan
-    runs-on: ubuntu-latest
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
       # v2.0.0, pinned so the security gate cannot move without review.
       - uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998
         with:

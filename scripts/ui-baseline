@@ -492,6 +492,26 @@ class Fail(Exception):
     """A route did not render. Collected, reported, and turned into exit 1."""
 
 
+class RetryableRootAttach(Fail):
+    """A fresh page never attached its route root before the bounded deadline."""
+
+
+def root_attach_failure(name, container, problems):
+    """Preserve semantic boot evidence; otherwise classify renderer loss."""
+    if problems:
+        return Fail(f"{name}: " + "; ".join(problems[:5]))
+    return RetryableRootAttach(
+        f"{name}: {container} did not attach before the route deadline"
+    )
+
+
+def should_retry_capture(route, error, attempt, attempts):
+    """Whether this exact failed capture owns one more fresh-context attempt."""
+    return attempt + 1 < attempts and (
+        bool(route.get("player")) or isinstance(error, RetryableRootAttach)
+    )
+
+
 # ---- environment ----------------------------------------------------------
 
 
@@ -756,21 +776,35 @@ class SelfHost:
     def seed(self):
         self.token = api(self.base_url, "/setup", method="POST",
                          body={"username": SEED_USER, "password": SEED_PASSWORD})["token"]
+        # Keep the item-detail fixture in one deliberate state. The default-on
+        # background indexer races the browser sweep: fast hosts render
+        # "Indexed", while slower hosts render "Index pending" from the exact
+        # same database. Focused API and web-policy tests cover both states;
+        # this structural golden needs one reproducible one.
+        api(self.base_url, "/settings", self.token, "PUT",
+            {"vod_index_mins": 0})
         libs = []
         for name, kind, share in LIBRARIES:
-            libs.append(api(self.base_url, "/libraries", self.token, "POST", {
+            library = api(self.base_url, "/libraries", self.token, "POST", {
                 "name": name, "kind": kind,
                 "paths": [str(self.media_dir / share)], "anime": False,
-            }))
-        deadline = time.time() + 300
-        while time.time() < deadline:
-            status = api(self.base_url, "/scan/status", self.token)
-            done = [status.get(str(l["id"])) for l in libs]
-            if all(s and not s["running"] and s.get("last_scan") for s in done):
-                break
-            time.sleep(0.4)
-        else:
-            raise Fail("the seeded libraries never finished scanning")
+            })
+            libs.append(library)
+            # File ids are allocated by concurrent scanners in completion
+            # order. The VOD indexer deliberately handles only four files per
+            # pass, so racing all three scans made Heat land on either side of
+            # that boundary and changed its detail DOM from Indexed to Pending.
+            # Finish each tiny fixture library before creating the next one;
+            # Heat is then in the first two files on every filesystem.
+            deadline = time.time() + 300
+            while time.time() < deadline:
+                status = api(self.base_url, "/scan/status", self.token)
+                done = status.get(str(library["id"]))
+                if done and not done["running"] and done.get("last_scan"):
+                    break
+                time.sleep(0.4)
+            else:
+                raise Fail(f"the seeded library {name!r} never finished scanning")
 
         by_title = {}
         for lib in libs:
@@ -896,7 +930,7 @@ def pick_playable(base_url, token, items, preferred):
 
 def discover_routes(base_url, token, args, preferred_library=None, preferred_item=None,
                     preferred_player=None, preferred_query=None):
-    """Resolve the nine routes against whatever server we were pointed at.
+    """Resolve the ten routes against whatever server we were pointed at.
 
     Ids are looked up rather than hardcoded so `--base-url` works against a real
     library. The ids themselves never appear in a screenshot — only in the hash
@@ -933,6 +967,7 @@ def discover_routes(base_url, token, args, preferred_library=None, preferred_ite
         "search": {"hash": f"#/search/{query}"},
         "item": {"hash": f"#/item/{item_id}"},
         "activity": {"hash": "#/activity"},
+        "analysis": {"hash": "#/analysis"},
         "settings": {"hash": "#/settings"},
         # No token in localStorage, so `boot()` falls through to the sign-in
         # card. The only route whose container is #app: there is no #main
@@ -1167,6 +1202,8 @@ def stress_classic_header(page, name, layout_id):
 
 
 def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
     page = pw_context.new_page()
     problems = []
     # The request log. Four documents cite a "request-log invariant" — converting
@@ -1207,7 +1244,14 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
             raise Fail(f"{name}: document responded 404")
 
         container = route.get("container", "#main")
-        page.wait_for_selector(container, state="attached", timeout=args.timeout)
+        try:
+            page.wait_for_selector(container, state="attached", timeout=args.timeout)
+        except PlaywrightTimeoutError as error:
+            # A page or console exception is product evidence, even when it
+            # also prevented the root from mounting. Otherwise one fresh
+            # context retry covers renderer/connection loss. A persistent
+            # missing root is still a product failure on the second attempt.
+            raise root_attach_failure(name, container, problems) from error
         # The layout the app actually resolved, not the one localStorage asked
         # for. `layoutId()` falls back to classic on a surface a layout does not
         # declare, and the sweep already skipped those pairs — so a mismatch
@@ -1225,7 +1269,7 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # Slow artwork or an incremental listing can no longer spend an
         # arbitrary part of the later 4.5s polling observation window.
         page.wait_for_load_state("networkidle", timeout=args.timeout)
-        # Home, Activity and Settings expose an explicit settled phase. Start
+        # Home, Activity, Analysis and Settings expose an explicit settled phase. Start
         # the polling observation window from that phase, not merely from the
         # document's network-idle event: under a loaded runner the route's
         # async render can finish after page.goto() returns, shortening the
@@ -1234,18 +1278,59 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         # /scan/status calls. The phase is product state, so synchronizing on it
         # preserves the request-count contract without baking a count or an
         # endpoint into this harness.
-        if name in {"home", "activity", "settings"}:
+        if name in {"home", "activity", "analysis", "settings"}:
             page.wait_for_selector(
                 f'{container}[data-phase="settled"]', timeout=args.timeout)
         if activity_poll_paused:
             resume_activity_polling(page)
+        settle_ms = args.settle_ms
+        if name == "analysis":
+            # The status page has already published one settled queue
+            # snapshot. Freeze its two-second route poll at that named state;
+            # otherwise a loaded runner can fit either two or three identical
+            # requests into the later 4.5s observation window.
+            page.evaluate("""() => {
+              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
+              PAGE_TIMER = null;
+            }""")
+        if name == "settings":
+            # The Libraries tab loads scan status once, then polls every 2s.
+            # A fixed sleep lets an overloaded event loop enqueue a third tick
+            # before the sleep callback, changing an unchanged request golden
+            # from three calls to four. Observe exactly two production ticks,
+            # then stop this route's timer at that named boundary.
+            deadline = time.time() + args.timeout / 1000
+            while (api_calls.count("GET /api/v1/scan/status") < 3 or
+                   api_calls.count("GET /api/v1/activity") < 2):
+                if time.time() >= deadline:
+                    raise Fail("settings did not complete its scan-status and activity polling ticks")
+                page.wait_for_timeout(50)
+            page.evaluate("""() => {
+              if (PAGE_TIMER) clearInterval(PAGE_TIMER);
+              PAGE_TIMER = null;
+              if (ACT_TIMER) clearInterval(ACT_TIMER);
+              ACT_TIMER = null;
+            }""")
+            # Waiting for those two 2s ticks already spans one complete 4s
+            # activity period. A second full settle window would add another
+            # activity request only on Settings and lengthen the sweep without
+            # observing any new state.
+            settle_ms = 200
         # The app polls activity every 4s and the activity page re-renders every
         # 3s. Rather than stubbing either — the baseline has to be of the real
         # app — the capture waits out more than one full period, so it always
         # lands on the same steady state instead of on whichever half of the
         # cycle happened to be showing.
-        page.wait_for_timeout(args.settle_ms)
+        page.wait_for_timeout(settle_ms)
         if route.get("player"):
+            # The request inventory has already observed one complete activity
+            # period above. Player startup includes a real media request and
+            # decoder initialization, whose duration varies with runner load;
+            # leaving the global interval live here makes that unrelated work
+            # decide whether the golden records two or three activity reads.
+            # Stop it at the named boundary and wait out any in-flight tick
+            # before opening the player.
+            pause_activity_polling(page, name, args.timeout)
             open_player(page, args.timeout)
 
         if args.self_test_fail and name == args.self_test_route:
@@ -1541,14 +1626,12 @@ def run_capture(base_url, token, routes, args, out_dir):
             for layout_id, vp, name, route in triples:
                 key = f"{layout_id}|{name}@{vp_key(vp)}"
                 shot = out_dir / layout_id / f"{name}@{vp_key(vp)}.png"
-                # The player is the only capture that waits on a real media
-                # decision and decoder. A loaded one-voter fixture can lose one
-                # authority read even though the next request is healthy (CI
-                # observed exactly one miss between five successful plays).
-                # Retry the whole capture in a fresh browser context, never an
-                # individual assertion: a persistent product, accessibility,
-                # request-inventory, or frame failure still fails unchanged.
-                attempts = 2 if route.get("player") else 1
+                # The player waits on a real media decision and decoder, so it
+                # retains one whole-capture retry. Any route also gets one
+                # fresh-context retry when Chromium never attaches its root;
+                # no later product, accessibility, request-inventory, or
+                # golden failure is retryable.
+                attempts = 2
                 for attempt in range(attempts):
                     if attempt:
                         time.sleep(0.5)
@@ -1560,11 +1643,12 @@ def run_capture(base_url, token, routes, args, out_dir):
                         print(f"OK      {key}", flush=True)
                         break
                     except Exception as e:  # noqa: BLE001 — every failure is a gate failure
-                        if attempt + 1 < attempts:
+                        if should_retry_capture(route, e, attempt, attempts):
                             print(f"RETRY   {key}: {e}", flush=True)
                             continue
                         failures.append(f"{key}: {e}")
                         print(f"FAIL    {key}: {e}", flush=True)
+                        break
                     finally:
                         context.close()
         finally:

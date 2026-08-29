@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4d0a0c0f"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The final executor-state repair makes both terminal and lost conditional atomic settlements: whichever state commits first is absorbing, and neither a stale available poll nor a private unavailable transport result can overwrite it. A direct regression proves both settlement orders and refuses later observing/idle transitions."

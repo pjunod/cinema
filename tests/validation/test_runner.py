@@ -246,8 +246,8 @@ class CatalogCase(unittest.TestCase):
 
         self.assertTrue(needs_rust_gate(()))
 
-    def test_merge_queue_events_fail_open_into_the_full_fan_out(self):
-        for event in ("merge_group", "push"):
+    def test_qualification_and_release_events_fail_open_into_the_full_fan_out(self):
+        for event in ("effort_qualification", "merge_group", "push"):
             with self.subTest(event=event):
                 self.assertEqual(resolve_scope(event, None), all_scope())
 
@@ -309,6 +309,7 @@ class CatalogCase(unittest.TestCase):
 
         for scheduler_path in (
             ".github/workflows/ci.yml",
+            ".github/workflows/effort-ci.yml",
             ".github/workflows/lint.yml",
             "validation/ci_scope.py",
             "validation/points.toml",

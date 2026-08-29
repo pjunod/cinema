@@ -283,19 +283,9 @@ impl Client {
             params,
         };
 
-        let res = match self.query_remote_req(query.clone(), consistent).await {
-            Ok(res) => Ok(res),
-            Err(err) => {
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    self.query_remote_req(query, consistent).await
-                } else {
-                    return Err(err);
-                }
-            }
-        }?
+        let res = self
+            .retry_db_after_leader_change(|| self.query_remote_req(query.clone(), consistent))
+            .await?
         .into_iter()
         .map(crate::Row::Owned)
         .collect();

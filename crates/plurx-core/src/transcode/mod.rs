@@ -286,6 +286,90 @@ pub fn hevc_copy_bsf_for_client(
     }
 }
 
+/// Whether the stored probe describes HEVC with the smallest legal hvcC
+/// record: the 23-byte fixed header followed by zero parameter-set arrays.
+///
+/// These Matroska files carry VPS/SPS/PPS only in-band. Removing NAL types
+/// 32–34 before the fragmented-MP4 muxer sees them makes ffmpeg emit an empty
+/// hvcC record, which neither our fragment reader nor a player can initialize
+/// from. The copy path converts those packets through Annex B so ffmpeg's
+/// `extract_extradata` filter can rebuild a complete hvcC before muxing.
+pub fn hevc_parameter_set_promotion_required(source: &MediaFile, probe_json: Option<&str>) -> bool {
+    if !matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
+        return false;
+    }
+    let Ok(probe) = serde_json::from_str::<serde_json::Value>(probe_json.unwrap_or_default())
+    else {
+        return false;
+    };
+    probe
+        .get("streams")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|streams| {
+            streams.iter().find(|stream| {
+                stream.get("codec_type").and_then(serde_json::Value::as_str) == Some("video")
+                    && stream
+                        .get("disposition")
+                        .and_then(|value| value.get("attached_pic"))
+                        .and_then(serde_json::Value::as_i64)
+                        != Some(1)
+            })
+        })
+        .and_then(|stream| stream.get("extradata_size"))
+        .and_then(|size| {
+            size.as_u64()
+                .or_else(|| size.as_str().and_then(|value| value.parse().ok()))
+        })
+        == Some(23)
+}
+
+/// Facts that determine the copied video byte stream.
+///
+/// Keeping this as one value prevents the index, production segmenter, and
+/// cache identity from accidentally choosing different HEVC normalization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CopyVideoOptions {
+    have_dovi_bsf: bool,
+    preserve_dolby_vision: bool,
+    promote_hevc_parameter_sets: bool,
+}
+
+impl CopyVideoOptions {
+    pub const fn new(have_dovi_bsf: bool, preserve_dolby_vision: bool) -> Self {
+        Self {
+            have_dovi_bsf,
+            preserve_dolby_vision,
+            promote_hevc_parameter_sets: false,
+        }
+    }
+
+    pub const fn with_parameter_set_promotion(mut self, required: bool) -> Self {
+        self.promote_hevc_parameter_sets = required;
+        self
+    }
+
+    pub fn from_probe(
+        source: &MediaFile,
+        probe_json: Option<&str>,
+        have_dovi_bsf: bool,
+        preserve_dolby_vision: bool,
+    ) -> Self {
+        Self::new(have_dovi_bsf, preserve_dolby_vision)
+            .with_parameter_set_promotion(hevc_parameter_set_promotion_required(source, probe_json))
+    }
+
+    pub const fn promotes_parameter_sets(self) -> bool {
+        self.promote_hevc_parameter_sets
+    }
+
+    pub const fn preserves_dolby_vision(self) -> bool {
+        self.preserve_dolby_vision
+    }
+}
+
+/// Historical name retained for callers that only configure Dolby Vision.
+pub type DolbyVisionCopyOptions = CopyVideoOptions;
+
 /// HEVC sample-entry tag for the copy output.
 ///
 /// Dolby Vision Profiles 8.1 and 8.4 are backward-compatible enhancements of
@@ -1148,11 +1232,7 @@ pub fn keyframe_probe_args(source_path: &str, start_seconds: f64) -> Vec<String>
 /// it deliberately excludes the input path: a moved file is caught by its
 /// identity, and re-indexing every file after a library move would be a cost
 /// with no finding behind it.
-pub fn copy_video_args(
-    source: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
-) -> Vec<String> {
+pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     args.push("-c:v".into());
     args.push("copy".into());
@@ -1164,7 +1244,7 @@ pub fn copy_video_args(
             hevc_copy_tag_for_format(
                 source.hdr.as_deref(),
                 source.hdr_format.as_deref(),
-                preserve_dolby_vision,
+                options.preserve_dolby_vision,
             )
             .into(),
         );
@@ -1176,28 +1256,43 @@ pub fn copy_video_args(
         // AVPlayer with CoreMedia -12927. The strictness option is scoped to
         // preserved DV; ordinary HEVC and stripped HDR10 copies do not need
         // an experimental muxer feature.
-        if source.hdr.as_deref() == Some("dolby_vision") && preserve_dolby_vision {
+        if source.hdr.as_deref() == Some("dolby_vision") && options.preserve_dolby_vision {
             args.push("-strict".into());
             args.push("unofficial".into());
         }
         // A non-backward-compatible Dolby Vision stream is tagged `dvh1`, so
         // its VPS/SPS/PPS must be present in hvcC before AVPlayer opens the
         // first fragment. Some WEB-DL Matroska files carry a minimal, empty
-        // hvcC and repeat those parameter sets only in-band. Stripping them
-        // here made an initialization record with no decoder configuration;
-        // tvOS rejected it with CoreMedia -15517. Leave the parameter sets in
-        // the pipe so the GOP-aware segmenter can promote them into hvcC from
-        // the first sample. Compatible Profile 8 and ordinary HEVC keep the
-        // existing hvc1 normalization.
+        // hvcC and repeat those parameter sets only in-band. Merely retaining
+        // the sets is insufficient: FFmpeg's MOV muxer consumes them while
+        // still emitting the source's 23-byte hvcC. Convert the packets to
+        // Annex B and extract their parameter sets first, which gives the
+        // muxer complete codec extradata and keeps the served `hvc1`/`dvh1`
+        // promise honest.
         let promote_profile5_parameter_sets = source.hdr.as_deref() == Some("dolby_vision")
-            && preserve_dolby_vision
+            && options.preserve_dolby_vision
             && !dolby_vision_has_compatible_base(source.hdr_format.as_deref());
-        if !promote_profile5_parameter_sets {
+        if options.promote_hevc_parameter_sets {
+            let mut filters = Vec::new();
+            if source.hdr.as_deref() == Some("dolby_vision")
+                && !options.preserve_dolby_vision
+                && options.have_dovi_bsf
+            {
+                filters.push("dovi_rpu=strip=1");
+            }
+            filters.push("hevc_mp4toannexb");
+            filters.push("extract_extradata");
+            if source.hdr.as_deref() == Some("dolby_vision") && !options.preserve_dolby_vision {
+                filters.push("filter_units=remove_types=62-63");
+            }
+            args.push("-bsf:v".into());
+            args.push(filters.join(","));
+        } else if !promote_profile5_parameter_sets {
             args.push("-bsf:v".into());
             args.push(hevc_copy_bsf_for_client(
                 source.hdr.as_deref(),
-                have_dovi_bsf,
-                preserve_dolby_vision,
+                options.have_dovi_bsf,
+                options.preserve_dolby_vision,
             ));
         }
     }
@@ -1262,8 +1357,7 @@ fn copy_input_args(
     audio_index: Option<i64>,
     transcode_audio: bool,
     pacing: Pacing,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: CopyVideoOptions,
 ) -> Vec<String> {
     let source_path = source.path.to_string_lossy().into_owned();
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
@@ -1331,11 +1425,7 @@ fn copy_input_args(
     }
     args.push("-sn".into());
 
-    args.extend(copy_video_args(
-        source,
-        have_dovi_bsf,
-        preserve_dolby_vision,
-    ));
+    args.extend(copy_video_args(source, video));
 
     if transcode_audio {
         // The correction rides the encode as a filter — same input, no
@@ -1388,25 +1478,28 @@ fn copy_input_args(
 /// - **unpaced.** Pacing rate-limits the input to protect a live session's
 ///   supply; an index build is background work with no viewer behind it, and
 ///   throttling it would only make it take longer.
-pub fn copy_index_pipe_args(
+pub fn copy_index_pipe_args(source: &MediaFile, video: CopyVideoOptions) -> Vec<String> {
+    copy_index_pipe_args_with_input(source, &source.path.to_string_lossy(), video)
+}
+
+/// The index pipe with an explicitly named input. Cluster index workers use a
+/// fixed inherited descriptor here, keeping the file they attested attached
+/// to ffmpeg even if the pathname is replaced before the child opens it.
+pub fn copy_index_pipe_args_with_input(
     source: &MediaFile,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    input: &str,
+    video: CopyVideoOptions,
 ) -> Vec<String> {
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "error".into()];
     args.push("-i".into());
-    args.push(source.path.to_string_lossy().into_owned());
+    args.push(input.to_owned());
     args.push("-map_chapters".into());
     args.push("-1".into());
     args.push("-map".into());
     args.push("0:v:0?".into());
     args.push("-an".into());
     args.push("-sn".into());
-    args.extend(copy_video_args(
-        source,
-        have_dovi_bsf,
-        preserve_dolby_vision,
-    ));
+    args.extend(copy_video_args(source, video));
     args.extend(
         [
             "-avoid_negative_ts",
@@ -1460,8 +1553,7 @@ pub fn copy_pipe_args(
         audio_index,
         transcode_audio,
         pacing,
-        have_dovi_bsf,
-        false,
+        CopyVideoOptions::new(have_dovi_bsf, false),
     )
 }
 
@@ -1471,8 +1563,7 @@ pub fn copy_pipe_args_with_dolby_vision(
     audio_index: Option<i64>,
     transcode_audio: bool,
     pacing: Pacing,
-    have_dovi_bsf: bool,
-    preserve_dolby_vision: bool,
+    video: CopyVideoOptions,
 ) -> Vec<String> {
     let mut args = copy_input_args(
         source,
@@ -1480,8 +1571,7 @@ pub fn copy_pipe_args_with_dolby_vision(
         audio_index,
         transcode_audio,
         pacing,
-        have_dovi_bsf,
-        preserve_dolby_vision,
+        video,
     );
     args.extend(
         [
@@ -1539,19 +1629,6 @@ pub fn hls_copy_args(
     )
 }
 
-/// Dolby Vision handling for an HLS copy session.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DolbyVisionCopyOptions {
-    have_bsf: bool,
-    preserve: bool,
-}
-
-impl DolbyVisionCopyOptions {
-    pub const fn new(have_bsf: bool, preserve: bool) -> Self {
-        Self { have_bsf, preserve }
-    }
-}
-
 pub fn hls_copy_args_with_dolby_vision(
     source: &MediaFile,
     start_seconds: f64,
@@ -1595,8 +1672,7 @@ pub fn hls_copy_args_with_sequence(
         audio_index,
         transcode_audio,
         pacing,
-        dolby_vision.have_bsf,
-        dolby_vision.preserve,
+        dolby_vision,
     );
 
     // fMP4 HLS. Segments split at existing keyframes (copy can't force them), so
@@ -3292,11 +3368,11 @@ mod index_pipe_tests {
                     None,
                     true,
                     Pacing::unpaced(),
-                    dovi,
-                    preserve,
+                    CopyVideoOptions::new(dovi, preserve),
                 );
-                let index = copy_index_pipe_args(&file, dovi, preserve);
-                let video = copy_video_args(&file, dovi, preserve);
+                let video_options = CopyVideoOptions::new(dovi, preserve);
+                let index = copy_index_pipe_args(&file, video_options);
+                let video = copy_video_args(&file, video_options);
                 assert!(
                     contains_run(&production, &video),
                     "production pipe lost the video arguments: {production:?}"
@@ -3312,7 +3388,7 @@ mod index_pipe_tests {
     #[test]
     fn the_index_pipe_maps_no_audio_and_never_seeks() {
         let file = hevc_dv();
-        let args = copy_index_pipe_args(&file, false, false);
+        let args = copy_index_pipe_args(&file, CopyVideoOptions::new(false, false));
         assert!(args.contains(&"-an".to_owned()));
         assert!(!args.iter().any(|a| a.starts_with("0:a:")));
         assert!(!args.contains(&"-ss".to_owned()));
@@ -3329,15 +3405,92 @@ mod index_pipe_tests {
         let file = hevc_dv();
         let mut moved = hevc_dv();
         moved.path = "/other/place/film.mkv".into();
-        let stripped = crate::segplan::argv_fingerprint(&copy_video_args(&file, false, false));
-        let preserved = crate::segplan::argv_fingerprint(&copy_video_args(&file, false, true));
-        let relocated = crate::segplan::argv_fingerprint(&copy_video_args(&moved, false, false));
+        let stripped = crate::segplan::argv_fingerprint(&copy_video_args(
+            &file,
+            CopyVideoOptions::new(false, false),
+        ));
+        let preserved = crate::segplan::argv_fingerprint(&copy_video_args(
+            &file,
+            CopyVideoOptions::new(false, true),
+        ));
+        let relocated = crate::segplan::argv_fingerprint(&copy_video_args(
+            &moved,
+            CopyVideoOptions::new(false, false),
+        ));
         assert_ne!(
             stripped, preserved,
             "preserving Dolby Vision changes the copied NAL stream, so it must \
              change the fingerprint"
         );
         assert_eq!(stripped, relocated, "a moved file is not a new pipeline");
+    }
+
+    #[test]
+    fn minimal_hevc_configuration_rebuilds_complete_muxer_extradata() {
+        let mut file = hevc_dv();
+        file.hdr = Some("hdr10".into());
+        file.hdr_format = Some("HDR10".into());
+        let probe = r#"{
+            "streams": [
+                {"codec_type":"video","codec_name":"mjpeg","extradata_size":23,
+                 "disposition":{"attached_pic":1}},
+                {"codec_type":"video","codec_name":"hevc","extradata_size":23,
+                 "disposition":{"attached_pic":0}}
+            ]
+        }"#;
+        assert!(hevc_parameter_set_promotion_required(&file, Some(probe)));
+
+        let ordinary = copy_video_args(&file, CopyVideoOptions::new(false, false));
+        let promoted = copy_video_args(
+            &file,
+            CopyVideoOptions::new(false, false).with_parameter_set_promotion(true),
+        );
+        assert!(
+            ordinary.join(" ").contains("remove_types=32-34"),
+            "ordinary HEVC must retain the hvc1 boundary-stutter fix"
+        );
+        assert!(
+            promoted
+                .join(" ")
+                .contains("-bsf:v hevc_mp4toannexb,extract_extradata"),
+            "the in-band VPS/SPS/PPS must become muxer extradata: {promoted:?}"
+        );
+        assert!(!promoted.join(" ").contains("32-34"), "{promoted:?}");
+        assert_ne!(
+            crate::segplan::argv_fingerprint(&ordinary),
+            crate::segplan::argv_fingerprint(&promoted),
+            "old failed indexes must not alias the repaired pipeline"
+        );
+
+        file.hdr = Some("dolby_vision".into());
+        let stripped_dv = copy_video_args(
+            &file,
+            CopyVideoOptions::new(true, false).with_parameter_set_promotion(true),
+        )
+        .join(" ");
+        assert!(
+            stripped_dv.contains(
+                "dovi_rpu=strip=1,hevc_mp4toannexb,extract_extradata,\
+                 filter_units=remove_types=62-63"
+            ),
+            "DV metadata is still stripped while hvcC is rebuilt: {stripped_dv}"
+        );
+        assert!(!stripped_dv.contains("32-34"), "{stripped_dv}");
+    }
+
+    #[test]
+    fn populated_or_non_hevc_configuration_does_not_request_promotion() {
+        let file = hevc_dv();
+        let populated = r#"{"streams":[{"codec_type":"video","extradata_size":97}]}"#;
+        assert!(!hevc_parameter_set_promotion_required(
+            &file,
+            Some(populated)
+        ));
+
+        let mut h264 = file;
+        h264.video_codec = Some("h264".into());
+        let minimal = r#"{"streams":[{"codec_type":"video","extradata_size":23}]}"#;
+        assert!(!hevc_parameter_set_promotion_required(&h264, Some(minimal)));
     }
 
     fn contains_run(haystack: &[String], needle: &[String]) -> bool {

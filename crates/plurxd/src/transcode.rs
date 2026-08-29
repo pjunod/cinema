@@ -6,13 +6,13 @@
 //! are reaped when idle. This is the session-based model; the deterministic
 //! per-segment model that enables cluster failover is Phase 3's spike.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{
     AtomicBool, AtomicI64, AtomicU64, AtomicUsize,
     Ordering::{AcqRel, Acquire, Relaxed, Release},
 };
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use plurx_core::domain::{
@@ -30,25 +30,28 @@ use sha2::{Digest as _, Sha256};
 use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::admission::Admission;
 use crate::admission::{
     Admissions, HwSlot, Priority, Workload, DEFAULT_MAX_HW_SESSIONS, QUEUE_WAIT,
 };
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::copyseg;
 use crate::ffmpeg::ffmpeg_bin;
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 use crate::ffmpeg::pacing_caps;
+use crate::media_sessions::SessionSettlementGuard;
 use crate::meter::Meter;
 
 /// Idle timeout after which a session's ffmpeg is killed and its dir removed.
-const SESSION_IDLE_SECS: u64 = 60;
+const SESSION_IDLE_SECS: u64 = crate::playback_control::ROLLING_LEASE_TIMEOUT_MS as u64 / 1_000;
 /// Stable classification for a start that lost a bounded admission wait.
 /// The HTTP layer maps only this class to 503; source, filesystem, and ffmpeg
 /// failures remain server errors rather than being mislabeled as contention.
 const RETRYABLE_CAPACITY_PREFIX: &str = "transcode capacity is temporarily unavailable: ";
-#[cfg(test)]
+const SERVING_FENCE_PREFIX: &str = "media serving authority is unavailable: ";
+const START_INFRASTRUCTURE_PREFIX: &str = "media session infrastructure is unavailable: ";
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const ADMISSION_POLL: Duration = Duration::from_millis(250);
 const SCRATCH_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const SCRATCH_SAMPLE_MAX_AGE: Duration = Duration::from_secs(45);
@@ -57,6 +60,22 @@ const MAX_CACHE_OFFER_VERDICTS: usize = 256;
 const MAX_CLUSTER_REPLACEMENT_GATES: usize = 4_096;
 const CLUSTER_REPLACEMENT_GATE_WAIT: Duration = Duration::from_secs(3);
 const SHARED_LOOKUP_PIN_MS: i64 = 30_000;
+/// One retained owner per actor-managed generation is sufficient, but the
+/// global bound also protects the process when many request futures vanish
+/// while their first-media commands are still queued.
+const MAX_FIRST_MEDIA_SETTLEMENT_OWNERS: usize = 256;
+const ROLLING_SCRATCH_CLEANUP_ATTEMPT: Duration = Duration::from_secs(5);
+const ROLLING_SCRATCH_CLEANUP_RETRY: Duration = Duration::from_secs(5);
+const ROLLING_SCRATCH_CLEANUP_ATTEMPTS: usize = 3;
+
+fn first_media_settlement_slots() -> &'static Arc<tokio::sync::Semaphore> {
+    static SLOTS: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| {
+        Arc::new(tokio::sync::Semaphore::new(
+            MAX_FIRST_MEDIA_SETTLEMENT_OWNERS,
+        ))
+    })
+}
 
 /// Stable non-secret correlation for bearer session capabilities. Raw UUIDs
 /// authorize playback and therefore never belong in logs, traces, metrics, or
@@ -77,7 +96,7 @@ fn session_log_text(text: &str, session_id: &str) -> String {
     text.replace(session_id, &session_log_id(session_id))
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn ffmpeg_args_log_message(label: &str, args: &[String], session_id: &str) -> String {
     format!("{label}: {}", session_log_text(&args.join(" "), session_id))
 }
@@ -96,11 +115,27 @@ fn capacity_error(message: impl AsRef<str>) -> String {
 }
 
 fn replacement_deadline_error() -> String {
-    capacity_error("the replacement start expired before it could reap its predecessor")
+    capacity_error("the replacement start expired before it could finish provisional work")
 }
 
 pub(crate) fn is_retryable_capacity_error(error: &str) -> bool {
     error.starts_with(RETRYABLE_CAPACITY_PREFIX)
+}
+
+pub(crate) fn serving_fence_error(message: impl AsRef<str>) -> String {
+    format!("{SERVING_FENCE_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_serving_fence_error(error: &str) -> bool {
+    error.starts_with(SERVING_FENCE_PREFIX)
+}
+
+pub(crate) fn start_infrastructure_error(message: impl AsRef<str>) -> String {
+    format!("{START_INFRASTRUCTURE_PREFIX}{}", message.as_ref())
+}
+
+pub(crate) fn is_start_infrastructure_error(error: &str) -> bool {
+    error.starts_with(START_INFRASTRUCTURE_PREFIX)
 }
 
 /// Stable classification for a start this ffmpeg build cannot perform at all.
@@ -139,6 +174,7 @@ pub(crate) fn invalid_reopen_reason(error: &str) -> Option<&str> {
 /// must receive this verdict and either wait for the named prerequisite or
 /// show the honest unsupported result.
 const VOD_REFUSAL_PREFIX: &str = "vod presentation unavailable: ";
+const CACHED_MEDIA_INTEGRITY_FAILURE: &str = "cached media failed an integrity check";
 
 pub(crate) fn vod_refusal_error(code: &'static str, message: impl AsRef<str>) -> String {
     format!("{VOD_REFUSAL_PREFIX}{code}: {}", message.as_ref())
@@ -189,44 +225,59 @@ const TRANSCODE_START_CUSHION_MS: i64 = transcode::SEGMENT_SECONDS as i64 * 2 * 
 /// survives a dropped HTTP request and a failed session still exits
 /// immediately.
 const PLAYLIST_WAIT_POLL: Duration = Duration::from_millis(100);
-/// Grace period for a hardware transcode to list its first segment before we
-/// assume it stalled (GPU contention, or a decode the GPU can't do) and fall
-/// back to software. Longer than a healthy hardware start (~1–3 s), with slack
-/// for a 4K decode to ramp.
-const FIRST_SEGMENT_GRACE: Duration = Duration::from_secs(12);
-/// After falling back to software, how long to wait for real output before
-/// declaring the session failed. Software-decoding 4K is slow, so this is
-/// generous — but a session that can't produce a first segment in this window
-/// is unwatchable, and failing it gives the client a clear error instead of an
-/// endless gray screen (e.g. a Dolby Vision stream the build can't decode).
-const SOFTWARE_GRACE: Duration = Duration::from_secs(30);
-/// How long ffmpeg's output timestamp may sit still before the session counts
-/// as stuck rather than slow. ffmpeg emits a `-progress` block about twice a
-/// second while it is working at all, so a frozen `out_time` for this long is
-/// a wedged pipeline — not a 4K decode losing to the clock, which advances
-/// steadily however far behind realtime it falls.
-#[cfg(test)]
+
+async fn wait_for_playlist_poll_before(deadline: Instant) {
+    let now = tokio::time::Instant::now().into_std();
+    if now >= deadline {
+        return;
+    }
+    tokio::time::sleep_until(tokio::time::Instant::from_std(
+        (now + PLAYLIST_WAIT_POLL).min(deadline),
+    ))
+    .await;
+}
+/// Compatibility mirror of the actor's bounded hardware startup budget. It
+/// sizes only the HTTP playlist wait; it is not a timer or recovery owner.
+/// The prepublication actor exclusively commits the 12-second verdict.
+const ACTOR_HARDWARE_STARTUP_BUDGET: Duration = Duration::from_secs(12);
+/// Compatibility mirror of the actor's bounded software startup/retry budget.
+/// Like the hardware mirror, it sizes HTTP patience and owns no timer.
+const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
+/// How long ffmpeg's output timestamp may sit still. It is the actor's
+/// progress budget for every actor-managed rolling producer.
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const PROGRESS_STALL: Duration = Duration::from_secs(10);
-/// How often the stall watchdog re-asks, once past its initial grace.
-#[cfg(test)]
-const WATCHDOG_POLL: Duration = Duration::from_secs(5);
-/// Slack on top of the startup-recovery graces, covering the cadence at which
-/// each stage actually renders its verdict: the first-segment watch re-asks
-/// every `WATCHDOG_POLL`, the downgrade respawns an ffmpeg, and the lifetime
-/// watchdog polls on the same cadence after its own grace. Two polls plus a
-/// respawn's worth, so the budget lands *after* the last verdict rather than
-/// in the gap before it.
-const PLAYLIST_WAIT_SLACK: Duration = Duration::from_secs(2 * 5 + 3);
+/// One typed copy-reader fact is a bounded actor ingress operation. This is
+/// separate from the actor's own five-second two-fact rendezvous, which starts
+/// only after the first exact-attempt completion/exit fact is accepted.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+const COPY_READER_INGRESS_TIMEOUT: Duration = Duration::from_secs(5);
+/// Repair cadence for a producer that has already been terminalized but whose
+/// process reap could not yet be confirmed. This owner never makes playback
+/// policy or replacement decisions; it only retains resources until physical
+/// cleanup converges.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+const PREPUBLICATION_REAP_RETRY: Duration = Duration::from_secs(5);
+/// One supervisor terminate/reap request may not monopolize lifecycle
+/// serialization. Timeout retains the child and permits for the next repair
+/// attempt; it never treats an unconfirmed reap as success.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+const PREPUBLICATION_REAP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Slack on top of both exact actor startup budgets for scheduler latency,
+/// predecessor reap, successor spawn/install, and the request's 100 ms file
+/// observation cadence. It is deliberately independent of every retained
+/// compatibility polling interval.
+const PLAYLIST_WAIT_SLACK: Duration = Duration::from_secs(13);
 /// How long a playlist request holds a still-starting session before giving up.
 ///
 /// **Derived from the server's own startup-recovery budget, not chosen.** This
 /// used to be an independent 30 s, sized against the copy path's publish gate
 /// (`COPY_PUBLISH_GATE_SECS`) and never against the recovery it now has to
-/// outlive. A hardware start that stalls gets `FIRST_SEGMENT_GRACE` before it
-/// is downgraded and then `SOFTWARE_GRACE` for the software fallback to
+/// outlive. A hardware start gets `ACTOR_HARDWARE_STARTUP_BUDGET` before it
+/// receives its one immutable retry and then the actor's software budget to
 /// produce real output — 42 s of *legitimate, still-working* startup, all of
-/// it past a 30 s wait. So a session the watchdog was in the middle of
-/// rescuing had its playlist 404'd, and hls.js escalated that to a fatal
+/// it past a 30 s wait. So a session the control transaction was in the middle
+/// of rescuing had its playlist 404'd, and hls.js escalated that to a fatal
 /// `levelLoadError`: the viewer was told the stream had permanently failed
 /// while the server was still successfully starting it. A mid-film bitmap
 /// subtitle burn is the likeliest session to need exactly that fallback — a
@@ -239,7 +290,9 @@ const PLAYLIST_WAIT_SLACK: Duration = Duration::from_secs(2 * 5 + 3);
 /// immediately, so this bound is only ever spent on a session that is
 /// genuinely still starting.
 const PLAYLIST_WAIT_BUDGET: Duration = Duration::from_secs(
-    FIRST_SEGMENT_GRACE.as_secs() + SOFTWARE_GRACE.as_secs() + PLAYLIST_WAIT_SLACK.as_secs(),
+    ACTOR_HARDWARE_STARTUP_BUDGET.as_secs()
+        + ACTOR_SOFTWARE_STARTUP_BUDGET.as_secs()
+        + PLAYLIST_WAIT_SLACK.as_secs(),
 );
 /// How far behind the *download frontier* media is kept on disk, and why that
 /// is not the same as "behind the playhead".
@@ -260,6 +313,10 @@ const CLIENT_BACK_BUFFER_SECS: i64 = 30;
 const RETRY_ALLOWANCE_SECS: i64 = 30;
 const RETENTION_SECS: i64 =
     CLIENT_FORWARD_FETCH_SECS + CLIENT_BACK_BUFFER_SECS + RETRY_ALLOWANCE_SECS;
+/// Maximum metadata handoffs performed while retention owns the producer-path
+/// transition. Payload deletion happens detached after these bounded renames.
+const RETENTION_HANDOFF_BATCH: usize = 32;
+static RETENTION_SWEEP_ID: AtomicU64 = AtomicU64::new(0);
 /// Default pace for an HLS session's input, as a multiple of realtime, and how
 /// many seconds it may deliver flat-out first. Admin-overridable (see
 /// [`keys::HLS_READRATE`] / [`keys::HLS_BURST_SECS`]).
@@ -274,6 +331,11 @@ pub(crate) const HLS_BURST_SECS_DEFAULT: f64 = 90.0;
 /// a low-bitrate stream of the reserve it could afford.
 pub(crate) const HLS_AHEAD_MAX_SECS_DEFAULT: i64 = 180;
 pub(crate) const HLS_AHEAD_MAX_BYTES_DEFAULT: i64 = 2 * 1024 * 1024 * 1024;
+/// Extra published media kept beyond the runway an explicit client already
+/// reports. Scale it by playback rate so the reserve represents thirty
+/// seconds of wall-clock protection at every supported rate; the configured
+/// ahead ceiling remains the absolute media-time bound.
+const EXPLICIT_PRODUCTION_RESERVE_WALL_SECS: f64 = 30.0;
 /// Ceiling on scratch across *all* live sessions. A per-session cap bounds one
 /// runaway; it does nothing about four healthy 4K sessions filling the disk
 /// between them.
@@ -294,7 +356,8 @@ const FLOW_CONTROL_REPAIR_INTERVAL: Duration = Duration::from_secs(15);
 /// a yes/no answer to a question that needs a rate. A 4K HDR session
 /// tone-mapping at 0.7x and a session whose GPU has wedged look identical for
 /// the first twelve seconds, and the watchdog killed both, restarting the
-/// merely-slow one on software that is slower still.
+/// merely-slow one on software that is slower still. The actor now consumes
+/// these measurements directly and owns the only progress deadline.
 #[derive(Debug)]
 pub struct Progress {
     /// Monotonic zero point for `moved_at_ms`.
@@ -314,8 +377,8 @@ pub struct Progress {
     ///
     /// This is ENCODER progress, not published media: it includes frames muxed
     /// into the in-progress `.tmp` segment, which no client can fetch. The
-    /// watchdog wants exactly that (proof of motion); pacing must not use it
-    /// (that is what the segment index is for).
+    /// producer actor wants exactly that (proof of motion); pacing must not
+    /// use it (that is what the segment index is for).
     out_time_ms: AtomicI64,
     /// Cumulative encode rate x1000 (`speed=1.85x` -> 1850); `-1` when unknown.
     speed_milli: AtomicI64,
@@ -386,11 +449,26 @@ impl Progress {
     ///
     /// Called when a session respawns (the hardware->software fallback). The
     /// replacement writes its own timeline from the same seek point, so
-    /// carrying the dead process's numbers would make it look instantly
-    /// stalled -- and the generation bump is what stops the dead process's
-    /// reader from putting them back.
+    /// carrying the dead process's numbers would make its actor progress
+    /// deadline look expired -- and the generation bump is what stops the dead
+    /// process's reader from putting them back.
     pub fn begin_attempt(&self) -> u64 {
         let generation = self.generation.fetch_add(1, Relaxed) + 1;
+        self.reset_attempt(generation);
+        generation
+    }
+
+    /// Reset the compatibility telemetry to an attempt allocated by the
+    /// rolling actor. Offline producers still use [`Self::begin_attempt`]; a
+    /// live session must share the actor's attempt fence with publication and
+    /// response commits so a predecessor cannot mutate its successor.
+    fn begin_fenced_attempt(&self, generation: u64) {
+        self.generation.store(generation, Relaxed);
+        self.reset_attempt(generation);
+    }
+
+    fn reset_attempt(&self, generation: u64) {
+        debug_assert!(generation > 0);
         self.out_time_ms.store(-1, Relaxed);
         self.speed_milli.store(-1, Relaxed);
         self.recent_milli.store(-1, Relaxed);
@@ -398,7 +476,6 @@ impl Progress {
         self.sample_out_ms.store(SAMPLE_UNSET, Relaxed);
         self.moved_at_ms
             .store(self.started.elapsed().as_millis() as i64, Relaxed);
-        generation
     }
 
     fn generation(&self) -> u64 {
@@ -441,9 +518,11 @@ impl Progress {
     }
 
     pub fn speed(&self) -> Option<f64> {
-        Some(self.speed_milli.load(Relaxed))
-            .filter(|v| *v >= 0)
-            .map(|v| v as f64 / 1000.0)
+        self.speed_milli().map(|v| v as f64 / 1000.0)
+    }
+
+    fn speed_milli(&self) -> Option<i64> {
+        Some(self.speed_milli.load(Relaxed)).filter(|v| *v >= 0)
     }
 
     /// The rate over the last few seconds, which is the one that predicts a
@@ -451,9 +530,11 @@ impl Progress {
     /// reporting a session's lifetime average as "recent" is how a slowdown
     /// stays invisible.
     pub fn recent_speed(&self) -> Option<f64> {
-        Some(self.recent_milli.load(Relaxed))
-            .filter(|v| *v >= 0)
-            .map(|v| v as f64 / 1000.0)
+        self.recent_speed_milli().map(|v| v as f64 / 1000.0)
+    }
+
+    fn recent_speed_milli(&self) -> Option<i64> {
+        Some(self.recent_milli.load(Relaxed)).filter(|v| *v >= 0)
     }
 
     /// Restart the motion clock without touching anything measured.
@@ -472,8 +553,8 @@ impl Progress {
     }
 }
 
-/// One completed, published segment — the unit of everything except the
-/// watchdog.
+/// One completed, published segment — the unit of playlist, retention, and
+/// delivery-frontier accounting.
 #[derive(Debug, Clone, PartialEq)]
 struct SegmentMeta {
     index: i64,
@@ -502,9 +583,13 @@ struct SegmentMeta {
 /// includes the in-progress `.tmp` segment nobody can fetch) and the client's
 /// download frontier. Conflating any two of them produces a plausible number
 /// that is wrong in a different way each time.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct SegmentIndex {
     segs: Vec<SegmentMeta>,
+    /// Monotonic in-memory catalog revision. Attempt fencing separates
+    /// producer generations; this separates concurrent observations of the
+    /// same attempt so an older rewritten playlist cannot land last.
+    revision: u64,
 }
 
 impl SegmentIndex {
@@ -586,6 +671,7 @@ impl SegmentIndex {
     /// the last *known* entry's duration and index rather than the count.
     /// A rebuild drops carried sizes on purpose: they described files a
     /// replaced timeline no longer contains.
+    #[cfg(test)]
     fn extend_from_playlist(&mut self, text: &str) -> bool {
         let known = self.segs.len();
         let mut seen = 0usize;
@@ -641,6 +727,48 @@ impl SegmentIndex {
             return true;
         }
         false
+    }
+
+    /// Apply an already parsed and measured playlist without doing storage
+    /// work while the producer-transition gate is held. An exact shorter
+    /// prefix is an older concurrent read, not evidence that a newer index
+    /// should move backward. A disagreement is a real same-attempt rewrite.
+    fn merge_prepared(
+        &mut self,
+        expected_revision: u64,
+        mut observed: SegmentIndex,
+    ) -> Option<bool> {
+        if self.revision != expected_revision {
+            return None;
+        }
+        let overlap = self.segs.len().min(observed.segs.len());
+        let disagreed =
+            self.segs
+                .iter()
+                .zip(&observed.segs)
+                .take(overlap)
+                .any(|(current, observed)| {
+                    current.index != observed.index
+                        || current.name != observed.name
+                        || current.start_ms != observed.start_ms
+                        || current.end_ms != observed.end_ms
+                });
+        if disagreed {
+            self.segs = observed.segs;
+            self.revision = self.revision.wrapping_add(1);
+            return Some(true);
+        }
+        for (current, observed) in self.segs.iter_mut().zip(observed.segs.iter()).take(overlap) {
+            if !current.pruned && current.bytes == 0 && observed.bytes > 0 {
+                current.bytes = observed.bytes;
+            }
+        }
+        let known = self.segs.len();
+        if observed.segs.len() > known {
+            self.segs.extend(observed.segs.drain(known..));
+        }
+        self.revision = self.revision.wrapping_add(1);
+        Some(false)
     }
 }
 
@@ -858,6 +986,7 @@ struct AheadLimits {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AheadHoldReason {
+    Demand,
     Time,
     Bytes,
     Global,
@@ -867,6 +996,181 @@ pub enum AheadHoldReason {
 struct AheadHold {
     reason: AheadHoldReason,
     release_value: i64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FlowEvaluation {
+    hold: Option<AheadHold>,
+    policy: &'static str,
+    production_ahead_seconds: Option<i64>,
+    production_target_seconds: Option<i64>,
+}
+
+#[derive(Clone, Copy)]
+struct FlowInputs<'a> {
+    physical_ahead: Option<Ahead>,
+    published_end_ms: Option<i64>,
+    media_origin_ms: i64,
+    lease_mode: crate::playback_control::RollingLeaseMode,
+    demand: Option<&'a crate::playback_control::PlaybackDemandSnapshot>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    limits: AheadLimits,
+    currently_suspended: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SuspendedAt {
+    since: Instant,
+    hold: AheadHold,
+}
+
+fn flow_event_extra(
+    evaluation: FlowEvaluation,
+    lease: &crate::playback_control::RollingLeaseSnapshot,
+    ahead: Option<Ahead>,
+    global_live_bytes: i64,
+    global_ahead_bytes: i64,
+    previous_hold_reason: Option<AheadHoldReason>,
+) -> String {
+    let lease_mode = match lease.mode {
+        crate::playback_control::RollingLeaseMode::Legacy => "legacy",
+        crate::playback_control::RollingLeaseMode::Explicit => "explicit",
+    };
+    let lease_state = lease.terminal.map_or("active", |cause| cause.status());
+    let demand = lease.demand.as_ref();
+    serde_json::json!({
+        "lease_mode": lease_mode,
+        "lease_state": lease_state,
+        "lease_timeout_ms": lease.timeout_ms(),
+        "control_demand": demand.map(|demand| demand.demand),
+        "producer_control": &lease.producer_control,
+        "reported_position_ms": demand.map(|demand| demand.position_ms),
+        "client_runway_ms": demand.map(|demand| demand.runway_ms()),
+        "production_policy": evaluation.policy,
+        "production_ahead_seconds": evaluation.production_ahead_seconds,
+        "production_target_seconds": evaluation.production_target_seconds,
+        "physical_ahead_seconds": ahead.map(|ahead| ahead.seconds),
+        "physical_ahead_bytes": ahead.map(|ahead| ahead.bytes),
+        "global_live_bytes": global_live_bytes,
+        "global_ahead_bytes": global_ahead_bytes,
+        "previous_hold_reason": previous_hold_reason,
+    })
+    .to_string()
+}
+
+fn explicit_production_target_seconds(
+    demand: &crate::playback_control::PlaybackDemandSnapshot,
+    configured_max_secs: i64,
+) -> i64 {
+    if configured_max_secs <= 0 {
+        return 0;
+    }
+    let runway_seconds = demand.runway_ms().saturating_add(999) / 1_000;
+    let reserve_seconds =
+        (demand.playback_rate * EXPLICIT_PRODUCTION_RESERVE_WALL_SECS).ceil() as i64;
+    runway_seconds
+        .saturating_add(reserve_seconds)
+        .clamp(1, configured_max_secs)
+}
+
+fn evaluate_flow(inputs: FlowInputs<'_>) -> FlowEvaluation {
+    let FlowInputs {
+        physical_ahead,
+        published_end_ms,
+        media_origin_ms,
+        lease_mode,
+        demand,
+        global_live_bytes,
+        global_ahead_bytes,
+        limits,
+        currently_suspended,
+    } = inputs;
+    if lease_mode == crate::playback_control::RollingLeaseMode::Legacy {
+        return FlowEvaluation {
+            hold: physical_ahead.and_then(|ahead| {
+                ahead_hold(
+                    ahead,
+                    global_live_bytes,
+                    global_ahead_bytes,
+                    limits,
+                    currently_suspended,
+                )
+            }),
+            policy: "legacy_fetch_frontier",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    }
+
+    let Some(demand) = demand else {
+        // Explicit mode is entered by the same actor command that stores the
+        // demand snapshot. If that invariant is ever broken, stop production
+        // instead of silently returning to inference.
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_missing_demand",
+            production_ahead_seconds: None,
+            production_target_seconds: None,
+        };
+    };
+
+    if matches!(
+        demand.demand,
+        crate::playback_control::PlaybackDemand::Hold
+            | crate::playback_control::PlaybackDemand::End
+    ) {
+        return FlowEvaluation {
+            hold: Some(AheadHold {
+                reason: AheadHoldReason::Demand,
+                release_value: 0,
+            }),
+            policy: "explicit_demand",
+            production_ahead_seconds: published_end_ms.map(|published_end_ms| {
+                media_origin_ms
+                    .saturating_add(published_end_ms)
+                    .saturating_sub(demand.buffer_anchor_ms())
+                    / 1_000
+            }),
+            production_target_seconds: Some(0),
+        };
+    }
+
+    let production_target_seconds = explicit_production_target_seconds(demand, limits.max_secs);
+    let production_ahead_seconds = published_end_ms.map(|published_end_ms| {
+        media_origin_ms
+            .saturating_add(published_end_ms)
+            .saturating_sub(demand.buffer_anchor_ms())
+            / 1_000
+    });
+    let hold = physical_ahead.and_then(|physical_ahead| {
+        let ahead = Ahead {
+            seconds: production_ahead_seconds.unwrap_or(physical_ahead.seconds),
+            bytes: physical_ahead.bytes,
+        };
+        ahead_hold(
+            ahead,
+            global_live_bytes,
+            global_ahead_bytes,
+            AheadLimits {
+                max_secs: production_target_seconds,
+                ..limits
+            },
+            currently_suspended,
+        )
+    });
+    FlowEvaluation {
+        hold,
+        policy: "explicit_demand",
+        production_ahead_seconds,
+        // Zero disables only the time limiter. Reporting `target: 0` for an
+        // active producer says the opposite, so expose no finite target while
+        // still passing zero through to `ahead_hold`'s disabled-limit rule.
+        production_target_seconds: (limits.max_secs > 0).then_some(production_target_seconds),
+    }
 }
 
 /// Whether a session should be held, given how far ahead it is, how much
@@ -961,17 +1265,17 @@ fn should_suspend(
 /// `speed` on a copy that has not been running long enough to estimate),
 /// which parses to nothing rather than to zero — zero would read as "stalled"
 /// and zero would read as "not moving" respectively, both wrong.
-pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
+pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) -> bool {
     // A line from a superseded attempt is not evidence about the running one.
     if progress.generation() != generation {
-        return;
+        return false;
     }
     let Some((key, value)) = line.split_once('=') else {
-        return;
+        return false;
     };
     let value = value.trim();
     if value.is_empty() || value == "N/A" {
-        return;
+        return false;
     }
     match key.trim() {
         // Both are microseconds despite the `_ms` name — an ffmpeg quirk, not
@@ -980,14 +1284,36 @@ pub fn apply_progress_line(progress: &Progress, generation: u64, line: &str) {
         "out_time_us" | "out_time_ms" => {
             if let Ok(us) = value.parse::<i64>() {
                 progress.note_out_time(us / 1000);
+                return true;
             }
         }
         "speed" => {
             if let Ok(x) = value.trim_end_matches('x').parse::<f64>() {
                 progress.speed_milli.store((x * 1000.0) as i64, Relaxed);
+                return true;
             }
         }
         _ => {}
+    }
+    false
+}
+
+fn apply_and_observe_progress_line(
+    progress: &Progress,
+    control: Option<&crate::playback_control::RollingControlHandle>,
+    generation: u64,
+    line: &str,
+) {
+    if !apply_progress_line(progress, generation, line) {
+        return;
+    }
+    if let Some(control) = control {
+        control.observe_producer_progress(
+            generation,
+            progress.out_time_ms(),
+            progress.speed_milli(),
+            progress.recent_speed_milli(),
+        );
     }
 }
 
@@ -1001,12 +1327,49 @@ struct FfmpegDescriptors {
     subtitle: Option<std::os::fd::RawFd>,
 }
 
+#[derive(Clone)]
+struct FfmpegProgressObserver {
+    progress: Arc<Progress>,
+    generation: u64,
+    control: Option<crate::playback_control::RollingControlHandle>,
+}
+
+impl FfmpegProgressObserver {
+    fn offline(progress: Arc<Progress>, generation: u64) -> Self {
+        Self {
+            progress,
+            generation,
+            control: None,
+        }
+    }
+
+    fn rolling(
+        progress: Arc<Progress>,
+        generation: u64,
+        control: crate::playback_control::RollingControlHandle,
+    ) -> Self {
+        Self {
+            progress,
+            generation,
+            control: Some(control),
+        }
+    }
+
+    fn apply_line(&self, line: &str) {
+        apply_and_observe_progress_line(
+            &self.progress,
+            self.control.as_ref(),
+            self.generation,
+            line,
+        );
+    }
+}
+
 fn spawn_ffmpeg(
     args: &[String],
     encoder_label: &'static str,
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
     descriptors: FfmpegDescriptors,
 ) -> Result<Child, String> {
@@ -1073,7 +1436,7 @@ fn spawn_ffmpeg(
             use tokio::io::{AsyncBufReadExt, BufReader};
             let mut lines = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                apply_progress_line(&progress, generation, &line);
+                progress_observer.apply_line(&line);
             }
         });
     }
@@ -1105,15 +1468,14 @@ fn spawn_ffmpeg(
 /// stream on stdout, `-progress` has to go somewhere else, so it goes to
 /// stderr alongside the log. Progress blocks are `key=value` on a line of
 /// their own and ffmpeg's own messages are not, so the drain sorts them and
-/// feeds the telemetry the watchdog and the activity page already read. Losing
-/// that would leave a segmenter session with no `speed`, no `out_time`, and a
-/// stall watchdog with nothing to watch.
-#[cfg(test)]
+/// feeds the actor progress ingress plus the activity page. Losing that would
+/// leave a segmenter session with no `speed`, no `out_time`, and no advancing
+/// progress evidence.
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn spawn_ffmpeg_pipe(
     args: &[String],
     session_id: &str,
-    progress: Arc<Progress>,
-    generation: u64,
+    progress_observer: FfmpegProgressObserver,
     runtime_cache: &std::path::Path,
 ) -> Result<(Child, tokio::process::ChildStdout), String> {
     let mut full: Vec<String> = vec!["-progress".into(), "pipe:2".into()];
@@ -1140,7 +1502,7 @@ fn spawn_ffmpeg_pipe(
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 if is_progress_line(&line) {
-                    apply_progress_line(&progress, generation, &line);
+                    progress_observer.apply_line(&line);
                 } else {
                     log_ffmpeg_stderr(&sid, "copy", &line);
                 }
@@ -1161,7 +1523,7 @@ fn spawn_ffmpeg_pipe(
 /// UID while leaving `HOME` out of the daemon environment. A non-login process
 /// does not synthesize it from passwd, so fontconfig has no user cache while
 /// libass initializes a text-subtitle burn. A transcode can then spend the
-/// entire first-segment watchdog window rebuilding font metadata, leaving the
+/// entire producer startup budget rebuilding font metadata, leaving the
 /// player with no HLS resource.
 /// Keep the environment local to ffmpeg rather than changing the daemon's
 /// process environment, and use the data directory whose ownership plurxd has
@@ -1180,7 +1542,7 @@ pub(crate) fn configure_ffmpeg_runtime(
 /// "contains an `=`" — an error message about `filter_units=remove_types=32-34`
 /// contains plenty of those, and swallowing it would hide exactly the failure
 /// a copy session is most likely to have.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn is_progress_line(line: &str) -> bool {
     let Some((key, _)) = line.split_once('=') else {
         return false;
@@ -1201,256 +1563,2002 @@ fn is_progress_line(line: &str) -> bool {
     ) || (key.starts_with("stream_") && key.ends_with("_q"))
 }
 
-/// True once the playlist actually lists a finished segment — i.e. real,
-/// playable output. This must NOT be "a `seg*` file exists": ffmpeg's HLS muxer
-/// opens the next segment as a `.tmp` before any frame is written, so a
-/// name-prefix check counts a stalled session as healthy and blinds the
-/// fallback watchdog (the exact bug behind a 4K-DV grey screen that spun ffmpeg
-/// for a minute and was never retried). A `.ts` line lands in the playlist only
-/// when a segment is complete.
-#[cfg(test)]
-async fn session_producing(dir: &std::path::Path) -> bool {
-    match tokio::fs::read(dir.join("index.m3u8")).await {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).lines().any(|l| {
-            let l = l.trim();
-            // A listed segment: `.ts` (transcode) or `.m4s` (copy fMP4).
-            !l.starts_with('#') && (l.ends_with(".ts") || l.ends_with(".m4s"))
-        }),
-        Err(_) => false,
-    }
-}
-
-/// What one watchdog poll should do with what it observed. Pure, because the
-/// subtlety is entirely in which states are *not* a stall, and each of those
-/// is a healthy session the wrong verdict would kill mid-film: a suspended
-/// encoder is motionless on purpose, an exited child is EOF or a kill (both
-/// already have owners reporting them), and a session failed elsewhere is
-/// already being torn down.
-#[cfg(test)]
-#[derive(Debug, PartialEq)]
-enum WatchNext {
-    /// Nothing wrong, or nothing judgeable: look again next poll.
-    Wait,
-    /// The watch is over — the process exited or someone else failed the
-    /// session. Not a verdict; both cases already have their own reporters.
-    Done,
-    /// Output stopped advancing while the session was supposed to be moving.
-    Stall,
-}
-
-#[cfg(test)]
-fn watch_next(failed: bool, exited: bool, suspended: bool, stalled_for: Duration) -> WatchNext {
-    if failed || exited {
-        return WatchNext::Done;
-    }
-    if !suspended && stalled_for >= PROGRESS_STALL {
-        return WatchNext::Stall;
-    }
-    WatchNext::Wait
-}
-
-/// Observe one producer without turning the observation into a verdict.
-///
-/// A replacement can begin immediately after this returns, so `Done` and
-/// `Stall` must be confirmed while holding `Session::child_transition` before
-/// either one acts. `Wait` has no consequence and can go straight to sleep.
-#[cfg(test)]
-async fn observed_watch_next(session: &Session) -> WatchNext {
-    let (replacing_child, exited) = {
-        let mut child = session.child.lock().await;
-        let replacing_child = session.replacing_child.load(Acquire);
-        let exited = child
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
-        (replacing_child, exited)
-    };
-    if replacing_child {
-        return WatchNext::Wait;
-    }
-    watch_next(
-        session.failed.load(Relaxed),
-        exited,
-        session.suspended.load(Relaxed),
-        session.progress.stalled_for(),
-    )
-}
-
-/// Fail a session whose output has stopped advancing — for the life of the
-/// encoder, not just its start.
-///
-/// This replaced a single verdict taken at a fixed deadline ("no segment after
-/// 30s ⇒ dead"), which could not tell a wedged pipeline from a slow one and
-/// killed both. It answers a different question — *is output still moving?* —
-/// on a poll, which is strictly more informative in both directions: a session
-/// that never opened its input still fails at the same deadline, and a session
-/// decoding 4K at 0.4x is left alone.
-///
-/// It used to return at the first playable segment, which left every *later*
-/// wedge unwatched: a pipeline that froze at minute 40 drained the client's
-/// buffer and then hung the player on a segment nobody was writing (review
-/// §2.3). Now the watch ends only when the process exits (EOF and kills both
-/// have owners reporting them) or the session is failed elsewhere. The states
-/// that are deliberately never judged: a *suspended* session is motionless on
-/// purpose — and `apply_ahead_window` restarts the motion clock at resume, so
-/// the suspension itself can never be read back as a stall — and a *cached*
-/// session has no process at all, so there is nothing here to watch.
-#[cfg(test)]
-struct WatchdogClaim {
-    session: Arc<Session>,
-}
-
-#[cfg(test)]
-impl WatchdogClaim {
-    fn take(session: &Arc<Session>) -> Option<Self> {
-        if session.cached
-            || session
-                .watchdog_active
-                .compare_exchange(false, true, AcqRel, Acquire)
-                .is_err()
-        {
-            return None;
+/// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn clear_session_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut entries = tokio::fs::read_dir(dir).await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not enumerate {}: {error}", dir.display()),
+        )
+    })?;
+    while let Some(entry) = entries.next_entry().await.map_err(|error| {
+        std::io::Error::new(
+            error.kind(),
+            format!("could not enumerate {}: {error}", dir.display()),
+        )
+    })? {
+        let path = entry.path();
+        match tokio::fs::remove_file(&path).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(std::io::Error::new(
+                    error.kind(),
+                    format!("could not remove {}: {error}", path.display()),
+                ));
+            }
         }
-        Some(Self {
-            session: Arc::clone(session),
+    }
+    drop(entries);
+
+    // The child/path transition excludes a successor writer, but detached
+    // retention cleanup can race this scan. Verify the directory is actually
+    // empty before ownership is allowed to reopen under the next attempt.
+    let mut remaining = tokio::fs::read_dir(dir).await?;
+    if let Some(entry) = remaining.next_entry().await? {
+        return Err(std::io::Error::other(format!(
+            "{} remained after predecessor cleanup",
+            entry.path().display()
+        )));
+    }
+    Ok(())
+}
+
+/// Immutable, one-shot retry material retained before the initial producer is
+/// admitted. No fallback re-runs policy, rereads a row, or reconstructs
+/// ffmpeg arguments from mutable session state.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+struct PrepublicationTranscodeRetry {
+    actor_recipe: crate::playback_control::ValidatedRetryRecipe,
+    args: Arc<[String]>,
+    encoder: Encoder,
+    pipeline: Pipeline,
+    file: plurx_core::domain::MediaFile,
+    target_height: i64,
+    software_threads: Option<usize>,
+    software_pool: crate::admission::SwPool,
+    runtime_cache: PathBuf,
+}
+
+/// Frozen fallback for the copy reader's one structural-unsupported verdict.
+/// The actor validates this exact identity before the executor may replace the
+/// pipe producer with ffmpeg's direct HLS muxer.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+struct PrepublicationCopyRetry {
+    actor_recipe: crate::playback_control::ValidatedRetryRecipe,
+    args: Arc<[String]>,
+    runtime_cache: PathBuf,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone)]
+enum PrepublicationRetry {
+    Transcode(Box<PrepublicationTranscodeRetry>),
+    Copy(PrepublicationCopyRetry),
+}
+
+/// Cancellation settlement for the interval between scratch creation and
+/// manager publication. Once a Session exists the guard carries a temporary
+/// strong cleanup owner; it is released at registration and never forms a
+/// task/session cycle. A dropped start future still terminates/reaps the child,
+/// clears scratch, ends the actor, and returns admissions.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+struct PrepublicationStartSettlement {
+    dir: PathBuf,
+    session: Option<Arc<Session>>,
+    settled: bool,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationStartSettlement {
+    fn new(dir: PathBuf) -> Self {
+        Self {
+            dir,
+            session: None,
+            settled: false,
+        }
+    }
+
+    fn attach(&mut self, session: &Arc<Session>) {
+        self.session = Some(Arc::clone(session));
+    }
+
+    fn disarm(&mut self) {
+        self.settled = true;
+        self.session = None;
+    }
+
+    fn settle(mut self) {
+        self.settled = true;
+        self.session = None;
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl Drop for PrepublicationStartSettlement {
+    fn drop(&mut self) {
+        if self.settled {
+            return;
+        }
+        let session = self.session.take();
+        let dir = self.dir.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if let Some(session) = session {
+                    fail_prepublication_transaction(
+                        &session,
+                        "producer start was cancelled before manager publication".to_owned(),
+                    )
+                    .await;
+                } else {
+                    let _ = tokio::fs::remove_dir_all(dir).await;
+                }
+            });
+        } else {
+            tracing::error!(
+                path = %dir.display(),
+                "runtime ended before cancelled prepublication scratch could be removed"
+            );
+        }
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationTranscodeRetry {
+    // Keep the frozen source, retry policy, and detached admission ownership as
+    // separate arguments; bundling them would obscure which snapshot each
+    // retry phase is allowed to retain.
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        file: &plurx_core::domain::MediaFile,
+        opts: &TranscodeOptions,
+        encoder: Encoder,
+        software_rate_control: EffectiveRateControl,
+        pacing: Pacing,
+        dir: &std::path::Path,
+        presentation_contract_fingerprint: &str,
+        software_pool: crate::admission::SwPool,
+        runtime_cache: PathBuf,
+    ) -> Result<Self, String> {
+        let mut retry_opts = opts.clone();
+        let retry_encoder = if opts.pipeline.on_gpu() {
+            retry_opts.pipeline = opts.pipeline.fallback().ok_or_else(|| {
+                format!(
+                    "pipeline {} has no color-safe one-step retry",
+                    opts.pipeline.name()
+                )
+            })?;
+            encoder
+        } else {
+            retry_opts.effective_rate_control = software_rate_control;
+            Encoder::Software
+        };
+        let software_threads = (retry_encoder == Encoder::Software)
+            .then(|| Workload::of(file, opts.target_height).software_threads());
+        if retry_opts.target_height != opts.target_height
+            || retry_opts.pipeline.output_grade() != opts.pipeline.output_grade()
+            || retry_opts.audio_index != opts.audio_index
+            || retry_opts.subtitle_burn != opts.subtitle_burn
+        {
+            return Err(
+                "one-step retry changed the frozen height, track, subtitle, or color contract"
+                    .to_owned(),
+            );
+        }
+        retry_opts.software_threads = software_threads.map(|threads| threads as u32);
+        let args = transcode::hls_args(
+            file,
+            retry_encoder,
+            &retry_opts,
+            pacing,
+            &dir.to_string_lossy(),
+        );
+        let fingerprint_body = serde_json::json!({
+            "version": 1,
+            "args": &args,
+            "encoder": retry_encoder.label(),
+            "pipeline": retry_opts.pipeline.name(),
+            "presentation_contract_fingerprint": presentation_contract_fingerprint,
+        });
+        let fingerprint = hex::encode(Sha256::digest(fingerprint_body.to_string().as_bytes()));
+        let identity = format!(
+            "one-step-color-safe:{}:{}",
+            retry_encoder.label(),
+            retry_opts.pipeline.name()
+        );
+        let startup_kind = if retry_encoder == Encoder::Software {
+            crate::playback_control::ProducerStartupKind::Software
+        } else {
+            crate::playback_control::ProducerStartupKind::Hardware
+        };
+        Ok(Self {
+            actor_recipe: crate::playback_control::ValidatedRetryRecipe::new(
+                identity,
+                fingerprint,
+                presentation_contract_fingerprint.to_owned(),
+                startup_kind,
+            ),
+            args: args.into(),
+            encoder: retry_encoder,
+            pipeline: retry_opts.pipeline,
+            file: file.clone(),
+            target_height: opts.target_height,
+            software_threads,
+            software_pool,
+            runtime_cache,
         })
     }
 }
 
-#[cfg(test)]
-impl Drop for WatchdogClaim {
-    fn drop(&mut self) {
-        self.session.watchdog_active.store(false, Release);
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationCopyRetry {
+    fn build(
+        args: Vec<String>,
+        presentation_contract_fingerprint: &str,
+        runtime_cache: PathBuf,
+    ) -> Self {
+        let fingerprint_body = serde_json::json!({
+            "version": 1,
+            "args": &args,
+            "encoder": "copy",
+            "pipeline": "ffmpeg-hls-muxer",
+            "presentation_contract_fingerprint": presentation_contract_fingerprint,
+        });
+        let fingerprint = hex::encode(Sha256::digest(fingerprint_body.to_string().as_bytes()));
+        Self {
+            actor_recipe: crate::playback_control::ValidatedRetryRecipe::new(
+                "copy-direct-hls-muxer".to_owned(),
+                fingerprint,
+                presentation_contract_fingerprint.to_owned(),
+                crate::playback_control::ProducerStartupKind::Copy,
+            )
+            .with_exit_classifier(crate::playback_control::ProducerExitClassifier::Immediate),
+            args: args.into(),
+            runtime_cache,
+        }
     }
 }
 
-#[cfg(test)]
-async fn watch_for_stall_claimed(session: Arc<Session>, dir: PathBuf, sid: String) {
-    // A generous floor before the first verdict: opening a 4K file over NFS
-    // and filling a first segment is legitimately slow, and `stalled_for`
-    // counts from session start, so judging earlier would fail cold opens.
-    tokio::time::sleep(SOFTWARE_GRACE).await;
-    let mut produced = false;
-    loop {
-        // Once true, stays true — and stops the per-poll playlist read. The
-        // flag only picks the failure message: which half of the session's
-        // life wedged decides what the operator should go look at.
-        if !produced && session_producing(&dir).await {
-            produced = true;
-        }
-        let next = observed_watch_next(&session).await;
-        if next == WatchNext::Wait {
-            tokio::time::sleep(WATCHDOG_POLL).await;
-            continue;
-        }
-        #[cfg(test)]
-        {
-            let pause = session
-                .watchdog_verdict_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
-        }
+async fn terminate_exact_prepublication_child(
+    session: &Session,
+    producer_attempt: u64,
+) -> Result<(), String> {
+    let mut slot = session.child.lock().await;
+    let child = slot
+        .as_mut()
+        .ok_or_else(|| format!("producer attempt {producer_attempt} had no installed child"))?;
+    if child.producer_attempt != producer_attempt {
+        return Err(format!(
+            "actor selected producer attempt {producer_attempt}, but child slot contains {}",
+            child.producer_attempt
+        ));
+    }
+    child
+        .request_termination()
+        .map_err(|error| format!("terminating producer attempt {producer_attempt}: {error}"))?;
+    tokio::time::timeout(
+        PREPUBLICATION_REAP_ATTEMPT_TIMEOUT,
+        child.wait_for_terminal(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "producer attempt {producer_attempt} reap exceeded {:?}",
+            PREPUBLICATION_REAP_ATTEMPT_TIMEOUT
+        )
+    })?
+    .map_err(|error| format!("reaping producer attempt {producer_attempt}: {error}"))?;
+    if child
+        .try_wait_observed(&session.control)
+        .map_err(|error| format!("confirming producer attempt {producer_attempt} reap: {error}"))?
+        .is_none()
+    {
+        return Err(format!(
+            "producer attempt {producer_attempt} termination returned before confirmed reap"
+        ));
+    }
+    *slot = None;
+    Ok(())
+}
 
-        // Replacement owns this gate from before it marks the predecessor
-        // through publishing (or failing) the successor. If one began after
-        // the observation above, wait for it and judge the new producer from
-        // scratch. Holding the same gate through a terminal action closes the
-        // final check-to-kill window: a replacement cannot start between this
-        // confirmation and the verdict it authorizes.
-        let transition = session.child_transition.lock().await;
-        #[cfg(test)]
-        {
-            let pause = session
-                .watchdog_transition_pause
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
-            if let Some(pause) = pause {
-                pause.wait().await;
-                pause.wait().await;
-            }
+async fn terminate_current_prepublication_child(session: &Session) -> Result<(), String> {
+    let producer_attempt = {
+        let slot = session.child.lock().await;
+        slot.as_ref().map(|child| child.producer_attempt)
+    };
+    let Some(producer_attempt) = producer_attempt else {
+        return Ok(());
+    };
+    terminate_exact_prepublication_child(session, producer_attempt).await
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PublishedFailureCleanupOutcome {
+    Reaped,
+    RetirementTookOwnership,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, Debug)]
+enum PublishedAttemptCleanupCause {
+    Failure {
+        decision_sequence: u64,
+        reason: crate::playback_control::ProducerDecisionReason,
+    },
+    Completion {
+        disposition: crate::playback_control::RollingProducerCompletionDisposition,
+    },
+    ExecutorLost,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn settle_exact_published_child(
+    session: &Session,
+    producer_attempt: u64,
+    require_successful_exit: bool,
+) -> Result<(), String> {
+    let mut slot = session.child.lock().await;
+    let Some(child) = slot.as_mut() else {
+        // Another cancellation-independent owner can win this exact cleanup
+        // before a cancelled executor's monitor starts its fallback owner.
+        // Both paths serialize on `child_transition`, so an empty slot here
+        // is already-settled rather than an unowned live process.
+        session.release_hardware_after_confirmed_reap();
+        session.release_software_after_confirmed_reap();
+        return Ok(());
+    };
+    if child.producer_attempt != producer_attempt {
+        return Err(format!(
+            "actor selected producer attempt {producer_attempt}, but child slot contains {}",
+            child.producer_attempt
+        ));
+    }
+    if !require_successful_exit {
+        child
+            .request_termination()
+            .map_err(|error| format!("terminating producer attempt {producer_attempt}: {error}"))?;
+    }
+    tokio::time::timeout(
+        PREPUBLICATION_REAP_ATTEMPT_TIMEOUT,
+        child.wait_for_terminal(),
+    )
+    .await
+    .map_err(|_| {
+        format!(
+            "producer attempt {producer_attempt} reap exceeded {:?}",
+            PREPUBLICATION_REAP_ATTEMPT_TIMEOUT
+        )
+    })?
+    .map_err(|error| format!("reaping producer attempt {producer_attempt}: {error}"))?;
+    let status = child
+        .try_wait_observed(&session.control)
+        .map_err(|error| format!("confirming producer attempt {producer_attempt} reap: {error}"))?
+        .ok_or_else(|| {
+            format!("producer attempt {producer_attempt} wait returned before confirmed reap")
+        })?;
+    if require_successful_exit && !status.success() {
+        return Err(format!(
+            "producer attempt {producer_attempt} completion cleanup observed non-success status {status}"
+        ));
+    }
+    *slot = None;
+    session.release_hardware_after_confirmed_reap();
+    session.release_software_after_confirmed_reap();
+    Ok(())
+}
+
+/// Retain the published generation while converging physical cleanup for one
+/// exact producer attempt.
+///
+/// This task is spawned before its caller waits, so cancellation of the
+/// executor cannot drop kill/reap ownership. Unlike prepublication cleanup it
+/// must not publish `Session::fail`, clear the compatibility catalog or scratch
+/// directory, or send actor/session End: playlist/init/segment objects already
+/// admitted from this generation remain legitimate. Admission capacity is
+/// released only after this task confirms the exact supervised child reaped.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn own_published_attempt_cleanup(
+    session: Arc<Session>,
+    producer_attempt: u64,
+    cause: PublishedAttemptCleanupCause,
+    sid: String,
+    settled: tokio::sync::oneshot::Sender<PublishedFailureCleanupOutcome>,
+) {
+    let (cause_kind, failure_reason, completion_disposition) = match cause {
+        PublishedAttemptCleanupCause::Failure { reason, .. } => ("failure", Some(reason), None),
+        PublishedAttemptCleanupCause::Completion { disposition } => {
+            ("completion", None, Some(disposition))
         }
-        let next = observed_watch_next(&session).await;
-        match next {
-            WatchNext::Done => return,
-            WatchNext::Wait => {
-                drop(transition);
-                tokio::time::sleep(WATCHDOG_POLL).await;
+        PublishedAttemptCleanupCause::ExecutorLost => ("executor_lost", None, None),
+    };
+    loop {
+        let outcome = {
+            // Copy replacement and ordinary retirement still use this
+            // compatibility gate. Actor-managed transcodes never replace a
+            // published attempt, but sharing the gate keeps this slice ordered
+            // with a simultaneous explicit End until the copy cut removes it.
+            let _transition = session.child_transition.lock().await;
+            if session.retirement_cleanup_finished.load(Acquire) {
+                Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership)
+            } else {
+                settle_exact_published_child(
+                    &session,
+                    producer_attempt,
+                    matches!(cause, PublishedAttemptCleanupCause::Completion { .. }),
+                )
+                .await
+                .map(|()| PublishedFailureCleanupOutcome::Reaped)
             }
-            WatchNext::Stall => {
-                tracing::error!(
+        };
+        match outcome {
+            Ok(outcome) => {
+                if outcome == PublishedFailureCleanupOutcome::Reaped {
+                    if let PublishedAttemptCleanupCause::Failure {
+                        decision_sequence, ..
+                    } = cause
+                    {
+                        if let Err(error) = session
+                            .control
+                            .decision_applied(decision_sequence, None)
+                            .await
+                        {
+                            tracing::warn!(
+                                session = %session_log_id(&sid),
+                                producer_attempt,
+                                decision_sequence,
+                                cleanup_policy = "retain_published",
+                                ?error,
+                                "published producer reaped after its actor decision could no longer be acknowledged"
+                            );
+                        }
+                    }
+                }
+                tracing::info!(
                     session = %session_log_id(&sid),
-                    stalled_s = session.progress.stalled_for().as_secs(),
-                    produced_ms = session.progress.out_time_ms(),
-                    "{}",
-                    if produced {
-                        "transcode output stopped advancing mid-stream; failing the session \
-                         so the player can recover instead of draining its buffer into a hang"
-                    } else {
-                        "transcode produced no playable segment and its output has stopped \
-                         advancing; failing the session — the source is likely undecodable \
-                         by this ffmpeg build (e.g. a Dolby Vision profile it can't handle)"
-                    }
+                    producer_attempt,
+                    cause = cause_kind,
+                    failure_reason = ?failure_reason,
+                    completion_disposition = ?completion_disposition,
+                    cleanup_policy = "retain_published",
+                    outcome = match outcome {
+                        PublishedFailureCleanupOutcome::Reaped => "reaped",
+                        PublishedFailureCleanupOutcome::RetirementTookOwnership => {
+                            "retirement_took_ownership"
+                        }
+                    },
+                    "published producer cleanup settled without discarding admitted media"
                 );
-                session.kill_child().await;
-                // The two halves of the log line above are two different
-                // things to a viewer — one lost a stream that was playing,
-                // the other never had one — so the client is told which.
-                session.fail(PlaylistError::SessionFailed(
-                    if produced {
-                        "the encoder stopped part-way through this stream"
-                    } else {
-                        "the encoder never produced any video — this build of ffmpeg \
-                         most likely cannot decode this source"
-                    }
-                    .into(),
-                ));
+                let _ = settled.send(outcome);
                 return;
             }
+            Err(error) => {
+                tracing::error!(
+                    session = %session_log_id(&sid),
+                    producer_attempt,
+                    cause = cause_kind,
+                    failure_reason = ?failure_reason,
+                    completion_disposition = ?completion_disposition,
+                    cleanup_policy = "retain_published",
+                    retry_after_ms = PREPUBLICATION_REAP_RETRY.as_millis(),
+                    %error,
+                    "published producer reap was not confirmed; retaining admissions, bytes, and cleanup ownership"
+                );
+                tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+            }
         }
     }
 }
 
-#[cfg(test)]
-async fn watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
-    // No process, nothing to judge — and `failed` on a cache entry would be a
-    // lie with consequences (its segments exist; readers would refuse them).
-    // Claiming also makes duplicate starts harmless: a fallback may ensure a
-    // successor has coverage while the predecessor's watcher is still alive.
-    let Some(_claim) = WatchdogClaim::take(&session) else {
-        return;
-    };
-    watch_for_stall_claimed(session, dir, sid).await;
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_published_failure_cleanup_owner(
+    session: &Arc<Session>,
+    producer_attempt: u64,
+    decision_sequence: u64,
+    reason: crate::playback_control::ProducerDecisionReason,
+    sid: &str,
+) -> tokio::sync::oneshot::Receiver<PublishedFailureCleanupOutcome> {
+    let (settled, settlement) = tokio::sync::oneshot::channel();
+    tokio::spawn(own_published_attempt_cleanup(
+        Arc::clone(session),
+        producer_attempt,
+        PublishedAttemptCleanupCause::Failure {
+            decision_sequence,
+            reason,
+        },
+        sid.to_owned(),
+        settled,
+    ));
+    settlement
 }
 
-/// Ensure one lifetime watchdog owns this session before returning.
-///
-/// The claim is taken synchronously, before the task is scheduled, so a copy
-/// fallback can publish a successor without leaving a scheduler-sized gap in
-/// which no watchdog owns it. An existing watcher makes this a no-op.
-#[cfg(test)]
-fn spawn_watch_for_stall(session: Arc<Session>, dir: PathBuf, sid: String) {
-    let Some(claim) = WatchdogClaim::take(&session) else {
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_published_completion_cleanup_owner(
+    session: &Arc<Session>,
+    producer_attempt: u64,
+    disposition: crate::playback_control::RollingProducerCompletionDisposition,
+    sid: &str,
+) -> tokio::sync::oneshot::Receiver<PublishedFailureCleanupOutcome> {
+    let (settled, settlement) = tokio::sync::oneshot::channel();
+    tokio::spawn(own_published_attempt_cleanup(
+        Arc::clone(session),
+        producer_attempt,
+        PublishedAttemptCleanupCause::Completion { disposition },
+        sid.to_owned(),
+        settled,
+    ));
+    settlement
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_published_executor_loss_cleanup_owner(
+    session: &Arc<Session>,
+    producer_attempt: u64,
+    sid: &str,
+) {
+    let (settled, _settlement) = tokio::sync::oneshot::channel();
+    tokio::spawn(own_published_attempt_cleanup(
+        Arc::clone(session),
+        producer_attempt,
+        PublishedAttemptCleanupCause::ExecutorLost,
+        sid.to_owned(),
+        settled,
+    ));
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollingRetirementParticipation {
+    Won,
+    Joined,
+}
+
+struct RollingRetirementOutcome {
+    removed: bool,
+    participation: RollingRetirementParticipation,
+    cause: Arc<str>,
+}
+
+struct RollingRetirementSettlement {
+    cause: std::sync::Mutex<Arc<str>>,
+    result: std::sync::Mutex<Option<Result<bool, String>>>,
+    settled: tokio::sync::Notify,
+    #[cfg(test)]
+    wait_before_await_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+}
+
+impl RollingRetirementSettlement {
+    fn new(cause: &'static str) -> Self {
+        Self {
+            cause: std::sync::Mutex::new(Arc::from(cause)),
+            result: std::sync::Mutex::new(None),
+            settled: tokio::sync::Notify::new(),
+            #[cfg(test)]
+            wait_before_await_pause: std::sync::Mutex::new(None),
+        }
+    }
+
+    fn cause(&self) -> Arc<str> {
+        Arc::clone(
+            &self
+                .cause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+    }
+
+    fn set_cause(&self, cause: &'static str) {
+        *self
+            .cause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::from(cause);
+    }
+
+    fn complete(&self, result: Result<bool, String>) {
+        let mut stored = self
+            .result
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stored.is_none() {
+            *stored = Some(result);
+            drop(stored);
+            self.settled.notify_waiters();
+        }
+    }
+
+    async fn wait(&self) -> Result<bool, String> {
+        loop {
+            if let Some(result) = self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return result;
+            }
+            let settled = self.settled.notified();
+            tokio::pin!(settled);
+            settled.as_mut().enable();
+            if self
+                .result
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_some()
+            {
+                continue;
+            }
+            #[cfg(test)]
+            let pause = self
+                .wait_before_await_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            settled.await;
+        }
+    }
+}
+
+struct RollingRetirementTicket {
+    participation: RollingRetirementParticipation,
+    settlement: Arc<RollingRetirementSettlement>,
+}
+
+#[derive(Clone)]
+struct RollingRetirementContext {
+    sessions: Weak<Mutex<HashMap<String, Arc<Session>>>>,
+    active_session_count: Arc<AtomicUsize>,
+    store: Arc<dyn Store>,
+}
+
+impl RollingRetirementTicket {
+    async fn wait(&self) -> Result<bool, String> {
+        self.settlement.wait().await
+    }
+}
+
+/// Unique retired scratch is no longer on the serving or admission critical
+/// path. One exact CAS-owned detached task makes a finite set of bounded
+/// attempts and reports every failure. A persistent orphan is then left for
+/// the existing startup/scheduled maintenance sweep; cached directories are
+/// never submitted here.
+fn spawn_rolling_scratch_cleanup_owner(
+    session_id: String,
+    session: &Arc<Session>,
+    #[cfg(test)] pause: Option<Arc<LifecycleTestPause>>,
+) {
+    if session.cached
+        || session
+            .scratch_cleanup_started
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_err()
+    {
         return;
-    };
+    }
+    let dir = session.dir.clone();
     tokio::spawn(async move {
-        let _claim = claim;
-        watch_for_stall_claimed(session, dir, sid).await;
+        #[cfg(test)]
+        if let Some(pause) = pause {
+            pause.reached.notify_one();
+            pause.release.notified().await;
+        }
+        for attempt in 1..=ROLLING_SCRATCH_CLEANUP_ATTEMPTS {
+            let cleanup = tokio::time::timeout(ROLLING_SCRATCH_CLEANUP_ATTEMPT, async {
+                clear_session_dir(&dir).await?;
+                match tokio::fs::remove_dir_all(&dir).await {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(error),
+                }
+            })
+            .await;
+            match cleanup {
+                Ok(Ok(())) => {
+                    tracing::debug!(
+                        session = %session_log_id(&session_id),
+                        path = %dir.display(),
+                        attempt,
+                        "rolling retirement scratch cleanup settled"
+                    );
+                    return;
+                }
+                Ok(Err(error)) => tracing::warn!(
+                    session = %session_log_id(&session_id),
+                    path = %dir.display(),
+                    attempt,
+                    %error,
+                    "rolling retirement scratch cleanup attempt failed"
+                ),
+                Err(_) => tracing::warn!(
+                    session = %session_log_id(&session_id),
+                    path = %dir.display(),
+                    attempt,
+                    timeout_ms = ROLLING_SCRATCH_CLEANUP_ATTEMPT.as_millis(),
+                    "rolling retirement scratch cleanup attempt timed out"
+                ),
+            }
+            if attempt < ROLLING_SCRATCH_CLEANUP_ATTEMPTS {
+                tokio::time::sleep(ROLLING_SCRATCH_CLEANUP_RETRY).await;
+            }
+        }
+        tracing::error!(
+            session = %session_log_id(&session_id),
+            path = %dir.display(),
+            attempts = ROLLING_SCRATCH_CLEANUP_ATTEMPTS,
+            "rolling retirement scratch cleanup exhausted; orphan handed to startup/maintenance sweep"
+        );
     });
 }
 
-/// Remove the (empty/partial) HLS output so a restarted ffmpeg starts clean.
-#[cfg(test)]
-async fn clear_session_dir(dir: &std::path::Path) {
-    if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
-        while let Ok(Some(entry)) = rd.next_entry().await {
-            let _ = tokio::fs::remove_file(entry.path()).await;
+/// Finish one rolling Session only after its exact supervised child is known
+/// reaped. Admission resources deliberately remain installed until this
+/// point: releasing them after SIGKILL request but before `wait` would let a
+/// replacement overcommit the same hardware or software capacity while the
+/// predecessor still exists in the kernel.
+async fn finish_rolling_retirement_after_reap(session: &Session) {
+    session.release_hardware_after_confirmed_reap();
+    session.release_software_after_confirmed_reap();
+    session.prepublication_cleanup_active.store(false, Release);
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn finish_prepublication_cleanup_after_reap(session: &Arc<Session>) {
+    finish_rolling_retirement_after_reap(session).await;
+    if !session.cached {
+        spawn_rolling_scratch_cleanup_owner(
+            "unregistered-prepublication".to_owned(),
+            session,
+            #[cfg(test)]
+            session
+                .scratch_cleanup_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take(),
+        );
+    }
+    if session.control.end().await.is_err() {
+        session.control.fence_unavailable();
+    }
+}
+
+/// One detached cleanup owner survives cancellation of whichever request,
+/// executor, or routine retirement transferred prepublication ownership. It
+/// never returns an admission resource until the exact supervised child has
+/// confirmed reap; unique scratch is then transferred to its own retrying
+/// owner. A failed first reap terminalizes
+/// serving but retains the Session, child handle, and permits while retrying
+/// physical convergence; callers decide separately whether to record a typed
+/// producer failure.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn own_prepublication_cleanup(
+    session: Arc<Session>,
+    first_attempt_settled: tokio::sync::oneshot::Sender<()>,
+) {
+    let mut first_attempt_settled = Some(first_attempt_settled);
+    loop {
+        // Hold lifecycle serialization only for one bounded reap attempt and,
+        // on success, its final admission settlement and scratch handoff. Sleeping with
+        // this lock would block the global reaper and every explicit stop.
+        let cleanup = {
+            let _transition = session.child_transition.lock().await;
+            let cleanup = terminate_current_prepublication_child(&session).await;
+            if cleanup.is_ok() {
+                finish_prepublication_cleanup_after_reap(&session).await;
+                session.prepublication_cleanup_active.store(false, Release);
+            }
+            cleanup
+        };
+        match cleanup {
+            Ok(()) => {
+                if let Some(settled) = first_attempt_settled.take() {
+                    let _ = settled.send(());
+                }
+                return;
+            }
+            Err(error) => {
+                tracing::error!(
+                    path = %session.dir.display(),
+                    %error,
+                    "prepublication producer reap was not confirmed; retaining admission and retrying cleanup"
+                );
+                if let Some(settled) = first_attempt_settled.take() {
+                    if session.control.end().await.is_err() {
+                        session.control.fence_unavailable();
+                    }
+                    let _ = settled.send(());
+                }
+                tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+            }
         }
     }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_prepublication_cleanup_owner(
+    session: &Arc<Session>,
+) -> Option<tokio::sync::oneshot::Receiver<()>> {
+    if session.retirement_cleanup_started.load(Acquire) {
+        return None;
+    }
+    if session
+        .prepublication_cleanup_active
+        .compare_exchange(false, true, AcqRel, Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    let (first_attempt_settled, settled) = tokio::sync::oneshot::channel();
+    let cleanup_session = Arc::clone(session);
+    tokio::spawn(async move {
+        // The cleanup owner is detached before the caller awaits it. Dropping
+        // the HTTP/start/executor future therefore cannot drop the child or
+        // release its admission half-way through a reap.
+        own_prepublication_cleanup(cleanup_session, first_attempt_settled).await;
+    });
+    Some(settled)
+}
+
+/// Cancellation-independent convergence for one exact rolling Session.
+///
+/// Before actor Terminal admission, `deadline` is a genuine no-mutation
+/// boundary. After Terminal applies, this task is the sole owner of registry
+/// removal, confirmed child reap, and admission release;
+/// caller cancellation and later deadlines cannot revoke that ownership.
+#[allow(clippy::too_many_arguments)]
+async fn own_rolling_retirement(
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    active_session_count: Arc<AtomicUsize>,
+    store: Arc<dyn Store>,
+    session_id: String,
+    session: Arc<Session>,
+    deadline: Option<tokio::time::Instant>,
+    settlement: Arc<RollingRetirementSettlement>,
+    committed: tokio::sync::oneshot::Sender<()>,
+) -> Result<bool, String> {
+    #[cfg(test)]
+    session.retirement_started.store(true, Release);
+
+    let transition = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
+            .await
+            .map_err(|_| replacement_deadline_error())?,
+        None => session.child_transition.lock().await,
+    };
+
+    let registered_key = {
+        let registry = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, sessions.lock())
+                .await
+                .map_err(|_| replacement_deadline_error())?,
+            None => sessions.lock().await,
+        };
+        registry
+            .iter()
+            .find_map(|(id, registered)| Arc::ptr_eq(registered, &session).then_some(id.clone()))
+    };
+    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+        return Err(replacement_deadline_error());
+    }
+
+    // Prepublication failure cleanup and routine retirement share this one
+    // process-resource claim. The detached retirement owner takes it before
+    // Terminal admission, but releases it again if the precommit deadline
+    // wins; after Terminal, the universal retirement claim is monotonic.
+    let prepublication_cleanup_claimed = session.prepublication_process_cleanup_required();
+    if prepublication_cleanup_claimed {
+        session.prepublication_cleanup_active.store(true, Release);
+    }
+
+    let terminal_cause = match session.end_activity_until(deadline).await {
+        Ok(cause) => cause,
+        Err(error) => {
+            if !session.control.is_retired() {
+                if prepublication_cleanup_claimed {
+                    session.prepublication_cleanup_active.store(false, Release);
+                }
+                return Err(error);
+            }
+            session
+                .control
+                .snapshot()
+                .await
+                .and_then(|snapshot| snapshot.terminal)
+                .unwrap_or(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        }
+    };
+    match terminal_cause {
+        crate::playback_control::RollingTerminalCause::End => {}
+        crate::playback_control::RollingTerminalCause::AuthorityFence => {
+            settlement.set_cause("authority_fence");
+        }
+        crate::playback_control::RollingTerminalCause::LeaseExpired => {
+            settlement.set_cause(if session.failed.load(Acquire) {
+                "failed"
+            } else {
+                "idle"
+            });
+        }
+    }
+    session.retirement_cleanup_started.store(true, Release);
+    let _ = committed.send(());
+
+    #[cfg(test)]
+    let pause = session
+        .retirement_cleanup_handoff_pause
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    #[cfg(test)]
+    if let Some(pause) = pause {
+        pause.reached.notify_one();
+        pause.release.notified().await;
+    }
+
+    drop(transition);
+
+    loop {
+        let cleanup = {
+            let _transition = session.child_transition.lock().await;
+            let cleanup = terminate_current_prepublication_child(&session).await;
+            if cleanup.is_ok() {
+                finish_rolling_retirement_after_reap(&session).await;
+            }
+            cleanup
+        };
+        match cleanup {
+            Ok(()) => {
+                // Keep the exact retired Arc discoverable until process death
+                // and admission release are both facts. Adoption may rename it
+                // during actor settlement, so remove by pointer at the end.
+                let (removed, removed_key) = {
+                    let mut registry = sessions.lock().await;
+                    let exact_key = registry.iter().find_map(|(id, registered)| {
+                        Arc::ptr_eq(registered, &session).then_some(id.clone())
+                    });
+                    if let Some(exact_key) = exact_key.as_deref() {
+                        registry.remove(exact_key);
+                        active_session_count.store(registry.len(), Relaxed);
+                    }
+                    (exact_key.is_some(), exact_key)
+                };
+                session.retirement_cleanup_finished.store(true, Release);
+                settlement.complete(Ok(removed));
+                let winning_cause = settlement.cause();
+                let settled_session_id = removed_key
+                    .as_deref()
+                    .or(registered_key.as_deref())
+                    .unwrap_or(&session_id);
+                if !session.cached {
+                    spawn_rolling_scratch_cleanup_owner(
+                        settled_session_id.to_owned(),
+                        &session,
+                        #[cfg(test)]
+                        session
+                            .scratch_cleanup_pause
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                            .take(),
+                    );
+                }
+                if registered_key.is_some() || removed {
+                    emit_session_event_to_store(
+                        Arc::clone(&store),
+                        settled_session_id,
+                        &session,
+                        "session_end",
+                        SessionEventFields {
+                            reason: Some(winning_cause.as_ref()),
+                            ..SessionEventFields::default()
+                        },
+                    )
+                    .await;
+                }
+                return Ok(removed);
+            }
+            Err(error) => {
+                tracing::error!(
+                    session = %session_log_id(&session_id),
+                    path = %session.dir.display(),
+                    %error,
+                    "rolling retirement could not confirm producer reap; retaining admissions and retrying"
+                );
+                tokio::time::sleep(PREPUBLICATION_REAP_RETRY).await;
+            }
+        }
+    }
+}
+
+fn spawn_rolling_retirement_owner(
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    active_session_count: Arc<AtomicUsize>,
+    store: Arc<dyn Store>,
+    session_id: String,
+    session: Arc<Session>,
+    deadline: Option<tokio::time::Instant>,
+    cause: &'static str,
+) -> (tokio::sync::oneshot::Receiver<()>, RollingRetirementTicket) {
+    let (settlement, participation) = {
+        let mut shared = session
+            .retirement_settlement
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match shared.as_ref() {
+            Some(settlement) => (
+                Arc::clone(settlement),
+                RollingRetirementParticipation::Joined,
+            ),
+            None => {
+                let settlement = Arc::new(RollingRetirementSettlement::new(cause));
+                *shared = Some(Arc::clone(&settlement));
+                (settlement, RollingRetirementParticipation::Won)
+            }
+        }
+    };
+    let (committed, commit) = tokio::sync::oneshot::channel();
+    if participation == RollingRetirementParticipation::Won {
+        let owner_settlement = Arc::clone(&settlement);
+        tokio::spawn(async move {
+            let outcome = own_rolling_retirement(
+                sessions,
+                active_session_count,
+                store,
+                session_id,
+                Arc::clone(&session),
+                deadline,
+                Arc::clone(&owner_settlement),
+                committed,
+            )
+            .await;
+            if outcome.is_err() && !session.control.is_retired() {
+                let mut shared = session
+                    .retirement_settlement
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if shared
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, &owner_settlement))
+                {
+                    *shared = None;
+                }
+                session.prepublication_cleanup_active.store(false, Release);
+            }
+            owner_settlement.complete(outcome);
+        });
+    } else {
+        drop(committed);
+    }
+    (
+        commit,
+        RollingRetirementTicket {
+            participation,
+            settlement,
+        },
+    )
+}
+
+fn spawn_context_retirement_owner(
+    session: &Arc<Session>,
+    deadline: Option<tokio::time::Instant>,
+    cause: &'static str,
+) -> Option<RollingRetirementTicket> {
+    let context = session.retirement_context.as_ref()?;
+    let sessions = context.sessions.upgrade()?;
+    let (_commit, ticket) = spawn_rolling_retirement_owner(
+        sessions,
+        Arc::clone(&context.active_session_count),
+        Arc::clone(&context.store),
+        "prepublication".to_owned(),
+        Arc::clone(session),
+        deadline,
+        cause,
+    );
+    Some(ticket)
+}
+
+/// One detached supersession transaction owns the VOD sweep and the complete
+/// rolling victim snapshot. The supplied deadline is honored only until the
+/// first VOD tombstone or rolling actor Terminal admission. Once either
+/// mutation wins, every snapshotted rolling victim is started without a
+/// caller deadline and all settlement futures remain owned here.
+#[allow(clippy::too_many_arguments)]
+async fn own_supersession_convergence(
+    vod: Arc<crate::vodserve::VodServe>,
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    active_session_count: Arc<AtomicUsize>,
+    store: Arc<dyn Store>,
+    doomed: Vec<(String, Arc<Session>)>,
+    deadline: Option<tokio::time::Instant>,
+    supersession_user: String,
+    playback_id: String,
+) -> Result<Vec<(String, Arc<Session>)>, String> {
+    let vod_ended = vod
+        .supersede_before(&supersession_user, &playback_id, "", deadline)
+        .await
+        .map_err(|_| replacement_deadline_error())?;
+    let mut committed = vod_ended > 0;
+    let mut pending = Vec::new();
+    let mut removed = Vec::new();
+    for (session_id, session) in doomed {
+        let retirement_deadline = if committed { None } else { deadline };
+        let (mut commit, ticket) = spawn_rolling_retirement_owner(
+            Arc::clone(&sessions),
+            Arc::clone(&active_session_count),
+            Arc::clone(&store),
+            session_id.clone(),
+            Arc::clone(&session),
+            retirement_deadline,
+            "superseded",
+        );
+        if committed {
+            pending.push((session_id, session, ticket));
+            continue;
+        }
+        let outcome = {
+            let result = ticket.wait();
+            tokio::pin!(result);
+            tokio::select! {
+                biased;
+                admission = &mut commit => {
+                    match admission {
+                        Ok(()) => None,
+                        Err(_) => Some(result.await),
+                    }
+                }
+                settlement = &mut result => {
+                    Some(settlement)
+                }
+            }
+        };
+        match outcome {
+            None => {
+                committed = true;
+                pending.push((session_id, session, ticket));
+                continue;
+            }
+            Some(Ok(true)) => {
+                committed = true;
+                removed.push((session_id, session));
+                continue;
+            }
+            Some(Ok(false)) => {}
+            Some(Err(error)) => return Err(error),
+        }
+    }
+
+    // Every victim after the first irreversible mutation is already running
+    // under detached ownership. Awaiting here is only for the initiating
+    // caller's success/event projection; dropping this future cannot cancel
+    // any individual settlement task.
+    for (session_id, session, ticket) in pending {
+        match ticket.wait().await {
+            Ok(true) => removed.push((session_id, session)),
+            Ok(false) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(removed)
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn fail_prepublication_transaction(session: &Arc<Session>, reason: String) {
+    // Publish the typed local failure before actor End can make a concurrent
+    // playlist lookup collapse the generation into an anonymous 404.
+    session.fail(PlaylistError::SessionFailed(reason));
+    if let Some(ticket) = spawn_context_retirement_owner(session, None, "failed") {
+        let _ = ticket.wait().await;
+        return;
+    }
+    let Some(settled) = spawn_prepublication_cleanup_owner(session) else {
+        return;
+    };
+    let _ = settled.await;
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn execute_prepublication_transcode_retry(
+    session: Arc<Session>,
+    retry: &PrepublicationTranscodeRetry,
+    decision_sequence: u64,
+    failed_attempt: u64,
+    actor_recipe: &crate::playback_control::ValidatedRetryRecipe,
+    first_reason: crate::playback_control::ProducerDecisionReason,
+    sid: &str,
+) -> Result<(), String> {
+    if actor_recipe != &retry.actor_recipe {
+        return Err(format!(
+            "actor retry recipe did not match immutable executor recipe ({first_reason:?})"
+        ));
+    }
+    let mut replacement = session.begin_child_replacement().await;
+    // Cancellation after the actor decision has been observed must fence the
+    // generation even though retry admission intentionally happens later.
+    replacement.mark_actor_decision_pending(PlaylistError::SessionFailed(format!(
+        "producer retry was cancelled after actor decision {first_reason:?}"
+    )));
+    let transaction = async {
+        terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        clear_session_dir(&session.dir)
+            .await
+            .map_err(|error| format!("clearing predecessor scratch: {error}"))?;
+        session.confirm_predecessor_scratch_cleared();
+        session.clear_compatibility_before_retry().await;
+
+        let producer_attempt = session
+            .control
+            .admit_producer_retry(decision_sequence, &retry.actor_recipe.fingerprint)
+            .await
+            .map_err(|reason| format!("actor rejected exact retry admission: {reason:?}"))?;
+        session
+            .bind_retry_compatibility_attempt(producer_attempt)
+            .await;
+
+        if let Some(threads) = retry.software_threads {
+            let work = Workload::of(&retry.file, retry.target_height);
+            let permit = retry.software_pool.take_forced(threads);
+            if permit.threads() != threads {
+                return Err(format!(
+                    "software admission granted {} threads for immutable {threads}-thread recipe",
+                    permit.threads()
+                ));
+            }
+            session.demote_to_software(work, permit);
+        }
+
+        session
+            .spawn_and_install_prepublication_child(producer_attempt, || {
+                spawn_ffmpeg(
+                    retry.args.as_ref(),
+                    retry.encoder.label(),
+                    sid,
+                    FfmpegProgressObserver::rolling(
+                        Arc::clone(&session.progress),
+                        producer_attempt,
+                        session.control.clone(),
+                    ),
+                    &retry.runtime_cache,
+                    FfmpegDescriptors {
+                        subtitle: session
+                            .subtitle_handle
+                            .as_ref()
+                            .map(std::os::fd::AsRawFd::as_raw_fd),
+                        ..FfmpegDescriptors::default()
+                    },
+                )
+                .map_err(|error| format!("spawning immutable fallback recipe: {error}"))
+            })
+            .await?;
+        *session.encoder_label.lock().await = retry.encoder.label();
+        *session.class.lock().expect("class mutex") =
+            Workload::of(&retry.file, retry.target_height).class(
+                if retry.encoder == Encoder::Software {
+                    crate::admission::SOFTWARE
+                } else {
+                    retry.encoder.label()
+                },
+            );
+        session
+            .control
+            .decision_applied(decision_sequence, Some(producer_attempt))
+            .await
+            .map_err(|reason| format!("actor rejected DecisionApplied: {reason:?}"))?;
+        Ok::<u64, String>(producer_attempt)
+    }
+    .await;
+    let producer_attempt = match transaction {
+        Ok(producer_attempt) => producer_attempt,
+        Err(error) => {
+            // ChildReplacement::Drop is intentionally generic for unknown
+            // callers. Settle it explicitly here so the actor's first exact
+            // decision reason remains the Session's first-writer failure.
+            session.fail(PlaylistError::SessionFailed(format!(
+                "prepublication recovery failed after {first_reason:?}: {error}"
+            )));
+            if let Err(acknowledgement_error) = session
+                .control
+                .decision_applied(decision_sequence, None)
+                .await
+            {
+                tracing::error!(
+                    session = %session_log_id(sid),
+                    decision_sequence,
+                    ?acknowledgement_error,
+                    "actor rejected failed retry DecisionApplied acknowledgement"
+                );
+            }
+            replacement.settle_terminal_rejection();
+            return Err(error);
+        }
+    };
+    replacement.complete();
+    tracing::info!(
+        session = %session_log_id(sid),
+        producer_attempt,
+        encoder = retry.encoder.label(),
+        pipeline = retry.pipeline.name(),
+        "actor-owned prepublication fallback installed"
+    );
+    Ok(())
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn execute_prepublication_copy_retry(
+    session: Arc<Session>,
+    retry: &PrepublicationCopyRetry,
+    decision_sequence: u64,
+    failed_attempt: u64,
+    actor_recipe: &crate::playback_control::ValidatedRetryRecipe,
+    first_reason: crate::playback_control::ProducerDecisionReason,
+    sid: &str,
+) -> Result<(), String> {
+    if actor_recipe != &retry.actor_recipe {
+        return Err(format!(
+            "actor copy retry recipe did not match immutable executor recipe ({first_reason:?})"
+        ));
+    }
+    if first_reason != crate::playback_control::ProducerDecisionReason::Unsupported {
+        return Err(format!(
+            "copy fallback was admitted for non-structural reason {first_reason:?}"
+        ));
+    }
+    let mut replacement = session.begin_child_replacement().await;
+    replacement.mark_actor_decision_pending(PlaylistError::SessionFailed(format!(
+        "copy retry was cancelled after actor decision {first_reason:?}"
+    )));
+    let transaction = async {
+        terminate_exact_prepublication_child(&session, failed_attempt).await?;
+        clear_session_dir(&session.dir)
+            .await
+            .map_err(|error| format!("clearing copy-reader predecessor scratch: {error}"))?;
+        session.confirm_predecessor_scratch_cleared();
+        session.clear_compatibility_before_retry().await;
+
+        let producer_attempt = session
+            .control
+            .admit_producer_retry(decision_sequence, &retry.actor_recipe.fingerprint)
+            .await
+            .map_err(|reason| format!("actor rejected exact copy retry admission: {reason:?}"))?;
+        session
+            .bind_retry_compatibility_attempt(producer_attempt)
+            .await;
+        session
+            .spawn_and_install_prepublication_child(producer_attempt, || {
+                spawn_ffmpeg(
+                    retry.args.as_ref(),
+                    "copy",
+                    sid,
+                    FfmpegProgressObserver::rolling(
+                        Arc::clone(&session.progress),
+                        producer_attempt,
+                        session.control.clone(),
+                    ),
+                    &retry.runtime_cache,
+                    FfmpegDescriptors::default(),
+                )
+                .map_err(|error| format!("spawning immutable copy fallback: {error}"))
+            })
+            .await?;
+        session
+            .control
+            .decision_applied(decision_sequence, Some(producer_attempt))
+            .await
+            .map_err(|reason| format!("actor rejected copy DecisionApplied: {reason:?}"))?;
+        Ok::<u64, String>(producer_attempt)
+    }
+    .await;
+    let producer_attempt = match transaction {
+        Ok(producer_attempt) => producer_attempt,
+        Err(error) => {
+            session.fail(PlaylistError::SessionFailed(format!(
+                "copy recovery failed after {first_reason:?}: {error}"
+            )));
+            if let Err(acknowledgement_error) = session
+                .control
+                .decision_applied(decision_sequence, None)
+                .await
+            {
+                tracing::error!(
+                    session = %session_log_id(sid),
+                    decision_sequence,
+                    ?acknowledgement_error,
+                    "actor rejected failed copy retry DecisionApplied acknowledgement"
+                );
+            }
+            replacement.settle_terminal_rejection();
+            return Err(error);
+        }
+    };
+    replacement.complete();
+    tracing::info!(
+        session = %session_log_id(sid),
+        producer_attempt,
+        encoder = "copy",
+        pipeline = "ffmpeg-hls-muxer",
+        "actor-owned copy fallback installed"
+    );
+    Ok(())
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrepublicationExecutorExit {
+    ActorTerminal,
+    SessionGone,
+    FailedClosed { producer_attempt: u64 },
+    ActorFailureApplied,
+    ActorCompletionApplied,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl PrepublicationExecutorExit {
+    fn monitor_cleanup_attempt(self) -> Option<u64> {
+        match self {
+            Self::FailedClosed { producer_attempt } => Some(producer_attempt),
+            Self::ActorTerminal
+            | Self::SessionGone
+            | Self::ActorFailureApplied
+            | Self::ActorCompletionApplied => None,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn completion_playlist_evidence(
+    probe_sequence: u64,
+    producer_attempt: u64,
+    bytes: Option<&[u8]>,
+) -> crate::playback_control::RollingProducerCompletionEvidence {
+    let text = bytes.and_then(|bytes| std::str::from_utf8(bytes).ok());
+    let segments = text.map(parse_playlist).unwrap_or_default();
+    let end_list = text.is_some_and(|text| {
+        let lines = text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        lines.first().copied() == Some("#EXTM3U")
+            && lines.last().copied() == Some("#EXT-X-ENDLIST")
+            && lines
+                .iter()
+                .filter(|line| **line == "#EXT-X-ENDLIST")
+                .count()
+                == 1
+    });
+    crate::playback_control::RollingProducerCompletionEvidence {
+        probe_sequence,
+        producer_attempt,
+        end_list,
+        final_segment: segments.last().map(|segment| segment.index),
+        final_end_ms: segments.last().map(|segment| segment.end_ms),
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn publish_copy_reader_outcome(
+    session: &Session,
+    sid: &str,
+    producer_attempt: u64,
+    outcome: copyseg::Outcome,
+) {
+    let classification = match outcome {
+        copyseg::Outcome::Completed(counts) => {
+            tracing::info!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                build = crate::version::BUILD,
+                "{}",
+                copyseg::summary(&counts)
+            );
+            crate::playback_control::CopyProducerExitClassification::Completed
+        }
+        copyseg::Outcome::ReaderFailed { reason, counts } => {
+            tracing::error!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                counts = %copyseg::summary(&counts),
+                "copy segmenter reader failed: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::ReaderFailed
+        }
+        copyseg::Outcome::InvalidHevcConfiguration(reason) => {
+            tracing::error!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                "copy segmenter produced invalid HEVC configuration: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::InvalidConfiguration
+        }
+        copyseg::Outcome::Unsupported(reason) => {
+            tracing::warn!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                "copy segmenter rejected the stream shape: {reason}"
+            );
+            crate::playback_control::CopyProducerExitClassification::Unsupported
+        }
+        copyseg::Outcome::Cancelled(counts) => {
+            tracing::debug!(
+                session = %session_log_id(sid),
+                producer_attempt,
+                counts = %copyseg::summary(&counts),
+                "copy segmenter stopped after lifecycle teardown"
+            );
+            return;
+        }
+    };
+    let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
+    if let Err(rejection) = session
+        .control
+        .classify_copy_producer_exit_before(producer_attempt, classification, deadline)
+        .await
+    {
+        tracing::warn!(
+            session = %session_log_id(sid),
+            producer_attempt,
+            ?classification,
+            ?rejection,
+            "copy reader classification was not accepted by the exact producer attempt"
+        );
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_copy_reader_owner(
+    session: Arc<Session>,
+    stdout: tokio::process::ChildStdout,
+    dir: PathBuf,
+    sid: String,
+    producer_attempt: u64,
+) {
+    tokio::spawn(async move {
+        // The outer owner retains the pipe until the actor has accepted the
+        // typed reader fact. Structural `Unsupported` deliberately stops
+        // reading early; dropping stdout before classification lets ffmpeg's
+        // resulting EPIPE race in as a non-zero process verdict and suppress
+        // the only permitted direct-HLS retry. The Arc also preserves this
+        // ordering if the reader task panics: `ReaderFailed` is sequenced
+        // while the pipe is still open, then the final owner closes it.
+        let stdout = Arc::new(Mutex::new(stdout));
+        let reader_stdout = Arc::clone(&stdout);
+        let worker_sid = sid.clone();
+        let worker = tokio::spawn(async move {
+            let mut stdout = reader_stdout.lock_owned().await;
+            copyseg::run(&mut *stdout, dir, &worker_sid, copyseg::Limits::default()).await
+        });
+        let outcome = match worker.await {
+            Ok(outcome) => outcome,
+            Err(join_error) => {
+                if session.control.is_retired()
+                    || session.control.current_producer_attempt() != producer_attempt
+                {
+                    return;
+                }
+                tracing::error!(
+                    session = %session_log_id(&sid),
+                    producer_attempt,
+                    %join_error,
+                    "copy reader task failed"
+                );
+                let deadline = Instant::now() + COPY_READER_INGRESS_TIMEOUT;
+                if let Err(rejection) = session
+                    .control
+                    .classify_copy_producer_exit_before(
+                        producer_attempt,
+                        crate::playback_control::CopyProducerExitClassification::ReaderFailed,
+                        deadline,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        session = %session_log_id(&sid),
+                        producer_attempt,
+                        ?rejection,
+                        "failed copy reader task could not classify its exact producer attempt"
+                    );
+                }
+                return;
+            }
+        };
+        publish_copy_reader_outcome(&session, &sid, producer_attempt, outcome).await;
+        drop(stdout);
+    });
+}
+
+/// Read one exact-attempt completion snapshot under the actor's classification
+/// deadline. This is a one-shot probe, not a polling recovery owner: the actor
+/// alone decides completion versus partial-success failure from the returned
+/// ENDLIST/frontier evidence.
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn classify_successful_transcode_exit(
+    session: &Arc<Session>,
+    probe: &crate::playback_control::RollingProducerExitProbe,
+    sid: &str,
+) -> Result<
+    crate::playback_control::RollingProducerCompletionDisposition,
+    crate::playback_control::ProducerAttemptRejection,
+> {
+    let bytes = if session.control.current_producer_attempt() == probe.producer_attempt
+        && session.compatibility_producer_attempt() == probe.producer_attempt
+    {
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(probe.deadline),
+            plurx_core::transcode::manifest::read_bounded_playlist(&session.dir, "index.m3u8"),
+        )
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .flatten()
+        .filter(|_| {
+            session.control.current_producer_attempt() == probe.producer_attempt
+                && session.compatibility_producer_attempt() == probe.producer_attempt
+        })
+    } else {
+        None
+    };
+    let evidence = completion_playlist_evidence(
+        probe.probe_sequence,
+        probe.producer_attempt,
+        bytes.as_deref(),
+    );
+    let end_list = evidence.end_list;
+    let final_segment = evidence.final_segment;
+    let final_end_ms = evidence.final_end_ms;
+    let disposition = session
+        .control
+        .classify_producer_exit_before(evidence, probe.deadline)
+        .await;
+    tracing::info!(
+        session = %session_log_id(sid),
+        producer_attempt = probe.producer_attempt,
+        probe_sequence = probe.probe_sequence,
+        end_list,
+        final_segment = ?final_segment,
+        final_end_ms = ?final_end_ms,
+        disposition = ?disposition,
+        "actor-owned transcode exit completion probe settled"
+    );
+    disposition
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+async fn run_prepublication_producer_executor(
+    session: Weak<Session>,
+    mut registration: crate::playback_control::RollingProducerExecutorRegistration,
+    manager_publication: tokio::sync::oneshot::Receiver<()>,
+    retry: Option<PrepublicationRetry>,
+    sid: String,
+) -> PrepublicationExecutorExit {
+    // Registration with the actor must precede the initial deadline, but the
+    // executor must not *act* until the manager has published the exact initial
+    // attempt. Otherwise an immediate process exit can admit a successor and
+    // make registration of the captured initial attempt spuriously stale.
+    if manager_publication.await.is_err() {
+        return PrepublicationExecutorExit::SessionGone;
+    }
+    loop {
+        match registration.next_decision().await {
+            crate::playback_control::RollingProducerExecutorPoll::ClassifyExit(probe) => {
+                let Some(session) = session.upgrade() else {
+                    return PrepublicationExecutorExit::SessionGone;
+                };
+                let disposition = classify_successful_transcode_exit(&session, &probe, &sid).await;
+                if matches!(
+                    disposition,
+                    Ok(
+                        crate::playback_control::RollingProducerCompletionDisposition::CompleteVerifiedDuration
+                            | crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration
+                    )
+                ) {
+                    let disposition = disposition.expect("matched successful completion");
+                    // Transfer the already-exited child and its admission
+                    // resources before awaiting. A cancelled executor cannot
+                    // strand either one after the actor has made completion
+                    // immutable.
+                    let settlement = spawn_published_completion_cleanup_owner(
+                        &session,
+                        probe.producer_attempt,
+                        disposition,
+                        &sid,
+                    );
+                    match settlement.await {
+                        Ok(PublishedFailureCleanupOutcome::Reaped) => {
+                            if let Err(error) = registration.settle_expected().await {
+                                tracing::error!(
+                                    session = %session_log_id(&sid),
+                                    producer_attempt = probe.producer_attempt,
+                                    disposition = ?disposition,
+                                    ?error,
+                                    "completed producer reaped but executor settlement was rejected"
+                                );
+                                return PrepublicationExecutorExit::FailedClosed {
+                                    producer_attempt: probe.producer_attempt,
+                                };
+                            }
+                            return PrepublicationExecutorExit::ActorCompletionApplied;
+                        }
+                        Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership) => {
+                            return PrepublicationExecutorExit::ActorTerminal;
+                        }
+                        Err(_) => {
+                            tracing::error!(
+                                session = %session_log_id(&sid),
+                                producer_attempt = probe.producer_attempt,
+                                disposition = ?disposition,
+                                "completed producer cleanup owner ended without settlement"
+                            );
+                            return PrepublicationExecutorExit::FailedClosed {
+                                producer_attempt: probe.producer_attempt,
+                            };
+                        }
+                    }
+                }
+            }
+            crate::playback_control::RollingProducerExecutorPoll::Decision(decision) => {
+                let Some(session) = session.upgrade() else {
+                    return PrepublicationExecutorExit::SessionGone;
+                };
+                match decision.as_ref() {
+                    crate::playback_control::ProducerDecision::Retry {
+                        decision_sequence,
+                        failed_attempt,
+                        recipe,
+                        reason,
+                    } => {
+                        let result = match retry.as_ref() {
+                            Some(PrepublicationRetry::Transcode(retry)) => {
+                                execute_prepublication_transcode_retry(
+                                    Arc::clone(&session),
+                                    retry,
+                                    *decision_sequence,
+                                    *failed_attempt,
+                                    recipe,
+                                    *reason,
+                                    &sid,
+                                )
+                                .await
+                            }
+                            Some(PrepublicationRetry::Copy(retry)) => {
+                                execute_prepublication_copy_retry(
+                                    Arc::clone(&session),
+                                    retry,
+                                    *decision_sequence,
+                                    *failed_attempt,
+                                    recipe,
+                                    *reason,
+                                    &sid,
+                                )
+                                .await
+                            }
+                            None => Err(format!(
+                                "actor selected a retry without an immutable recipe ({reason:?})"
+                            )),
+                        };
+                        if let Err(error) = result {
+                            fail_prepublication_transaction(
+                                &session,
+                                format!("prepublication recovery failed after {reason:?}: {error}"),
+                            )
+                            .await;
+                            return PrepublicationExecutorExit::ActorFailureApplied;
+                        }
+                    }
+                    crate::playback_control::ProducerDecision::Fail {
+                        decision_sequence,
+                        failed_attempt,
+                        reason,
+                        cleanup,
+                        ..
+                    } => {
+                        if cleanup.cleanup_policy
+                            == crate::playback_control::CleanupPolicy::RetainPublished
+                        {
+                            // Transfer ownership before the first await. The
+                            // detached owner keeps admitted bytes/catalogs
+                            // intact and holds capacity until exact reap even
+                            // if this executor is cancelled.
+                            let settlement = spawn_published_failure_cleanup_owner(
+                                &session,
+                                *failed_attempt,
+                                *decision_sequence,
+                                *reason,
+                                &sid,
+                            );
+                            match settlement.await {
+                                Ok(PublishedFailureCleanupOutcome::Reaped) => {
+                                    if let Err(error) = registration.settle_expected().await {
+                                        tracing::error!(
+                                            session = %session_log_id(&sid),
+                                            producer_attempt = *failed_attempt,
+                                            decision_sequence = *decision_sequence,
+                                            reason = ?reason,
+                                            cleanup_policy = "retain_published",
+                                            ?error,
+                                            "published producer failure reaped but executor settlement was rejected"
+                                        );
+                                        return PrepublicationExecutorExit::FailedClosed {
+                                            producer_attempt: *failed_attempt,
+                                        };
+                                    }
+                                    return PrepublicationExecutorExit::ActorFailureApplied;
+                                }
+                                Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership) => {
+                                    return PrepublicationExecutorExit::ActorTerminal;
+                                }
+                                Err(_) => {
+                                    tracing::error!(
+                                        session = %session_log_id(&sid),
+                                        producer_attempt = *failed_attempt,
+                                        decision_sequence = *decision_sequence,
+                                        reason = ?reason,
+                                        cleanup_policy = "retain_published",
+                                        "published producer cleanup owner ended without settlement"
+                                    );
+                                    return PrepublicationExecutorExit::FailedClosed {
+                                        producer_attempt: *failed_attempt,
+                                    };
+                                }
+                            }
+                        }
+
+                        debug_assert_eq!(
+                            cleanup.cleanup_policy,
+                            crate::playback_control::CleanupPolicy::DiscardPrepublication
+                        );
+                        // Publish the actor's exact terminal verdict before
+                        // DecisionApplied/End can make readers observe only a
+                        // retired capability and return an anonymous 404.
+                        session.fail(
+                            if *reason
+                                == crate::playback_control::ProducerDecisionReason::ProcessExit
+                            {
+                                PlaylistError::ProducerExited(
+                                    "the actor observed a non-zero producer exit".to_owned(),
+                                )
+                            } else {
+                                PlaylistError::SessionFailed(format!(
+                                    "producer failed before publication: {reason:?}"
+                                ))
+                            },
+                        );
+                        let mut replacement = session.begin_child_replacement().await;
+                        replacement.mark_admission_pending();
+                        let cleanup = async {
+                            terminate_exact_prepublication_child(&session, *failed_attempt).await?;
+                            clear_session_dir(&session.dir).await.map_err(|error| {
+                                format!("clearing failed producer scratch: {error}")
+                            })?;
+                            session.confirm_predecessor_scratch_cleared();
+                            session.clear_compatibility_before_retry().await;
+                            session
+                                .control
+                                .decision_applied(*decision_sequence, None)
+                                .await
+                                .map_err(|error| {
+                                    format!("acknowledging actor failure: {error:?}")
+                                })?;
+                            session.control.end().await.map_err(|error| {
+                                format!("terminalizing actor failure: {error:?}")
+                            })?;
+                            Ok::<(), String>(())
+                        }
+                        .await;
+                        match cleanup {
+                            Ok(()) => {
+                                session.release_hardware_after_confirmed_reap();
+                                session.release_software_after_confirmed_reap();
+                                replacement.complete();
+                            }
+                            Err(error) => {
+                                replacement.settle_terminal_rejection();
+                                drop(replacement);
+                                fail_prepublication_transaction(
+                                    &session,
+                                    format!("prepublication failure cleanup failed after {reason:?}: {error}"),
+                                )
+                                .await;
+                            }
+                        }
+                        return PrepublicationExecutorExit::ActorFailureApplied;
+                    }
+                }
+            }
+            crate::playback_control::RollingProducerExecutorPoll::Terminal(_) => {
+                return PrepublicationExecutorExit::ActorTerminal;
+            }
+            crate::playback_control::RollingProducerExecutorPoll::Unavailable => {
+                if let Some(session) = session.upgrade() {
+                    let producer_attempt = session.control.current_producer_attempt();
+                    if session.actor_prepublication_producer.load(Acquire) {
+                        fail_prepublication_transaction(
+                            &session,
+                            "prepublication executor became unavailable".to_owned(),
+                        )
+                        .await;
+                    } else {
+                        tracing::error!(
+                            session = %session_log_id(&sid),
+                            "producer decision observer became unavailable after first-media handoff; actor lifetime fence retained"
+                        );
+                        return PrepublicationExecutorExit::FailedClosed { producer_attempt };
+                    }
+                    return PrepublicationExecutorExit::ActorFailureApplied;
+                }
+                return PrepublicationExecutorExit::SessionGone;
+            }
+        }
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+fn spawn_prepublication_executor_owner(
+    session: &Arc<Session>,
+    registration: crate::playback_control::RollingProducerExecutorRegistration,
+    manager_publication: tokio::sync::oneshot::Receiver<()>,
+    retry: Option<PrepublicationRetry>,
+    sid: String,
+) {
+    let executor_session = Arc::downgrade(session);
+    let monitor_session = Arc::downgrade(session);
+    let monitor_sid = sid.clone();
+    tokio::spawn(async move {
+        let worker = tokio::spawn(run_prepublication_producer_executor(
+            executor_session,
+            registration,
+            manager_publication,
+            retry,
+            sid,
+        ));
+        let unexpected_exit = match worker.await {
+            Err(join_error) => Some((format!("executor task failed: {join_error}"), None)),
+            Ok(exit) => exit.monitor_cleanup_attempt().map(|producer_attempt| {
+                (
+                    "executor returned failed-closed".to_owned(),
+                    Some(producer_attempt),
+                )
+            }),
+        };
+        if let Some((unexpected_exit, exact_attempt)) = unexpected_exit {
+            if let Some(session) = monitor_session.upgrade() {
+                let actor_still_owns_prepublication = match session.control.snapshot().await {
+                    Some(snapshot) => {
+                        snapshot.terminal.is_none()
+                            && !snapshot.producer_control.producer_media_published
+                    }
+                    None => true,
+                };
+                if session.actor_prepublication_producer.load(Acquire)
+                    && actor_still_owns_prepublication
+                {
+                    fail_prepublication_transaction(
+                        &session,
+                        format!(
+                            "prepublication executor stopped without cleanup: {unexpected_exit}"
+                        ),
+                    )
+                    .await;
+                } else {
+                    let producer_attempt =
+                        exact_attempt.unwrap_or_else(|| session.control.current_producer_attempt());
+                    spawn_published_executor_loss_cleanup_owner(
+                        &session,
+                        producer_attempt,
+                        &monitor_sid,
+                    );
+                    tracing::error!(
+                        session = %session_log_id(&monitor_sid),
+                        producer_attempt,
+                        reason = %unexpected_exit,
+                        "producer executor stopped after actor lifetime ownership activated; exact cleanup owner retained admitted media"
+                    );
+                }
+            }
+        }
+    });
 }
 
 /// Fail in terms of the dependency that is actually missing.
@@ -1491,11 +3599,6 @@ fn tone_map_pref() -> ToneMap {
     }
 }
 
-struct LastRequest {
-    at: Instant,
-    kind: &'static str,
-}
-
 /// Immutable publication identity for the cache location behind a session.
 ///
 /// Integrity failures remove the row with all five fields as a compare-and-
@@ -1528,74 +3631,834 @@ struct CacheOfferVerification {
     revoke_shared_member: bool,
 }
 
+/// Immutable master-playlist inputs for one rolling generation. A mutable
+/// library row or a later probe refresh must never change the advertised
+/// presentation behind an already-issued capability.
+#[derive(Clone)]
+struct FrozenHlsPresentation {
+    file: plurx_core::domain::MediaFile,
+    context: HlsContext,
+    contract_fingerprint: String,
+    /// Present when the frozen source/session facts completely determine the
+    /// master. AVC and other non-init-derived codec families are stable
+    /// generation metadata; HEVC/Dolby Vision masters remain attempt media
+    /// because their exact tier/profile may be normalized from `init.mp4`.
+    sealed_stable_master_contract: Option<String>,
+}
+
+impl FrozenHlsPresentation {
+    fn new(file: plurx_core::domain::MediaFile, context: HlsContext, kind: &SessionKind) -> Self {
+        let identity = serde_json::json!({
+            "version": 1,
+            "file": &file,
+            "kind": kind,
+            "start_seconds": context.start_seconds,
+            "media_origin_seconds": context.media_origin_seconds,
+            "codecs": &context.codecs,
+            "supplemental_codecs": &context.supplemental_codecs,
+            "frame_rate": context.frame_rate,
+        });
+        let contract_fingerprint = hex::encode(Sha256::digest(identity.to_string().as_bytes()));
+        let master_requires_attempt_init = context.codecs.split(',').next().is_some_and(|video| {
+            ["hvc1", "hev1", "dvh1", "dvhe"]
+                .into_iter()
+                .any(|entry| video.trim().starts_with(entry))
+        });
+        let sealed_stable_master_contract =
+            (!master_requires_attempt_init).then(|| contract_fingerprint.clone());
+        Self {
+            file,
+            context,
+            contract_fingerprint,
+            sealed_stable_master_contract,
+        }
+    }
+}
+
+fn frozen_video_frame_rate(probe_json: Option<&str>) -> Option<f64> {
+    fn fraction(raw: &str) -> Option<f64> {
+        let (numerator, denominator) = raw.split_once('/')?;
+        let numerator = numerator.parse::<f64>().ok()?;
+        let denominator = denominator.parse::<f64>().ok()?;
+        (numerator.is_finite() && denominator.is_finite() && denominator > 0.0)
+            .then_some(numerator / denominator)
+            .filter(|value| value.is_finite() && *value > 0.0)
+    }
+
+    let probe: serde_json::Value = serde_json::from_str(probe_json?).ok()?;
+    probe.get("streams")?.as_array()?.iter().find_map(|stream| {
+        (stream.get("codec_type")?.as_str()? == "video")
+            .then(|| {
+                stream
+                    .get("avg_frame_rate")
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(fraction)
+                    .or_else(|| {
+                        stream
+                            .get("r_frame_rate")
+                            .and_then(serde_json::Value::as_str)
+                            .and_then(fraction)
+                    })
+            })
+            .flatten()
+    })
+}
+
+/// A process handle paired permanently with the actor attempt that installed
+/// it. The attempt cannot be reconstructed from current session state: actor
+/// admission advances before a replacement kills its predecessor, and that
+/// exact overlap is where an untagged exit gets blamed on the successor.
 #[cfg(test)]
+struct LifecycleTestPause {
+    reached: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl LifecycleTestPause {
+    fn new() -> Self {
+        Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        }
+    }
+}
+
+struct AttemptChild {
+    producer_attempt: u64,
+    pid: Option<u32>,
+    terminal: Arc<std::sync::Mutex<Option<AttemptChildTerminal>>>,
+    terminal_notify: Arc<tokio::sync::Notify>,
+    commands: tokio::sync::mpsc::UnboundedSender<AttemptChildCommand>,
+    #[cfg(test)]
+    signal_after_authorization_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
+    #[cfg(test)]
+    signal_after_flow_reservation_pause: Arc<std::sync::Mutex<Option<Arc<std::sync::Barrier>>>>,
+    /// Test-only seam after exact-attempt termination has been requested but
+    /// before the supervisor can observe and publish the terminal wait.
+    #[cfg(test)]
+    terminate_before_reap_pause: Arc<std::sync::Mutex<Option<Arc<LifecycleTestPause>>>>,
+}
+
+#[derive(Clone)]
+enum AttemptChildTerminal {
+    Exited(std::process::ExitStatus, Instant),
+    WaitFailed(std::io::ErrorKind, String),
+}
+
+enum AttemptChildCommand {
+    Signal {
+        signal: libc::c_int,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<bool>>,
+    },
+    Terminate {
+        reply: Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>,
+    },
+}
+
+impl AttemptChildTerminal {
+    fn wait_result(&self) -> std::io::Result<()> {
+        match self {
+            Self::Exited(_, _) => Ok(()),
+            Self::WaitFailed(kind, message) => Err(std::io::Error::new(*kind, message.clone())),
+        }
+    }
+}
+
+impl AttemptChild {
+    fn new(
+        producer_attempt: u64,
+        mut child: Child,
+        control: crate::playback_control::RollingControlHandle,
+    ) -> Self {
+        let pid = child.id();
+        let terminal = Arc::new(std::sync::Mutex::new(None));
+        let terminal_notify = Arc::new(tokio::sync::Notify::new());
+        let (commands, mut command_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let supervisor_terminal = Arc::clone(&terminal);
+        let supervisor_terminal_notify = Arc::clone(&terminal_notify);
+        #[cfg(test)]
+        let signal_after_authorization_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
+        #[cfg(test)]
+        let supervisor_signal_pause = Arc::clone(&signal_after_authorization_pause);
+        #[cfg(test)]
+        let signal_after_flow_reservation_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<std::sync::Barrier>>));
+        #[cfg(test)]
+        let supervisor_flow_reservation_pause = Arc::clone(&signal_after_flow_reservation_pause);
+        #[cfg(test)]
+        let terminate_before_reap_pause =
+            Arc::new(std::sync::Mutex::new(None::<Arc<LifecycleTestPause>>));
+        #[cfg(test)]
+        let supervisor_terminate_pause = Arc::clone(&terminate_before_reap_pause);
+        tokio::spawn(async move {
+            let mut command_open = true;
+            let mut terminate_replies = Vec::new();
+            let terminal = loop {
+                if !command_open {
+                    break Self::record_wait_result(&control, producer_attempt, child.wait().await);
+                }
+                tokio::select! {
+                    // `Child::wait` is cancel safe. Poll it first so a ready
+                    // reap always wins over a simultaneous signal command;
+                    // the cached pid therefore cannot have been reused when
+                    // the command branch runs.
+                    biased;
+                    result = child.wait() => {
+                        break Self::record_wait_result(&control, producer_attempt, result);
+                    }
+                    command = command_receiver.recv() => {
+                        let Some(command) = command else {
+                            command_open = false;
+                            continue;
+                        };
+                        match command {
+                            AttemptChildCommand::Signal { signal, reply } => {
+                                let flow_signal =
+                                    signal == libc::SIGSTOP || signal == libc::SIGCONT;
+                                let result = loop {
+                                    let deferred = {
+                                        let transition = control.lock_producer_transition();
+                                        if control.current_producer_attempt() != producer_attempt
+                                            || !control
+                                                .producer_transition_is_live(&transition)
+                                        {
+                                            break Ok(false);
+                                        }
+                                        #[cfg(test)]
+                                        if let Some(pause) = supervisor_signal_pause
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .take()
+                                        {
+                                            pause.wait();
+                                            pause.wait();
+                                        }
+                                        if flow_signal
+                                            && !control.reserve_producer_flow_applied(
+                                                &transition,
+                                                producer_attempt,
+                                            )
+                                        {
+                                            // Attempt changes and retirement
+                                            // use this same fence, so after
+                                            // the liveness check `false`
+                                            // means only bounded capacity.
+                                            true
+                                        } else {
+                                            #[cfg(test)]
+                                            if flow_signal {
+                                                if let Some(pause) = supervisor_flow_reservation_pause
+                                                    .lock()
+                                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                                    .take()
+                                                {
+                                                    pause.wait();
+                                                    pause.wait();
+                                                }
+                                            }
+                                            // The syscall and successful
+                                            // acknowledgement publication are
+                                            // one exact-attempt transaction.
+                                            // A failed syscall only releases
+                                            // the reserved barrier slot.
+                                            let result =
+                                                signal_owned_pid(pid, producer_attempt, signal);
+                                            if flow_signal {
+                                                control.finish_producer_flow_applied(
+                                                    &transition,
+                                                    producer_attempt,
+                                                    signal == libc::SIGSTOP,
+                                                    matches!(&result, Ok(true)),
+                                                );
+                                            }
+                                            break result;
+                                        }
+                                    };
+                                    debug_assert!(deferred);
+                                    // Never wait while holding the transition
+                                    // fence: the actor needs that fence to
+                                    // drain the barriers that make capacity.
+                                    // After waking, re-authorize the attempt;
+                                    // retirement or replacement may have won.
+                                    if !control.wait_for_producer_flow_capacity().await {
+                                        break Ok(false);
+                                    }
+                                };
+                                let _ = reply.send(result);
+                            }
+                            AttemptChildCommand::Terminate { reply } => {
+                                match signal_owned_pid(pid, producer_attempt, libc::SIGKILL) {
+                                    Ok(_) => {
+                                        if let Some(reply) = reply {
+                                            terminate_replies.push(reply);
+                                        }
+                                        #[cfg(test)]
+                                        let pause = supervisor_terminate_pause
+                                            .lock()
+                                            .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                            .take();
+                                        #[cfg(test)]
+                                        if let Some(pause) = pause {
+                                            pause.reached.notify_one();
+                                            pause.release.notified().await;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        if let Some(reply) = reply {
+                                            let _ = reply.send(Err(error));
+                                        } else {
+                                            tracing::error!(
+                                                producer_attempt,
+                                                %error,
+                                                "dropped producer could not be terminated"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            *supervisor_terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(terminal.clone());
+            supervisor_terminal_notify.notify_waiters();
+            supervisor_terminal_notify.notify_one();
+            for reply in terminate_replies {
+                let _ = reply.send(terminal.wait_result());
+            }
+        });
+        Self {
+            producer_attempt,
+            pid,
+            terminal,
+            terminal_notify,
+            commands,
+            #[cfg(test)]
+            signal_after_authorization_pause,
+            #[cfg(test)]
+            signal_after_flow_reservation_pause,
+            #[cfg(test)]
+            terminate_before_reap_pause,
+        }
+    }
+
+    fn record_wait_result(
+        control: &crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+        result: std::io::Result<std::process::ExitStatus>,
+    ) -> AttemptChildTerminal {
+        match result {
+            Ok(status) => {
+                Self::observe_status(control, producer_attempt, &status);
+                AttemptChildTerminal::Exited(status, Instant::now())
+            }
+            Err(error) => {
+                tracing::error!(
+                    producer_attempt,
+                    %error,
+                    "producer process exit could not be observed"
+                );
+                AttemptChildTerminal::WaitFailed(error.kind(), error.to_string())
+            }
+        }
+    }
+
+    fn observe_status(
+        control: &crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+        status: &std::process::ExitStatus,
+    ) {
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        control.observe_producer_exit(producer_attempt, status.success(), status.code(), signal);
+    }
+
+    fn try_wait_observed(
+        &mut self,
+        _control: &crate::playback_control::RollingControlHandle,
+    ) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.try_wait()
+    }
+
+    fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        match self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            None => Ok(None),
+            Some(AttemptChildTerminal::Exited(status, _)) => Ok(Some(status)),
+            Some(AttemptChildTerminal::WaitFailed(kind, message)) => {
+                Err(std::io::Error::new(kind, message))
+            }
+        }
+    }
+
+    fn id(&self) -> Option<u32> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_none()
+            .then_some(self.pid)
+            .flatten()
+    }
+
+    #[cfg(test)]
+    fn pause_signal_after_authorization(&self, pause: Arc<std::sync::Barrier>) {
+        *self
+            .signal_after_authorization_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    fn pause_signal_after_flow_reservation(&self, pause: Arc<std::sync::Barrier>) {
+        *self
+            .signal_after_flow_reservation_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    async fn signal(&self, signal: libc::c_int) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Signal { signal, reply })
+            .is_err()
+        {
+            return self.signal_result_or_broken_pipe("producer exited before signal request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.signal_result_or_broken_pipe("producer supervisor stopped before signaling")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(terminal) = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return terminal.wait_result();
+        }
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: Some(reply) })
+            .is_err()
+        {
+            return self.terminal_result_or_broken_pipe("producer exited before terminate request");
+        }
+        match response.await {
+            Ok(result) => result,
+            Err(_) => {
+                self.terminal_result_or_broken_pipe("producer supervisor stopped before reaping")
+            }
+        }
+    }
+
+    /// Request SIGKILL without registering a response sender in the process
+    /// supervisor. Prepublication repair observes the shared terminal latch,
+    /// so a D-state child cannot accumulate one abandoned oneshot per retry.
+    fn request_termination(&self) -> std::io::Result<()> {
+        if let Some(terminal) = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+        {
+            return terminal.wait_result();
+        }
+        if self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: None })
+            .is_err()
+        {
+            return self.terminal_result_or_broken_pipe("producer exited before terminate request");
+        }
+        Ok(())
+    }
+
+    async fn wait_for_terminal(&self) -> std::io::Result<()> {
+        loop {
+            let notified = self.terminal_notify.notified();
+            if let Some(terminal) = self
+                .terminal
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+            {
+                return terminal.wait_result();
+            }
+            notified.await;
+        }
+    }
+
+    fn terminal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<()> {
+        self.terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+            .map_or_else(
+                || Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message)),
+                |terminal| terminal.wait_result(),
+            )
+    }
+
+    fn signal_result_or_broken_pipe(&self, message: &'static str) -> std::io::Result<bool> {
+        if self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_some()
+        {
+            Ok(false)
+        } else {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, message))
+        }
+    }
+
+    fn terminal_exit_snapshot(
+        &self,
+    ) -> Option<crate::playback_control::RollingProducerExitSnapshot> {
+        let terminal = self
+            .terminal
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()?;
+        let AttemptChildTerminal::Exited(status, observed_at) = terminal else {
+            return None;
+        };
+        #[cfg(unix)]
+        let signal = {
+            use std::os::unix::process::ExitStatusExt as _;
+            status.signal()
+        };
+        #[cfg(not(unix))]
+        let signal = None;
+        Some(crate::playback_control::RollingProducerExitSnapshot {
+            success: status.success(),
+            code: status.code(),
+            signal,
+            observed_idle_ms: observed_at.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        })
+    }
+}
+
+impl Drop for AttemptChild {
+    fn drop(&mut self) {
+        let _ = self
+            .commands
+            .send(AttemptChildCommand::Terminate { reply: None });
+    }
+}
+
+/// Signal a pid only from the task that owns and has not reaped its Child.
+/// A biased, cancel-safe `Child::wait` select proves the pid is still reserved
+/// before the command branch can reach this call.
+fn signal_owned_pid(
+    pid: Option<u32>,
+    producer_attempt: u64,
+    signal: libc::c_int,
+) -> std::io::Result<bool> {
+    let Some(pid) = pid else {
+        return Ok(false);
+    };
+    let pid = i32::try_from(pid).map_err(|_| {
+        std::io::Error::other(format!(
+            "producer attempt {producer_attempt} pid does not fit pid_t"
+        ))
+    })?;
+    // SAFETY: this runs only in the task that owns the unreaped Child. The pid
+    // cannot be reused until this task's later try_wait returns a status.
+    if unsafe { libc::kill(pid, signal) } == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(false)
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct PreparedSharedCacheRead {
     dir: PathBuf,
     manifest: Arc<plurx_core::transcode::manifest::GenerationManifest>,
 }
 
-impl LastRequest {
-    fn now(kind: &'static str) -> Self {
-        Self {
-            at: Instant::now(),
-            kind,
+#[derive(Clone)]
+struct RollingTerminalResultReceipt {
+    result: tokio::sync::watch::Receiver<
+        Option<
+            Result<
+                crate::playback_control::LocalControlResult,
+                crate::playback_control::ControlStateError,
+            >,
+        >,
+    >,
+}
+
+impl RollingTerminalResultReceipt {
+    fn pending() -> (
+        Self,
+        tokio::sync::watch::Sender<
+            Option<
+                Result<
+                    crate::playback_control::LocalControlResult,
+                    crate::playback_control::ControlStateError,
+                >,
+            >,
+        >,
+    ) {
+        let (sender, result) = tokio::sync::watch::channel(None);
+        (Self { result }, sender)
+    }
+
+    async fn wait(
+        &self,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let mut result = self.result.clone();
+        loop {
+            if let Some(outcome) = result.borrow().clone() {
+                return outcome;
+            }
+            result
+                .changed()
+                .await
+                .map_err(|_| crate::playback_control::ControlStateError::Unavailable)?;
         }
+    }
+}
+
+#[derive(Clone)]
+struct RollingTerminalIdentity {
+    generation: String,
+    owner_node_id: String,
+    owner_epoch: u64,
+    client_instance_id: String,
+    sequence: u64,
+    snapshot: crate::playback_control::PlaybackDemandSnapshot,
+}
+
+impl RollingTerminalIdentity {
+    fn from_request(control: &crate::playback_control::LocalControlRequest<'_>) -> Self {
+        Self {
+            generation: control.generation.to_owned(),
+            owner_node_id: control.owner_node_id.to_owned(),
+            owner_epoch: control.owner_epoch,
+            client_instance_id: control.client_instance_id.to_owned(),
+            sequence: control.sequence,
+            snapshot: control.snapshot.clone(),
+        }
+    }
+
+    fn matches(&self, control: &crate::playback_control::LocalControlRequest<'_>) -> bool {
+        self.generation == control.generation
+            && self.owner_node_id == control.owner_node_id
+            && self.owner_epoch == control.owner_epoch
+            && self.client_instance_id == control.client_instance_id
+            && self.sequence == control.sequence
+            && self.snapshot == control.snapshot
+    }
+}
+
+#[derive(Clone)]
+struct RollingTerminalOperation {
+    identity: RollingTerminalIdentity,
+    result: RollingTerminalResultReceipt,
+    /// Zero while the actor-owned result is still being prepared. Once the
+    /// terminal committer returns, this becomes its exact immutable durable
+    /// acknowledgement expiry rather than a separately guessed admission TTL.
+    expires_at_unix_ms: Arc<AtomicI64>,
+    exact_commit: Arc<std::sync::Mutex<Option<crate::playback_control::TerminalCommitReceipt>>>,
+}
+
+impl RollingTerminalOperation {
+    fn expired(&self, now_unix_ms: i64) -> bool {
+        if let Some(commit) = self
+            .exact_commit
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+        {
+            return commit.is_expired();
+        }
+        let expires_at_unix_ms = self.expires_at_unix_ms.load(Acquire);
+        expires_at_unix_ms > 0 && now_unix_ms >= expires_at_unix_ms
     }
 }
 
 struct Session {
     dir: PathBuf,
+    /// Process-local response incarnation. The bearer session id can be reused
+    /// by a durable reattachment, while segment names and lengths can repeat
+    /// across producer attempts. Strong HTTP validators therefore need this
+    /// additional immutable coordinate.
+    response_incarnation: uuid::Uuid,
+    frozen_presentation: Option<FrozenHlsPresentation>,
+    /// True for every rolling generation whose response publication is
+    /// admitted by the actor. Producer recovery may still remain compatibility
+    /// owned; response ownership does not imply prepublication retry policy.
+    actor_managed_response_publication: bool,
+    /// Immutable scope bit for the one actor-managed prepublication process
+    /// cut. The mutable projection below clears at actor acceptance, before the
+    /// detached waiter can install its successor owner, so retirement uses this
+    /// bit plus `first_media_handoff_applied` to close that handoff interval.
+    actor_managed_prepublication_process: bool,
+    /// This bit is only a projection of the actor's exact first-media
+    /// authorization. It begins true for every actor-managed producer cut and is
+    /// cleared by that authorization, never by a compatibility observation.
+    actor_prepublication_producer: Arc<AtomicBool>,
+    /// Serializes actor response authorization through the exact first-media
+    /// ownership transfer. It is per Session, so one slow generation cannot
+    /// block unrelated registry traffic.
+    response_publication_transition: Mutex<()>,
+    /// Set only after the actor-owned published lifetime is active.
+    /// Concurrent/cancelled response requests wait on this shared completion,
+    /// not a request-local handoff future.
+    first_media_handoff_applied: AtomicBool,
+    first_media_handoff_notify: tokio::sync::Notify,
+    /// Exactly one cancellation-safe task owns actor-managed prepublication
+    /// reap and resource settlement, whether entered by failure or routine
+    /// retirement. It remains true while an unconfirmed child keeps the
+    /// Session and its admission resources retained for repair.
+    prepublication_cleanup_active: AtomicBool,
+    /// Monotonic claim made only after actor Terminal admission is
+    /// irreversible. Exactly one detached owner may then remove this exact
+    /// Arc, confirm physical reap, and release admissions. Unique scratch is
+    /// transferred afterward to its own retrying lifecycle owner.
+    /// It deliberately remains set after convergence so a late reaper cannot
+    /// recreate a second cleanup owner for the same generation.
+    retirement_cleanup_started: AtomicBool,
+    /// Published only after registry removal, confirmed child reap, and
+    /// admission release have all completed. Supersession
+    /// followers use it to join an already-claimed exact cleanup owner.
+    retirement_cleanup_finished: AtomicBool,
+    /// Exact shared physical-settlement receipt. The first cause wins; every
+    /// admin, cache, prepublication, reaper, or supersession follower joins
+    /// this same result rather than starting or mislabeling another cleanup.
+    retirement_settlement: std::sync::Mutex<Option<Arc<RollingRetirementSettlement>>>,
+    /// Exact once-only claim for this Session's unique scratch directory.
+    /// Both legacy prepublication fallback and universal retirement converge
+    /// here; after the finite attempt budget, maintenance owns the orphan.
+    scratch_cleanup_started: AtomicBool,
+    /// Weak registry ownership lets detached prepublication failure paths join
+    /// manager retirement without forming Session -> registry -> Session.
+    retirement_context: Option<RollingRetirementContext>,
+    /// Monotonic ownership latch for a cache generation that failed byte
+    /// verification after it had already been admitted for serving. The first
+    /// observer publishes the typed failure synchronously, then one detached
+    /// owner invalidates the location and retires this exact Session. Keeping
+    /// the latch set also lets the move-only response owner authenticate that
+    /// failure after retirement removes the process-local registry entry.
+    cache_integrity_cleanup_started: AtomicBool,
     /// The ffmpeg producing this session's segments — `None` for a cache hit,
     /// where the segments already exist and there is nothing to run, watch,
     /// suspend or kill.
-    child: Mutex<Option<Child>>,
-    /// Serializes a fallback's kill-to-successor interval with any terminal
-    /// playlist or watchdog verdict. Observations may happen without it, but
-    /// every action is re-confirmed while holding it so a replacement cannot
-    /// land in the check-to-use gap.
+    child: Mutex<Option<AttemptChild>>,
+    /// Serializes an actor-authorized kill-to-successor interval with terminal,
+    /// flow, retention, and response-path lifecycle work.
     child_transition: Mutex<()>,
-    /// Exactly one task owns lifetime stall coverage for the current producer.
-    /// A copy fallback that follows a predecessor `Done` verdict re-arms it
-    /// before publishing the successor; an already-active watcher wins.
-    #[cfg(test)]
-    watchdog_active: AtomicBool,
-    /// True only while a fallback deliberately replaces one live producer
-    /// with another inside this same session. The predecessor's non-zero kill
-    /// status is neither a terminal playlist verdict nor a watchdog exit.
+    /// True only while an actor-approved fallback deliberately replaces one
+    /// live producer with another inside this same session. The predecessor's
+    /// non-zero kill status belongs to the failed attempt, never its successor.
     replacing_child: AtomicBool,
-    /// Monotonic lifetime verdict set while teardown owns `child_transition`,
-    /// before the session leaves the manager. A fallback that reaches the
-    /// same gate later must not publish into this retired session even while
-    /// its scratch directory still exists.
-    retired: AtomicBool,
     #[cfg(test)]
     replacement_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after a watchdog has chosen `Done` or `Stall`, before it
-    /// acts. Production has no pause; the seam makes replacement races
-    /// deterministic instead of hoping the scheduler lands in a tiny window.
-    #[cfg(test)]
-    watchdog_verdict_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only seam after the watchdog owns the transition, before its
-    /// terminal re-observation. This pins the inverse race where a fallback
-    /// has decided to replace but reaches the gate after the watchdog.
-    #[cfg(test)]
-    watchdog_transition_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
-    /// Test-only rendezvous at the first per-session activity read. It proves
-    /// the manager registry lock was released before telemetry can wait.
+    /// Test-only rendezvous after the actor snapshot for a per-session
+    /// activity read. It proves the manager registry lock was released before
+    /// telemetry can wait and makes attempt replacement interleavings exact.
     #[cfg(test)]
     activity_detail_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after the control actor has accepted and ticketed a
+    /// command while the HTTP-owned transition guard is still held.
+    #[cfg(test)]
+    control_applied_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Set synchronously by the actor's accepted-End callback and cleared only
+    /// after the replicated terminal commit settles. The reaper observes it
+    /// under `child_transition`, so no actor-to-continuation reply gap exists.
+    terminal_response_pending: Arc<AtomicBool>,
+    /// One actor-installed terminal operation shared by the original request
+    /// and every exact retry. It owns physical convergence, response
+    /// projection and the durable acknowledgement receipt.
+    terminal_control: std::sync::Mutex<Option<RollingTerminalOperation>>,
+    /// Test-only seam after producer policy is applied but before the flow
+    /// ticket is completed back to a waiting control response.
+    #[cfg(test)]
+    flow_completion_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous immediately before first-playlist publication.
+    #[cfg(test)]
+    playlist_publication_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after actor authorization and before the exact
+    /// producer fence is reacquired for child assignment.
+    #[cfg(test)]
+    producer_install_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after a refresh reads its playlist and before it
+    /// merges the prepared observation.
+    #[cfg(test)]
+    refresh_after_read_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after a path reader's first replacement-marker
+    /// check and before it samples compatibility/actor attempt ownership.
+    #[cfg(test)]
+    path_owner_sample_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only rendezvous after retention resolves its doomed names while
+    /// holding the path-ownership transition.
+    #[cfg(test)]
+    retention_delete_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    #[cfg(test)]
+    response_projection_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only seam after actor settlement cleared prepublication and before
+    /// the detached waiter publishes that actor lifetime ownership is active.
+    #[cfg(test)]
+    first_media_owner_claim_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
     /// Test-only proof that teardown reached the shared transition before a
     /// paused replacement is released.
     #[cfg(test)]
     retirement_started: AtomicBool,
+    /// Test-only seam after actor Terminal has handed exact cleanup to the
+    /// universal detached owner but before registry removal. It proves caller
+    /// cancellation cannot revoke either pre- or post-publication ownership.
+    #[cfg(test)]
+    retirement_cleanup_handoff_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
+    /// Test-only seam owned by the detached scratch lifecycle. Physical
+    /// process settlement and replacement admission must finish before this
+    /// independently retrying filesystem work is allowed to proceed.
+    #[cfg(test)]
+    scratch_cleanup_pause: std::sync::Mutex<Option<Arc<LifecycleTestPause>>>,
     /// Served from the pre-transcode cache.
     ///
-    /// Two things follow, and the second is the dangerous one. A cached
-    /// session has no process, so every watchdog, stall check and flow-control
-    /// decision is about nothing. And its directory is a finished asset this
-    /// session did not produce and other viewers will want — deleting it on
-    /// the way out, which is what every other session does, would destroy the
-    /// cache one playback at a time.
+    /// A cached session has no process, and its directory is a finished asset
+    /// this session did not produce and other viewers will want. Deleting it on
+    /// the way out, which is what rolling sessions do with unique scratch,
+    /// would destroy the cache one playback at a time.
     cached: bool,
     /// Process-local read ownership for a finished cache entry. Kept for the
     /// session's full lifetime so the budget sweep cannot remove its playlist
@@ -1604,7 +4467,7 @@ struct Session {
     /// Exact bounded text-subtitle inode inherited by ffmpeg as `/dev/fd/5`.
     /// Keeping it for the session lifetime also lets a fallback child inherit
     /// the same bytes without reopening a replaceable pathname.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     subtitle_handle: Option<std::fs::File>,
     /// Small authenticated inventory loaded once at offer time. Media objects
     /// are verified only when requested, not walked before playback starts.
@@ -1612,10 +4475,16 @@ struct Session {
     /// Exact durable identity used to invalidate this location if a requested
     /// object later fails the generation manifest.
     cache_location: Option<CachedLocationIdentity>,
-    /// The request that keeps this session alive. Keeping the kind beside the
-    /// clock makes an idle reap explain whether the last sign of life was a
-    /// playlist reload, a media segment, or only a subtitle/context lookup.
-    last_request: Mutex<LastRequest>,
+    /// The one owner of control sequencing, demand, media renewal, expiry, and
+    /// retirement ordering for this rolling generation. Legacy clients begin
+    /// in compatibility lease mode; the first accepted explicit exchange
+    /// binds the full demand snapshot without creating a second liveness
+    /// clock.
+    control: crate::playback_control::RollingControlHandle,
+    /// One detached, cancellation-safe consumer applies every actor-owned
+    /// producer-policy wake. HTTP response futures may disappear after the
+    /// actor accepts a command; this worker must not disappear with them.
+    flow_worker_started: AtomicBool,
     // -- metadata for the activity page --
     file_id: i64,
     item_id: i64,
@@ -1659,12 +4528,10 @@ struct Session {
     /// recovery must report what the running encoder is producing rather than
     /// what a later reader would decide.
     grade: OutputGrade,
-    hls_codecs: String,
     /// Backward-compatible enhancement carried by the video samples, such as
     /// Dolby Vision Profile 8.1 over an HDR10 HEVC base layer. Apple requires
     /// this outside CODECS so clients that only understand the base can still
     /// select the variant.
-    hls_supplemental_codecs: Option<String>,
     target_height: i64,
     /// The encoder actually running *now*. Mutable because the
     /// hardware->software fallback replaces the process inside one session,
@@ -1675,7 +4542,7 @@ struct Session {
     /// Set when the session can never produce output (hardware and software
     /// both failed to emit a first segment). Playlist/segment reads then fail
     /// fast so the player shows an error instead of waiting on a gray screen.
-    failed: AtomicBool,
+    failed: Arc<AtomicBool>,
     /// *Why* [`Self::failed`] was set, recorded at the moment of the verdict.
     ///
     /// The flag alone is what made every terminal cause anonymous downstream:
@@ -1694,12 +4561,17 @@ struct Session {
     /// Highest segment index the client has fetched (-1 before the first).
     /// Kept for logs and for resolving the frontier against the index; the
     /// accounting itself works in media time.
-    high_segment: AtomicI64,
+    high_segment: Arc<AtomicI64>,
+    /// Exact producer attempt represented by the compatibility frontier
+    /// atomics. The short synchronous gate makes an accepted predecessor EOF
+    /// and a successor reset order without blocking response EOF on process
+    /// transition I/O.
+    compatibility_attempt: Arc<std::sync::Mutex<u64>>,
     /// The client's DOWNLOAD frontier in session-relative ms: the end of the
     /// furthest segment served, from that segment's own `EXTINF`. Not the
     /// playhead — a client fetches its whole forward buffer ahead of the
     /// picture — and every name and log line here says so.
-    fetched_end_ms: AtomicI64,
+    fetched_end_ms: Arc<AtomicI64>,
     /// What the playlist says is published, refreshed as segments complete.
     segments: Mutex<SegmentIndex>,
     /// Published bytes past the client's frontier, cached from the last
@@ -1713,7 +4585,14 @@ struct Session {
     /// what the global scratch cap sums. The two used to be one figure, and
     /// the cap it produced was not a bound: several healthy sessions could
     /// exceed the documented ceiling by their whole retention windows.
-    live_bytes: AtomicI64,
+    live_bytes: Arc<AtomicI64>,
+    /// Bytes renamed out of served segment paths but not yet physically
+    /// unlinked. Hidden garbage still consumes the same scratch budget.
+    retention_garbage_bytes: Arc<AtomicI64>,
+    /// One coalesced cleanup queue/owner per session. A slow NAS unlink cannot
+    /// create an unbounded stack of detached filesystem workers.
+    retention_cleanup_queue: Arc<std::sync::Mutex<Vec<(PathBuf, i64)>>>,
+    retention_cleanup_active: Arc<AtomicBool>,
     /// Live encode telemetry (see [`Progress`]).
     progress: Arc<Progress>,
     /// What kind of work this is, for the admission record (see
@@ -1727,12 +4606,11 @@ struct Session {
     /// The hardware slot this session holds.
     ///
     /// Released two ways, on purpose. `release_hardware` hands it back the
-    /// moment the session ends, which is what makes the cap *prompt*: the
-    /// watchdog task holds an `Arc` to this session for its whole grace window,
-    /// so waiting for the last reference to go would keep a slot for twelve
-    /// seconds after the viewer closed the tab. And dropping the session
-    /// returns it too, which is what makes the cap *complete* — every way a
-    /// session can end, including the ones nobody wrote a branch for.
+    /// moment the session ends, which is what makes the cap *prompt*: actor
+    /// and executor tasks can retain an `Arc` while physical cleanup settles,
+    /// so waiting for the last reference would unnecessarily retain a slot.
+    /// Dropping the session returns it too, which makes the cap *complete* —
+    /// every way a session can end, including paths with no explicit branch.
     hw_slot: std::sync::Mutex<Option<HwSlot>>,
     /// This session's reservation from the software CPU pool, when it runs
     /// (or fell back to) a software encoder. Held for the session's life and
@@ -1753,7 +4631,7 @@ struct Session {
     /// suspended encoder makes no progress *on purpose*.
     suspended: AtomicBool,
     /// When the current held interval began, for the resume event's duration.
-    suspended_at: Mutex<Option<(Instant, AheadHoldReason)>>,
+    suspended_at: Mutex<Option<SuspendedAt>>,
     /// Successful running→held transitions during this session. A counter,
     /// rather than only the current boolean, exposes flapping after it has
     /// already resumed.
@@ -1769,19 +4647,116 @@ struct Session {
     first_slide_logged: AtomicBool,
 }
 
-/// Keeps the replacement marker true across every await between killing the
-/// predecessor and publishing (or failing) its successor. Cancellation clears
-/// it too, so a dropped fallback task cannot leave the session unjudgeable.
-#[cfg(test)]
+enum SessionReapVerdict {
+    Live(String, Arc<Session>),
+    CleanupOwned,
+    Expired {
+        id: String,
+        session: Arc<Session>,
+        idle_seconds: u64,
+        last_request: &'static str,
+        cleanup_reason: &'static str,
+    },
+}
+
+/// Keeps the replacement marker true across every await between actor
+/// admission and publishing (or terminally failing) its successor.
+///
+/// Before admission, cancellation is harmless and releases the marker. After
+/// admission, the actor and compatibility projections already name a new
+/// attempt. Dropping that transaction must fail closed: reopening old paths
+/// would serve predecessor bytes under successor ownership.
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct ChildReplacement<'a> {
     session: &'a Session,
     _transition: tokio::sync::MutexGuard<'a, ()>,
+    state: ChildReplacementState,
+    cancellation_failure: Option<PlaylistError>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChildReplacementState {
+    PreAdmission,
+    AdmissionPendingOrAccepted,
+    Completed,
+    TerminallySettled,
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+impl ChildReplacement<'_> {
+    /// The actor can commit an attempt before its oneshot reply is delivered.
+    /// Mark that cancellation-sensitive interval before awaiting the command.
+    fn mark_admission_pending(&mut self) {
+        self.state = ChildReplacementState::AdmissionPendingOrAccepted;
+    }
+
+    fn mark_actor_decision_pending(&mut self, failure: PlaylistError) {
+        self.cancellation_failure = Some(failure);
+        self.mark_admission_pending();
+    }
+
+    /// A typed rejection proves the actor did not change path ownership.
+    #[cfg(test)]
+    fn admission_rejected(&mut self) {
+        self.state = ChildReplacementState::PreAdmission;
+    }
+
+    /// Publish completion and release the transition when this call returns.
+    /// A completed transaction must not remain a hidden mutex owner merely
+    /// because its caller keeps the now-useless local binding in scope.
+    fn complete(mut self) {
+        self.state = ChildReplacementState::Completed;
+        self.session.replacing_child.store(false, Release);
+    }
+
+    /// Final installation can lose to an actor-owned terminal verdict after
+    /// the candidate was spawned. Keep path ownership fenced without turning
+    /// that ordinary race into a synthetic "cancelled" session failure.
+    fn settle_terminal_rejection(&mut self) {
+        self.state = ChildReplacementState::TerminallySettled;
+        self.request_terminal_fence();
+    }
+
+    fn request_terminal_fence(&self) {
+        if self.session.control.is_retired() {
+            return;
+        }
+        // Drop cannot await and Session is borrowed by the transition guard.
+        // Retire through the cloneable actor handle; the ordinary repair loop
+        // owns child/scratch cleanup. Keep `replacing_child` true until then so
+        // no request can reopen predecessor paths in the successor attempt.
+        let control = self.session.control.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                if control.end().await.is_err() || !control.is_retired() {
+                    control.fence_unavailable();
+                }
+            });
+        } else {
+            control.fence_unavailable();
+        }
+    }
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
 impl Drop for ChildReplacement<'_> {
     fn drop(&mut self) {
-        self.session.replacing_child.store(false, Release);
+        match self.state {
+            ChildReplacementState::PreAdmission | ChildReplacementState::Completed => {
+                self.session.replacing_child.store(false, Release);
+            }
+            ChildReplacementState::TerminallySettled => {}
+            ChildReplacementState::AdmissionPendingOrAccepted => {
+                self.session
+                    .fail(self.cancellation_failure.clone().unwrap_or_else(|| {
+                        PlaylistError::SessionFailed(
+                            "producer replacement was cancelled before publication".into(),
+                        )
+                    }));
+                self.request_terminal_fence();
+            }
+        }
     }
 }
 
@@ -1791,6 +4766,70 @@ struct SessionEventFields<'a> {
     extra: Option<String>,
     hold_reason: Option<AheadHoldReason>,
     ms: Option<i64>,
+}
+
+async fn emit_session_event_to_store(
+    store: Arc<dyn Store>,
+    session_id: &str,
+    session: &Session,
+    event: &str,
+    fields: SessionEventFields<'_>,
+) {
+    let method = match session.method {
+        crate::delivery::Method::Direct => "direct_play",
+        crate::delivery::Method::Remux | crate::delivery::Method::HlsCopy => "remux",
+        crate::delivery::Method::Transcode => "transcode",
+    };
+    let hold_reason = if let Some(reason) = fields.hold_reason {
+        Some(reason)
+    } else if session.suspended.load(Relaxed) {
+        (*session.suspended_at.lock().await).map(|held| held.hold.reason)
+    } else {
+        None
+    }
+    .map(|reason| {
+        match reason {
+            AheadHoldReason::Demand => "demand",
+            AheadHoldReason::Time => "time",
+            AheadHoldReason::Bytes => "bytes",
+            AheadHoldReason::Global => "global",
+        }
+        .to_owned()
+    });
+    crate::telemetry::emit(
+        store,
+        PlaybackEvent {
+            at_unix_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+                .unwrap_or(0),
+            session_id: Some(session_log_id(session_id)),
+            file_id: Some(session.file_id),
+            event: event.to_owned(),
+            method: Some(method.to_owned()),
+            encoder: Some((*session.encoder_label.lock().await).to_owned()),
+            height: Some(session.target_height),
+            ms: fields.ms,
+            speed_recent: session.progress.recent_speed(),
+            ahead_seconds: session.ahead().await.map(|ahead| ahead.seconds),
+            suspended: Some(session.suspended.load(Relaxed)),
+            hold_reason,
+            delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
+            readrate: Some(session.readrate),
+            reason: fields.reason.map(str::to_owned),
+            extra: fields.extra,
+            ..PlaybackEvent::default()
+        },
+    );
+}
+
+#[cfg(any(test, feature = "live-hls-recovery"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionRegistrationRejection {
+    ServingFence,
+    SessionRelease,
+    AdoptionCapacity,
+    Producer(crate::playback_control::ProducerAttemptRejection),
 }
 
 /// How far a session's published media runs ahead of the client's download
@@ -1808,6 +4847,285 @@ fn ahead_of(index: &SegmentIndex, fetched_end_ms: i64) -> Option<Ahead> {
 }
 
 impl Session {
+    fn compatibility_producer_attempt(&self) -> u64 {
+        *self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Capture one producer attempt that coherently owns the compatibility
+    /// paths. Sampling the compatibility tag before the actor attempt and
+    /// checking the replacement marker on both sides closes the interval in
+    /// which actor admission has advanced but predecessor paths still exist.
+    async fn coherent_path_producer_attempt(&self) -> Option<u64> {
+        if self.replacing_child.load(Acquire) {
+            return None;
+        }
+        #[cfg(test)]
+        {
+            let pause = self
+                .path_owner_sample_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+        let compatibility_attempt = self.compatibility_producer_attempt();
+        let producer_attempt = self.control.current_producer_attempt();
+        (!self.replacing_child.load(Acquire) && compatibility_attempt == producer_attempt)
+            .then_some(producer_attempt)
+    }
+
+    fn compatibility_playlist_published(&self, producer_attempt: u64) -> Option<bool> {
+        let projected_attempt = self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        (*projected_attempt == producer_attempt).then(|| self.playlist_published.load(Relaxed))
+    }
+
+    #[cfg(test)]
+    async fn pause_playlist_publication_for_test(&self) {
+        let pause = self
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
+
+    async fn publish_compatibility_playlist(
+        &self,
+        producer_attempt: u64,
+        deadline: Instant,
+    ) -> bool {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
+        }
+        #[cfg(test)]
+        self.pause_playlist_publication_for_test().await;
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
+        }
+        let projected_attempt = self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if *projected_attempt != producer_attempt {
+            return false;
+        }
+        self.playlist_published.store(true, Relaxed);
+        true
+    }
+
+    /// Reset every compatibility projection immediately after the actor
+    /// allocates a successor attempt and before the predecessor is touched.
+    /// The actor remains authoritative; this short gate exists only until M4
+    /// removes the atomics that legacy pacing and pruning still consume.
+    #[cfg(test)]
+    async fn reset_compatibility_delivery(&self, producer_attempt: u64) {
+        {
+            let mut projected_attempt = self
+                .compatibility_attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *projected_attempt = producer_attempt;
+            self.high_segment.store(-1, Relaxed);
+            self.fetched_end_ms.store(0, Relaxed);
+            self.ahead_bytes.store(0, Relaxed);
+        }
+        *self.segments.lock().await = SegmentIndex::default();
+        if matches!(&self.kind, SessionKind::Transcode { .. }) {
+            self.playlist_published.store(false, Relaxed);
+        }
+        self.progress.begin_fenced_attempt(producer_attempt);
+    }
+
+    /// Clear all legacy catalog/frontier/accounting projections only after
+    /// predecessor scratch was verified empty and before actor retry
+    /// admission. The attempt tag deliberately remains on the predecessor
+    /// until the actor returns the exact admitted successor id; path serving
+    /// is fenced for this whole interval by `replacing_child`.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn clear_compatibility_before_retry(&self) {
+        self.high_segment.store(-1, Relaxed);
+        self.fetched_end_ms.store(0, Relaxed);
+        self.ahead_bytes.store(0, Relaxed);
+        *self.segments.lock().await = SegmentIndex::default();
+        self.playlist_published.store(false, Relaxed);
+        self.suspended.store(false, Release);
+        *self.suspended_at.lock().await = None;
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn bind_retry_compatibility_attempt(&self, producer_attempt: u64) {
+        *self
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
+        self.progress.begin_fenced_attempt(producer_attempt);
+    }
+
+    /// Release predecessor scratch accounting only after the verified clear
+    /// has removed every old served path. Admission resets the compatibility
+    /// catalog earlier, but rename/removal has not freed physical bytes then.
+    fn confirm_predecessor_scratch_cleared(&self) {
+        let mut cleanup_queue = self
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Verified-empty scratch means every queued hidden path is already
+        // absent. Removing those identities under the same accounting lock
+        // makes a detached cleaner's later NotFound a no-op instead of a
+        // subtraction from the successor's totals.
+        cleanup_queue.clear();
+        self.retention_garbage_bytes.store(0, Release);
+        self.live_bytes.store(0, Release);
+    }
+
+    /// The actor clears its compatibility prepublication projection before the
+    /// detached first-media waiter can synchronously claim the retained
+    /// lifetime owner. Until that second publication is visible, retirement
+    /// must keep using the cancellation-safe confirmed-reap path.
+    fn prepublication_process_cleanup_required(&self) -> bool {
+        self.actor_managed_prepublication_process && !self.first_media_handoff_applied.load(Acquire)
+    }
+
+    /// Fence every later renewal in the control actor before publishing the
+    /// process-local serving verdict. Actor ordering replaces the old
+    /// check-plus-two-lock activity-clock protocol.
+    #[cfg(test)]
+    async fn end_activity(&self) {
+        let _ = self.end_activity_until(None).await;
+    }
+
+    /// Preserve a replacement request's absolute deadline while waiting for
+    /// the actor End round trip. Once the command has entered the actor queue,
+    /// dropping this waiter cannot revoke it: Terminal applies independently
+    /// of reply delivery and the ordinary reaper observes the retired actor.
+    async fn end_activity_until(
+        &self,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<crate::playback_control::RollingTerminalCause, String> {
+        let outcome = match deadline {
+            Some(deadline) => match self.control.end_before(deadline.into_std()).await {
+                Ok(outcome) => Ok(outcome),
+                Err(crate::playback_control::RollingTerminalRequestError::AdmissionDeadline) => {
+                    return Err(replacement_deadline_error());
+                }
+                Err(crate::playback_control::RollingTerminalRequestError::ControlUnavailable) => {
+                    Err(())
+                }
+            },
+            None => self.control.end().await.map_err(|_| ()),
+        };
+        match outcome {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling session end observed");
+                Ok(outcome.cause())
+            }
+            Err(_) => {
+                self.control.fence_unavailable();
+                Ok(crate::playback_control::RollingTerminalCause::AuthorityFence)
+            }
+        }
+    }
+
+    /// Fence this generation because the node can no longer prove durable or
+    /// cluster serving authority. This cause must survive later cleanup so
+    /// failover is never misreported as an ordinary lifecycle end.
+    fn project_authority_fence(&self) {
+        // This synchronous projection uses the same producer transition as
+        // actor response admission. The actor imports the shared retirement
+        // bit as typed AuthorityFence before applying its next queued command.
+        self.control.fence_unavailable();
+    }
+
+    async fn settle_authority_fence(&self) {
+        match self.control.authority_fence().await {
+            Ok(outcome) => {
+                tracing::trace!(terminal = ?outcome.cause(), "rolling authority fence observed");
+            }
+            Err(_) => self.control.fence_unavailable(),
+        }
+    }
+
+    /// Renew the actor-owned playback lease only if no serving fence
+    /// linearized first.
+    #[cfg(test)]
+    async fn touch_attempt_if_active(&self, kind: &'static str, producer_attempt: u64) -> bool {
+        self.control
+            .commit_media(
+                kind,
+                producer_attempt,
+                None,
+                None,
+                None,
+                tokio::time::Instant::now().into_std() + Duration::from_secs(5),
+            )
+            .await
+    }
+
+    /// Submit sequence acceptance and lease renewal as one actor command.
+    /// Equal/stale controls return without mutating either fact.
+    async fn accept_control(
+        &self,
+        request: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_admission: Option<Arc<dyn crate::playback_control::RollingTerminalAdmission>>,
+    ) -> Option<
+        Result<
+            (
+                crate::playback_control::ControlDisposition,
+                u64,
+                crate::playback_control::ControlAction,
+                crate::playback_control::ClientPlatform,
+                i64,
+                u32,
+                u64,
+                &'static str,
+                bool,
+            ),
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        let outcome = match self
+            .control
+            .control_before(request, deadline_unix_ms, terminal_admission)
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        let acknowledged_end = outcome.lease.terminal
+            == Some(crate::playback_control::RollingTerminalCause::End)
+            && outcome.lease.demand.as_ref().is_some_and(|demand| {
+                demand.demand == crate::playback_control::PlaybackDemand::End
+            });
+        let lease_state = outcome.lease.terminal.map_or(
+            "active",
+            crate::playback_control::RollingTerminalCause::status,
+        );
+        Some(Ok((
+            outcome.disposition,
+            outcome.accepted_sequence,
+            outcome.action,
+            outcome.platform,
+            outcome.lease.expires_at_unix_ms(),
+            outcome.lease.timeout_ms(),
+            outcome.flow_ticket,
+            lease_state,
+            acknowledged_end,
+        )))
+    }
+
     /// Where this generation's session-relative zero sits on the durable
     /// incarnation timeline.
     ///
@@ -1837,7 +5155,11 @@ impl Session {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_or_insert(reason);
-        self.failed.store(true, Relaxed);
+        // The actor-owned response contract reads this with Acquire while
+        // authorizing copy/cache responses. This Release is the synchronous
+        // half of that ordering: an earlier failure rejects publication,
+        // while an authorization that sampled false linearized first.
+        self.failed.store(true, Release);
     }
 
     /// The recorded cause, for a reader that has already seen `failed`.
@@ -1855,28 +5177,96 @@ impl Session {
             })
     }
 
-    #[cfg(test)]
+    /// Actor-owned post-publication producer failure, if this exact attempt has
+    /// one. This is deliberately not projected into `Session::failed`: that
+    /// compatibility fence would reject the playlist and segments which were
+    /// already admitted before the producer ended.
+    async fn published_producer_ended_before(
+        &self,
+        producer_attempt: u64,
+        deadline: Instant,
+    ) -> Option<(PlaylistError, Option<i64>)> {
+        if !self.actor_managed_prepublication_process {
+            return None;
+        }
+        let snapshot = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.control.snapshot(),
+        )
+        .await
+        .ok()
+        .flatten()?;
+        if snapshot.terminal.is_some()
+            || snapshot.delivery.producer_attempt != producer_attempt
+            || !snapshot.producer_control.producer_media_published
+            || !snapshot.producer_control.producer_ended_with_proposal
+        {
+            return None;
+        }
+        let reason = snapshot.producer_control.decision_reason?;
+        Some((
+            PlaylistError::ProducerEnded(reason.to_owned()),
+            snapshot.delivery.published_segment,
+        ))
+    }
+
+    /// A cache-integrity failure owner remains an exact response capability
+    /// after its detached cleanup removes this Session from the live registry.
+    /// The monotonic cleanup latch and first-writer failure cell together make
+    /// that exception specific to this Arc and this typed verdict; an ordinary
+    /// stale owner still cannot authorize through an absent or reused id.
+    fn owns_retired_cache_integrity_failure(&self, error: &PlaylistError) -> bool {
+        self.cached
+            && self.cache_integrity_cleanup_started.load(Acquire)
+            && self.failed.load(Relaxed)
+            && matches!(
+                error,
+                PlaylistError::SessionFailed(reason)
+                    if reason == CACHED_MEDIA_INTEGRITY_FAILURE
+            )
+            && self.failure_reason() == *error
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn begin_child_replacement(&self) -> ChildReplacement<'_> {
         let transition = self.child_transition.lock().await;
         self.replacing_child.store(true, Release);
         ChildReplacement {
             session: self,
             _transition: transition,
+            state: ChildReplacementState::PreAdmission,
+            cancellation_failure: None,
         }
     }
 
     #[cfg(test)]
-    async fn kill_child_for_replacement(&self) -> Option<ChildReplacement<'_>> {
-        let replacement = self.begin_child_replacement().await;
+    async fn kill_child_for_replacement(
+        &self,
+    ) -> Result<(ChildReplacement<'_>, u64), crate::playback_control::ProducerAttemptRejection>
+    {
+        let mut replacement = self.begin_child_replacement().await;
         // Retirement uses the same transition. If it won first, this
         // previously scheduled fallback is stale and must not resurrect an
         // encoder after the manager removed the session. Holding the gate
         // through the check and successor publication also prevents
         // retirement from starting between this verdict and the caller's
         // install.
-        if self.retired.load(Acquire) {
-            return None;
+        if self.control.is_retired() {
+            return Err(crate::playback_control::ProducerAttemptRejection::SessionEnded);
         }
+        replacement.mark_admission_pending();
+        let producer_attempt = match self.control.begin_producer_attempt().await {
+            Ok(producer_attempt) => producer_attempt,
+            Err(crate::playback_control::ProducerAttemptRejection::ControlUnavailable) => {
+                replacement.settle_terminal_rejection();
+                return Err(crate::playback_control::ProducerAttemptRejection::ControlUnavailable);
+            }
+            Err(rejection) => {
+                replacement.admission_rejected();
+                return Err(rejection);
+            }
+        };
+        self.reset_compatibility_delivery(producer_attempt).await;
         self.kill_child().await;
         #[cfg(test)]
         {
@@ -1890,93 +5280,309 @@ impl Session {
                 pause.wait().await;
             }
         }
-        Some(replacement)
+        Ok((replacement, producer_attempt))
     }
 
-    /// Begin a replacement only while its session is still live after this
-    /// task acquires the transition.
+    /// Install a spawned replacement only if the actor still authorizes this
+    /// exact attempt at the install linearization point. Actor expiry can win
+    /// while teardown waits behind `child_transition`; staging the supervised
+    /// process must never make it serveable merely because its earlier
+    /// admission succeeded.
     ///
-    /// The copy reader decides `Unsupported` outside this gate. In between
-    /// that decision and acquiring it, the lifetime watchdog may win, observe
-    /// `Done` or `Stall`, and end. Re-checking the lifetime and failure
-    /// verdicts under the gate prevents a failed or retired session from
-    /// receiving a successor. Directory existence is only a scratch fact,
-    /// not session liveness: teardown can remove the manager entry before its
-    /// asynchronous deletion completes. An exited child is still replaceable:
-    /// the caller re-arms a watchdog synchronously when it publishes that
-    /// successor.
-    #[cfg(test)]
-    async fn begin_copy_child_replacement(&self) -> Option<ChildReplacement<'_>> {
-        let replacement = self.begin_child_replacement().await;
-        if self.retired.load(Acquire)
-            || self.failed.load(Relaxed)
-            || tokio::fs::metadata(&self.dir).await.is_err()
-        {
-            return None;
+    /// The prepublication variant acquires the Session slot *before* spawning
+    /// and places the new process under AttemptChild supervision without an
+    /// intervening await. Cancellation can therefore never strand a raw Child
+    /// outside the cleanup owner's confirmed-reap path.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn spawn_and_install_prepublication_child<F>(
+        &self,
+        producer_attempt: u64,
+        spawn: F,
+    ) -> Result<(), String>
+    where
+        F: FnOnce() -> Result<Child, String>,
+    {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_ref() {
+            return Err(format!(
+                "producer attempt {producer_attempt} cannot stage over installed attempt {}",
+                child.producer_attempt
+            ));
         }
+        let candidate = spawn()?;
+        *slot = Some(AttemptChild::new(
+            producer_attempt,
+            candidate,
+            self.control.clone(),
+        ));
+        drop(slot);
+
+        let install_authorization = match self
+            .control
+            .authorize_producer_install(producer_attempt)
+            .await
         {
-            let mut child = self.child.lock().await;
-            let child = child.as_mut()?;
-            match child.try_wait() {
-                Ok(None) => {
-                    let _ = child.kill().await;
-                }
-                Ok(Some(_)) => {}
-                Err(_) => return None,
+            Ok(authorization) => authorization,
+            Err(reason) => {
+                let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+                return Err(match cleanup {
+                    Ok(()) => format!("actor rejected exact producer installation: {reason:?}"),
+                    Err(error) => format!(
+                        "actor rejected exact producer installation ({reason:?}); staged candidate reap failed: {error}"
+                    ),
+                });
             }
-        }
+        };
         #[cfg(test)]
         {
             let pause = self
-                .replacement_pause
+                .producer_install_pause
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .clone();
+                .take();
             if let Some(pause) = pause {
                 pause.wait().await;
                 pause.wait().await;
             }
         }
-        Some(replacement)
+        let final_rejection = {
+            let slot = self.child.lock().await;
+            if !slot
+                .as_ref()
+                .is_some_and(|child| child.producer_attempt == producer_attempt)
+            {
+                Some(crate::playback_control::ProducerAttemptRejection::SessionEnded)
+            } else {
+                self.control
+                    .lock_authorized_producer_install(install_authorization)
+                    .err()
+            }
+        };
+        let Some(reason) = final_rejection else {
+            return Ok(());
+        };
+        let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+        Err(match cleanup {
+            Ok(()) => format!("actor rejected final producer installation fence: {reason:?}"),
+            Err(error) => format!(
+                "actor rejected final producer installation fence ({reason:?}); staged candidate reap failed: {error}"
+            ),
+        })
+    }
+
+    /// Pipe-producing counterpart to `spawn_and_install_prepublication_child`.
+    /// The raw Child enters exact-attempt supervision synchronously before the
+    /// stdout reader is returned, so cancellation cannot detach either half.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn spawn_and_install_prepublication_pipe_child<F>(
+        &self,
+        producer_attempt: u64,
+        spawn: F,
+    ) -> Result<tokio::process::ChildStdout, String>
+    where
+        F: FnOnce() -> Result<(Child, tokio::process::ChildStdout), String>,
+    {
+        let mut slot = self.child.lock().await;
+        if let Some(child) = slot.as_ref() {
+            return Err(format!(
+                "producer attempt {producer_attempt} cannot stage over installed attempt {}",
+                child.producer_attempt
+            ));
+        }
+        let (candidate, stdout) = spawn()?;
+        *slot = Some(AttemptChild::new(
+            producer_attempt,
+            candidate,
+            self.control.clone(),
+        ));
+        drop(slot);
+
+        let install_authorization = match self
+            .control
+            .authorize_producer_install(producer_attempt)
+            .await
+        {
+            Ok(authorization) => authorization,
+            Err(reason) => {
+                drop(stdout);
+                let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+                return Err(match cleanup {
+                    Ok(()) => {
+                        format!("actor rejected exact pipe producer installation: {reason:?}")
+                    }
+                    Err(error) => format!(
+                        "actor rejected exact pipe producer installation ({reason:?}); staged candidate reap failed: {error}"
+                    ),
+                });
+            }
+        };
+        #[cfg(test)]
+        {
+            let pause = self
+                .producer_install_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+        let final_rejection = {
+            let slot = self.child.lock().await;
+            if !slot
+                .as_ref()
+                .is_some_and(|child| child.producer_attempt == producer_attempt)
+            {
+                Some(crate::playback_control::ProducerAttemptRejection::SessionEnded)
+            } else {
+                self.control
+                    .lock_authorized_producer_install(install_authorization)
+                    .err()
+            }
+        };
+        let Some(reason) = final_rejection else {
+            return Ok(stdout);
+        };
+        drop(stdout);
+        let cleanup = terminate_exact_prepublication_child(self, producer_attempt).await;
+        Err(match cleanup {
+            Ok(()) => format!("actor rejected final pipe producer installation fence: {reason:?}"),
+            Err(error) => format!(
+                "actor rejected final pipe producer installation fence ({reason:?}); staged candidate reap failed: {error}"
+            ),
+        })
+    }
+
+    /// Install a spawned replacement only if the actor still authorizes this
+    /// exact attempt at the install linearization point. Legacy copy callers
+    /// still pass an already-spawned child; actor-owned transcodes use the
+    /// cancellation-safe prepublication variant above.
+    #[cfg(test)]
+    async fn terminate_rejected_candidate(&self, mut candidate: Child, producer_attempt: u64) {
+        let mut first_error = None;
+        for signal_attempt in 1..=2 {
+            match candidate.kill().await {
+                Ok(()) => return,
+                Err(error) => match candidate.try_wait() {
+                    Ok(Some(_)) => return,
+                    Ok(None) if signal_attempt == 1 => {
+                        first_error = Some(error);
+                        tokio::task::yield_now().await;
+                    }
+                    Ok(None) => {
+                        let first_error = first_error.as_ref().unwrap_or(&error);
+                        tracing::error!(
+                            producer_attempt,
+                            first_error = %first_error,
+                            retry_error = %error,
+                            "rejected replacement remained live after two termination attempts"
+                        );
+                        self.fail(PlaylistError::SessionFailed(format!(
+                            "rejected producer {producer_attempt} could not be terminated: {error}"
+                        )));
+                        return;
+                    }
+                    Err(status_error) => {
+                        tracing::error!(
+                            producer_attempt,
+                            signal_error = %error,
+                            %status_error,
+                            "rejected replacement termination status could not be observed"
+                        );
+                        self.fail(PlaylistError::SessionFailed(format!(
+                            "rejected producer {producer_attempt} termination could not be observed: {status_error}"
+                        )));
+                        return;
+                    }
+                },
+            }
+        }
+    }
+
+    #[cfg(test)]
+    async fn install_replacement_child(
+        &self,
+        producer_attempt: u64,
+        candidate: Child,
+    ) -> Result<(), crate::playback_control::ProducerAttemptRejection> {
+        // Acquire the async slot before authorization. The exact actor fence
+        // below is synchronous and must never be held across an await.
+        let mut child = self.child.lock().await;
+        let install_authorization = match self
+            .control
+            .authorize_producer_install(producer_attempt)
+            .await
+        {
+            Ok(authorization) => authorization,
+            Err(reason) => {
+                drop(child);
+                self.terminate_rejected_candidate(candidate, producer_attempt)
+                    .await;
+                return Err(reason);
+            }
+        };
+        #[cfg(test)]
+        {
+            let pause = self
+                .producer_install_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+        }
+        let rejected = {
+            match self
+                .control
+                .lock_authorized_producer_install(install_authorization)
+            {
+                Ok(install) => {
+                    *child = Some(AttemptChild::new(
+                        producer_attempt,
+                        candidate,
+                        self.control.clone(),
+                    ));
+                    drop(install);
+                    None
+                }
+                Err(reason) => Some((candidate, reason)),
+            }
+        };
+        drop(child);
+        let Some((candidate, reason)) = rejected else {
+            return Ok(());
+        };
+        // The std MutexGuard Result is gone before this await. Rejection owns
+        // the candidate until SIGKILL is confirmed and the process is reaped;
+        // no detached task or session slot can lose that lifecycle.
+        self.terminate_rejected_candidate(candidate, producer_attempt)
+            .await;
+        Err(reason)
     }
 
     /// Stop the encoder, if there is one. A cache hit has no process; a
     /// session whose ffmpeg already exited has one that is already reaped.
-    /// Keep the handle in the slot after waiting: detached watchdogs use its
-    /// exit status to tell routine teardown from a real stall. Replacement
-    /// paths suppress that same status with `begin_child_replacement`.
+    /// Keep the handle in the slot after waiting so exact-attempt lifecycle
+    /// tests can inspect the supervisor's terminal record.
+    #[cfg(test)]
     async fn kill_child(&self) {
         if let Some(child) = self.child.lock().await.as_mut() {
             let _ = child.kill().await;
+            let _ = child.try_wait_observed(&self.control);
         }
     }
 
-    /// Remove this session's scratch — unless it is a cache entry, which this
-    /// session did not produce and the next viewer still wants.
-    ///
-    /// The guard is the whole reason this is a method. Every other place a
-    /// session ends removes its directory, correctly, and a cached session
-    /// reaching one of those paths without this check would delete the cache
-    /// one playback at a time — each hit destroying the entry that made it.
-    async fn discard_dir(&self) {
-        if self.cached {
-            return;
-        }
-        let _ = tokio::fs::remove_dir_all(&self.dir).await;
-    }
-
-    /// Hand the hardware slot back now rather than whenever the last reference
-    /// to this session happens to go. Idempotent, because the reaper and an
-    /// explicit stop can both reach a session and neither should have to know
-    /// whether the other got there first.
-    fn release_hardware(&self) {
+    /// Bypass the prepublication-reap retention fence only when the caller has
+    /// either confirmed physical reap or is intentionally transferring a live
+    /// hardware producer to its admitted software successor.
+    fn release_hardware_after_confirmed_reap(&self) {
         let _ = self.hw_slot.lock().expect("hw slot mutex").take();
     }
 
-    /// Hand the software pool its threads back now — the watchdog task holds
-    /// an `Arc` to this session for its whole grace window, and a viewer who
-    /// closed the tab should not keep cores reserved for it.
-    fn release_software(&self) {
+    fn release_software_after_confirmed_reap(&self) {
         let _ = self.sw_permit.lock().expect("sw permit mutex").take();
     }
 
@@ -1988,9 +5594,9 @@ impl Session {
     /// admission class flips to software, so the speeds measured from here on
     /// are recorded as what they are rather than poisoning the hardware
     /// class's record with a software encoder's numbers.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     fn demote_to_software(&self, work: Workload<'_>, permit: crate::admission::SwPermit) {
-        self.release_hardware();
+        self.release_hardware_after_confirmed_reap();
         *self.class.lock().expect("class mutex") = work.software_class();
         // Forced, not negotiated — the viewer is already watching — but on
         // the books: the pool runs over budget and every later admission
@@ -2001,60 +5607,169 @@ impl Session {
     /// Re-read the playlist, take in what is newly published, and measure
     /// only that.
     ///
-    /// The index is extended in place ([`SegmentIndex::extend_from_playlist`])
-    /// rather than reconstructed, sizes stay where they were measured, and a
-    /// pruned segment is never re-stated — this runs on every segment publish
-    /// and frontier advance, and it used to redo a whole session's worth of
-    /// parsing and ENOENTs each time (review §2.6).
+    /// Parsing and metadata reads are prepared outside the producer-transition
+    /// gate. The final in-memory merge is attempt-revalidated under that gate,
+    /// so slow storage cannot block stop/replacement/control while an old
+    /// playlist still cannot enter its successor's compatibility index.
     async fn refresh_segments(&self) {
+        // Actor admission deliberately precedes predecessor teardown. During
+        // that interval the current attempt already names the successor while
+        // the directory can still contain predecessor bytes. Never prepare an
+        // observation in that mixed state: otherwise it could wait on the
+        // transition and merge the old index after successor publication.
+        let Some(producer_attempt) = self.coherent_path_producer_attempt().await else {
+            return;
+        };
+        // Capture the catalog generation before starting any storage work.
+        // Capturing it after the playlist read gives an old read a new token
+        // when another refresh lands during that read, allowing stale bytes
+        // to overwrite the newer observation.
+        let previous = self.segments.lock().await.clone();
+        let base_revision = previous.revision;
+        let pending_fetched_segment = self
+            .control
+            .snapshot()
+            .await
+            .and_then(|snapshot| snapshot.delivery.pending_fetched_segment);
         let Ok(raw) = tokio::fs::read(self.dir.join("index.m3u8")).await else {
             return;
         };
-        // Under the lock only to extend; the stats happen with it released.
-        let to_stat: Vec<(i64, String)> = {
-            let mut index = self.segments.lock().await;
-            if index.extend_from_playlist(&String::from_utf8_lossy(&raw)) {
-                tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
+        #[cfg(test)]
+        {
+            let pause = self
+                .refresh_after_read_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            if let Some(pause) = pause {
+                pause.wait().await;
+                pause.wait().await;
             }
-            index
+        }
+        let mut observed = SegmentIndex {
+            segs: parse_playlist(&String::from_utf8_lossy(&raw)),
+            revision: 0,
+        };
+        // Preserve known sizes and pruning only when this observation agrees
+        // with the snapshot it extends. A rewrite describes different files
+        // even when it reused their names, so all of those sizes are measured
+        // again.
+        let compatible_prefix =
+            previous
                 .segs
                 .iter()
-                .filter(|s| s.bytes == 0 && !s.pruned)
-                .map(|s| (s.index, s.name.clone()))
-                .collect()
+                .zip(&observed.segs)
+                .all(|(current, observed)| {
+                    current.index == observed.index
+                        && current.name == observed.name
+                        && current.start_ms == observed.start_ms
+                        && current.end_ms == observed.end_ms
+                });
+        if compatible_prefix {
+            for (observed, previous) in observed.segs.iter_mut().zip(&previous.segs) {
+                observed.bytes = previous.bytes;
+                observed.pruned = previous.pruned;
+            }
+        }
+        for segment in observed
+            .segs
+            .iter_mut()
+            .filter(|segment| segment.bytes == 0 && !segment.pruned)
+        {
+            if let Ok(meta) = tokio::fs::metadata(self.dir.join(&segment.name)).await {
+                segment.bytes = meta.len() as i64;
+            }
+        }
+        if self.replacing_child.load(Acquire)
+            || self.compatibility_producer_attempt() != producer_attempt
+        {
+            return;
+        }
+
+        // Producer replacement owns this gate from actor admission through
+        // successor publication. Only the final in-memory projection crosses
+        // it; every filesystem operation above remains independently bounded
+        // by the storage layer rather than blocking lifecycle actions.
+        let (published_segment, published_end_ms, next_media_sequence, resolved_fetched_end_ms) = {
+            let producer_transition = self.child_transition.lock().await;
+            if self.control.current_producer_attempt() != producer_attempt {
+                return;
+            }
+            let mut index = self.segments.lock().await;
+            let projected_attempt = self
+                .compatibility_attempt
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if *projected_attempt != producer_attempt {
+                return;
+            }
+            let Some(rebuilt) = index.merge_prepared(base_revision, observed) else {
+                // Another same-attempt observation (or retention mutation)
+                // landed while metadata was prepared. Its newer catalog is
+                // authoritative; a later refresh will observe anything this
+                // discarded read still has to add.
+                return;
+            };
+            if rebuilt {
+                tracing::debug!("segment index rebuilt — the playlist was truncated or replaced");
+            }
+            // Resolve the frontier against the fresh index: a segment served
+            // before its EXTINF was known gets its real end time now.
+            let high = self.high_segment.load(Relaxed);
+            if high >= 0 {
+                if let Some(end) = index.end_ms_of(high) {
+                    self.fetched_end_ms.fetch_max(end, Relaxed);
+                }
+            }
+            // A cached asset's bytes are not scratch, and must not be counted
+            // as any. The global budget is a sum over every session, and it
+            // decides whether live encoders get suspended — so a 6 GB cached
+            // 4K title reported here would blow the budget the moment somebody
+            // pressed play and hold every real encoder on the box. Those bytes
+            // are already accounted for by the cache's own size budget.
+            if !self.cached {
+                if let Some(ahead) = ahead_of(&index, self.fetched_end_ms.load(Relaxed).max(0)) {
+                    self.ahead_bytes.store(ahead.bytes, Relaxed);
+                }
+                let _accounting = self
+                    .retention_cleanup_queue
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                self.live_bytes.store(
+                    index
+                        .total_bytes()
+                        .saturating_add(self.retention_garbage_bytes.load(Relaxed)),
+                    Relaxed,
+                );
+            }
+            let result = (
+                index.segs.last().map(|segment| segment.index),
+                index.produced_playable_end_ms(),
+                index.next_media_sequence(),
+                pending_fetched_segment.and_then(|segment| index.end_ms_of(segment)),
+            );
+            drop(projected_attempt);
+            drop(index);
+            drop(producer_transition);
+            result
         };
-        let mut sizes: Vec<(i64, i64)> = Vec::with_capacity(to_stat.len());
-        for (idx, name) in to_stat {
-            if let Ok(meta) = tokio::fs::metadata(self.dir.join(&name)).await {
-                sizes.push((idx, meta.len() as i64));
-            }
-        }
-        let mut index = self.segments.lock().await;
-        for (idx, len) in sizes {
-            if let Some(s) = index.segs.iter_mut().find(|s| s.index == idx && !s.pruned) {
-                s.bytes = len;
-            }
-        }
-        // Resolve the frontier against the fresh index: a segment served
-        // before its EXTINF was known gets its real end time now.
-        let high = self.high_segment.load(Relaxed);
-        if high >= 0 {
-            if let Some(end) = index.end_ms_of(high) {
-                self.fetched_end_ms.fetch_max(end, Relaxed);
-            }
-        }
-        // A cached asset's bytes are not scratch, and must not be counted as
-        // any. The global budget is a sum over every session, and it decides
-        // whether *live* encoders get suspended — so a 6 GB cached 4K title
-        // reported here would blow the budget the moment somebody pressed
-        // play and hold every real encoder on the box. Those bytes are already
-        // accounted for, by the cache's own size budget.
-        if !self.cached {
-            if let Some(ahead) = ahead_of(&index, self.fetched_end_ms.load(Relaxed).max(0)) {
-                self.ahead_bytes.store(ahead.bytes, Relaxed);
-            }
-            self.live_bytes.store(index.total_bytes(), Relaxed);
-        }
+        // Never hold a filesystem/process or segment-index lock while waiting
+        // on the actor mailbox. A replacement that wins after the projection
+        // check increments the attempt first, and the actor rejects this stale
+        // observation.
+        let _ = self
+            .control
+            .observe_publication(crate::playback_control::RollingPublicationObservation {
+                producer_attempt,
+                playlist_ready: self.playlist_published.load(Relaxed),
+                published_segment,
+                published_end_ms,
+                next_media_sequence,
+                resolved_fetched_segment: pending_fetched_segment
+                    .filter(|_| resolved_fetched_end_ms.is_some()),
+                resolved_fetched_end_ms,
+            })
+            .await;
     }
 
     async fn ahead(&self) -> Option<Ahead> {
@@ -2073,6 +5788,7 @@ async fn session_info(
     global_live_bytes: i64,
     global_ahead_bytes: i64,
 ) -> SessionInfo {
+    let lease = s.control.snapshot().await;
     #[cfg(test)]
     {
         let pause = s
@@ -2085,28 +5801,121 @@ async fn session_info(
             pause.wait().await;
         }
     }
-    let (ahead, first_retained_segment, published_end_ms) = {
+    let fetched_end_ms = lease.as_ref().map_or_else(
+        || s.fetched_end_ms.load(Relaxed),
+        |lease| lease.delivery.fetched_end_ms,
+    );
+    let (ahead, first_retained_segment, compatibility_published_end_ms) = {
         let index = s.segments.lock().await;
         (
-            ahead_of(&index, s.fetched_end_ms.load(Relaxed).max(0)),
+            ahead_of(&index, fetched_end_ms.max(0)),
             index.first_retained_index(),
             index.produced_playable_end_ms(),
         )
     };
-    let last_request = s.last_request.lock().await;
-    let idle_seconds = last_request.at.elapsed().as_secs();
-    let last_request_kind = last_request.kind;
-    drop(last_request);
+    let published_end_ms = lease
+        .as_ref()
+        .map_or(compatibility_published_end_ms, |lease| {
+            lease.delivery.published_end_ms
+        });
+    let idle_seconds = lease
+        .as_ref()
+        .map_or(SESSION_IDLE_SECS, |lease| lease.idle_for.as_secs());
+    let last_request_kind = lease
+        .as_ref()
+        .map_or("control-unavailable", |lease| lease.last_renewal_kind);
+    let lease_mode = match lease.as_ref().map(|lease| lease.mode) {
+        Some(crate::playback_control::RollingLeaseMode::Explicit) => "explicit",
+        Some(crate::playback_control::RollingLeaseMode::Legacy) => "legacy",
+        None => "unavailable",
+    };
+    let lease_state = match lease.as_ref() {
+        Some(lease) => lease.terminal.map_or("active", |cause| cause.status()),
+        None => "unavailable",
+    };
+    let demand = lease.as_ref().and_then(|lease| lease.demand.as_ref());
+    let delivery = lease.as_ref().map(|lease| &lease.delivery);
+    let control_demand = demand.map(|demand| match demand.demand {
+        crate::playback_control::PlaybackDemand::Active => "active",
+        crate::playback_control::PlaybackDemand::Hold => "hold",
+        crate::playback_control::PlaybackDemand::End => "end",
+    });
+    let render_state = demand.map(|demand| match demand.render_state {
+        crate::playback_control::RenderState::Starting => "starting",
+        crate::playback_control::RenderState::Rendering => "rendering",
+        crate::playback_control::RenderState::Waiting => "waiting",
+        crate::playback_control::RenderState::Stalled => "stalled",
+        crate::playback_control::RenderState::Seeking => "seeking",
+        crate::playback_control::RenderState::Ended => "ended",
+        crate::playback_control::RenderState::Failed => "failed",
+    });
     let suspended = s.suspended.load(Relaxed);
-    let hold = if suspended {
-        ahead.and_then(|ahead| {
-            ahead_hold(ahead, global_live_bytes, global_ahead_bytes, limits, true)
+    let flow = lease.as_ref().map(|lease| {
+        evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
+            published_end_ms,
+            media_origin_ms: (s.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
+            global_live_bytes,
+            global_ahead_bytes,
+            limits,
+            currently_suspended: suspended,
         })
+    });
+    let active_hold = if suspended {
+        (*s.suspended_at.lock().await).map(|held| held.hold)
     } else {
         None
     };
+    let status_owner_attempt = delivery.map_or_else(
+        || s.control.current_producer_attempt(),
+        |delivery| delivery.producer_attempt,
+    );
+    let actor_available = delivery.is_some();
+    let (child_is_running, fallback_exit) = {
+        let child = s.child.lock().await;
+        child.as_ref().map_or((false, None), |child| {
+            if child.producer_attempt != status_owner_attempt {
+                return (false, None);
+            }
+            (
+                child.id().is_some(),
+                if actor_available {
+                    None
+                } else {
+                    child.terminal_exit_snapshot()
+                },
+            )
+        })
+    };
+    let producer_exit = delivery
+        .and_then(|delivery| delivery.producer_exit.clone())
+        .or(fallback_exit);
+    let actor_producer = lease.as_ref().map(|lease| &lease.producer_control);
+    let producer_state = if s.failed.load(Relaxed) {
+        "failed"
+    } else if s.cached
+        || (s.actor_managed_prepublication_process
+            && actor_producer.is_some_and(|producer| producer.completion != "incomplete"))
+        || (!s.actor_managed_prepublication_process
+            && producer_exit.as_ref().is_some_and(|exit| exit.success))
+    {
+        "complete"
+    } else if actor_producer.is_some_and(|producer| producer.producer_ended_with_proposal) {
+        "producer_ended_with_proposal"
+    } else if producer_exit.is_some() {
+        "exited"
+    } else if suspended {
+        "held"
+    } else if child_is_running {
+        "running"
+    } else {
+        "waiting"
+    };
     SessionInfo {
         id: id.to_owned(),
+        presentation: "live-recovery",
         file_id: s.file_id,
         item_id: s.item_id,
         item_title: s.item_title.clone(),
@@ -2116,13 +5925,41 @@ async fn session_info(
         started_unix: s.started_unix,
         idle_seconds,
         last_request: last_request_kind,
-        speed: s.progress.speed(),
-        recent_speed: s.progress.recent_speed(),
-        out_time_ms: s.progress.out_time_ms(),
-        progress_idle_ms: s.progress.stalled_for().as_millis().min(i64::MAX as u128) as i64,
+        lease_mode,
+        lease_state,
+        lease_timeout_ms: lease.as_ref().map(|lease| lease.timeout_ms()),
+        control_demand,
+        reported_position_ms: demand.map(|demand| demand.position_ms),
+        client_runway_ms: demand.map(|demand| demand.runway_ms()),
+        render_state,
+        production_policy: flow.map_or("unavailable", |flow| flow.policy),
+        production_ahead_seconds: flow.and_then(|flow| flow.production_ahead_seconds),
+        production_target_seconds: flow.and_then(|flow| flow.production_target_seconds),
+        producer_control: lease.as_ref().map(|lease| lease.producer_control.clone()),
+        producer_state,
+        producer_attempt: Some(status_owner_attempt),
+        playlist_ready: delivery.map(|delivery| delivery.playlist_ready),
+        published_segment: delivery.and_then(|delivery| delivery.published_segment),
+        next_media_sequence: delivery.map(|delivery| delivery.next_media_sequence),
+        pending_fetched_segment: delivery.and_then(|delivery| delivery.pending_fetched_segment),
+        speed: delivery
+            .and_then(|delivery| delivery.producer_speed_milli)
+            .map(|speed| speed as f64 / 1_000.0),
+        recent_speed: delivery
+            .and_then(|delivery| delivery.producer_recent_speed_milli)
+            .map(|speed| speed as f64 / 1_000.0),
+        out_time_ms: delivery.and_then(|delivery| delivery.producer_out_time_ms),
+        progress_idle_ms: delivery.map_or(-1, |delivery| delivery.producer_progress_idle_ms),
+        producer_exit_success: producer_exit.as_ref().map(|exit| exit.success),
+        producer_exit_code: producer_exit.as_ref().and_then(|exit| exit.code),
+        producer_exit_signal: producer_exit.as_ref().and_then(|exit| exit.signal),
+        producer_exit_idle_ms: producer_exit.as_ref().map(|exit| exit.observed_idle_ms),
         published_end_ms,
-        fetched_end_ms: s.fetched_end_ms.load(Relaxed),
-        fetched_segment: Some(s.high_segment.load(Relaxed)).filter(|index| *index >= 0),
+        fetched_end_ms,
+        fetched_segment: lease.as_ref().map_or_else(
+            || Some(s.high_segment.load(Relaxed)).filter(|index| *index >= 0),
+            |lease| lease.delivery.fetched_segment,
+        ),
         first_retained_segment,
         playlist_shape: if s.cached {
             "vod"
@@ -2132,12 +5969,17 @@ async fn session_info(
             "event"
         },
         ahead_seconds: ahead.map(|a| a.seconds),
-        hold_reason: hold.map(|hold| hold.reason),
-        resume_below_seconds: hold
+        hold_reason: active_hold.map(|hold| hold.reason),
+        resume_below_seconds: active_hold
             .filter(|hold| hold.reason == AheadHoldReason::Time)
             .map(|hold| hold.release_value),
-        resume_below_bytes: hold
-            .filter(|hold| hold.reason != AheadHoldReason::Time)
+        resume_below_bytes: active_hold
+            .filter(|hold| {
+                matches!(
+                    hold.reason,
+                    AheadHoldReason::Bytes | AheadHoldReason::Global
+                )
+            })
             .map(|hold| hold.release_value),
         ahead_bytes: ahead.map(|a| a.bytes),
         delivered_bytes: s.delivery.total_bytes(),
@@ -2152,6 +5994,7 @@ async fn session_info(
 fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionInfo {
     SessionInfo {
         id: info.id,
+        presentation: "vod",
         file_id: info.file_id,
         item_id: info.item_id,
         item_title: info.item_title,
@@ -2161,10 +6004,31 @@ fn vod_delivery_session_info(info: crate::vodserve::VodDeliveryInfo) -> SessionI
         started_unix: info.started_unix,
         idle_seconds: info.idle_seconds,
         last_request: "vod",
+        lease_mode: "vod",
+        lease_state: "active",
+        lease_timeout_ms: Some(crate::playback_control::VOD_LEASE_TIMEOUT_MS),
+        control_demand: None,
+        reported_position_ms: None,
+        client_runway_ms: None,
+        render_state: None,
+        production_policy: "immutable_vod",
+        production_ahead_seconds: None,
+        production_target_seconds: None,
+        producer_control: None,
+        producer_state: "vod",
+        producer_attempt: None,
+        playlist_ready: None,
+        published_segment: None,
+        next_media_sequence: None,
+        pending_fetched_segment: None,
         speed: None,
         recent_speed: None,
         out_time_ms: None,
         progress_idle_ms: 0,
+        producer_exit_success: None,
+        producer_exit_code: None,
+        producer_exit_signal: None,
+        producer_exit_idle_ms: None,
         published_end_ms: None,
         fetched_end_ms: 0,
         fetched_segment: None,
@@ -2192,12 +6056,313 @@ pub struct SegmentFile {
     pub(crate) delivery: SegmentDelivery,
 }
 
+impl SegmentFile {
+    pub(crate) fn response_owner(&self) -> MediaResponseOwner {
+        MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&self.delivery.session),
+            producer_attempt: self.delivery.producer_attempt,
+        })
+    }
+}
+
+/// Opaque engine/incarnation identity carried from resource resolution to the
+/// HTTP response commit. Session ids are durable routing keys; they are not
+/// sufficient proof that the bytes still belong to the currently live
+/// rolling actor or resurrected VOD attachment.
+#[derive(Clone)]
+pub(crate) struct MediaResponseOwner(MediaResponseOwnerKind);
+
+/// One VOD lookup result plus the exact attachment/tombstone snapshot that
+/// produced it. Keeping the owner beside errors and misses lets HTTP admit a
+/// bodyless status without reconstructing authority from a reusable id.
+pub(crate) struct VodResponsePublication<T> {
+    pub(crate) result: Result<T, crate::vodserve::VodError>,
+    pub(crate) owner: MediaResponseOwner,
+}
+
+impl MediaResponseOwner {
+    /// A strong validator for one rolling object. VOD supplies its own
+    /// artifact digest; rolling scratch needs both the process-local Session
+    /// incarnation and exact producer attempt so an ABA reuse can never turn
+    /// different bytes with the same length into a false 304.
+    pub(crate) fn rolling_etag(
+        &self,
+        session_id: &str,
+        object_name: &str,
+        len: u64,
+    ) -> Option<String> {
+        let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &self.0
+        else {
+            return None;
+        };
+        let identity = format!(
+            "{session_id}\0{}\0{producer_attempt}\0{object_name}\0{len}",
+            session.response_incarnation
+        );
+        Some(format!(
+            "\"{}\"",
+            hex::encode(Sha256::digest(identity.as_bytes()))
+        ))
+    }
+}
+
+/// Why exact response publication could not linearize. HTTP must distinguish
+/// a reusable capability whose owner disappeared from a live incarnation that
+/// merely changed attempt/decision state while the response was prepared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MediaResponsePublicationRejection {
+    OwnerGone,
+    StateChanged,
+    ProducerEnded(String),
+}
+
+/// Frozen presentation facts resolved without erasing the distinction between
+/// a missing capability, a still-current generation in transition, and a
+/// terminal producer verdict. HTTP must publish the latter two as typed
+/// responses rather than passing through the live-only facade and inventing a
+/// fatal 404.
+// The Ready payload is intentionally returned by value to preserve the
+// existing cross-module response contract; boxing it would force every HTTP
+// caller to unwrap an owned presentation before publication admission.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum HlsPresentationResolution {
+    Ready(
+        HlsContext,
+        plurx_core::domain::MediaFile,
+        MediaResponseOwner,
+    ),
+    Failed(PlaylistPublicationError),
+    StateChanged,
+    Gone,
+}
+
+/// A typed playlist refusal plus the exact rolling incarnation that produced
+/// it. `SessionGone` deliberately carries no owner; live startup and immutable
+/// failure responses must revalidate this owner before HTTP exposes them.
+pub(crate) struct PlaylistPublicationError {
+    pub(crate) error: PlaylistError,
+    pub(crate) owner: Option<MediaResponseOwner>,
+}
+
+impl PlaylistPublicationError {
+    fn gone() -> Self {
+        Self {
+            error: PlaylistError::SessionGone,
+            owner: None,
+        }
+    }
+
+    fn for_session(error: PlaylistError, session: &Arc<Session>) -> Self {
+        Self {
+            error,
+            owner: Some(MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session: Arc::clone(session),
+                producer_attempt: session.control.current_producer_attempt(),
+            })),
+        }
+    }
+
+    fn without_owner(error: PlaylistError) -> Self {
+        Self { error, owner: None }
+    }
+}
+
+#[derive(Clone)]
+enum MediaResponseOwnerKind {
+    Rolling {
+        session: Arc<Session>,
+        producer_attempt: u64,
+    },
+    Vod(crate::vodserve::ResponseOwner),
+}
+
+#[derive(Clone, Copy)]
+enum MediaResponsePublicationBinding {
+    GenerationMetadata,
+    AttemptMedia,
+    AttemptStatus,
+    ProtocolOnly,
+}
+
+/// The response class requested by HTTP before any bytes become visible.
+/// Object names are retained only for exact EOF/frontier accounting; actor
+/// admission is derived from this typed class, never from URL parsing.
+pub(crate) struct MediaResponsePublication {
+    kind: &'static str,
+    object_name: Option<String>,
+    binding: MediaResponsePublicationBinding,
+}
+
+impl MediaResponsePublication {
+    pub(crate) fn generation_metadata(kind: &'static str) -> Self {
+        Self {
+            kind,
+            object_name: None,
+            binding: MediaResponsePublicationBinding::GenerationMetadata,
+        }
+    }
+
+    pub(crate) fn attempt_media(kind: &'static str, object_name: Option<&str>) -> Self {
+        Self {
+            kind,
+            object_name: object_name.map(str::to_owned),
+            binding: MediaResponsePublicationBinding::AttemptMedia,
+        }
+    }
+
+    /// A bodyless status derived from one exact producer attempt. Unlike media
+    /// publication this validates ownership without closing prepublication or
+    /// advancing any delivery frontier.
+    pub(crate) fn attempt_status(kind: &'static str, object_name: Option<&str>) -> Self {
+        Self {
+            kind,
+            object_name: object_name.map(str::to_owned),
+            binding: MediaResponsePublicationBinding::AttemptStatus,
+        }
+    }
+
+    #[allow(dead_code)] // Reserved for generation-scoped control/redirect responses.
+    pub(crate) fn protocol_only(kind: &'static str) -> Self {
+        Self {
+            kind,
+            object_name: None,
+            binding: MediaResponsePublicationBinding::ProtocolOnly,
+        }
+    }
+
+    fn rolling_object(&self) -> crate::playback_control::RollingResponseObject {
+        use crate::playback_control::RollingResponseObject as Object;
+        match self.kind {
+            "master-playlist" => Object::MasterPlaylist,
+            "playlist" => Object::VideoMediaPlaylist,
+            "subtitle-playlist" => Object::SubtitleMediaPlaylist,
+            "subtitle-segment" => Object::SubtitleSegment,
+            "init-segment" => Object::InitializationSegment,
+            "media-segment" => Object::MediaSegment,
+            "segment-not-modified" => Object::NotModified,
+            "segment-range-not-satisfiable" => Object::RangeNotSatisfiable,
+            "segment-range" => Object::ByteRange,
+            _ => Object::ProtocolResponse,
+        }
+    }
+
+    fn rolling_media_segment_index(
+        &self,
+        object: crate::playback_control::RollingResponseObject,
+    ) -> Option<i64> {
+        use crate::playback_control::RollingResponseObject as Object;
+        match object {
+            Object::MediaSegment | Object::ByteRange | Object::NotModified => {
+                self.object_name.as_deref().and_then(segment_index)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Move-only authorization for one prepared HTTP response. Dropping it is a
+/// non-commit (including 416); consuming it at exact EOF is the only path that
+/// renews demand or advances a rolling/VOD frontier.
+pub(crate) struct MediaResponseAuthorization {
+    session_id: String,
+    owner: MediaResponseOwner,
+    release_gate: Arc<SessionReleaseGate>,
+    admitted_serving_generation: u64,
+    kind: &'static str,
+    object_name: Option<String>,
+    rolling_generation_metadata_fingerprint: Option<String>,
+}
+
+/// Prepare a concrete, non-reentrant first-media transfer before asking the
+/// actor to authorize a response. The detached waiter survives cancellation
+/// of the HTTP request. Its acknowledgement lets the successful caller wait
+/// until manager ownership has changed before publishing response bytes.
+#[cfg(test)]
+async fn begin_first_media_publication_handoff(
+    session: &Arc<Session>,
+    session_id: &str,
+) -> Option<(
+    crate::playback_control::RollingFirstMediaPublicationHandoff,
+    tokio::sync::oneshot::Receiver<bool>,
+)> {
+    let deadline = tokio::time::Instant::now().into_std() + Duration::from_secs(5);
+    begin_first_media_publication_handoff_before(session, session_id, deadline).await
+}
+
+async fn begin_first_media_publication_handoff_before(
+    session: &Arc<Session>,
+    _session_id: &str,
+    deadline: Instant,
+) -> Option<(
+    crate::playback_control::RollingFirstMediaPublicationHandoff,
+    tokio::sync::oneshot::Receiver<bool>,
+)> {
+    let permit = tokio::time::timeout_at(
+        tokio::time::Instant::from_std(deadline),
+        Arc::clone(first_media_settlement_slots()).acquire_owned(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let handoff = crate::playback_control::RollingFirstMediaPublicationHandoff::with_prepublication_projection(
+        Arc::clone(&session.actor_prepublication_producer),
+        permit,
+    );
+    let waiter = handoff.waiter();
+    let session = Arc::clone(session);
+    let (applied, applied_response) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let accepted =
+            match tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), waiter.wait())
+                .await
+            {
+                Ok(accepted) => accepted,
+                Err(_) => session.control.settle_first_media_at_deadline(&waiter),
+            };
+        if accepted {
+            #[cfg(test)]
+            let pause = session
+                .first_media_owner_claim_pause
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            #[cfg(test)]
+            if let Some(pause) = pause {
+                pause.reached.notify_one();
+                pause.release.notified().await;
+            }
+            // Attempt-media authorization is the exact linearization point at
+            // which the rolling actor becomes the sole transcode lifetime
+            // owner. The decision executor remains registered across this
+            // handoff; no detached compatibility watcher is elected here.
+            session.first_media_handoff_applied.store(true, Release);
+            session.first_media_handoff_notify.notify_waiters();
+            session.first_media_handoff_notify.notify_one();
+        }
+        let _ = applied.send(accepted);
+    });
+    Some((handoff, applied_response))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentOpenError {
     /// Authenticated snapshot memory is still owned by earlier response
     /// bodies. This is an admission outcome, not evidence that the immutable
     /// cache generation is corrupt.
     Capacity,
+}
+
+/// Exact outcome of resolving one rolling media object. Negative results keep
+/// the Session/attempt owner that produced the verdict so HTTP can fence a
+/// bodyless 404/502/503 before it becomes visible.
+pub(crate) enum SegmentPublication {
+    Ready(SegmentFile),
+    Missing(Option<MediaResponseOwner>),
+    Pending(MediaResponseOwner),
+    Failed(PlaylistPublicationError),
 }
 
 /// Who is reading the segment behind a [`SegmentDelivery`].
@@ -2238,6 +6403,7 @@ impl DeliveryPurpose {
 pub(crate) struct SegmentDelivery {
     store: Arc<dyn Store>,
     session: Arc<Session>,
+    producer_attempt: u64,
     session_id: String,
     segment: String,
     method: &'static str,
@@ -2253,16 +6419,29 @@ pub(crate) struct SegmentDelivery {
     _snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
 }
 
+struct SegmentDeliveryContext {
+    store: Arc<dyn Store>,
+    session: Arc<Session>,
+    producer_attempt: u64,
+    session_id: String,
+    segment: String,
+    encoder: String,
+}
+
 impl SegmentDelivery {
     fn new(
-        store: Arc<dyn Store>,
-        session: Arc<Session>,
-        session_id: &str,
-        segment: &str,
-        encoder: String,
+        context: SegmentDeliveryContext,
         expected_bytes: u64,
         snapshot_lease: Option<plurx_core::transcode::manifest::VerifiedObjectLease>,
     ) -> Self {
+        let SegmentDeliveryContext {
+            store,
+            session,
+            producer_attempt,
+            session_id,
+            segment,
+            encoder,
+        } = context;
         let method = match session.method {
             crate::delivery::Method::Direct => "direct_play",
             crate::delivery::Method::Remux | crate::delivery::Method::HlsCopy => "remux",
@@ -2271,8 +6450,9 @@ impl SegmentDelivery {
         Self {
             store,
             session,
-            session_id: session_id.to_owned(),
-            segment: segment.to_owned(),
+            producer_attempt,
+            session_id,
+            segment,
             method,
             encoder,
             purpose: DeliveryPurpose::ClientResponse,
@@ -2379,13 +6559,16 @@ impl SegmentDelivery {
         );
     }
 
-    pub(crate) fn finish(&mut self) {
+    /// Finish delivery and report whether every advertised byte was read.
+    /// This completion bit is the only authorization to move the consumed
+    /// frontier for a streamed response.
+    pub(crate) fn finish(&mut self) -> bool {
         if self.terminal {
-            return;
+            return self.delivered_bytes >= self.expected_bytes;
         }
         self.terminal = true;
         if self.delivered_bytes >= self.expected_bytes {
-            return;
+            return true;
         }
         let elapsed_ms = self.started_at.elapsed().as_millis().min(i64::MAX as u128) as i64;
         tracing::warn!(
@@ -2405,9 +6588,31 @@ impl SegmentDelivery {
                 "expected_bytes": self.expected_bytes
             }),
         );
+        false
     }
 
     pub(crate) fn fail(&mut self, error: &std::io::Error) {
+        self.fail_with_reason(error, "storage_read_error", "storage");
+    }
+
+    /// Record a response-body transport failure without teaching adaptive
+    /// control that local storage stalled. The caller supplies one stable,
+    /// bounded reason from the HTTP lifecycle (`body_lifetime_exceeded` or
+    /// `downstream_no_progress`).
+    pub(crate) fn fail_transport(&mut self, error: &std::io::Error, reason: &'static str) {
+        debug_assert!(matches!(
+            reason,
+            "body_lifetime_exceeded" | "downstream_no_progress"
+        ));
+        self.fail_with_reason(error, reason, "transport");
+    }
+
+    fn fail_with_reason(
+        &mut self,
+        error: &std::io::Error,
+        reason: &'static str,
+        failure_domain: &'static str,
+    ) {
         if self.terminal {
             return;
         }
@@ -2418,17 +6623,19 @@ impl SegmentDelivery {
             segment = %self.segment,
             delivered_bytes = self.delivered_bytes,
             expected_bytes = self.expected_bytes,
+            failure_domain,
             %error,
-            "HLS segment response failed while reading storage"
+            "HLS segment response failed before delivery completed"
         );
         self.emit(
             "segment_delivery_incomplete",
-            "storage_read_error",
+            reason,
             elapsed_ms,
             serde_json::json!({
                 "segment": self.segment,
                 "delivered_bytes": self.delivered_bytes,
                 "expected_bytes": self.expected_bytes,
+                "failure_domain": failure_domain,
                 "error": error.to_string()
             }),
         );
@@ -2509,9 +6716,14 @@ pub enum PlaylistError {
     /// string is ffmpeg's rendered exit status — the one fact that separates
     /// "this build refused the source" from "something killed it".
     ProducerExited(String),
-    /// The session was failed after it started: the stall watchdog's verdict,
-    /// or a fallback that could not spawn. Carries the operator-facing detail
-    /// recorded at the moment of the verdict.
+    /// An actor-managed producer ended after media from its exact attempt had
+    /// already been admitted. Published objects remain readable; this verdict
+    /// is returned only when a request needs media beyond the retained
+    /// published frontier.
+    ProducerEnded(String),
+    /// The session was failed after it started: an actor-owned producer
+    /// verdict or a fallback that could not spawn. Carries the operator-facing
+    /// detail recorded at the moment of the verdict.
     SessionFailed(String),
     /// Still starting when [`PLAYLIST_WAIT_BUDGET`] ran out. Not terminal —
     /// the session may yet publish — so clients are told to retry rather than
@@ -2526,6 +6738,7 @@ impl PlaylistError {
         match self {
             PlaylistError::SessionGone => "session_gone",
             PlaylistError::ProducerExited(_) => "producer_failed",
+            PlaylistError::ProducerEnded(_) => "producer_ended",
             PlaylistError::SessionFailed(_) => "session_failed",
             PlaylistError::StartupTimedOut(_) => "startup_timeout",
         }
@@ -2544,6 +6757,10 @@ impl PlaylistError {
                 "the server's encoder exited before it produced any video ({status}) — \
                  this build of ffmpeg could not handle this source, audio track or \
                  subtitle burn-in"
+            ),
+            PlaylistError::ProducerEnded(reason) => format!(
+                "the server's encoder ended after publishing part of this stream \
+                 ({reason}); media already listed remains available"
             ),
             PlaylistError::SessionFailed(detail) => {
                 format!("the server could not build this stream: {detail}")
@@ -2805,9 +7022,13 @@ pub struct StartInfo {
     /// The player needs to know, because the difference is visible. A live
     /// session seeks by restarting the encoder somewhere else; a finished one
     /// seeks by moving `currentTime`, like direct play, in well under a second.
-    /// And the stall watchdog's restart arm has nothing to fix here — a
-    /// segment that is late was never going to be produced faster.
+    /// No rolling producer recovery applies here — a segment that is late was
+    /// never going to be produced faster.
     pub vod: bool,
+    /// Legacy activity lifetime enforced by the registry that owns this
+    /// session. A finished transcode-cache hit is seekable VOD to the client
+    /// but still belongs to the 60-second rolling registry.
+    pub control_lease_timeout_ms: u32,
 }
 
 /// A cluster worker and the process-local replacement gate that must remain
@@ -2815,15 +7036,29 @@ pub struct StartInfo {
 pub(crate) struct ClusterSessionStart {
     pub(crate) info: StartInfo,
     pub(crate) replacement: ClusterReplacementGuard,
+    pub(crate) created: bool,
 }
 
-/// Serializes replacement of one user's player on this worker. Holding this
-/// only through ffmpeg spawn is insufficient: a second start could otherwise
-/// broad-reap the unpublished first worker before its durable activation.
+struct SessionCreation {
+    info: StartInfo,
+    created: bool,
+}
+
+#[derive(Clone, Copy)]
+struct ClusterServingAdmission {
+    generation: u64,
+    deadline: tokio::time::Instant,
+}
+
+/// Serializes one player's provisional cluster worker from local creation
+/// through the ingress activation verdict and exact predecessor settlement.
+/// Cluster make-before-break deliberately does not reap the predecessor
+/// before the Store pointer CAS.
 pub(crate) struct ClusterReplacementGuard {
     registry: Arc<ClusterReplacementGates>,
     key: String,
     permit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _predecessor_settlement: Option<SessionSettlementGuard>,
 }
 
 impl Drop for ClusterReplacementGuard {
@@ -2846,10 +7081,127 @@ struct ClusterReplacementGates {
     entries: std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
+struct SessionReleaseGate {
+    transition: Arc<tokio::sync::Mutex<()>>,
+    released: AtomicBool,
+}
+
+pub(crate) struct SessionAdoptionToken {
+    gate: Arc<SessionReleaseGate>,
+    registry: Arc<SessionReleaseGates>,
+    session_id: String,
+}
+
+/// Move-only cleanup ownership that follows a rolling worker across the one
+/// registry mutation which changes its public capability. The adoption future
+/// owns this value, so cancellation drops the cleanup owner at whichever exact
+/// identity the registry currently contains. Implementations must update only
+/// process-local identity; durable publication is still owned by the caller.
+pub(crate) trait SessionAdoptionOwner: Send + Sized + 'static {
+    fn adopted_session_id(&mut self, durable_session_id: &str);
+}
+
+impl SessionAdoptionOwner for () {
+    fn adopted_session_id(&mut self, _durable_session_id: &str) {}
+}
+
+impl Drop for SessionAdoptionToken {
+    fn drop(&mut self) {
+        // The final token is the only owner that can prove an unretained weak
+        // entry is dead. Remove only the exact gate generation: a completed
+        // release may have retained it, or a later operation may already have
+        // installed a replacement for this never-reused capability key.
+        // Take the registry lock before testing the count: every new token
+        // upgrades the Weak while holding this lock, so it cannot race this
+        // last-owner proof and lose the registry generation beneath itself.
+        let mut registry = self
+            .registry
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if Arc::strong_count(&self.gate) != 1 {
+            return;
+        }
+        let exact = registry.entries.get(&self.session_id).is_some_and(|entry| {
+            entry.active_release.is_none()
+                && entry.retain_until.is_none()
+                && Weak::ptr_eq(&entry.gate, &Arc::downgrade(&self.gate))
+        });
+        if exact {
+            registry.entries.remove(&self.session_id);
+        }
+    }
+}
+
+struct SessionReleaseGateEntry {
+    gate: Weak<SessionReleaseGate>,
+    active_release: Option<Arc<SessionReleaseGate>>,
+    retain_until: Option<Instant>,
+}
+
+#[derive(Default)]
+struct SessionReleaseGates {
+    registry: std::sync::Mutex<SessionReleaseGateRegistry>,
+}
+
+#[derive(Default)]
+struct SessionReleaseGateRegistry {
+    entries: HashMap<String, SessionReleaseGateEntry>,
+    retained: VecDeque<(String, Instant)>,
+}
+
+/// Outlive the complete admitted media envelope and replicated lease work. A
+/// completed terminal projection therefore cannot be forgotten while a
+/// pre-terminal route decision, body, or commit-unknown renewal can still
+/// retain its exact generation.
+const SESSION_RELEASE_GATE_RETENTION: Duration =
+    crate::media_sessions::TERMINAL_PROJECTION_SAFETY_WINDOW;
+const MAX_RETAINED_SESSION_RELEASE_GATES: usize = 4_096;
+/// Bound distinct capability generations that are only being inspected or
+/// prepared. Active release owners and retained terminal generations have
+/// their own independent bounds, so an attacker cannot exhaust adoption
+/// memory with random UUID GETs while legitimate terminalization still gets
+/// an admission path.
+const MAX_IN_FLIGHT_SESSION_ADOPTION_GATES: usize = 4_096;
+
+fn prune_session_release_gates(registry: &mut SessionReleaseGateRegistry) {
+    let now = Instant::now();
+    while registry.retained.front().is_some_and(|(_, deadline)| {
+        *deadline <= now || registry.retained.len() > MAX_RETAINED_SESSION_RELEASE_GATES
+    }) {
+        let Some((session_id, deadline)) = registry.retained.pop_front() else {
+            break;
+        };
+        let remove = registry.entries.get_mut(&session_id).is_some_and(|entry| {
+            if entry.retain_until != Some(deadline) {
+                return false;
+            }
+            entry.active_release = None;
+            entry.retain_until = None;
+            entry.gate.strong_count() == 0
+        });
+        if remove {
+            registry.entries.remove(&session_id);
+        }
+    }
+    // An authorization may outlive the retained FIFO entry. Once its final
+    // Arc drops there is no adoption-token Drop hook to remove the dead Weak;
+    // sweep every fully unretained dead generation here so repeated valid
+    // sessions cannot grow the map outside either hard admission bound.
+    registry.entries.retain(|_, entry| {
+        entry.active_release.is_some()
+            || entry.retain_until.is_some()
+            || entry.gate.strong_count() > 0
+    });
+}
+
 /// A live session, as the activity page sees it.
 #[derive(Clone, serde::Serialize)]
 pub struct SessionInfo {
     pub id: String,
+    /// `vod` for the immutable presentation; `live-recovery` for the
+    /// temporary growing-HLS compatibility engine.
+    pub presentation: &'static str,
     pub file_id: i64,
     pub item_id: i64,
     pub item_title: String,
@@ -2862,6 +7214,47 @@ pub struct SessionInfo {
     /// client that keeps polling playlists is different from one that stopped
     /// making requests altogether, even when both have the same idle age.
     pub last_request: &'static str,
+    /// Which liveness contract owns this rolling generation. `explicit`
+    /// begins only after a newly accepted control sequence carries a complete
+    /// demand snapshot; media-only viewers remain visible during rollout.
+    pub lease_mode: &'static str,
+    /// Actor lifecycle verdict. Expiry may be visible briefly while the repair
+    /// pass performs process and scratch teardown; serving is already fenced.
+    pub lease_state: &'static str,
+    /// The timeout currently enforced by the actor. Legacy viewers retain the
+    /// rollout-compatible lifetime; explicit viewers receive the shorter
+    /// deadline renewed by control or authenticated media consumption.
+    pub lease_timeout_ms: Option<u32>,
+    /// Last accepted viewer intent and render facts. These are observations,
+    /// not inferred recovery decisions.
+    pub control_demand: Option<&'static str>,
+    pub reported_position_ms: Option<i64>,
+    pub client_runway_ms: Option<i64>,
+    pub render_state: Option<&'static str>,
+    /// The pacing authority and its measured high-water coordinates. The
+    /// legacy policy is download-frontier inference; explicit policy is
+    /// actor-owned demand plus reported playhead/runway.
+    pub production_policy: &'static str,
+    pub production_ahead_seconds: Option<i64>,
+    pub production_target_seconds: Option<i64>,
+    /// Bounded actor-owned producer control truth. `None` means the rolling
+    /// actor was unavailable or this is immutable VOD, rather than inferring
+    /// control state from compatibility fields.
+    pub producer_control: Option<crate::playback_control::RollingProducerOperationalSnapshot>,
+    /// Compatibility-derived producer summary retained for existing Activity
+    /// consumers. `producer_control` is the actor-owned source for deadline
+    /// and ingress truth; this field remains non-authoritative until the M4
+    /// decision/executor cutover removes the remaining compatibility inputs.
+    pub producer_state: &'static str,
+    /// Actor-owned rolling attempt and delivery coordinates. Immutable VOD is
+    /// `None`; an unavailable rolling actor reports the once-sampled fallback
+    /// attempt so exact terminal facts remain attributable. Attempt zero is a
+    /// valid compatibility cache generation with no child process.
+    pub producer_attempt: Option<u64>,
+    pub playlist_ready: Option<bool>,
+    pub published_segment: Option<i64>,
+    pub next_media_sequence: Option<i64>,
+    pub pending_fetched_segment: Option<i64>,
     /// Cumulative encode rate as a multiple of realtime, as ffmpeg reports it.
     pub speed: Option<f64>,
     /// Rate over the last few seconds. This is the one that answers "is the
@@ -2873,8 +7266,17 @@ pub struct SessionInfo {
     pub out_time_ms: Option<i64>,
     /// Wall time since ffmpeg's output timestamp last advanced. Unlike
     /// `recent_speed`, this remains decisive when the producer has stopped
-    /// emitting samples entirely.
+    /// emitting samples entirely. `-1` is explicit unknown when neither an
+    /// actor snapshot nor an exact-attempt compatibility projection exists.
     pub progress_idle_ms: i64,
+    /// Exact process terminal facts for the actor attempt above. `code` is
+    /// present for ordinary exits; `signal` is present for Unix signal exits.
+    /// Success is kept separately because platforms may report neither code
+    /// nor signal for a terminal status.
+    pub producer_exit_success: Option<bool>,
+    pub producer_exit_code: Option<i32>,
+    pub producer_exit_signal: Option<i32>,
+    pub producer_exit_idle_ms: Option<i64>,
     /// End of the newest complete, fetchable segment on the session timeline.
     pub published_end_ms: Option<i64>,
     /// End of the highest segment the client has requested.
@@ -2928,8 +7330,8 @@ pub struct SessionInfo {
 #[derive(Clone, serde::Serialize)]
 #[serde(untagged)]
 pub enum HlsSessionInfo {
-    Live(SessionInfo),
-    Vod(crate::vodserve::VodSessionInfo),
+    Live(Box<SessionInfo>),
+    Vod(Box<crate::vodserve::VodSessionInfo>),
 }
 
 /// Monotone failover coordinates sampled for the owner's two-second liveness
@@ -2944,6 +7346,10 @@ pub(crate) struct SessionFrontier {
 /// Coordinates selected before an expired incarnation is reproduced locally.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SessionTakeoverStart {
+    /// Process-local capability chosen by the settlement supervisor before
+    /// creation. Knowing it in advance lets that supervisor reap an exact
+    /// worker even if the creation task panics after manager registration.
+    pub provisional_session_id: String,
     /// The durable incarnation this generation continues. Teardown keys off
     /// the incarnation rather than the process-local request record, because
     /// a successor is not created by any request on this node.
@@ -3114,7 +7520,7 @@ struct CopySessionOptions {
 }
 
 #[derive(Clone, Copy)]
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct SessionOwner<'a> {
     user_name: &'a str,
     supersession_user: &'a str,
@@ -3312,7 +7718,7 @@ const PRODUCER_RETRY: Duration = Duration::from_secs(5);
 ///
 /// Every field defaults to the production value above and nothing in the
 /// daemon ever changes one — `TranscodeManager::new` takes the default and
-/// there is no setter outside `#[cfg(test)]`. They live here because the
+/// there is no setter outside `#[cfg(any(test, feature = "live-hls-recovery"))]`. They live here because the
 /// resume path is only reachable by *interrupting an encoder that is still
 /// running*, and whether that is possible at all depends on how fast the box
 /// is: a 16-core desktop finished the whole 240-second fixture between two
@@ -3368,7 +7774,7 @@ enum PartEnd {
 
 /// The owner-aware permits a foreground encoder keeps for its whole lifetime.
 /// Constructed only after every background permit has been released.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 struct LiveAdmission {
     encoder: Encoder,
     hw_slot: Option<HwSlot>,
@@ -4665,8 +9071,25 @@ pub struct TranscodeManager {
     /// it. Offers fail closed until the background verdict arrives.
     cache_offer_verdicts: Arc<std::sync::Mutex<HashMap<String, CacheOfferVerdict>>>,
     cache_offer_verifier: Arc<tokio::sync::Semaphore>,
-    sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// Arc-owned so an accepted retirement can remove its exact Session after
+    /// the initiating request, reaper, or takeover future has disappeared.
+    /// The detached owner never needs to retain the complete manager merely
+    /// to converge one registry entry.
+    sessions: Arc<Mutex<HashMap<String, Arc<Session>>>>,
+    /// Bounded terminal operations outlive rolling-session cleanup so an
+    /// exact End can retry the original immutable durable acknowledgement
+    /// after one Store-attempt window expires.
+    terminal_controls: std::sync::Mutex<HashMap<String, RollingTerminalOperation>>,
     cluster_replacement_gates: Arc<ClusterReplacementGates>,
+    /// Exact per-capability exclusion between late registration/resurrection
+    /// and public release. Active releases retain a strong gate; an operation
+    /// that began earlier retains the same gate through its final insertion,
+    /// so completing the durable End cannot erase the generation change out
+    /// from under a delayed adopter.
+    session_release_gates: Arc<SessionReleaseGates>,
+    /// Authoritative synchronous serving projection shared with AppState.
+    /// Response publication never waits for the teardown watch to mirror it.
+    serving_authority: crate::serving_fence::ServingAuthority,
     /// Process-local quorum serving authority. The router rejects ordinary
     /// starts before they reach the manager; this second edge closes the
     /// transition race between that check and publishing a spawned child.
@@ -4731,8 +9154,16 @@ pub struct TranscodeManager {
     /// Shortens [`PLAYLIST_WAIT_BUDGET`] for tests that need the deadline to
     /// actually elapse. Zero (always, in production) means the real budget —
     /// see [`TranscodeManager::playlist_wait`].
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     playlist_wait_override_ms: std::sync::atomic::AtomicU64,
+    /// Test-only rendezvous after subtitle playlist bytes and their exact
+    /// owner resolve, before the composite response commits.
+    #[cfg(test)]
+    subtitle_playlist_commit_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
+    /// Test-only pause after authoritative publication admission but before a
+    /// VOD owner await, proving loss need not reach the teardown watch first.
+    #[cfg(test)]
+    vod_publication_admission_pause: std::sync::Mutex<Option<Arc<tokio::sync::Barrier>>>,
 }
 
 /// Store-free, lock-free projection used by the Prometheus handler.
@@ -4786,7 +9217,112 @@ impl TranscodeMetrics {
     }
 }
 
+struct RollingTerminalAdmission {
+    manager: Arc<TranscodeManager>,
+    session_id: String,
+    session: Arc<Session>,
+    identity: RollingTerminalIdentity,
+    terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    #[cfg(test)]
+    control_pause: Option<Arc<tokio::sync::Barrier>>,
+}
+
+impl crate::playback_control::RollingTerminalAdmission for RollingTerminalAdmission {
+    fn accepted(&self, outcome: crate::playback_control::RollingControlOutcome) {
+        if outcome.lease.terminal != Some(crate::playback_control::RollingTerminalCause::End) {
+            return;
+        }
+        let (receipt, sender) = RollingTerminalResultReceipt::pending();
+        let expires_at_unix_ms = Arc::new(AtomicI64::new(0));
+        let exact_commit = Arc::new(std::sync::Mutex::new(None));
+        let operation = RollingTerminalOperation {
+            identity: self.identity.clone(),
+            result: receipt,
+            expires_at_unix_ms: Arc::clone(&expires_at_unix_ms),
+            exact_commit: Arc::clone(&exact_commit),
+        };
+        let handoff = {
+            let mut shared = self
+                .session
+                .terminal_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if shared.is_some() {
+                return;
+            }
+            let handoff = crate::playback_control::TerminalResponseHandoff::new(Arc::clone(
+                &self.session.terminal_response_pending,
+            ));
+            *shared = Some(operation.clone());
+            handoff
+        };
+        self.manager
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.session_id.clone(), operation);
+        let manager = Arc::clone(&self.manager);
+        let session_id = self.session_id.clone();
+        let session = Arc::clone(&self.session);
+        let terminal_committer = self.terminal_committer.clone();
+        #[cfg(test)]
+        let control_pause = self.control_pause.clone();
+        tokio::spawn(async move {
+            let result = manager
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    outcome.disposition,
+                    outcome.accepted_sequence,
+                    outcome.action,
+                    outcome.platform,
+                    outcome.lease.expires_at_unix_ms(),
+                    outcome.lease.timeout_ms(),
+                    outcome.flow_ticket,
+                    outcome.lease.terminal.map_or(
+                        "active",
+                        crate::playback_control::RollingTerminalCause::status,
+                    ),
+                    true,
+                    Some(handoff),
+                    terminal_committer,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await;
+            let prepared_commit = result
+                .as_ref()
+                .ok()
+                .and_then(|result| result.terminal_commit.as_ref())
+                .cloned();
+            let exact_expiry = prepared_commit
+                .as_ref()
+                .and_then(|commit| commit.expires_at_unix_ms())
+                // Tests and embedders may intentionally omit durable commit;
+                // still start their bound after result preparation, never at
+                // actor admission before the immutable result exists.
+                .unwrap_or_else(|| {
+                    crate::media_sessions::unix_ms()
+                        .saturating_add(crate::playback_control::TERMINAL_ACK_REPLAY_TTL_MS)
+                });
+            *exact_commit
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = prepared_commit;
+            expires_at_unix_ms.store(exact_expiry, Release);
+            let _ = sender.send(Some(result));
+        });
+    }
+}
+
 impl TranscodeManager {
+    fn rolling_retirement_context(&self) -> RollingRetirementContext {
+        RollingRetirementContext {
+            sessions: Arc::downgrade(&self.sessions),
+            active_session_count: Arc::clone(&self.active_session_count),
+            store: Arc::clone(&self.store),
+        }
+    }
+
     /// `pipeline` is the tone-map graph this node proved at boot — see
     /// [`crate::pipeprobe`]. It is fixed for the manager's life because it is
     /// a fact about the hardware, not a setting; the per-session filtering
@@ -4830,8 +9366,11 @@ impl TranscodeManager {
             cache_readers: crate::cachekeep::ActiveCacheReaders::default(),
             cache_offer_verdicts: Arc::new(std::sync::Mutex::new(HashMap::new())),
             cache_offer_verifier: Arc::new(tokio::sync::Semaphore::new(1)),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            terminal_controls: std::sync::Mutex::new(HashMap::new()),
             cluster_replacement_gates: Arc::new(ClusterReplacementGates::default()),
+            session_release_gates: Arc::new(SessionReleaseGates::default()),
+            serving_authority: crate::serving_fence::ServingAuthority::always_ready(),
             serving_ready: AtomicBool::new(true),
             serving_loss_generation: AtomicU64::new(0),
             active_session_count: Arc::new(AtomicUsize::new(0)),
@@ -4845,8 +9384,12 @@ impl TranscodeManager {
             dovi_passthrough_qsv: false,
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             playlist_wait_override_ms: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            subtitle_playlist_commit_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            vod_publication_admission_pause: std::sync::Mutex::new(None),
         }
     }
 
@@ -4901,6 +9444,7 @@ impl TranscodeManager {
             cache_parent.join("renditions"),
             ffmpeg_build,
             node_id,
+            None,
         )
     }
 
@@ -4908,6 +9452,7 @@ impl TranscodeManager {
     /// and validates these paths before scratch cleanup; deriving siblings
     /// from a canonicalized `transcode` leaf would move them when only that
     /// legacy child is a relocation symlink.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_cache_layout(
         mut self,
         cache_dir: PathBuf,
@@ -4916,13 +9461,20 @@ impl TranscodeManager {
         rendition_cache: PathBuf,
         ffmpeg_build: String,
         node_id: String,
+        cluster_membership: Option<plurx_core::cluster::membership::MembershipManager>,
     ) -> Self {
         self.runtime_cache = runtime_cache;
         self.subtitle_cache = subtitle_cache;
         // Renditions are durable state — admitted ones are the copy cache the
         // plan promises — so they live beside the persistent caches rather
         // than in scratch. Replaced before serving starts, like the caches.
-        self.vod = crate::vodserve::VodServe::new(rendition_cache, Arc::clone(&self.store));
+        self.vod = crate::vodserve::VodServe::new_cluster(
+            rendition_cache,
+            Arc::clone(&self.store),
+            node_id.clone(),
+            crate::fragment_index_cluster::cache_root(&self.runtime_cache),
+            cluster_membership,
+        );
         if let Err(err) = std::fs::create_dir_all(&self.runtime_cache) {
             tracing::warn!(
                 path = %self.runtime_cache.display(),
@@ -4942,6 +9494,14 @@ impl TranscodeManager {
         shared_cache: Arc<crate::shared_cache::SharedCacheCoordinator>,
     ) -> Self {
         self.shared_cache = Some(shared_cache);
+        self
+    }
+
+    pub(crate) fn with_serving_authority(
+        mut self,
+        serving_authority: crate::serving_fence::ServingAuthority,
+    ) -> Self {
+        self.serving_authority = serving_authority;
         self
     }
 
@@ -6050,19 +10610,49 @@ impl TranscodeManager {
         }
     }
 
-    async fn fail_cached_session_integrity(
-        &self,
+    fn fail_cached_session_integrity(
+        self: &Arc<Self>,
         session_id: &str,
         session: &Arc<Session>,
         reason: &'static str,
     ) {
-        if let Some(location) = &session.cache_location {
-            self.invalidate_cache_location(location, reason).await;
-        }
+        // Publish the response-visible verdict before any database, mount,
+        // task-scheduling, or retirement operation. The exact response owner
+        // can therefore authenticate this failure even after cleanup removes
+        // the Session from the process-local registry.
         session.fail(PlaylistError::SessionFailed(
-            "cached media failed an integrity check".to_owned(),
+            CACHED_MEDIA_INTEGRITY_FAILURE.to_owned(),
         ));
-        let _ = self.retire_session(session_id, session).await;
+        if session
+            .cache_integrity_cleanup_started
+            .compare_exchange(false, true, AcqRel, Acquire)
+            .is_err()
+        {
+            return;
+        }
+
+        let manager = Arc::clone(self);
+        let session = Arc::clone(session);
+        let session_id = session_id.to_owned();
+        let (_commit, retirement) = spawn_rolling_retirement_owner(
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.active_session_count),
+            Arc::clone(&self.store),
+            session_id.clone(),
+            Arc::clone(&session),
+            None,
+            "failed",
+        );
+        tokio::spawn(async move {
+            // This is the sole cleanup owner. It is detached before the
+            // detecting request returns, so an outer playlist deadline or a
+            // disconnected segment request cannot cancel invalidation between
+            // the synchronous failure store and exact retirement.
+            if let Some(location) = &session.cache_location {
+                manager.invalidate_cache_location(location, reason).await;
+            }
+            let _ = retirement.wait().await;
+        });
     }
 
     /// Prove that the complete local generation for this exact recipe is
@@ -6352,7 +10942,7 @@ impl TranscodeManager {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn prepare_shared_cached_read(
         store: Arc<dyn Store>,
         coordinator: Arc<crate::shared_cache::SharedCacheCoordinator>,
@@ -6472,7 +11062,7 @@ impl TranscodeManager {
     /// and a viewer to point at them. It is still a session because the
     /// activity page should show somebody watching, and because the idle
     /// reaper is what eventually forgets them.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn serve_cached(
         &self,
         file: &plurx_core::domain::MediaFile,
@@ -6669,29 +11259,96 @@ impl TranscodeManager {
                 .touch_cache_entry(&hash, &cache_location.node_id)
                 .await;
         }
+        let cached_kind = SessionKind::Transcode {
+            height: opts.target_height,
+        };
+        let cached_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let cached_probe_json = self.store.get_file_probe_json(file.id).await.ok().flatten();
+        let frozen_presentation = FrozenHlsPresentation::new(
+            file.clone(),
+            HlsContext {
+                file_id: file.id,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: cached_codecs.clone(),
+                supplemental_codecs: None,
+                frame_rate: frozen_video_frame_rate(cached_probe_json.as_deref()),
+            },
+            &cached_kind,
+        );
+        let control = crate::playback_control::RollingControlHandle::spawn("session-start");
+        let failed = Arc::new(AtomicBool::new(false));
+        if let Err(reason) = control
+            .bind_response_publication_contract(
+                frozen_presentation.contract_fingerprint.clone(),
+                Arc::clone(&failed),
+            )
+            .await
+        {
+            tracing::warn!(
+                session = %session_log_id(&session_id),
+                rejection = ?reason,
+                "rolling actor rejected cached response-publication ownership"
+            );
+            return None;
+        }
         let session = Arc::new(Session {
             dir,
+            response_incarnation: uuid::Uuid::new_v4(),
+            frozen_presentation: Some(frozen_presentation),
+            actor_managed_response_publication: true,
+            actor_managed_prepublication_process: false,
+            actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
+            response_publication_transition: Mutex::new(()),
+            first_media_handoff_applied: AtomicBool::new(false),
+            first_media_handoff_notify: tokio::sync::Notify::new(),
+            prepublication_cleanup_active: AtomicBool::new(false),
+            retirement_cleanup_started: AtomicBool::new(false),
+            retirement_cleanup_finished: AtomicBool::new(false),
+            retirement_settlement: std::sync::Mutex::new(None),
+            scratch_cleanup_started: AtomicBool::new(false),
+            retirement_context: Some(self.rolling_retirement_context()),
+            cache_integrity_cleanup_started: AtomicBool::new(false),
             child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            producer_install_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            refresh_after_read_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            path_owner_sample_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            response_projection_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            first_media_owner_claim_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            scratch_cleanup_pause: std::sync::Mutex::new(None),
             cached: true,
             _cache_reader: cache_reader,
             subtitle_handle: None,
             cache_manifest,
             cache_location: Some(cache_location),
-            last_request: Mutex::new(LastRequest::now("session-start")),
+            control,
+            flow_worker_started: AtomicBool::new(false),
             file_id: file.id,
             item_id: file.item_id,
             item_title: item_title.to_owned(),
@@ -6699,9 +11356,7 @@ impl TranscodeManager {
             supersession_user: owner.supersession_user.to_owned(),
             playback_id: owner.playback_id.to_owned(),
             automatic: owner.automatic,
-            kind: SessionKind::Transcode {
-                height: opts.target_height,
-            },
+            kind: cached_kind,
             // A cache hit only ever answers a transcode request (`serve_cached`
             // is reached from the transcode path alone); the encoder label goes to
             // "cached" here, which is exactly why the method is not read off it.
@@ -6710,22 +11365,24 @@ impl TranscodeManager {
             // A cache hit is the whole stream from the beginning.
             media_origin_seconds: 0.0,
             grade: opts.pipeline.output_grade(),
-            hls_codecs: transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
-            hls_supplemental_codecs: None,
             target_height: opts.target_height,
             encoder_label: Mutex::new("cached"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
-            failed: AtomicBool::new(false),
+            failed,
             failure: std::sync::Mutex::new(None),
             playlist_published: AtomicBool::new(true),
-            high_segment: AtomicI64::new(-1),
-            fetched_end_ms: AtomicI64::new(0),
+            high_segment: Arc::new(AtomicI64::new(-1)),
+            compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
+            fetched_end_ms: Arc::new(AtomicI64::new(0)),
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
-            live_bytes: AtomicI64::new(0),
+            live_bytes: Arc::new(AtomicI64::new(0)),
+            retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
+            retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            retention_cleanup_active: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Progress::new()),
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
@@ -6739,10 +11396,15 @@ impl TranscodeManager {
             takeover: None,
             first_slide_logged: AtomicBool::new(false),
         });
-        if !self
-            .register_session(&session_id, Arc::clone(&session))
+        if let Err(reason) = self
+            .register_session(&session_id, Arc::clone(&session), 0)
             .await
         {
+            tracing::warn!(
+                session = %session_log_id(&session_id),
+                rejection = ?reason,
+                "cached rolling session registration rejected"
+            );
             return None;
         }
         tracing::info!(
@@ -6776,6 +11438,7 @@ impl TranscodeManager {
             encoder: "cached",
             grade: opts.pipeline.output_grade(),
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -7845,8 +12508,7 @@ impl TranscodeManager {
                 &args,
                 encoder.label(),
                 hash,
-                Arc::clone(&progress),
-                generation,
+                FfmpegProgressObserver::offline(Arc::clone(&progress), generation),
                 &self.runtime_cache,
                 FfmpegDescriptors {
                     source: bound_source_fd,
@@ -8025,8 +12687,9 @@ impl TranscodeManager {
         user_name: &str,
     ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["username", user_name]).to_string();
-        self.create_session_inner(req, user_name, &supersession_user, None, None)
+        self.create_session_inner(req, user_name, &supersession_user, None, None, None)
             .await
+            .map(|creation| creation.info)
     }
 
     /// Start a cluster-owned replacement while retaining its process-local
@@ -8037,41 +12700,96 @@ impl TranscodeManager {
         user_id: i64,
         user_name: &str,
         deadline: tokio::time::Instant,
+        admitted_serving_generation: u64,
     ) -> Result<ClusterSessionStart, String> {
+        let serving_admission = ClusterServingAdmission {
+            generation: admitted_serving_generation,
+            deadline,
+        };
+        self.require_cluster_serving_authority(serving_admission)?;
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
         let gate_key =
             serde_json::json!([supersession_user.as_str(), req.playback_id.as_str(),]).to_string();
         let replacement = self
-            .acquire_cluster_replacement_gate(gate_key, deadline)
+            .acquire_cluster_replacement_gate(
+                gate_key,
+                req.previous_session_id.as_deref(),
+                deadline,
+            )
             .await?;
         if tokio::time::Instant::now() >= deadline {
             return Err(capacity_error(
-                "the replacement start expired before it could reap its predecessor",
+                "the replacement start expired before it could finish provisional work",
             ));
         }
-        let info = self
-            .create_session_inner(req, user_name, &supersession_user, Some(deadline), None)
+        self.require_cluster_serving_authority(serving_admission)?;
+        let creation = self
+            .create_session_inner(
+                req,
+                user_name,
+                &supersession_user,
+                Some(deadline),
+                None,
+                Some(serving_admission),
+            )
             .await?;
-        Ok(ClusterSessionStart { info, replacement })
+        Ok(ClusterSessionStart {
+            info: creation.info,
+            replacement,
+            created: creation.created,
+        })
     }
 
-    /// Start a provisional fenced-successor generation. The caller publishes
-    /// ownership only after this method has acquired capacity and produced a
-    /// live local worker; a losing CAS stops the provisional session.
-    pub(crate) async fn create_cluster_takeover_session(
+    fn require_cluster_serving_authority(
+        &self,
+        admission: ClusterServingAdmission,
+    ) -> Result<(), String> {
+        if tokio::time::Instant::now() >= admission.deadline {
+            return Err(capacity_error(
+                "the replacement start expired before it could finish provisional work",
+            ));
+        }
+        self.serving_authority
+            .is_current(admission.generation)
+            .then_some(())
+            .ok_or_else(|| {
+                serving_fence_error("the node lost authority during cluster session creation")
+            })
+    }
+
+    /// Acquire the player replacement serialization separately from worker
+    /// creation. The takeover supervisor retains this guard while a child
+    /// task performs cancellation-sensitive creation, so even a panic cannot
+    /// reopen the player key before exact cleanup has been transferred.
+    pub(crate) async fn acquire_cluster_takeover_replacement(
+        &self,
+        req: &SessionRequest,
+        user_id: i64,
+        deadline: tokio::time::Instant,
+    ) -> Result<ClusterReplacementGuard, String> {
+        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+        let gate_key =
+            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
+        self.acquire_cluster_replacement_gate(
+            gate_key,
+            req.previous_session_id.as_deref(),
+            deadline,
+        )
+        .await
+    }
+
+    /// Create the takeover worker while the caller owns the already-acquired
+    /// replacement guard. `takeover.provisional_session_id` is fixed before
+    /// this call so a supervising task can reap an exact late registration.
+    pub(crate) async fn create_cluster_takeover_session_under_guard(
         &self,
         req: &SessionRequest,
         user_id: i64,
         user_name: &str,
         deadline: tokio::time::Instant,
         takeover: SessionTakeoverStart,
-    ) -> Result<ClusterSessionStart, String> {
+    ) -> Result<StartInfo, String> {
         let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        let gate_key =
-            serde_json::json!([supersession_user.as_str(), req.playback_id.as_str()]).to_string();
-        let replacement = self
-            .acquire_cluster_replacement_gate(gate_key, deadline)
-            .await?;
         // Same check the ordinary cluster start makes after its gate wait: a
         // start with no budget left cannot finish, and spawning ffmpeg only to
         // abandon it costs an admission slot for nothing.
@@ -8080,21 +12798,22 @@ impl TranscodeManager {
                 "the takeover start expired while waiting for this player's gate",
             ));
         }
-        let info = self
-            .create_session_inner(
-                req,
-                user_name,
-                &supersession_user,
-                Some(deadline),
-                Some(takeover),
-            )
-            .await?;
-        Ok(ClusterSessionStart { info, replacement })
+        self.create_session_inner(
+            req,
+            user_name,
+            &supersession_user,
+            Some(deadline),
+            Some(takeover),
+            None,
+        )
+        .await
+        .map(|creation| creation.info)
     }
 
     async fn acquire_cluster_replacement_gate(
         &self,
         key: String,
+        predecessor_session_id: Option<&str>,
         deadline: tokio::time::Instant,
     ) -> Result<ClusterReplacementGuard, String> {
         let gate = {
@@ -8130,6 +12849,12 @@ impl TranscodeManager {
             registry: Arc::clone(&self.cluster_replacement_gates),
             key,
             permit: Some(permit),
+            // Acquired after serialization and retained across provisional
+            // creation plus the durable activation verdict. The lease tick
+            // reads workers before this registry, so it observes either the
+            // predecessor process or this settlement protection while the
+            // successor remains make-before-break provisional.
+            _predecessor_settlement: predecessor_session_id.map(SessionSettlementGuard::begin),
         })
     }
 
@@ -8140,7 +12865,11 @@ impl TranscodeManager {
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         takeover: Option<SessionTakeoverStart>,
-    ) -> Result<StartInfo, String> {
+        serving_admission: Option<ClusterServingAdmission>,
+    ) -> Result<SessionCreation, String> {
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
         match (&req.previous_session_id, req.reopen_reason) {
             (None, None) | (Some(_), Some(_)) => {}
             _ => {
@@ -8156,7 +12885,15 @@ impl TranscodeManager {
         }
         let claim = match req.request_id.as_deref() {
             Some(key) => match self.claim_request(key, req, supersession_user).await? {
-                Claimed::Recovered(info) => return Ok(info),
+                Claimed::Recovered(info) => {
+                    if let Some(admission) = serving_admission {
+                        self.require_cluster_serving_authority(admission)?;
+                    }
+                    return Ok(SessionCreation {
+                        info,
+                        created: false,
+                    });
+                }
                 Claimed::Mine(claim, normalized) => Some((claim, normalized)),
             },
             None => None,
@@ -8169,65 +12906,73 @@ impl TranscodeManager {
             }
             None => (None, req),
         };
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
 
-        // The former engine remains buildable only inside its historical
-        // regression harness. No production target contains this branch or
-        // any of the live-start methods it calls.
-        #[cfg(test)]
+        // Immutable VOD remains first. During the index backfill, a typed
+        // prerequisite refusal may use the retained live engine rather than
+        // turning background preparation into a catalogue-wide outage.
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         let info = if req.presentation == Presentation::Live {
-            match req.kind {
-                SessionKind::Transcode { height } => {
-                    self.start_with_audio_offset(
-                        req.file_id,
-                        height,
-                        req.start_seconds,
-                        req.audio_index,
-                        req.subtitle_burn,
-                        req.audio_offset_ms,
-                        user_name,
-                        supersession_user,
-                        replacement_deadline,
-                        takeover,
-                        &req.playback_id,
-                        req.automatic,
-                        req.hdr10,
-                    )
-                    .await?
-                }
-                SessionKind::Copy {
-                    aac,
-                    preserve_dolby_vision,
-                } => {
-                    self.start_copy_with_audio_offset(
-                        req.file_id,
-                        req.start_seconds,
-                        req.audio_index,
-                        req.audio_offset_ms,
-                        CopySessionOptions {
-                            transcode_audio: aac,
-                            preserve_dolby_vision,
-                        },
-                        user_name,
-                        supersession_user,
-                        replacement_deadline,
-                        takeover,
-                        &req.playback_id,
-                        req.automatic,
-                    )
-                    .await?
-                }
-            }
-        } else {
-            self.try_vod_session(
+            self.start_live_recovery_session(
                 req,
                 user_name,
                 supersession_user,
                 replacement_deadline,
-                takeover.is_some(),
+                takeover,
             )
             .await?
+        } else {
+            let vod = self
+                .try_vod_session(
+                    req,
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover.is_some(),
+                    serving_admission,
+                )
+                .await;
+            match vod {
+                Ok(info) => info,
+                Err(error) => {
+                    let recovery_code = vod_refusal(&error)
+                        .map(|(code, _)| code.to_owned())
+                        .filter(|code| {
+                            matches!(
+                                code.as_str(),
+                                "vod_index_pending"
+                                    | "vod_transcode_unavailable"
+                                    | "vod_subtitle_burn_unavailable"
+                                    | "vod_source_unsupported"
+                            )
+                        });
+                    if let Some(code) = recovery_code {
+                        if self.live_hls_recovery_enabled().await? {
+                            tracing::warn!(
+                                file_id = req.file_id,
+                                refusal = code,
+                                "VOD prerequisite unavailable; using temporary live-HLS recovery"
+                            );
+                            self.start_live_recovery_session(
+                                req,
+                                user_name,
+                                supersession_user,
+                                replacement_deadline,
+                                takeover,
+                            )
+                            .await?
+                        } else {
+                            return Err(error);
+                        }
+                    } else {
+                        return Err(error);
+                    }
+                }
+            }
         };
-        #[cfg(not(test))]
+        #[cfg(not(any(test, feature = "live-hls-recovery")))]
         let info = self
             .try_vod_session(
                 req,
@@ -8235,6 +12980,7 @@ impl TranscodeManager {
                 supersession_user,
                 replacement_deadline,
                 takeover.is_some(),
+                serving_admission,
             )
             .await?;
         if let Some(claim) = claim {
@@ -8246,7 +12992,82 @@ impl TranscodeManager {
             live.extend(self.vod.session_ids().await);
             claim.complete(&info.session_id, &live);
         }
-        Ok(info)
+        Ok(SessionCreation {
+            info,
+            created: true,
+        })
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn live_hls_recovery_enabled(&self) -> Result<bool, String> {
+        let configured = self
+            .store
+            .get_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY)
+            .await
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading live-HLS recovery setting: {error}"))
+            })?;
+        // Regression tests opt in explicitly so existing VOD refusal tests
+        // continue to exercise the refusal contract. The shipped recovery
+        // build is availability-first unless an operator explicitly disables
+        // the fallback.
+        #[cfg(test)]
+        return Ok(configured.as_deref() == Some("1"));
+        #[cfg(not(test))]
+        Ok(configured.as_deref() != Some("0"))
+    }
+
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn start_live_recovery_session(
+        &self,
+        req: &SessionRequest,
+        user_name: &str,
+        supersession_user: &str,
+        replacement_deadline: Option<tokio::time::Instant>,
+        takeover: Option<SessionTakeoverStart>,
+    ) -> Result<StartInfo, String> {
+        match req.kind {
+            SessionKind::Transcode { height } => {
+                self.start_with_audio_offset(
+                    req.file_id,
+                    height,
+                    req.start_seconds,
+                    req.audio_index,
+                    req.subtitle_burn,
+                    req.audio_offset_ms,
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover,
+                    &req.playback_id,
+                    req.automatic,
+                    req.hdr10,
+                )
+                .await
+            }
+            SessionKind::Copy {
+                aac,
+                preserve_dolby_vision,
+            } => {
+                self.start_copy_with_audio_offset(
+                    req.file_id,
+                    req.start_seconds,
+                    req.audio_index,
+                    req.audio_offset_ms,
+                    CopySessionOptions {
+                        transcode_audio: aac,
+                        preserve_dolby_vision,
+                    },
+                    user_name,
+                    supersession_user,
+                    replacement_deadline,
+                    takeover,
+                    &req.playback_id,
+                    req.automatic,
+                )
+                .await
+            }
+        }
     }
 
     /// The only public HLS presentation. A request either receives immutable
@@ -8258,7 +13079,11 @@ impl TranscodeManager {
         supersession_user: &str,
         replacement_deadline: Option<tokio::time::Instant>,
         is_takeover: bool,
+        serving_admission: Option<ClusterServingAdmission>,
     ) -> Result<StartInfo, String> {
+        if let Some(admission) = serving_admission {
+            self.require_cluster_serving_authority(admission)?;
+        }
         if req.presentation != Presentation::Vod {
             return Err(vod_refusal_error(
                 "live_presentation_removed",
@@ -8281,13 +13106,19 @@ impl TranscodeManager {
             .store
             .get_file(req.file_id)
             .await
-            .map_err(|error| format!("reading the source file: {error}"))?
+            .map_err(|error| {
+                start_infrastructure_error(format!("reading the source file: {error}"))
+            })?
             .ok_or_else(|| "the file no longer exists".to_owned())?;
-        // One player replacing its own stream sweeps both registries: the
-        // live sessions it may be leaving, and any VOD session it holds
-        // (`reap_superseded_until` sweeps both).
-        self.reap_superseded_before(replacement_deadline, supersession_user, &req.playback_id)
-            .await?;
+        // Cluster activation is make-before-break: the Store pointer CAS and
+        // exact post-CAS terminal projection are the only operations allowed
+        // to retire the authoritative predecessor. If provisional capacity is
+        // unavailable, fail this replacement and leave the current player
+        // intact. Legacy process-local callers retain their historical sweep.
+        if replacement_deadline.is_none() {
+            self.reap_superseded_before(None, supersession_user, &req.playback_id)
+                .await?;
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         let item_title = self
             .store
@@ -8297,20 +13128,42 @@ impl TranscodeManager {
             .flatten()
             .map(|item| item.title)
             .unwrap_or_else(|| format!("#{}", file.item_id));
-        let start = self
-            .vod
-            .try_create(
-                req,
-                &file,
-                &settings,
-                crate::vodserve::VodAttribution {
-                    user_name,
-                    item_title: &item_title,
-                    supersession_user,
-                },
-                session_id,
-            )
-            .await?;
+        let attribution = crate::vodserve::VodAttribution {
+            user_name,
+            item_title: &item_title,
+            supersession_user,
+        };
+        let start = if let Some(admission) = serving_admission {
+            self.vod
+                .try_create_cluster(
+                    req,
+                    &file,
+                    &settings,
+                    attribution,
+                    session_id,
+                    crate::vodserve::VodServingAdmission::new(
+                        self.serving_authority.clone(),
+                        admission.generation,
+                        admission.deadline.into_std(),
+                    ),
+                )
+                .await
+                .map_err(|error| {
+                    if vod_refusal(&error).is_some()
+                        || is_serving_fence_error(&error)
+                        || is_retryable_capacity_error(&error)
+                        || unsupported_build_reason(&error).is_some()
+                    {
+                        error
+                    } else {
+                        start_infrastructure_error(error)
+                    }
+                })?
+        } else {
+            self.vod
+                .try_create(req, &file, &settings, attribution, session_id)
+                .await?
+        };
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{}/index.m3u8", start.session_id),
             session_id: start.session_id,
@@ -8326,6 +13179,7 @@ impl TranscodeManager {
             // gave without retaining its live presentation.
             grade: OutputGrade::Sdr,
             vod: true,
+            control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8342,7 +13196,7 @@ impl TranscodeManager {
                 store
                     .get_setting(key)
                     .await
-                    .map_err(|error| format!("reading {key}: {error}"))
+                    .map_err(|error| start_infrastructure_error(format!("reading {key}: {error}")))
             }
         };
         if read(plurx_core::store::keys::VOD_PRESENTATION)
@@ -8420,26 +13274,64 @@ impl TranscodeManager {
 
     /// The VOD dispatch half of [`Self::playlist`]: `None` when the id is not
     /// a VOD session's.
-    pub async fn vod_playlist(
+    pub(crate) async fn vod_playlist(
         &self,
         session_id: &str,
-    ) -> Option<Result<Vec<u8>, crate::vodserve::VodError>> {
-        self.vod.playlist(session_id).await
+    ) -> Option<VodResponsePublication<Vec<u8>>> {
+        self.vod
+            .playlist(session_id)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
     }
 
     /// The VOD dispatch half of [`Self::segment`]: `None` when the id is not
     /// a VOD session's.
-    pub async fn vod_segment(
+    pub(crate) async fn vod_segment(
         &self,
         session_id: &str,
         name: &str,
-    ) -> Option<Result<Option<crate::vodserve::SegmentReady>, crate::vodserve::VodError>> {
-        self.vod.segment(session_id, name).await
+    ) -> Option<VodResponsePublication<Option<crate::vodserve::SegmentReady>>> {
+        self.vod
+            .segment(session_id, name)
+            .await
+            .map(|publication| VodResponsePublication {
+                result: publication.result,
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            })
     }
 
-    /// The file a live VOD session serves, for response-time source facts.
-    pub async fn vod_session_file_id(&self, session_id: &str) -> Option<i64> {
-        self.vod.session_file_id(session_id).await
+    /// True for an attached VOD capability or one still in the slow
+    /// resurrection preparation window. Lease loss uses this classification
+    /// to close the stable release generation before a late attachment.
+    pub(crate) async fn vod_owns_or_preparing(&self, session_id: &str) -> bool {
+        self.vod.owns_or_preparing(session_id).await
+    }
+
+    pub(crate) fn begin_vod_preparation(
+        &self,
+        session_id: &str,
+    ) -> crate::vodserve::VodPreparationGuard {
+        self.vod.begin_preparing_session(session_id)
+    }
+
+    pub(crate) async fn vod_live_or_preparing_session_ids(&self) -> Vec<String> {
+        self.vod.live_or_preparing_session_ids().await
+    }
+
+    /// Frozen source facts carried by the exact VOD response owner. Transforms
+    /// must not resolve these through the reusable live session id: a
+    /// resurrection can replace that attachment while preparation is in flight.
+    pub(crate) fn vod_file_for_owner(
+        &self,
+        owner: &MediaResponseOwner,
+    ) -> Option<plurx_core::domain::MediaFile> {
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            return None;
+        };
+        Some(self.vod.response_owner_file(owner))
     }
 
     /// Live (un-tombstoned) VOD session ids, for operator surfaces.
@@ -8454,63 +13346,93 @@ impl TranscodeManager {
     /// lease has not expired. `false` when the recipe is not a VOD one or the
     /// rendition cannot be re-attached — the caller then answers as it always
     /// has.
-    pub async fn vod_resurrect(&self, recipe_json: &str, session_id: &str, user_id: i64) -> bool {
-        let Ok(remote) =
-            serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
-        else {
-            return false;
-        };
-        let req = remote.request;
-        if req.presentation != Presentation::Vod {
+    /// Resurrect within the caller's absolute request deadline. Preparation
+    /// may be cancelled before attachment, while VodServe's final reader-graph
+    /// and registry swap is synchronous after it owns every affected lock, so
+    /// timeout cannot expose a half-attached incarnation.
+    pub(crate) async fn vod_resurrect_before(
+        &self,
+        recipe_json: &str,
+        session_id: &str,
+        user_id: i64,
+        adoption: SessionAdoptionToken,
+        deadline: Instant,
+    ) -> bool {
+        if Instant::now() >= deadline {
             return false;
         }
-        let Ok(Some(settings)) = self.vod_settings(&req).await else {
+        // Publish VOD intent before the first settings/file/user Store await.
+        // Lease loss must close this exact adoption generation even while
+        // resurrection is still gathering inputs and no session is attached.
+        let _vod_preparing = self.vod.begin_preparing_session(session_id);
+        let release_gate = &adoption.gate;
+        if release_gate.released.load(Acquire) {
             return false;
-        };
-        let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
-            return false;
-        };
-        let user_name = self
-            .store
-            .get_user(user_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|user| user.username)
-            .unwrap_or_else(|| format!("user #{user_id}"));
-        let item_title = self
-            .store
-            .get_item(file.item_id)
-            .await
-            .ok()
-            .flatten()
-            .map(|item| item.title)
-            .unwrap_or_else(|| format!("#{}", file.item_id));
-        let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
-        match self
-            .vod
-            .try_create(
-                &req,
-                &file,
-                &settings,
-                crate::vodserve::VodAttribution {
-                    user_name: &user_name,
-                    item_title: &item_title,
-                    supersession_user: &supersession_user,
-                },
-                session_id.to_owned(),
-            )
-            .await
-        {
-            Ok(_) => {
-                tracing::info!(
-                    session = %session_log_id(session_id),
-                    "resurrected a vod session from its durable route"
-                );
-                true
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+            let Ok(remote) =
+                serde_json::from_str::<crate::media_sessions::RemoteStartRequest>(recipe_json)
+            else {
+                return false;
+            };
+            let req = remote.request;
+            if req.presentation != Presentation::Vod {
+                return false;
             }
-            _ => false,
-        }
+            let Ok(Some(settings)) = self.vod_settings(&req).await else {
+                return false;
+            };
+            let Ok(Some(file)) = self.store.get_file(req.file_id).await else {
+                return false;
+            };
+            let user_name = self
+                .store
+                .get_user(user_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|user| user.username)
+                .unwrap_or_else(|| format!("user #{user_id}"));
+            let item_title = self
+                .store
+                .get_item(file.item_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|item| item.title)
+                .unwrap_or_else(|| format!("#{}", file.item_id));
+            let supersession_user = serde_json::json!(["user_id", user_id]).to_string();
+            match self
+                .vod
+                .try_create_before_release(
+                    &req,
+                    &file,
+                    &settings,
+                    crate::vodserve::VodAttribution {
+                        user_name: &user_name,
+                        item_title: &item_title,
+                        supersession_user: &supersession_user,
+                    },
+                    session_id.to_owned(),
+                    crate::vodserve::VodReleaseFence::new(
+                        Arc::clone(&release_gate.transition),
+                        &release_gate.released,
+                    ),
+                )
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        session = %session_log_id(session_id),
+                        "resurrected a vod session from its durable route"
+                    );
+                    true
+                }
+                _ => false,
+            }
+        })
+        .await
+        .unwrap_or(false)
     }
 
     /// The VOD serving maintenance loop, spawned beside [`Self::reap_loop`].
@@ -8737,6 +13659,7 @@ impl TranscodeManager {
                 encoder: "vod",
                 grade: OutputGrade::Sdr,
                 vod: true,
+                control_lease_timeout_ms: crate::playback_control::VOD_LEASE_TIMEOUT_MS,
             });
         }
         let session = self.sessions.lock().await.get(session_id).cloned()?;
@@ -8762,6 +13685,7 @@ impl TranscodeManager {
             encoder,
             grade: session.grade,
             vod: session.cached,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -8822,7 +13746,7 @@ impl TranscodeManager {
     /// How an HLS session's input should be paced, given the admin settings
     /// and what this ffmpeg build supports. `for_copy` picks the pre-5.1
     /// degradation (see [`crate::ffmpeg::PacingCaps::resolve`]).
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn pacing(&self, for_copy: bool) -> Pacing {
         let rate = self
             .num_setting(keys::HLS_READRATE, HLS_READRATE_DEFAULT)
@@ -9396,7 +14320,7 @@ impl TranscodeManager {
         supersession_user: &str,
         playback_id: &str,
     ) -> Result<(), String> {
-        let doomed: Vec<(String, Arc<Session>)> = {
+        let mut doomed: Vec<(String, Arc<Session>)> = {
             let sessions = match deadline {
                 Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
                     .await
@@ -9406,12 +14330,6 @@ impl TranscodeManager {
             if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
                 return Err(replacement_deadline_error());
             }
-            // A player replacing its stream supersedes whichever presentation
-            // it was on — a legacy create ends this viewer's VOD session too.
-            // AFTER the deadline check: a start with no budget left must not
-            // tombstone a still-playing predecessor and then fail to replace
-            // it (the sweep itself is in-memory and costs nothing).
-            self.vod.supersede(supersession_user, playback_id, "").await;
             sessions
                 .iter()
                 .filter(|(_, s)| {
@@ -9420,26 +14338,38 @@ impl TranscodeManager {
                 .map(|(id, session)| (id.clone(), Arc::clone(session)))
                 .collect()
         };
-        for (session_id, session) in doomed {
-            // Retirement releases both admission pools before the caller goes
-            // on to ask for a slot of its own. A player replacing its own
-            // session must not queue behind the session it just replaced.
-            if !self
-                .retire_session_until(&session_id, &session, deadline)
-                .await?
-            {
-                continue;
-            }
-            self.emit_session_event(
-                &session_id,
-                &session,
-                "session_end",
-                SessionEventFields {
-                    reason: Some("superseded"),
-                    ..SessionEventFields::default()
-                },
+        // Stable ordering is not a correctness dependency, but makes the
+        // first irreversible rolling victim deterministic for diagnostics and
+        // for cancellation regressions that pause exactly that boundary.
+        doomed.sort_by(|left, right| left.0.cmp(&right.0));
+        // Transfer the complete cross-presentation victim set before entering
+        // VOD or actor lifecycle waits. Cancellation of this create request
+        // cannot strand a VOD-only or first-rolling-only partial sweep.
+        let (settled, result) = tokio::sync::oneshot::channel();
+        let vod = Arc::clone(&self.vod);
+        let sessions = Arc::clone(&self.sessions);
+        let active_session_count = Arc::clone(&self.active_session_count);
+        let store = Arc::clone(&self.store);
+        let supersession_user = supersession_user.to_owned();
+        let owned_playback_id = playback_id.to_owned();
+        tokio::spawn(async move {
+            let outcome = own_supersession_convergence(
+                vod,
+                sessions,
+                active_session_count,
+                store,
+                doomed,
+                deadline,
+                supersession_user,
+                owned_playback_id,
             )
             .await;
+            let _ = settled.send(outcome);
+        });
+        let removed = result.await.unwrap_or_else(|_| {
+            Err("supersession convergence owner exited before settlement".to_owned())
+        })?;
+        for (session_id, _session) in removed {
             tracing::info!(
                 session = %session_log_id(&session_id),
                 playback = %session_log_id(playback_id),
@@ -9449,10 +14379,9 @@ impl TranscodeManager {
         Ok(())
     }
 
-    /// Preserve the cluster ingress deadline across request recovery and
-    /// normalization. Those awaits are necessary before supersession, but a
-    /// start that consumed its budget there must not kill a still-playable
-    /// predecessor and then fail before replacing it.
+    /// Bound the retained legacy/process-local supersession sweep. Cluster
+    /// replacements skip this break-before-make path and keep their
+    /// predecessor serving until the later durable activation CAS succeeds.
     async fn reap_superseded_before(
         &self,
         deadline: Option<tokio::time::Instant>,
@@ -9504,7 +14433,7 @@ impl TranscodeManager {
     /// capacity back. The permit then carries live ownership for the session's
     /// whole lifetime, keeping every background pool parked after this method
     /// drops the short-lived waiter.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn admit_live(
         &self,
         preferred: Encoder,
@@ -9608,7 +14537,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn start_with_audio_offset(
         &self,
         file_id: i64,
@@ -9626,17 +14555,12 @@ impl TranscodeManager {
         hdr10: bool,
     ) -> Result<StartInfo, String> {
         let rate_control = self.rate_control_snapshot();
-        // Before spawning, not after: the point is to never have two encoders
-        // for one player running at once, and reaping first also frees the
-        // hardware slot the new session is about to want.
-        //
-        // A takeover is a continuation of an existing incarnation, not a new
-        // player start, so it supersedes nothing. Reaping here would retire
-        // whatever this viewer and player id are already running on THIS
-        // node — including a session the client legitimately started here
-        // while the old owner's lease was still expiring.
-        if takeover.is_none() {
-            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+        // Cluster replacements are provisional until their durable pointer CAS
+        // wins. Killing the old process here would turn an admission/Store
+        // failure into an avoidable playback outage. Takeovers likewise
+        // continue an existing incarnation and supersede nothing.
+        if replacement_deadline.is_none() && takeover.is_none() {
+            self.reap_superseded_before(None, supersession_user, playback_id)
                 .await?;
         }
 
@@ -9758,7 +14682,10 @@ impl TranscodeManager {
         let hw_slot = admission.hw_slot;
         let sw_permit = admission.sw_permit;
 
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = takeover
+            .as_ref()
+            .map(|takeover| takeover.provisional_session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         // The public UUID is a bearer capability. Keep it out of ffmpeg's
         // argv and stderr entirely by giving the scratch directory an
         // independent, process-private name.
@@ -9766,6 +14693,7 @@ impl TranscodeManager {
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
+        let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
 
         // Admission may have moved this session to software, which changes the
         // pipeline it is entitled to — so the options are rebuilt rather than
@@ -9813,51 +14741,138 @@ impl TranscodeManager {
             build = crate::version::BUILD,
             "{}", ffmpeg_args_log_message("transcode ffmpeg args", &args, &session_id)
         );
-        let progress = Arc::new(Progress::new());
-        let generation = progress.begin_attempt();
-        let child = spawn_ffmpeg(
-            &args,
-            encoder.label(),
-            &session_id,
-            Arc::clone(&progress),
-            generation,
-            &self.runtime_cache,
-            FfmpegDescriptors {
-                subtitle: subtitle_handle
-                    .as_ref()
-                    .map(std::os::fd::AsRawFd::as_raw_fd),
-                ..FfmpegDescriptors::default()
+        let session_kind = SessionKind::Transcode {
+            height: target_height,
+        };
+        let hls_codecs = transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height);
+        let probe_json = match self.store.get_file_probe_json(file_id).await {
+            Ok(probe_json) => probe_json,
+            Err(error) => {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                start_settlement.disarm();
+                return Err(format!("reading frozen presentation probe: {error}"));
+            }
+        };
+        let frozen_presentation = FrozenHlsPresentation::new(
+            file.clone(),
+            HlsContext {
+                file_id,
+                start_seconds,
+                media_origin_seconds: start_seconds,
+                codecs: hls_codecs.clone(),
+                supplemental_codecs: None,
+                frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
             },
-        )?;
-
-        tracing::info!(
-            session = %session_log_id(&session_id), file_id, target_height, start_seconds,
-            encoder = encoder.label(), "started transcode session"
+            &session_kind,
         );
+        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        let retry = if encoder == Encoder::Software {
+            None
+        } else {
+            match PrepublicationTranscodeRetry::build(
+                &file,
+                &opts,
+                encoder,
+                rate_control.effective_for(Encoder::Software),
+                pacing,
+                &dir,
+                &presentation_contract_fingerprint,
+                self.admissions.software_pool(),
+                self.runtime_cache.clone(),
+            ) {
+                Ok(retry) => Some(retry),
+                Err(error) => {
+                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                    start_settlement.disarm();
+                    return Err(error);
+                }
+            }
+        };
+        let expected_remaining_ms =
+            file.duration_ms
+                .filter(|duration_ms| *duration_ms > 0)
+                .map(|duration_ms| {
+                    duration_ms
+                        .saturating_sub((start_seconds * 1_000.0).round() as i64)
+                        .max(0)
+                });
+        let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
+        let policy = if let Some(retry) = retry.as_ref() {
+            crate::playback_control::InitialProducerPolicy::hardware(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+                retry.actor_recipe.clone(),
+            )
+        } else {
+            crate::playback_control::InitialProducerPolicy::software(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+            )
+        }
+        .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
+        let progress = Arc::new(Progress::new());
+        let (control, mut executor_registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                "session-start",
+            );
 
         let session = Arc::new(Session {
             dir: dir.clone(),
-            child: Mutex::new(Some(child)),
+            response_incarnation: uuid::Uuid::new_v4(),
+            frozen_presentation: Some(frozen_presentation),
+            actor_managed_response_publication: true,
+            actor_managed_prepublication_process: true,
+            actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
+            response_publication_transition: Mutex::new(()),
+            first_media_handoff_applied: AtomicBool::new(false),
+            first_media_handoff_notify: tokio::sync::Notify::new(),
+            prepublication_cleanup_active: AtomicBool::new(false),
+            retirement_cleanup_started: AtomicBool::new(false),
+            retirement_cleanup_finished: AtomicBool::new(false),
+            retirement_settlement: std::sync::Mutex::new(None),
+            scratch_cleanup_started: AtomicBool::new(false),
+            retirement_context: Some(self.rolling_retirement_context()),
+            cache_integrity_cleanup_started: AtomicBool::new(false),
+            child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            producer_install_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            refresh_after_read_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            path_owner_sample_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            response_projection_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            first_media_owner_claim_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            scratch_cleanup_pause: std::sync::Mutex::new(None),
             cached: false,
             _cache_reader: None,
             subtitle_handle,
             cache_manifest: None,
             cache_location: None,
-            last_request: Mutex::new(LastRequest::now("session-start")),
+            control,
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -9865,31 +14880,31 @@ impl TranscodeManager {
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
-            kind: SessionKind::Transcode {
-                height: target_height,
-            },
+            kind: session_kind,
             method: crate::delivery::Method::Transcode,
             start_seconds,
             // A transcode seeks accurately, so its media begins exactly where
             // it was asked to: no probe, no discrepancy to resolve.
             media_origin_seconds: start_seconds,
             grade: opts.pipeline.output_grade(),
-            hls_codecs: transcoded_hls_codecs(opts.pipeline.output_grade(), opts.target_height),
-            hls_supplemental_codecs: None,
             target_height,
             encoder_label: Mutex::new(encoder.label()),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
-            failed: AtomicBool::new(false),
+            failed: Arc::new(AtomicBool::new(false)),
             failure: std::sync::Mutex::new(None),
             playlist_published: AtomicBool::new(false),
-            high_segment: AtomicI64::new(-1),
-            fetched_end_ms: AtomicI64::new(0),
+            high_segment: Arc::new(AtomicI64::new(-1)),
+            compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
+            fetched_end_ms: Arc::new(AtomicI64::new(0)),
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
-            live_bytes: AtomicI64::new(0),
+            live_bytes: Arc::new(AtomicI64::new(0)),
+            retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
+            retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            retention_cleanup_active: Arc::new(AtomicBool::new(false)),
             progress: Arc::clone(&progress),
             class: std::sync::Mutex::new(work.class(if encoder == Encoder::Software {
                 crate::admission::SOFTWARE
@@ -9909,12 +14924,95 @@ impl TranscodeManager {
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
-        if !self
-            .register_session(&session_id, Arc::clone(&session))
+        start_settlement.attach(&session);
+        if let Err(reason) = executor_registration.register().await {
+            fail_prepublication_transaction(
+                &session,
+                format!("rolling control actor rejected executor registration: {reason:?}"),
+            )
+            .await;
+            start_settlement.disarm();
+            return Err(format!(
+                "rolling control actor rejected executor registration: {reason:?}"
+            ));
+        }
+        let executor_retry = retry
+            .clone()
+            .map(|retry| PrepublicationRetry::Transcode(Box::new(retry)));
+        let (executor_activation, manager_publication) = tokio::sync::oneshot::channel();
+        spawn_prepublication_executor_owner(
+            &session,
+            executor_registration,
+            manager_publication,
+            executor_retry,
+            session_id.clone(),
+        );
+        let generation = match session.control.begin_initial_producer_attempt(policy).await {
+            Ok(generation) => generation,
+            Err(reason) => {
+                fail_prepublication_transaction(
+                    &session,
+                    format!(
+                        "rolling control actor rejected the initial producer policy: {reason:?}"
+                    ),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(format!(
+                    "rolling control actor rejected the initial producer policy: {reason:?}"
+                ));
+            }
+        };
+        session.bind_retry_compatibility_attempt(generation).await;
+        if let Err(reason) = session
+            .spawn_and_install_prepublication_child(generation, || {
+                spawn_ffmpeg(
+                    &args,
+                    encoder.label(),
+                    &session_id,
+                    FfmpegProgressObserver::rolling(
+                        Arc::clone(&progress),
+                        generation,
+                        session.control.clone(),
+                    ),
+                    &self.runtime_cache,
+                    FfmpegDescriptors {
+                        subtitle: session
+                            .subtitle_handle
+                            .as_ref()
+                            .map(std::os::fd::AsRawFd::as_raw_fd),
+                        ..FfmpegDescriptors::default()
+                    },
+                )
+            })
             .await
         {
-            return Err("this node lost quorum serving authority".to_owned());
+            fail_prepublication_transaction(
+                &session,
+                format!("initial transcode producer could not be installed: {reason}"),
+            )
+            .await;
+            start_settlement.disarm();
+            return Err(reason);
         }
+        tracing::info!(
+            session = %session_log_id(&session_id), file_id, target_height, start_seconds,
+            encoder = encoder.label(), "started actor-owned prepublication transcode session"
+        );
+        if let Err(reason) = self
+            .register_session(&session_id, Arc::clone(&session), generation)
+            .await
+        {
+            start_settlement.disarm();
+            return Err(format!("rolling session registration rejected: {reason:?}"));
+        }
+        if executor_activation.send(()).is_err() {
+            let reason = "prepublication executor ended before manager publication".to_owned();
+            fail_prepublication_transaction(&session, reason.clone()).await;
+            start_settlement.disarm();
+            return Err(reason);
+        }
+        start_settlement.settle();
         self.emit_session_event(
             &session_id,
             &session,
@@ -9925,119 +15023,6 @@ impl TranscodeManager {
             },
         )
         .await;
-
-        // A hardware path can init cleanly yet produce nothing — GPU contention
-        // under a second session, or a decode the GPU can't do (a 4K Dolby
-        // Vision HEVC stream is the classic case). Watch the *playlist* for a
-        // finished segment; if none lands in the grace window, restart on
-        // software. If software also can't produce a first segment in its
-        // (longer) window, mark the session failed so the client gets an error
-        // instead of a gray screen forever. Software-started sessions still get
-        // the fail-fast guard, just not the hardware→software step.
-        {
-            let session = Arc::clone(&session);
-            let file = file.clone();
-            let opts = opts.clone();
-            let dir = dir.clone();
-            let sid = session_id.clone();
-            let started_on_hardware = encoder != Encoder::Software;
-            let sw_pool = self.admissions.software_pool();
-            let runtime_cache = self.runtime_cache.clone();
-            let software_rate_control = rate_control.effective_for(Encoder::Software);
-            tokio::spawn(async move {
-                if started_on_hardware {
-                    tokio::time::sleep(FIRST_SEGMENT_GRACE).await;
-                    // A watch, not a glance. The single verdict this used to
-                    // take had three ways to walk away early — producing,
-                    // suspended, still advancing — and every one of them ended
-                    // monitoring for the life of the session, so a pipeline
-                    // that wedged a minute in was nobody's problem (§2.3).
-                    // Now the only exits are into the lifetime watchdog below,
-                    // or through the one-step downgrade — which still fires at
-                    // most once per session, on the same evidence as before:
-                    // no playable segment AND output stopped advancing.
-                    let mut announced_slow = false;
-                    loop {
-                        if session.failed.load(Relaxed) {
-                            return;
-                        }
-                        if session_producing(&dir).await {
-                            // Producing real segments. If the picture is still
-                            // gray, the problem is the *output* (tone-map/
-                            // color), not the pipeline stalling — this line
-                            // says which. The speed says how much headroom it
-                            // has while doing it.
-                            tracing::info!(
-                                session = %session_log_id(&sid),
-                                speed = session.progress.speed(),
-                                "transcode producing segments (hardware path healthy)"
-                            );
-                            break;
-                        }
-                        let exited = {
-                            let mut child = session.child.lock().await;
-                            child
-                                .as_mut()
-                                .is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))))
-                        };
-                        if exited {
-                            // Died before producing: the playlist and segment
-                            // readers report that; there is nothing left here
-                            // to downgrade.
-                            return;
-                        }
-                        // Producing nothing, but *is* it stuck? A session
-                        // stopped for running ahead obviously makes no
-                        // progress, and one decoding 4K at 0.4x is slow rather
-                        // than broken — restarting either on software trades a
-                        // slow start for a slower one. Only a session whose
-                        // output has actually stopped moving gets the
-                        // fallback; the rest keep being watched rather than
-                        // walked away from.
-                        let suspended = session.suspended.load(Relaxed);
-                        if suspended || session.progress.stalled_for() < PROGRESS_STALL {
-                            if !suspended && !announced_slow {
-                                announced_slow = true;
-                                tracing::info!(
-                                    session = %session_log_id(&sid),
-                                    produced_ms = session.progress.out_time_ms(),
-                                    speed = session.progress.speed(),
-                                    "no finished segment yet, but the encoder is still \
-                                     advancing — watching it rather than restarting it on \
-                                     something slower"
-                                );
-                            }
-                            tokio::time::sleep(WATCHDOG_POLL).await;
-                            continue;
-                        }
-                        break;
-                    }
-                    // Fell out of the loop two ways: producing (nothing to
-                    // fix — skip straight to the lifetime watchdog), or
-                    // stalled without a segment (downgrade one step).
-                    if !session_producing(&dir).await {
-                        Self::downgrade_one_step(
-                            &session,
-                            &file,
-                            &opts,
-                            encoder,
-                            software_rate_control,
-                            pacing,
-                            &sw_pool,
-                            &dir,
-                            &sid,
-                            &runtime_cache,
-                        )
-                        .await;
-                        if session.failed.load(Relaxed) {
-                            return;
-                        }
-                    }
-                }
-
-                watch_for_stall(session, dir, sid).await;
-            });
-        }
 
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -10052,6 +15037,7 @@ impl TranscodeManager {
             encoder: encoder.label(),
             grade: opts.pipeline.output_grade(),
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
@@ -10069,8 +15055,8 @@ impl TranscodeManager {
     ///
     /// One step per session, deliberately: this fires once, and a viewer who
     /// has waited out the grace window twice has waited too long. If the
-    /// downgraded session also stalls, the lifetime watchdog takes it. On a
-    /// spawn failure the session is marked failed; the caller checks.
+    /// downgraded session also stalls, the actor's software deadline takes it.
+    /// On a spawn failure the session is marked failed; the caller checks.
     #[allow(clippy::too_many_arguments)] // one fallback's worth of context
     #[cfg(test)]
     async fn downgrade_one_step(
@@ -10127,10 +15113,30 @@ impl TranscodeManager {
                 "retrying on software"
             }
         );
-        let Some(_replacement) = session.kill_child_for_replacement().await else {
-            return opts.effective_rate_control;
+        let (mut replacement, generation) = match session.kill_child_for_replacement().await {
+            Ok(replacement) => replacement,
+            Err(reason) => {
+                tracing::warn!(
+                    session = %session_log_id(sid),
+                    rejection = ?reason,
+                    "rolling actor rejected fallback before the predecessor was changed"
+                );
+                return opts.effective_rate_control;
+            }
         };
-        clear_session_dir(dir).await;
+        if let Err(error) = clear_session_dir(dir).await {
+            tracing::error!(
+                session = %session_log_id(sid),
+                %error,
+                "fallback refused because predecessor scratch could not be cleared"
+            );
+            session.fail(PlaylistError::SessionFailed(format!(
+                "predecessor scratch could not be cleared: {error}"
+            )));
+            replacement.settle_terminal_rejection();
+            return opts.effective_rate_control;
+        }
+        session.confirm_predecessor_scratch_cleared();
         if !downgrade_pipeline {
             // The slot belonged to the encoder that just died, not
             // to the session: hand it back at the transition so
@@ -10157,13 +15163,15 @@ impl TranscodeManager {
         // make it look stalled from its first second, and the
         // generation bump is what stops the dead process's reader
         // from writing those numbers back after the reset.
-        let generation = session.progress.begin_attempt();
         match spawn_ffmpeg(
             &sw_args,
             retry_encoder.label(),
             sid,
-            Arc::clone(&session.progress),
-            generation,
+            FfmpegProgressObserver::rolling(
+                Arc::clone(&session.progress),
+                generation,
+                session.control.clone(),
+            ),
             runtime_cache,
             FfmpegDescriptors {
                 subtitle: session
@@ -10174,8 +15182,17 @@ impl TranscodeManager {
             },
         ) {
             Ok(child) => {
-                *session.child.lock().await = Some(child);
-                *session.last_request.lock().await = LastRequest::now("fallback-start");
+                if let Err(reason) = session.install_replacement_child(generation, child).await {
+                    replacement.settle_terminal_rejection();
+                    tracing::warn!(
+                        session = %session_log_id(sid),
+                        producer_attempt = generation,
+                        rejection = ?reason,
+                        "rolling actor refused fallback installation after spawn; candidate removed from session ownership"
+                    );
+                    return opts.effective_rate_control;
+                }
+                replacement.complete();
                 // The activity page must stop naming the hardware
                 // encoder the moment it is no longer the one running.
                 *session.encoder_label.lock().await = retry_encoder.label();
@@ -10191,6 +15208,7 @@ impl TranscodeManager {
                 session.fail(PlaylistError::SessionFailed(
                     "the fallback encoder could not be started".into(),
                 ));
+                replacement.complete();
             }
         }
         retry_opts.effective_rate_control
@@ -10231,7 +15249,7 @@ impl TranscodeManager {
     }
 
     #[allow(clippy::too_many_arguments)] // one stream's worth of knobs
-    #[cfg(test)]
+    #[cfg(any(test, feature = "live-hls-recovery"))]
     async fn start_copy_with_audio_offset(
         &self,
         file_id: i64,
@@ -10246,11 +15264,10 @@ impl TranscodeManager {
         playback_id: &str,
         automatic: bool,
     ) -> Result<StartInfo, String> {
-        // Same reasoning as `start`; the copy path matters more if anything,
-        // since an abandoned remux reads the source as fast as the disk allows.
-        // A takeover continues an existing incarnation and supersedes nothing.
-        if takeover.is_none() {
-            self.reap_superseded_before(replacement_deadline, supersession_user, playback_id)
+        // Same make-before-break rule as the transcode path. A takeover
+        // continues an existing incarnation and supersedes nothing.
+        if replacement_deadline.is_none() && takeover.is_none() {
+            self.reap_superseded_before(None, supersession_user, playback_id)
                 .await?;
         }
 
@@ -10284,11 +15301,15 @@ impl TranscodeManager {
             .map(|i| i.title)
             .unwrap_or_else(|| "(unknown)".to_owned());
 
-        let session_id = uuid::Uuid::new_v4().to_string();
+        let session_id = takeover
+            .as_ref()
+            .map(|takeover| takeover.provisional_session_id.clone())
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let dir = self.work_dir.join(format!("w-{}", uuid::Uuid::new_v4()));
         tokio::fs::create_dir_all(&dir)
             .await
             .map_err(|e| format!("creating session dir: {e}"))?;
+        let mut start_settlement = PrepublicationStartSettlement::new(dir.clone());
 
         // An ffmpeg capability, read from the daemon's own record of which
         // ffmpeg it runs. It used to be read off the CACHE config — which
@@ -10297,6 +15318,18 @@ impl TranscodeManager {
         // left the DV configuration in every remux, and had Chrome refuse the
         // stream Safari played fine.
         let have_dovi = self.dv_strippable();
+        let video_options = transcode::CopyVideoOptions::from_probe(
+            &file,
+            probe_json.as_deref(),
+            have_dovi,
+            options.preserve_dolby_vision,
+        );
+        if video_options.promotes_parameter_sets() && takeover.is_some() {
+            return Err(
+                "this HEVC source requires GOP-aware init promotion and cannot use the legacy takeover muxer"
+                    .to_owned(),
+            );
+        }
         let pacing = self.pacing(true).await;
         let typeless_sliding = self
             .stable_playlist_shape(replacement_deadline.is_some(), takeover.is_some())
@@ -10327,112 +15360,166 @@ impl TranscodeManager {
                 ),
             }
         };
-        let progress = Arc::new(Progress::new());
-        let generation = progress.begin_attempt();
-
         // Take over the cutting when the source is one whose keyframes can be
         // read (docs/SEGMENTER-PLAN.md). ffmpeg then writes one continuous
         // fragmented stream down a pipe and `copyseg` decides where the
         // segments end — in front of a keyframe no player will discard a
-        // leading picture at. If anything about that stream turns out to be
-        // unreadable, the reader task respawns this same session on the
-        // arguments below, so the worst case is exactly today's behaviour.
+        // leading picture at. A structural Unsupported result may ask the
+        // actor for the one frozen legacy retry; the reader never performs the
+        // replacement itself.
         let segmenting = takeover.is_none() && copyseg::supports(file.video_codec.as_deref());
-        let (child, pipe_stdout) = if segmenting {
-            let args = transcode::copy_pipe_args_with_dolby_vision(
+        let initial_args = if segmenting {
+            transcode::copy_pipe_args_with_dolby_vision(
                 &file,
                 start_seconds,
                 audio_index,
                 options.transcode_audio,
                 pacing,
-                have_dovi,
-                options.preserve_dolby_vision,
-            );
-            tracing::info!(
-                session = %session_log_id(&session_id), file_id, start_seconds, mode = "segmenter",
-                build = crate::version::BUILD,
-                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
-            );
-            match spawn_ffmpeg_pipe(
-                &args,
-                &session_id,
-                Arc::clone(&progress),
-                generation,
-                &self.runtime_cache,
-            ) {
-                Ok((child, stdout)) => (child, Some(stdout)),
-                Err(e) => {
-                    // Spawning failed before any of this was decided, so there
-                    // is nothing to unwind: start the legacy path here.
-                    tracing::warn!(
-                        session = %session_log_id(&session_id),
-                        "copy segmenter could not start ffmpeg ({e}); using the HLS muxer"
-                    );
-                    let args = legacy_args();
-                    let child = spawn_ffmpeg(
-                        &args,
-                        "copy",
-                        &session_id,
-                        Arc::clone(&progress),
-                        generation,
-                        &self.runtime_cache,
-                        FfmpegDescriptors::default(),
-                    )?;
-                    (child, None)
-                }
-            }
+                video_options,
+            )
         } else {
-            let args = legacy_args();
-            tracing::info!(
-                session = %session_log_id(&session_id), file_id, start_seconds, mode = "legacy",
-                build = crate::version::BUILD,
-                "{}", ffmpeg_args_log_message("copy-video HLS ffmpeg args", &args, &session_id)
-            );
-            let child = spawn_ffmpeg(
-                &args,
-                "copy",
-                &session_id,
-                Arc::clone(&progress),
-                generation,
-                &self.runtime_cache,
-                FfmpegDescriptors::default(),
-            )?;
-            (child, None)
+            legacy_args()
         };
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            file_id,
+            start_seconds,
+            mode = if segmenting { "segmenter" } else { "legacy" },
+            build = crate::version::BUILD,
+            "{}",
+            ffmpeg_args_log_message("copy-video HLS ffmpeg args", &initial_args, &session_id)
+        );
 
-        // Deliberately after the spawn: ffmpeg is already opening the source
-        // while this runs, so the probe costs the viewer nothing it was not
-        // already waiting for.
+        // Freeze the achieved media origin before actor admission. The actor,
+        // retry recipe, and response contract must describe one immutable
+        // presentation even if the start future is later cancelled.
         let media_origin_seconds = probe_media_origin(&file.path, start_seconds).await;
 
         let (hls_codecs, hls_supplemental_codecs) =
             copied_hls_codecs(&file, audio_index, options, probe_json.as_deref());
+        let copy_kind = SessionKind::Copy {
+            aac: options.transcode_audio,
+            preserve_dolby_vision: options.preserve_dolby_vision,
+        };
+        let frozen_presentation = FrozenHlsPresentation::new(
+            file.clone(),
+            HlsContext {
+                file_id,
+                start_seconds,
+                media_origin_seconds,
+                codecs: hls_codecs.clone(),
+                supplemental_codecs: hls_supplemental_codecs.clone(),
+                frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
+            },
+            &copy_kind,
+        );
+        let presentation_contract_fingerprint = frozen_presentation.contract_fingerprint.clone();
+        let retry = (segmenting && !video_options.promotes_parameter_sets()).then(|| {
+            PrepublicationCopyRetry::build(
+                legacy_args(),
+                &presentation_contract_fingerprint,
+                self.runtime_cache.clone(),
+            )
+        });
+        let expected_remaining_ms =
+            file.duration_ms
+                .filter(|duration_ms| *duration_ms > 0)
+                .map(|duration_ms| {
+                    duration_ms
+                        .saturating_sub((media_origin_seconds * 1_000.0).round() as i64)
+                        .max(0)
+                });
+        let completion_tolerance_ms = (transcode::SEGMENT_SECONDS as i64).saturating_mul(1_000);
+        let policy = if segmenting {
+            crate::playback_control::InitialProducerPolicy::copy(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+                retry.as_ref().map(|retry| retry.actor_recipe.clone()),
+            )
+        } else {
+            crate::playback_control::InitialProducerPolicy::copy_immediate(
+                presentation_contract_fingerprint,
+                PROGRESS_STALL,
+            )
+        }
+        .with_completion_expectation(expected_remaining_ms, completion_tolerance_ms);
+        let progress = Arc::new(Progress::new());
+        let (control, mut executor_registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_producer(
+                "copy-session-start",
+            );
+        let failed = Arc::new(AtomicBool::new(false));
+        if let Err(reason) = control
+            .bind_response_publication_contract(
+                frozen_presentation.contract_fingerprint.clone(),
+                Arc::clone(&failed),
+            )
+            .await
+        {
+            return Err(format!(
+                "rolling control actor rejected copy response-publication failure fencing: {reason:?}"
+            ));
+        }
         let session = Arc::new(Session {
             // A copy session encodes nothing; `session_delivered_dynamic_range`
             // reads its range off the source and `preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             dir: dir.clone(),
-            child: Mutex::new(Some(child)),
+            response_incarnation: uuid::Uuid::new_v4(),
+            frozen_presentation: Some(frozen_presentation),
+            actor_managed_response_publication: true,
+            actor_managed_prepublication_process: true,
+            actor_prepublication_producer: Arc::new(AtomicBool::new(true)),
+            response_publication_transition: Mutex::new(()),
+            first_media_handoff_applied: AtomicBool::new(false),
+            first_media_handoff_notify: tokio::sync::Notify::new(),
+            prepublication_cleanup_active: AtomicBool::new(false),
+            retirement_cleanup_started: AtomicBool::new(false),
+            retirement_cleanup_finished: AtomicBool::new(false),
+            retirement_settlement: std::sync::Mutex::new(None),
+            scratch_cleanup_started: AtomicBool::new(false),
+            retirement_context: Some(self.rolling_retirement_context()),
+            cache_integrity_cleanup_started: AtomicBool::new(false),
+            child: Mutex::new(None),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
             #[cfg(test)]
             replacement_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
             activity_detail_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            flow_completion_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            playlist_publication_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            producer_install_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            refresh_after_read_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            path_owner_sample_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            retention_delete_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            response_projection_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            first_media_owner_claim_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            scratch_cleanup_pause: std::sync::Mutex::new(None),
             cached: false,
             _cache_reader: None,
             subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
-            last_request: Mutex::new(LastRequest::now("session-start")),
+            control,
+            flow_worker_started: AtomicBool::new(false),
             file_id,
             item_id: file.item_id,
             item_title,
@@ -10440,29 +15527,28 @@ impl TranscodeManager {
             supersession_user: supersession_user.to_owned(),
             playback_id: playback_id.to_owned(),
             automatic,
-            kind: SessionKind::Copy {
-                aac: options.transcode_audio,
-                preserve_dolby_vision: options.preserve_dolby_vision,
-            },
+            kind: copy_kind,
             method: crate::delivery::Method::HlsCopy,
             start_seconds,
             media_origin_seconds,
-            hls_codecs,
-            hls_supplemental_codecs,
             target_height: file.height.unwrap_or(0),
             encoder_label: Mutex::new("copy"),
             started_unix: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(0),
-            failed: AtomicBool::new(false),
+            failed,
             failure: std::sync::Mutex::new(None),
-            playlist_published: AtomicBool::new(true),
-            high_segment: AtomicI64::new(-1),
-            fetched_end_ms: AtomicI64::new(0),
+            playlist_published: AtomicBool::new(false),
+            high_segment: Arc::new(AtomicI64::new(-1)),
+            compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
+            fetched_end_ms: Arc::new(AtomicI64::new(0)),
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
-            live_bytes: AtomicI64::new(0),
+            live_bytes: Arc::new(AtomicI64::new(0)),
+            retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
+            retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            retention_cleanup_active: Arc::new(AtomicBool::new(false)),
             progress: Arc::clone(&progress),
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
@@ -10478,12 +15564,133 @@ impl TranscodeManager {
             takeover,
             first_slide_logged: AtomicBool::new(false),
         });
-        if !self
-            .register_session(&session_id, Arc::clone(&session))
+        start_settlement.attach(&session);
+        if let Err(reason) = executor_registration.register().await {
+            fail_prepublication_transaction(
+                &session,
+                format!("rolling control actor rejected copy executor registration: {reason:?}"),
+            )
+            .await;
+            start_settlement.disarm();
+            return Err(format!(
+                "rolling control actor rejected copy executor registration: {reason:?}"
+            ));
+        }
+        let (executor_activation, manager_publication) = tokio::sync::oneshot::channel();
+        spawn_prepublication_executor_owner(
+            &session,
+            executor_registration,
+            manager_publication,
+            retry.clone().map(PrepublicationRetry::Copy),
+            session_id.clone(),
+        );
+        let generation = match session.control.begin_initial_producer_attempt(policy).await {
+            Ok(generation) => generation,
+            Err(reason) => {
+                fail_prepublication_transaction(
+                    &session,
+                    format!(
+                        "rolling control actor rejected the initial copy producer policy: {reason:?}"
+                    ),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(format!(
+                    "rolling control actor rejected the initial copy producer policy: {reason:?}"
+                ));
+            }
+        };
+        session.bind_retry_compatibility_attempt(generation).await;
+        let pipe_stdout = if segmenting {
+            match session
+                .spawn_and_install_prepublication_pipe_child(generation, || {
+                    spawn_ffmpeg_pipe(
+                        &initial_args,
+                        &session_id,
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            session.control.clone(),
+                        ),
+                        &self.runtime_cache,
+                    )
+                })
+                .await
+            {
+                Ok(stdout) => Some(stdout),
+                Err(reason) => {
+                    fail_prepublication_transaction(
+                        &session,
+                        format!("initial copy pipe producer could not be installed: {reason}"),
+                    )
+                    .await;
+                    start_settlement.disarm();
+                    return Err(reason);
+                }
+            }
+        } else {
+            if let Err(reason) = session
+                .spawn_and_install_prepublication_child(generation, || {
+                    spawn_ffmpeg(
+                        &initial_args,
+                        "copy",
+                        &session_id,
+                        FfmpegProgressObserver::rolling(
+                            Arc::clone(&progress),
+                            generation,
+                            session.control.clone(),
+                        ),
+                        &self.runtime_cache,
+                        FfmpegDescriptors::default(),
+                    )
+                })
+                .await
+            {
+                fail_prepublication_transaction(
+                    &session,
+                    format!("initial direct copy producer could not be installed: {reason}"),
+                )
+                .await;
+                start_settlement.disarm();
+                return Err(reason);
+            }
+            None
+        };
+        if let Some(stdout) = pipe_stdout {
+            spawn_copy_reader_owner(
+                Arc::clone(&session),
+                stdout,
+                dir.clone(),
+                session_id.clone(),
+                generation,
+            );
+        }
+        tracing::info!(
+            session = %session_log_id(&session_id),
+            file_id,
+            start_seconds,
+            producer_attempt = generation,
+            mode = if segmenting { "segmenter" } else { "legacy" },
+            "started actor-owned prepublication copy session"
+        );
+        if let Err(reason) = self
+            .register_session(&session_id, Arc::clone(&session), generation)
             .await
         {
-            return Err("this node lost quorum serving authority".to_owned());
+            // Registration rejection owns synchronous/detached retirement;
+            // do not race that exact settlement with this start guard.
+            start_settlement.disarm();
+            return Err(format!(
+                "rolling copy session registration rejected: {reason:?}"
+            ));
         }
+        if executor_activation.send(()).is_err() {
+            let reason = "copy producer executor ended before manager publication".to_owned();
+            fail_prepublication_transaction(&session, reason.clone()).await;
+            start_settlement.disarm();
+            return Err(reason);
+        }
+        start_settlement.settle();
         self.emit_session_event(
             &session_id,
             &session,
@@ -10491,133 +15698,6 @@ impl TranscodeManager {
             SessionEventFields::default(),
         )
         .await;
-
-        // The reader task, when plurx is doing the cutting. It owns the pipe
-        // for the session's life, and it owns the one fallback: a stream it
-        // cannot follow is killed and respawned on ffmpeg's HLS muxer, in this
-        // same session, so the player never learns anything happened. Only
-        // while the playlist is unpublished — once it is out, a respawn would
-        // rewrite a timeline a player may already be holding. (The publish
-        // gate keeps that window open through the first few segments: files
-        // nothing was ever told about are cleared and recut, not a timeline.)
-        if let Some(stdout) = pipe_stdout {
-            let session = Arc::clone(&session);
-            let sid = session_id.clone();
-            let dir = dir.clone();
-            let file = file.clone();
-            let progress = Arc::clone(&progress);
-            let runtime_cache = self.runtime_cache.clone();
-            tokio::spawn(async move {
-                let outcome =
-                    copyseg::run(stdout, dir.clone(), &sid, copyseg::Limits::default()).await;
-                match outcome {
-                    copyseg::Outcome::Ran(counts) => {
-                        tracing::info!(
-                            session = %session_log_id(&sid), build = crate::version::BUILD,
-                            "{}", copyseg::summary(&counts)
-                        );
-                    }
-                    copyseg::Outcome::Unsupported(reason) => {
-                        // Is this session still one anybody is watching?
-                        //
-                        // The reader task holds its own `Arc<Session>`, so the
-                        // struct outlives removal from the manager's map —
-                        // respawning into a stopped, superseded or reaped
-                        // session would put an ffmpeg behind a session id
-                        // nothing schedules, suspends or reaps, reading the
-                        // source flat out through its 90 s burst until the
-                        // last Arc drops. And it would log a warning blaming
-                        // the SOURCE for what was a viewer pressing stop,
-                        // which is how a good path gets a bad reputation.
-                        //
-                        // This is only the cheap preflight. The lifetime
-                        // verdict is rechecked after acquiring the shared
-                        // transition below, because scratch deletion trails
-                        // manager retirement and cannot prove liveness.
-                        if session.retired.load(Acquire)
-                            || session.failed.load(Relaxed)
-                            || tokio::fs::metadata(&dir).await.is_err()
-                        {
-                            return;
-                        }
-                        // `Unsupported` was decided before this task reached
-                        // the transition. The watchdog may have terminally
-                        // judged the predecessor in that gap. A failed session
-                        // cannot restart; an exited predecessor may, but its
-                        // successor gets a fresh watchdog below.
-                        let Some(_replacement) = session.begin_copy_child_replacement().await
-                        else {
-                            return;
-                        };
-                        tracing::warn!(
-                            session = %session_log_id(&sid),
-                            "copy segmenter cannot read this stream ({reason}); \
-                             falling back to ffmpeg's HLS muxer for this session"
-                        );
-                        clear_session_dir(&dir).await;
-                        let args = transcode::hls_copy_args_with_dolby_vision(
-                            &file,
-                            start_seconds,
-                            audio_index,
-                            options.transcode_audio,
-                            pacing,
-                            transcode::DolbyVisionCopyOptions::new(
-                                have_dovi,
-                                options.preserve_dolby_vision,
-                            ),
-                            &dir.to_string_lossy(),
-                        );
-                        // A fresh generation, or the dead process's last
-                        // progress blocks land on the replacement's telemetry
-                        // and the watchdog reads it as stalled from birth.
-                        // (The replacement then gets PROGRESS_STALL rather
-                        // than the full SOFTWARE_GRACE to emit its first
-                        // block, exactly as the hardware→software ladder's
-                        // replacement does. It matters only for a fallback
-                        // taken tens of seconds in, which means ffmpeg never
-                        // produced a moov — a session already in trouble.)
-                        let generation = progress.begin_attempt();
-                        match spawn_ffmpeg(
-                            &args,
-                            "copy",
-                            &sid,
-                            progress,
-                            generation,
-                            &runtime_cache,
-                            FfmpegDescriptors::default(),
-                        ) {
-                            Ok(child) => {
-                                *session.child.lock().await = Some(child);
-                                *session.last_request.lock().await =
-                                    LastRequest::now("fallback-start");
-                                spawn_watch_for_stall(
-                                    Arc::clone(&session),
-                                    dir.clone(),
-                                    sid.clone(),
-                                );
-                                tracing::info!(session = %session_log_id(&sid), "fallback copy started");
-                            }
-                            Err(e) => {
-                                tracing::error!(session = %session_log_id(&sid), "fallback copy failed: {e}");
-                                session.fail(PlaylistError::SessionFailed(
-                                    "the fallback remux could not be started".into(),
-                                ));
-                            }
-                        }
-                    }
-                }
-            });
-        }
-
-        // Fail-fast guard: copy has no encoder ladder, but if the segments stop
-        // coming (undecodable source, ffmpeg refusal) mark the session failed
-        // so the player errors instead of waiting on a gray screen.
-        {
-            let session = Arc::clone(&session);
-            let dir = dir.clone();
-            let sid = session_id.clone();
-            spawn_watch_for_stall(session, dir, sid);
-        }
 
         Ok(StartInfo {
             playlist_url: format!("/api/v1/hls/{session_id}/index.m3u8"),
@@ -10635,42 +15715,96 @@ impl TranscodeManager {
             // source's, read off `kind`/`preserve_dolby_vision`.
             grade: OutputGrade::Sdr,
             vod: false,
+            control_lease_timeout_ms: crate::playback_control::ROLLING_LEASE_TIMEOUT_MS,
         })
     }
 
     /// Number of active HLS sessions across the public VOD registry and the
     /// test-only historical live registry (for /metrics and activity).
     pub async fn active_sessions(&self) -> usize {
-        self.sessions.lock().await.len() + self.vod.active_sessions().await
+        let rolling = self.sessions.lock().await.len();
+        rolling + self.vod.active_sessions().await
     }
 
     /// Publish a provisional successor under the incarnation's stable bearer
     /// capability after the replicated owner CAS succeeds.
+    #[cfg(test)]
     pub(crate) async fn adopt_session_id(
         &self,
         provisional_id: &str,
         durable_session_id: &str,
     ) -> bool {
-        if provisional_id == durable_session_id {
-            return self.sessions.lock().await.contains_key(durable_session_id);
-        }
-        let mut sessions = self.sessions.lock().await;
-        if sessions.contains_key(durable_session_id) {
-            return false;
-        }
-        let Some(session) = sessions.remove(provisional_id) else {
+        let Some(adoption) = self.session_adoption_token(durable_session_id) else {
             return false;
         };
+        self.adopt_session_id_with_token(provisional_id, durable_session_id, adoption)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn adopt_session_id_with_token(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+        adoption: SessionAdoptionToken,
+    ) -> bool {
+        self.adopt_session_id_with_owner(provisional_id, durable_session_id, adoption, ())
+            .await
+            .is_ok()
+    }
+
+    /// Move a provisional worker and its cleanup owner through the same
+    /// cancellation boundary. Once the map contains the durable capability,
+    /// `owner` is updated synchronously before any further await or fallible
+    /// bookkeeping. A panic or cancellation after that point therefore tears
+    /// down the durable id; one before it still tears down the provisional id.
+    pub(crate) async fn adopt_session_id_with_owner<O: SessionAdoptionOwner>(
+        &self,
+        provisional_id: &str,
+        durable_session_id: &str,
+        adoption: SessionAdoptionToken,
+        mut owner: O,
+    ) -> Result<O, O> {
+        if provisional_id == durable_session_id {
+            return if self.sessions.lock().await.contains_key(durable_session_id) {
+                owner.adopted_session_id(durable_session_id);
+                Ok(owner)
+            } else {
+                Err(owner)
+            };
+        }
+        let release_gate = &adoption.gate;
+        if release_gate.released.load(Acquire) {
+            return Err(owner);
+        }
+        let _release_transition = Arc::clone(&release_gate.transition).lock_owned().await;
+        if release_gate.released.load(Acquire) {
+            return Err(owner);
+        }
+        let mut sessions = self.sessions.lock().await;
+        if release_gate.released.load(Acquire) {
+            return Err(owner);
+        }
+        if sessions.contains_key(durable_session_id) {
+            return Err(owner);
+        }
+        let Some(session) = sessions.remove(provisional_id) else {
+            return Err(owner);
+        };
         sessions.insert(durable_session_id.to_owned(), session);
+        owner.adopted_session_id(durable_session_id);
         drop(sessions);
 
-        let mut requests = self.requests.lock().expect("requests mutex");
+        let mut requests = self
+            .requests
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for entry in requests.values_mut() {
             if matches!(&entry.state, RequestState::Ready(id) if id == provisional_id) {
                 entry.state = RequestState::Ready(durable_session_id.to_owned());
             }
         }
-        true
+        Ok(owner)
     }
 
     /// The fMP4 init object this session actually publishes.
@@ -10902,13 +16036,332 @@ impl TranscodeManager {
     /// Status for either HLS presentation. A VOD lookup goes first because a
     /// session id belongs to exactly one registry and its diagnostics have no
     /// honest live-transcode equivalent.
+    #[cfg(test)]
     pub async fn hls_session_status(&self, session_id: &str) -> Option<HlsSessionInfo> {
-        if let Some(status) = self.vod.status(session_id).await {
-            return Some(HlsSessionInfo::Vod(status));
-        }
-        self.session_status(session_id)
+        self.hls_session_status_publication(session_id)
             .await
-            .map(HlsSessionInfo::Live)
+            .and_then(|publication| publication.result.ok())
+    }
+
+    /// Status bound to the exact VOD incarnation or rolling producer attempt
+    /// that was sampled. The HTTP layer must bodylessly authorize this owner
+    /// immediately before returning telemetry.
+    pub(crate) async fn hls_session_status_publication(
+        &self,
+        session_id: &str,
+    ) -> Option<VodResponsePublication<HlsSessionInfo>> {
+        if let Some(publication) = self.vod.status_publication(session_id).await {
+            return Some(VodResponsePublication {
+                result: publication
+                    .result
+                    .map(|status| HlsSessionInfo::Vod(Box::new(status))),
+                owner: MediaResponseOwner(MediaResponseOwnerKind::Vod(publication.owner)),
+            });
+        }
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        let producer_attempt = session.control.current_producer_attempt();
+        let limits = self.ahead_limits().await;
+        let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+        let status = session_info(
+            session_id,
+            &session,
+            limits,
+            global_live_bytes,
+            global_ahead_bytes,
+        )
+        .await;
+        Some(VodResponsePublication {
+            result: Ok(HlsSessionInfo::Live(Box::new(status))),
+            owner: MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session,
+                producer_attempt,
+            }),
+        })
+    }
+
+    fn rolling_terminal_operation(
+        &self,
+        control: &crate::playback_control::LocalControlRequest<'_>,
+    ) -> Result<Option<RollingTerminalOperation>, crate::playback_control::ControlStateError> {
+        let mut terminal = self
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(operation) = terminal.get(control.session_id).cloned() else {
+            return Ok(None);
+        };
+        if operation.expired(crate::media_sessions::unix_ms()) {
+            terminal.remove(control.session_id);
+            return Ok(None);
+        }
+        if operation.identity.matches(control) {
+            Ok(Some(operation))
+        } else {
+            Err(crate::playback_control::ControlStateError::SessionEnded)
+        }
+    }
+
+    /// Fenced behavior-neutral control for either HLS presentation. A newly
+    /// accepted sequence renews the selected engine's established activity
+    /// clock with the explicit `control` reason; replay and rejection do not.
+    #[cfg(test)]
+    pub(crate) async fn hls_session_control(
+        self: &Arc<Self>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        self.hls_session_control_with_terminal(control, i64::MAX, None)
+            .await
+    }
+
+    pub(crate) async fn hls_session_control_with_terminal(
+        self: &Arc<Self>,
+        control: crate::playback_control::LocalControlRequest<'_>,
+        deadline_unix_ms: i64,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+    ) -> Option<
+        Result<
+            crate::playback_control::LocalControlResult,
+            crate::playback_control::ControlStateError,
+        >,
+    > {
+        match self.rolling_terminal_operation(&control) {
+            Ok(Some(operation)) => {
+                let mut result = match operation.result.wait().await {
+                    Ok(result) => result,
+                    Err(error) => return Some(Err(error)),
+                };
+                result.disposition = crate::playback_control::ControlDisposition::Replay;
+                if let Some(commit) = &result.terminal_commit {
+                    commit.retry();
+                }
+                return Some(Ok(result));
+            }
+            Err(error) => return Some(Err(error)),
+            Ok(None) => {}
+        }
+        if let Some(result) = self
+            .vod
+            .control_with_terminal(
+                control.clone(),
+                deadline_unix_ms,
+                terminal_committer.clone(),
+            )
+            .await
+        {
+            return Some(result);
+        }
+        let session = self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .cloned()?;
+        let transition = session.child_transition.lock().await;
+        if !self
+            .sessions
+            .lock()
+            .await
+            .get(control.session_id)
+            .is_some_and(|current| Arc::ptr_eq(current, &session))
+        {
+            return None;
+        }
+        if let Err(error) = crate::playback_control::verify_authority(
+            self.store.as_ref(),
+            control.session_id,
+            control.generation,
+            control.owner_node_id,
+            control.owner_epoch,
+        )
+        .await
+        {
+            return Some(Err(error));
+        }
+        let session_id = control.session_id.to_owned();
+        // Start the detached consumer before sending the actor command. If
+        // the request future is cancelled after mailbox admission, the actor
+        // can still publish a ticket that this session-owned worker applies.
+        self.ensure_flow_worker(&session_id, Arc::clone(&session));
+        #[cfg(test)]
+        let control_pause = session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let terminal_admission =
+            (control.snapshot.demand == crate::playback_control::PlaybackDemand::End).then(|| {
+                Arc::new(RollingTerminalAdmission {
+                    manager: Arc::clone(self),
+                    session_id: session_id.clone(),
+                    session: Arc::clone(&session),
+                    identity: RollingTerminalIdentity::from_request(&control),
+                    terminal_committer: terminal_committer.clone(),
+                    #[cfg(test)]
+                    control_pause: control_pause.clone(),
+                }) as Arc<dyn crate::playback_control::RollingTerminalAdmission>
+            });
+        let (
+            disposition,
+            accepted_sequence,
+            action,
+            platform,
+            lease_expires_at_unix_ms,
+            lease_timeout_ms,
+            flow_ticket,
+            lease_state,
+            acknowledged_end,
+        ) = match session
+            .accept_control(control, deadline_unix_ms, terminal_admission)
+            .await?
+        {
+            Ok(outcome) => outcome,
+            Err(error) => return Some(Err(error)),
+        };
+        drop(transition);
+        if acknowledged_end {
+            let terminal = session
+                .terminal_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            return Some(match terminal {
+                Some(terminal) => match terminal.result.wait().await {
+                    Ok(mut result) => {
+                        result.disposition = disposition;
+                        if disposition == crate::playback_control::ControlDisposition::Replay {
+                            if let Some(commit) = &result.terminal_commit {
+                                commit.retry();
+                            }
+                        }
+                        Ok(result)
+                    }
+                    Err(error) => Err(error),
+                },
+                None => Err(crate::playback_control::ControlStateError::Unavailable),
+            });
+        }
+        Some(
+            Arc::clone(self)
+                .finish_hls_session_control(
+                    session_id,
+                    session,
+                    disposition,
+                    accepted_sequence,
+                    action,
+                    platform,
+                    lease_expires_at_unix_ms,
+                    lease_timeout_ms,
+                    flow_ticket,
+                    lease_state,
+                    false,
+                    None,
+                    None,
+                    #[cfg(test)]
+                    control_pause,
+                )
+                .await,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_hls_session_control(
+        self: Arc<Self>,
+        session_id: String,
+        session: Arc<Session>,
+        disposition: crate::playback_control::ControlDisposition,
+        accepted_sequence: u64,
+        action: crate::playback_control::ControlAction,
+        platform: crate::playback_control::ClientPlatform,
+        lease_expires_at_unix_ms: i64,
+        lease_timeout_ms: u32,
+        flow_ticket: u64,
+        lease_state: &'static str,
+        acknowledged_end: bool,
+        terminal_handoff: Option<crate::playback_control::TerminalResponseHandoff>,
+        terminal_committer: Option<Arc<dyn crate::playback_control::TerminalControlCommitter>>,
+        #[cfg(test)] control_pause: Option<Arc<tokio::sync::Barrier>>,
+    ) -> Result<
+        crate::playback_control::LocalControlResult,
+        crate::playback_control::ControlStateError,
+    > {
+        let rescue = terminal_handoff.clone();
+        let outcome = async {
+            #[cfg(test)]
+            if let Some(pause) = control_pause {
+                pause.wait().await;
+                pause.wait().await;
+            }
+            // The actor also tickets replayed sequences. A caller whose first
+            // response was lost can therefore wait for physical convergence.
+            session.control.wait_for_flow(flow_ticket).await;
+            let limits = self.ahead_limits().await;
+            let (global_live_bytes, global_ahead_bytes) = self.global_flow_bytes().await;
+            let _final_transition = session.child_transition.lock().await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let status = session_info(
+                &session_id,
+                &session,
+                limits,
+                global_live_bytes,
+                global_ahead_bytes,
+            )
+            .await;
+            if session.control.is_retired() && !acknowledged_end {
+                return Err(crate::playback_control::ControlStateError::SessionEnded);
+            }
+            if !self
+                .sessions
+                .lock()
+                .await
+                .get(&session_id)
+                .is_some_and(|current| Arc::ptr_eq(current, &session))
+            {
+                return Err(crate::playback_control::ControlStateError::OwnerTransition);
+            }
+            let mut result = crate::playback_control::LocalControlResult {
+                disposition,
+                accepted_sequence,
+                action,
+                lease_expires_at_unix_ms,
+                lease_timeout_ms,
+                lease_state,
+                status: HlsSessionInfo::Live(Box::new(status)),
+                platform,
+                terminal_handoff,
+                terminal_commit: None,
+            };
+            if acknowledged_end {
+                if let Some(committer) = terminal_committer {
+                    result.terminal_commit = Some(committer.start(&result));
+                } else if let Some(handoff) = &result.terminal_handoff {
+                    handoff.complete();
+                }
+            }
+            Ok(result)
+        }
+        .await;
+        if outcome.is_err() {
+            if let Some(handoff) = rescue {
+                handoff.complete();
+            }
+        }
+        outcome
     }
 
     async fn emit_session_event(
@@ -10918,133 +16371,210 @@ impl TranscodeManager {
         event: &str,
         fields: SessionEventFields<'_>,
     ) {
-        let method = match session.method {
-            crate::delivery::Method::Direct => "direct_play",
-            crate::delivery::Method::Remux | crate::delivery::Method::HlsCopy => "remux",
-            crate::delivery::Method::Transcode => "transcode",
-        };
-        let hold_reason = if let Some(reason) = fields.hold_reason {
-            Some(reason)
-        } else if session.suspended.load(Relaxed) {
-            let limits = self.ahead_limits().await;
-            let (global_live, global_ahead) = self.global_flow_bytes().await;
-            session.ahead().await.and_then(|ahead| {
-                ahead_hold(ahead, global_live, global_ahead, limits, true).map(|hold| hold.reason)
-            })
-        } else {
-            None
-        }
-        .map(|reason| {
-            match reason {
-                AheadHoldReason::Time => "time",
-                AheadHoldReason::Bytes => "bytes",
-                AheadHoldReason::Global => "global",
-            }
-            .to_owned()
-        });
-        crate::telemetry::emit(
-            Arc::clone(&self.store),
-            PlaybackEvent {
-                at_unix_ms: std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
-                    .unwrap_or(0),
-                session_id: Some(session_log_id(session_id)),
-                file_id: Some(session.file_id),
-                event: event.to_owned(),
-                method: Some(method.to_owned()),
-                encoder: Some((*session.encoder_label.lock().await).to_owned()),
-                height: Some(session.target_height),
-                ms: fields.ms,
-                speed_recent: session.progress.recent_speed(),
-                ahead_seconds: session.ahead().await.map(|ahead| ahead.seconds),
-                suspended: Some(session.suspended.load(Relaxed)),
-                hold_reason,
-                delivered_bps: session.delivery.recent_bps().map(|bytes| bytes * 8),
-                readrate: Some(session.readrate),
-                reason: fields.reason.map(str::to_owned),
-                extra: fields.extra,
-                ..PlaybackEvent::default()
-            },
-        );
+        emit_session_event_to_store(Arc::clone(&self.store), session_id, session, event, fields)
+            .await;
     }
 
     /// Linearize manager retirement with producer replacement.
     ///
     /// Replacement holds `child_transition` until a successor is published.
-    /// Teardown takes the same gate before removing the manager entry and
-    /// keeps it through process kill and scratch deletion. Whichever wins is
-    /// therefore complete before the other can act: a late replacement sees
-    /// `retired`, while a late retirement kills the published successor.
+    /// Teardown transfers the exact Arc to a detached owner, which takes that
+    /// same gate before actor Terminal admission and retains all process,
+    /// scratch, and admission ownership through confirmed reap. Whichever
+    /// wins still fixes the exact child: a late replacement sees `retired`,
+    /// while late retirement owns the installed successor until terminal
+    /// proof.
+    #[cfg(test)]
     async fn retire_session(&self, session_id: &str, session: &Arc<Session>) -> bool {
         self.retire_session_until(session_id, session, None)
             .await
             .expect("unbounded session retirement cannot expire")
     }
 
+    #[cfg(test)]
     async fn retire_session_until(
         &self,
         session_id: &str,
         session: &Arc<Session>,
         deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, String> {
-        #[cfg(test)]
-        session.retirement_started.store(true, Release);
-        let _transition = match deadline {
-            Some(deadline) => tokio::time::timeout_at(deadline, session.child_transition.lock())
-                .await
-                .map_err(|_| replacement_deadline_error())?,
-            None => session.child_transition.lock().await,
-        };
-        let removed = {
-            let mut sessions = match deadline {
-                Some(deadline) => tokio::time::timeout_at(deadline, self.sessions.lock())
+        self.retire_session_until_with_cause(session_id, session, deadline, "ended")
+            .await
+            .map(|outcome| outcome.removed)
+    }
+
+    async fn retire_session_until_with_cause(
+        &self,
+        session_id: &str,
+        session: &Arc<Session>,
+        deadline: Option<tokio::time::Instant>,
+        cause: &'static str,
+    ) -> Result<RollingRetirementOutcome, String> {
+        loop {
+            // Transfer the exact Arc and registry handles before the first
+            // await. A joined follower observes the same physical settlement
+            // and winning cause; it never creates a second cleanup owner.
+            let (_committed, ticket) = spawn_rolling_retirement_owner(
+                Arc::clone(&self.sessions),
+                Arc::clone(&self.active_session_count),
+                Arc::clone(&self.store),
+                session_id.to_owned(),
+                Arc::clone(session),
+                deadline,
+                cause,
+            );
+            let participation = ticket.participation;
+            let settlement = Arc::clone(&ticket.settlement);
+            let waited = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, ticket.wait())
                     .await
                     .map_err(|_| replacement_deadline_error())?,
-                None => self.sessions.lock().await,
+                None => ticket.wait().await,
             };
-            let still_live = sessions
-                .get(session_id)
-                .is_some_and(|active| Arc::ptr_eq(active, session));
-            if still_live {
-                if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
-                    return Err(replacement_deadline_error());
+            match waited {
+                Ok(removed) => {
+                    return Ok(RollingRetirementOutcome {
+                        removed,
+                        participation,
+                        cause: settlement.cause(),
+                    });
                 }
-                session.retired.store(true, Release);
-                sessions.remove(session_id);
-                self.active_session_count.store(sessions.len(), Relaxed);
+                Err(_) if deadline.is_none() && !session.control.is_retired() => continue,
+                Err(error) => return Err(error),
             }
-            still_live
-        };
-        if !removed {
-            return Ok(false);
         }
-        session.release_hardware();
-        session.release_software();
-        session.kill_child().await;
-        session.discard_dir().await;
-        Ok(true)
     }
 
     /// Publish a newly spawned session only while the process-local serving
-    /// fence is open. The post-insert load and the loss loop's pre-snapshot
-    /// store cover both orderings: either that snapshot sees this session or
-    /// this method observes the closed fence and retires it itself.
-    #[cfg(test)]
-    async fn register_session(&self, session_id: &str, session: Arc<Session>) -> bool {
-        let admitted_generation = self.serving_loss_generation.load(Acquire);
-        {
-            let mut sessions = self.sessions.lock().await;
-            sessions.insert(session_id.to_owned(), Arc::clone(&session));
-            self.active_session_count.store(sessions.len(), Relaxed);
-        }
-        if self.serving_ready.load(Acquire)
-            && self.serving_loss_generation.load(Acquire) == admitted_generation
-        {
-            return true;
-        }
-        let _ = self.retire_session(session_id, &session).await;
-        false
+    /// fence is open. Admission reads the fence's synchronous loss generation,
+    /// not the teardown loop's delayed mirror, and rechecks it around actor and
+    /// registry waits plus the final move-only install transaction.
+    #[cfg(any(test, feature = "live-hls-recovery"))]
+    async fn register_session(
+        &self,
+        session_id: &str,
+        session: Arc<Session>,
+        producer_attempt: u64,
+    ) -> Result<(), SessionRegistrationRejection> {
+        let adoption = match self.session_adoption_token(session_id) {
+            Some(adoption) => adoption,
+            None => {
+                let rejection = SessionRegistrationRejection::AdoptionCapacity;
+                session.fail(PlaylistError::SessionFailed(
+                    "rolling session registration rejected: adoption capacity".to_owned(),
+                ));
+                let (_commit, retirement) = spawn_rolling_retirement_owner(
+                    Arc::clone(&self.sessions),
+                    Arc::clone(&self.active_session_count),
+                    Arc::clone(&self.store),
+                    session_id.to_owned(),
+                    Arc::clone(&session),
+                    None,
+                    "capacity",
+                );
+                let _ = retirement.wait().await;
+                return Err(rejection);
+            }
+        };
+        let release_gate = &adoption.gate;
+        let admitted_generation = self.serving_authority.admit();
+        // Actor authorization may wait behind the bounded per-session
+        // mailbox; never hold the global session registry while doing so.
+        let authorization = match (release_gate.released.load(Acquire), admitted_generation) {
+            (true, _) => Err(SessionRegistrationRejection::SessionRelease),
+            (false, None) => Err(SessionRegistrationRejection::ServingFence),
+            (false, Some(admitted_generation)) => {
+                let authorization = session
+                    .control
+                    .authorize_producer_install(producer_attempt)
+                    .await
+                    .map_err(SessionRegistrationRejection::Producer);
+                if self.publication_authority_is_current(admitted_generation) {
+                    authorization
+                } else {
+                    Err(SessionRegistrationRejection::ServingFence)
+                }
+            }
+        };
+        let rejection = match authorization {
+            Err(rejection) => Some(rejection),
+            Ok(authorization) => {
+                // Actor admission may be slow. Serialize only the final
+                // registry/install transaction with release; the monotone bit
+                // rejects an authorization that became stale while waiting.
+                let _release_transition = Arc::clone(&release_gate.transition).lock_owned().await;
+                let admitted_generation = admitted_generation
+                    .expect("successful registration authorization has a serving generation");
+                // Publication below is synchronous while both the registry
+                // guard and the actor's exact move-only install fence are
+                // held. The serving generation is checked again inside both.
+                let mut sessions = self.sessions.lock().await;
+                if release_gate.released.load(Acquire) {
+                    Some(SessionRegistrationRejection::SessionRelease)
+                } else if !self.publication_authority_is_current(admitted_generation) {
+                    Some(SessionRegistrationRejection::ServingFence)
+                } else {
+                    match session
+                        .control
+                        .lock_authorized_producer_install(authorization)
+                    {
+                        Err(reason) => Some(SessionRegistrationRejection::Producer(reason)),
+                        Ok(install) => {
+                            if release_gate.released.load(Acquire) {
+                                drop(install);
+                                Some(SessionRegistrationRejection::SessionRelease)
+                            } else if !self.publication_authority_is_current(admitted_generation) {
+                                drop(install);
+                                Some(SessionRegistrationRejection::ServingFence)
+                            } else {
+                                sessions.insert(session_id.to_owned(), Arc::clone(&session));
+                                self.active_session_count.store(sessions.len(), Relaxed);
+                                drop(install);
+                                None
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        let Some(rejection) = rejection else {
+            return Ok(());
+        };
+        // Rejection occurred before registry publication, so ordinary
+        // retire_session cannot find this Arc. Tear it down explicitly and
+        // promptly; Child::kill_on_drop is only the last-resort backstop.
+        // Store the typed local failure before actor End: a concurrent
+        // playlist reader must see a 502-class producer failure, not observe
+        // only actor retirement and collapse it into an anonymous 404.
+        let failure = format!("rolling session registration rejected: {rejection:?}");
+        session.fail(PlaylistError::SessionFailed(failure));
+        let cause = match rejection {
+            SessionRegistrationRejection::ServingFence => {
+                // Publish the typed fence synchronously before transferring
+                // cancellation-independent process ownership.
+                session.project_authority_fence();
+                "authority_fence"
+            }
+            SessionRegistrationRejection::SessionRelease => {
+                session.project_authority_fence();
+                "client_released"
+            }
+            SessionRegistrationRejection::Producer(_) => "failed",
+            SessionRegistrationRejection::AdoptionCapacity => "capacity",
+        };
+        let (_commit, retirement) = spawn_rolling_retirement_owner(
+            Arc::clone(&self.sessions),
+            Arc::clone(&self.active_session_count),
+            Arc::clone(&self.store),
+            session_id.to_owned(),
+            Arc::clone(&session),
+            None,
+            cause,
+        );
+        // Dropping this registration future cannot cancel the already-spawned
+        // owner. The await only gives the synchronous caller a settled result.
+        let _ = retirement.wait().await;
+        Err(rejection)
     }
 
     /// End one session now. True if it existed.
@@ -11077,9 +16607,6 @@ impl TranscodeManager {
         let Some(session) = self.sessions.lock().await.get(session_id).cloned() else {
             return false;
         };
-        if !self.retire_session(session_id, &session).await {
-            return false;
-        }
         let event_reason = if reason.contains("released") {
             "client_released"
         } else if reason.contains("admin") {
@@ -11087,18 +16614,286 @@ impl TranscodeManager {
         } else {
             reason
         };
-        self.emit_session_event(
-            session_id,
-            &session,
-            "session_end",
-            SessionEventFields {
-                reason: Some(event_reason),
-                ..SessionEventFields::default()
+        let Ok(outcome) = self
+            .retire_session_until_with_cause(session_id, &session, None, event_reason)
+            .await
+        else {
+            return false;
+        };
+        tracing::info!(
+            session = %session_log_id(session_id),
+            requested_reason = reason,
+            winning_reason = %outcome.cause,
+            participation = ?outcome.participation,
+            "transcode session retirement settled"
+        );
+        outcome.removed
+    }
+
+    fn session_adoption_gate(&self, session_id: &str) -> Option<Arc<SessionReleaseGate>> {
+        let mut entries = self
+            .session_release_gates
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_session_release_gates(&mut entries);
+        if let Some(gate) = entries.entries.get(session_id).and_then(|entry| {
+            entry
+                .active_release
+                .clone()
+                .or_else(|| entry.gate.upgrade())
+        }) {
+            return Some(gate);
+        }
+        let in_flight = entries
+            .entries
+            .values()
+            .filter(|entry| {
+                entry.active_release.is_none()
+                    && entry.retain_until.is_none()
+                    && entry.gate.strong_count() > 0
+            })
+            .count();
+        if in_flight >= MAX_IN_FLIGHT_SESSION_ADOPTION_GATES {
+            return None;
+        }
+        let gate = Arc::new(SessionReleaseGate {
+            transition: Arc::new(tokio::sync::Mutex::new(())),
+            released: AtomicBool::new(false),
+        });
+        entries.entries.insert(
+            session_id.to_owned(),
+            SessionReleaseGateEntry {
+                gate: Arc::downgrade(&gate),
+                active_release: None,
+                retain_until: None,
             },
+        );
+        Some(gate)
+    }
+
+    /// Capture the release generation before an authoritative route/CAS
+    /// decision. Holding this token prevents a completed release from being
+    /// forgotten and re-created as a fresh, permissive gate by a delayed
+    /// request.
+    pub(crate) fn session_adoption_token(&self, session_id: &str) -> Option<SessionAdoptionToken> {
+        Some(SessionAdoptionToken {
+            gate: self.session_adoption_gate(session_id)?,
+            registry: Arc::clone(&self.session_release_gates),
+            session_id: session_id.to_owned(),
+        })
+    }
+
+    fn activate_session_release_gate(&self, session_id: &str) -> Arc<SessionReleaseGate> {
+        let mut entries = self
+            .session_release_gates
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_session_release_gates(&mut entries);
+        let entry = entries
+            .entries
+            .entry(session_id.to_owned())
+            .or_insert_with(|| {
+                let gate = Arc::new(SessionReleaseGate {
+                    transition: Arc::new(tokio::sync::Mutex::new(())),
+                    released: AtomicBool::new(false),
+                });
+                SessionReleaseGateEntry {
+                    gate: Arc::downgrade(&gate),
+                    active_release: Some(gate),
+                    retain_until: None,
+                }
+            });
+        let gate = entry
+            .active_release
+            .clone()
+            .or_else(|| entry.gate.upgrade())
+            .unwrap_or_else(|| {
+                Arc::new(SessionReleaseGate {
+                    transition: Arc::new(tokio::sync::Mutex::new(())),
+                    released: AtomicBool::new(false),
+                })
+            });
+        entry.gate = Arc::downgrade(&gate);
+        entry.active_release = Some(Arc::clone(&gate));
+        entry.retain_until = None;
+        gate
+    }
+
+    /// Lift only the strong active-release owner. Delayed adopters retain the
+    /// same gate Arc and therefore still observe its monotone `released` bit;
+    /// a later unrelated operation cannot turn their stale generation live.
+    pub(crate) fn complete_session_release(&self, session_id: &str) {
+        let mut entries = self
+            .session_release_gates
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_session_release_gates(&mut entries);
+        if let Some(entry) = entries.entries.get_mut(session_id) {
+            let deadline = Instant::now() + SESSION_RELEASE_GATE_RETENTION;
+            entry.retain_until = Some(deadline);
+            entries
+                .retained
+                .push_back((session_id.to_owned(), deadline));
+        }
+        prune_session_release_gates(&mut entries);
+    }
+
+    /// Complete a terminal generation after the Store has definitively
+    /// published terminal state or absence. Fresh operations are fenced by
+    /// that authoritative result, while operations admitted before it retain
+    /// the exact released Arc in their adoption token. Removing the registry
+    /// owner here keeps arbitrary absent DELETE keys out of the retained
+    /// lease-loss safety window.
+    pub(crate) fn complete_session_release_durable(
+        &self,
+        proof: &crate::media_sessions::DurableReleaseProof,
+    ) {
+        let session_id = proof.session_id();
+        let mut registry = self
+            .session_release_gates
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        prune_session_release_gates(&mut registry);
+        let remove = registry.entries.get_mut(session_id).is_some_and(|entry| {
+            entry.active_release = None;
+            entry.retain_until = None;
+            entry.gate.strong_count() == 0
+        });
+        if remove {
+            registry.entries.remove(session_id);
+        }
+    }
+
+    fn session_release_is_active(&self, session_id: &str) -> bool {
+        self.session_release_gates
+            .registry
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .entries
+            .get(session_id)
+            .and_then(|entry| {
+                entry
+                    .active_release
+                    .as_ref()
+                    .map(Arc::clone)
+                    .or_else(|| entry.gate.upgrade())
+            })
+            .is_some_and(|gate| gate.released.load(Acquire))
+    }
+
+    /// Phase one of a durable terminal decision: close response publication
+    /// and late adoption without choosing a local tombstone cause. The Store
+    /// CAS then persists the first winning cause, and `begin_session_terminal`
+    /// projects that exact winner in phase two.
+    pub(crate) async fn begin_session_publication_fence(self: &Arc<Self>, session_id: &str) {
+        let gate = self.activate_session_release_gate(session_id);
+        let _transition = Arc::clone(&gate.transition).lock_owned().await;
+        // This is the publication linearization point. Once set, every media
+        // authorization path rejects even if cancellation prevents the
+        // optional actor mirror below from running.
+        gate.released.store(true, Release);
+        if let Some(session) = self.sessions.lock().await.get(session_id).cloned() {
+            session.project_authority_fence();
+        }
+    }
+
+    /// Fail closed one public capability before its durable End mutation.
+    ///
+    /// VOD has no rolling actor, so its exact tombstone must be installed
+    /// synchronously here. Rolling publication is synchronously authority-
+    /// fenced, while confirmed process reap continues under the universal
+    /// detached retirement owner and cannot delay submission of the durable
+    /// Store mutation.
+    #[cfg(test)]
+    pub(crate) async fn begin_session_release(self: &Arc<Self>, session_id: &str) {
+        self.begin_session_terminal(
+            session_id,
+            crate::vodserve::Terminal::Deleted,
+            "released by client",
         )
         .await;
-        tracing::info!(session = %session_log_id(session_id), reason, "transcode session ended");
-        true
+    }
+
+    /// Project a terminal capability generation on the actual worker before
+    /// any durable settlement or exact cleanup. This is shared by client
+    /// release, supersession, lease loss and operator stop so a preparing VOD
+    /// attachment cannot appear after any terminal decision.
+    pub(crate) async fn begin_session_terminal(
+        self: &Arc<Self>,
+        session_id: &str,
+        terminal: crate::vodserve::Terminal,
+        reason: &'static str,
+    ) {
+        let gate = self.activate_session_release_gate(session_id);
+        let manager = Arc::clone(self);
+        let session_id = session_id.to_owned();
+        let (projected_tx, projected_rx) = tokio::sync::oneshot::channel();
+        // Transfer the whole proof before the first cancellable wait. If the
+        // caller disappears, this supervisor still retries a panicked attempt
+        // until the release generation and concrete worker are fail-closed.
+        tokio::spawn(async move {
+            loop {
+                let attempt_manager = Arc::clone(&manager);
+                let attempt_gate = Arc::clone(&gate);
+                let attempt_session_id = session_id.clone();
+                let attempt = tokio::spawn(async move {
+                    attempt_manager
+                        .project_session_terminal(
+                            attempt_gate,
+                            attempt_session_id,
+                            terminal,
+                            reason,
+                        )
+                        .await;
+                });
+                match attempt.await {
+                    Ok(()) => {
+                        let _ = projected_tx.send(());
+                        return;
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "session terminal projection attempt failed; retrying");
+                        tokio::task::yield_now().await;
+                    }
+                }
+            }
+        });
+        projected_rx
+            .await
+            .expect("session terminal projection supervisor exited before proof");
+    }
+
+    async fn project_session_terminal(
+        self: Arc<Self>,
+        gate: Arc<SessionReleaseGate>,
+        session_id: String,
+        terminal: crate::vodserve::Terminal,
+        reason: &'static str,
+    ) {
+        let _transition = Arc::clone(&gate.transition).lock_owned().await;
+        // The transition makes this bit and every final attachment decision
+        // one total order. Setting it before acquiring the transition would
+        // allow an attachment already inside the critical section to pass an
+        // earlier check and then commit after the bit changed.
+        gate.released.store(true, Release);
+        if self.vod.begin_end_detached(&session_id, terminal).await {
+            return;
+        }
+        let rolling = self.sessions.lock().await.get(&session_id).cloned();
+        if let Some(session) = &rolling {
+            // This atomic projection is the response-publication boundary.
+            // Actor settlement and physical reap must not delay durable End;
+            // the detached retirement owner below retains both.
+            session.project_authority_fence();
+        }
+        let manager = Arc::clone(&self);
+        tokio::spawn(async move {
+            manager.stop_session(&session_id, reason).await;
+        });
     }
 
     /// Snapshot the live capability ids without holding the session map while
@@ -11116,14 +16911,14 @@ impl TranscodeManager {
             .lock()
             .await
             .iter()
-            .filter(|(_, session)| !session.retired.load(Acquire))
+            .filter(|(_, session)| !session.control.is_retired())
             .map(|(session_id, _)| session_id.clone())
             .collect();
         // VOD sessions hold durable routes too; invisible here, the lease
         // loop settles their routes as stale ~3 s after create and every
         // request answers 410. Tombstoned ones are deliberately absent —
         // dropping out of the live set is how their routes get ended.
-        ids.extend(self.vod.live_session_ids().await);
+        ids.extend(self.vod.live_or_preparing_session_ids().await);
         ids
     }
 
@@ -11132,33 +16927,53 @@ impl TranscodeManager {
     /// path later takes `child_transition`, removes the registry entries, and
     /// reaps their resources; every serving path observes this monotonic bit.
     pub async fn fence_sessions(&self, session_ids: &[String]) {
-        let sessions = self.sessions.lock().await;
-        for session_id in session_ids {
-            if let Some(session) = sessions.get(session_id) {
-                session.retired.store(true, Release);
+        let fenced = {
+            let sessions = self.sessions.lock().await;
+            let fenced = session_ids
+                .iter()
+                .filter_map(|session_id| sessions.get(session_id).cloned())
+                .collect::<Vec<_>>();
+            // Publish every fail-closed projection before releasing the map.
+            // An in-flight response must reacquire this map before visibility,
+            // so it can never pass between the snapshot and a later actor
+            // round trip for another Session.
+            for session in &fenced {
+                session.project_authority_fence();
             }
-        }
+            fenced
+        };
+        futures_util::future::join_all(
+            fenced
+                .iter()
+                .map(|session| session.settle_authority_fence()),
+        )
+        .await;
     }
 
     async fn stop_all_sessions_for_serving_fence(&self) {
-        let sessions = self
-            .sessions
-            .lock()
-            .await
-            .iter()
-            .map(|(id, session)| (id.clone(), Arc::clone(session)))
-            .collect::<Vec<_>>();
-        for (_, session) in &sessions {
-            // Serving authority is lost now, not after a producer transition
-            // happens to unblock. Lease renewal and every media path observe
-            // this bit while detached teardown catches up.
-            session.retired.store(true, Release);
-        }
+        let sessions = {
+            let registry = self.sessions.lock().await;
+            let sessions = registry
+                .iter()
+                .map(|(id, session)| (id.clone(), Arc::clone(session)))
+                .collect::<Vec<_>>();
+            for (_, session) in &sessions {
+                // Serving authority is lost now, not after any actor mailbox
+                // or an earlier Session happens to unblock.
+                session.project_authority_fence();
+            }
+            sessions
+        };
         futures_util::future::join_all(sessions.into_iter().map(
             |(session_id, session)| async move {
-                if self.retire_session(&session_id, &session).await {
-                    // Do not publish a Store-backed playback event here: quorum
-                    // loss is exactly the condition that triggered teardown.
+                session.settle_authority_fence().await;
+                if self
+                    .retire_session_until_with_cause(&session_id, &session, None, "authority_fence")
+                    .await
+                    .is_ok_and(|outcome| outcome.removed)
+                {
+                    // The detached retirement winner owns the single event;
+                    // this loop only records local teardown progress.
                     tracing::warn!(
                         session = %session_log_id(&session_id),
                         "transcode session self-fenced after quorum loss"
@@ -11181,8 +16996,9 @@ impl TranscodeManager {
             let previous_generation = self.serving_loss_generation.load(Acquire);
             if !state.ready || state.loss_generation != previous_generation {
                 // Keep the gate closed until the old generation is fully
-                // retired. Any insertion after the snapshot observes false
-                // in its post-insert check and retires itself.
+                // retired. A racing registration either observes false in its
+                // final pre-insert check or publishes before this loop obtains
+                // the registry lock, in which case the snapshot includes it.
                 self.serving_ready.store(false, Release);
                 self.serving_loss_generation
                     .store(state.loss_generation, Release);
@@ -11207,45 +17023,158 @@ impl TranscodeManager {
     /// slot, and §7.2's "a delete racing takeover resolves to ended without a
     /// replacement child remaining alive" holds only by the slower lease-loss
     /// path.
+    async fn rolling_session_for_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+    ) -> Option<Arc<Session>> {
+        let request_matches = self.requests.lock().is_ok_and(|requests| {
+            requests.get(request_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+        });
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        session
+            .takeover
+            .as_ref()
+            .map_or(request_matches, |takeover| {
+                takeover.incarnation_id == request_id
+            })
+            .then_some(session)
+    }
+
+    /// Resolve only the exact rolling owner generation from a lease snapshot.
+    /// The stable public id and incarnation survive takeover, so both are
+    /// insufficient by themselves: epoch 1 is the original request-owned
+    /// worker and later epochs must match the embedded takeover identity.
+    async fn rolling_session_for_owner(
+        &self,
+        incarnation_id: &str,
+        session_id: &str,
+        owner_epoch: i64,
+    ) -> Option<Arc<Session>> {
+        let request_matches = owner_epoch == 1
+            && self.requests.lock().is_ok_and(|requests| {
+                requests.get(incarnation_id).is_some_and(|entry| {
+                    matches!(&entry.state, RequestState::Ready(ready) if ready == session_id)
+                })
+            });
+        let session = self.sessions.lock().await.get(session_id).cloned()?;
+        session
+            .takeover
+            .as_ref()
+            .map_or(request_matches, |takeover| {
+                takeover.incarnation_id == incarnation_id && takeover.owner_epoch == owner_epoch
+            })
+            .then_some(session)
+    }
+
+    pub(crate) async fn fence_session_for_owner(
+        &self,
+        incarnation_id: &str,
+        session_id: &str,
+        owner_epoch: i64,
+    ) -> bool {
+        let Some(session) = self
+            .rolling_session_for_owner(incarnation_id, session_id, owner_epoch)
+            .await
+        else {
+            return false;
+        };
+        session.project_authority_fence();
+        true
+    }
+
+    pub(crate) async fn owns_session_for_owner(
+        &self,
+        incarnation_id: &str,
+        session_id: &str,
+        owner_epoch: i64,
+    ) -> bool {
+        if self
+            .rolling_session_for_owner(incarnation_id, session_id, owner_epoch)
+            .await
+            .is_some()
+        {
+            return true;
+        }
+        owner_epoch == 1
+            && self.requests.lock().is_ok_and(|requests| {
+                requests.get(incarnation_id).is_some_and(
+                |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
+            )
+            })
+            && self.vod.owns_or_preparing(session_id).await
+    }
+
+    pub(crate) async fn stop_session_for_owner(
+        &self,
+        incarnation_id: &str,
+        session_id: &str,
+        owner_epoch: i64,
+        reason: &'static str,
+    ) -> bool {
+        let Some(session) = self
+            .rolling_session_for_owner(incarnation_id, session_id, owner_epoch)
+            .await
+        else {
+            return false;
+        };
+        session.project_authority_fence();
+        self.retire_session_until_with_cause(session_id, &session, None, reason)
+            .await
+            .is_ok_and(|outcome| outcome.removed)
+    }
+
     pub async fn stop_session_for_request(
         &self,
         request_id: &str,
         session_id: &str,
         reason: &'static str,
     ) -> bool {
-        let matches = self.requests.lock().is_ok_and(|requests| {
+        if let Some(session) = self
+            .rolling_session_for_request(request_id, session_id)
+            .await
+        {
+            session.project_authority_fence();
+            return self
+                .retire_session_until_with_cause(session_id, &session, None, reason)
+                .await
+                .is_ok_and(|outcome| outcome.removed);
+        }
+        // A VOD session is stoppable by its durable route without a match in
+        // the live maps: its ids are unguessable and never recycled, and the
+        // route store is the caller's authority.
+        self.vod.owns(session_id).await && self.stop_session(session_id, reason).await
+    }
+
+    /// Abort an epoch-1 VOD worker only when the original start request still
+    /// maps to that exact public id. Kept separate from rolling request
+    /// matching so a delayed start-abort cannot fall through and kill a later
+    /// takeover generation with the same incarnation.
+    pub(crate) async fn stop_vod_session_for_request(
+        &self,
+        request_id: &str,
+        session_id: &str,
+        reason: &'static str,
+    ) -> bool {
+        let request_matches = self.requests.lock().is_ok_and(|requests| {
             requests.get(request_id).is_some_and(
                 |entry| matches!(&entry.state, RequestState::Ready(ready) if ready == session_id),
             )
         });
-        let matches = matches
-            || self
-                .sessions
-                .lock()
-                .await
-                .get(session_id)
-                .is_some_and(|session| {
-                    session
-                        .takeover
-                        .as_ref()
-                        .is_some_and(|takeover| takeover.incarnation_id == request_id)
-                });
-        // A VOD session is stoppable by its durable route without a match in
-        // the live maps: its ids are unguessable and never recycled, and the
-        // route store is the caller's authority.
-        let matches = matches || self.vod.owns(session_id).await;
-        matches && self.stop_session(session_id, reason).await
+        request_matches
+            && self.vod.owns(session_id).await
+            && self.stop_session(session_id, reason).await
     }
 
     /// `stop_session` with a ceiling on how long teardown may take.
     ///
-    /// Retirement takes the child-transition gate, kills the process, and
-    /// recursively deletes the scratch tree — all unbounded, and all of it
-    /// serialized behind a hardware-to-software replacement that may itself be
-    /// respawning ffmpeg. A takeover's cleanup runs inside a bounded fan-out,
-    /// so it fences the session (making it immediately unservable, which is
-    /// the part that must not wait) and leaves the slow half to the detached
-    /// reaper rather than occupying a fan-out slot indefinitely.
+    /// Retirement takes the child-transition gate, kills and confirms the
+    /// process, releases admission, and removes the exact registry Arc. Those
+    /// steps may be serialized behind a hardware-to-software replacement that
+    /// is itself respawning ffmpeg. Unique scratch cleanup is a separate
+    /// retrying owner and is deliberately outside this replacement boundary.
     ///
     /// `hold` is anything the caller must not release until teardown has
     /// really finished — in practice the cluster replacement guard. Dropping
@@ -11259,16 +17188,15 @@ impl TranscodeManager {
         deadline: tokio::time::Instant,
         hold: T,
     ) -> bool {
-        // Fencing is the half that must be immediate and cannot block: every
-        // serving path reads this monotone bit.
-        self.fence_sessions(std::slice::from_ref(&session_id.to_owned()))
-            .await;
-        // Teardown itself runs detached, never cancelled. Dropping a
-        // half-finished retirement would leave the manager entry gone with the
-        // encoder still running, which is strictly worse than waiting.
+        // Transfer the replacement guard and all later actor/resource work
+        // before the first cancellable await. The deadline limits only this
+        // caller's wait; the exact cleanup owner continues to confirmed reap.
         let manager = Arc::clone(self);
         let owned_id = session_id.to_owned();
         let teardown = tokio::spawn(async move {
+            manager
+                .fence_sessions(std::slice::from_ref(&owned_id))
+                .await;
             let stopped = manager.stop_session(&owned_id, reason).await;
             drop(hold);
             stopped
@@ -11287,19 +17215,862 @@ impl TranscodeManager {
         }
     }
 
-    async fn touch(&self, session_id: &str, kind: &'static str) -> Option<Arc<Session>> {
+    /// Resolve a rolling capability without extending its lease.
+    ///
+    /// Object readers call this before publication/integrity/wait checks and
+    /// renew only after they have a concrete response to serve. Keeping those
+    /// operations separate prevents repeated misses from becoming synthetic
+    /// playback activity.
+    #[cfg(test)]
+    async fn live_session(&self, session_id: &str) -> Option<Arc<Session>> {
         let session = self.sessions.lock().await.get(session_id).cloned()?;
-        if session.retired.load(Acquire) {
-            return None;
-        }
-        *session.last_request.lock().await = LastRequest::now(kind);
-        Some(session)
+        (!session.control.is_retired()).then_some(session)
     }
 
-    /// Resolve the source and resume base attached to a live HLS capability.
-    pub async fn hls_context(&self, session_id: &str) -> Option<HlsContext> {
-        if let Some(facts) = self.vod.hls_facts(session_id).await {
-            let probe_json = self.store.get_file_probe_json(facts.file.id).await.ok()?;
+    fn publication_authority_is_current(&self, admitted_generation: u64) -> bool {
+        self.serving_authority.is_current(admitted_generation)
+    }
+
+    /// Admit a fully prepared response against the exact owner that resolved
+    /// its bytes. The registry identity is checked on both sides of actor
+    /// admission so a replacement cannot take the reusable session id during
+    /// the await and receive its predecessor's response.
+    pub(crate) async fn authorize_response_publication(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        publication: MediaResponsePublication,
+        deadline: Instant,
+    ) -> Result<MediaResponseAuthorization, MediaResponsePublicationRejection> {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        let release_gate = self
+            .session_adoption_gate(session_id)
+            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        if release_gate.released.load(Acquire) {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        let admitted_serving_generation = self
+            .serving_authority
+            .admit()
+            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        macro_rules! require_publication_authority {
+            () => {
+                if !self.publication_authority_is_current(admitted_serving_generation)
+                    || release_gate.released.load(Acquire)
+                {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+            };
+        }
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
+            require_publication_authority!();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
+            require_publication_authority!();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if !session.actor_managed_response_publication {
+                if session.control.current_producer_attempt() != *producer_attempt
+                    || session.control.is_retired()
+                    || !self.publication_authority_is_current(admitted_serving_generation)
+                {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+                return Ok(MediaResponseAuthorization {
+                    session_id: session_id.to_owned(),
+                    owner: owner.clone(),
+                    release_gate: Arc::clone(&release_gate),
+                    admitted_serving_generation,
+                    kind: publication.kind,
+                    object_name: publication.object_name,
+                    rolling_generation_metadata_fingerprint: None,
+                });
+            }
+            // Keep all actor-managed publication calls for this Session
+            // behind the exact first-media handoff. This is per generation,
+            // not the global registry lock: a concurrent second response
+            // cannot emit while the actor has closed prepublication but its
+            // lifetime-ownership handoff is not yet process-locally visible.
+            require_publication_authority!();
+            let _response_transition = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                session.response_publication_transition.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?;
+            require_publication_authority!();
+            require_publication_authority!();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
+            require_publication_authority!();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if session.control.is_retired() {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            let object = publication.rolling_object();
+            let media_segment_index = publication.rolling_media_segment_index(object);
+            let mut rolling_generation_metadata_fingerprint = None;
+            let actor_publication = match publication.binding {
+                MediaResponsePublicationBinding::GenerationMetadata => {
+                    let frozen = session
+                        .frozen_presentation
+                        .as_ref()
+                        .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+                    if frozen
+                        .sealed_stable_master_contract
+                        .as_ref()
+                        .is_some_and(|sealed| sealed == &frozen.contract_fingerprint)
+                    {
+                        rolling_generation_metadata_fingerprint =
+                            frozen.sealed_stable_master_contract.clone();
+                        crate::playback_control::RollingResponsePublication::generation_metadata(
+                            object,
+                            frozen.contract_fingerprint.clone(),
+                        )
+                    } else {
+                        crate::playback_control::RollingResponsePublication::attempt_media(
+                            object,
+                            *producer_attempt,
+                            media_segment_index,
+                        )
+                    }
+                }
+                MediaResponsePublicationBinding::AttemptMedia => {
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        object,
+                        *producer_attempt,
+                        media_segment_index,
+                    )
+                }
+                MediaResponsePublicationBinding::AttemptStatus => {
+                    crate::playback_control::RollingResponsePublication::attempt_status(
+                        object,
+                        *producer_attempt,
+                    )
+                }
+                MediaResponsePublicationBinding::ProtocolOnly => {
+                    crate::playback_control::RollingResponsePublication::protocol_only(
+                        object,
+                        *producer_attempt,
+                    )
+                }
+            };
+            let attempt_media_publication = matches!(
+                &actor_publication.binding,
+                crate::playback_control::RollingResponsePublicationBinding::AttemptMedia { .. }
+            );
+            let (actor_handoff, first_media_applied) = if attempt_media_publication
+                && session.actor_prepublication_producer.load(Acquire)
+            {
+                require_publication_authority!();
+                let Some((handoff, applied)) =
+                    begin_first_media_publication_handoff_before(session, session_id, deadline)
+                        .await
+                else {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                };
+                require_publication_authority!();
+                (Some(handoff), Some(applied))
+            } else {
+                (None, None)
+            };
+            require_publication_authority!();
+            let actor_authorization = session
+                .control
+                .authorize_response_publication(actor_publication, actor_handoff, deadline)
+                .await;
+            let actor_authorization = match actor_authorization {
+                Ok(authorization) => authorization,
+                Err(_) => {
+                    // Authorization is the final byte-publication fence. Only
+                    // after it rejects may a second exact actor snapshot
+                    // classify an already-open numeric segment as beyond the
+                    // immutable retained frontier. This preserves the typed
+                    // ProducerEnded response without a stale pre-check ever
+                    // replacing actor authorization.
+                    if attempt_media_publication {
+                        if let Some(requested_segment) = media_segment_index {
+                            require_publication_authority!();
+                            if let Some((PlaylistError::ProducerEnded(reason), published_segment)) =
+                                session
+                                    .published_producer_ended_before(*producer_attempt, deadline)
+                                    .await
+                            {
+                                require_publication_authority!();
+                                if producer_request_beyond_frontier(
+                                    Some(requested_segment),
+                                    published_segment,
+                                ) {
+                                    let current = tokio::time::timeout_at(
+                                        tokio::time::Instant::from_std(deadline),
+                                        self.sessions.lock(),
+                                    )
+                                    .await
+                                    .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+                                    .get(session_id)
+                                    .cloned();
+                                    require_publication_authority!();
+                                    if !current
+                                        .as_ref()
+                                        .is_some_and(|current| Arc::ptr_eq(current, session))
+                                    {
+                                        return Err(MediaResponsePublicationRejection::OwnerGone);
+                                    }
+                                    return Err(MediaResponsePublicationRejection::ProducerEnded(
+                                        reason,
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+            };
+            require_publication_authority!();
+            if actor_authorization.first_producer_media_publication {
+                let Some(applied) = first_media_applied else {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                };
+                require_publication_authority!();
+                if !tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), applied)
+                    .await
+                    .ok()
+                    .and_then(Result::ok)
+                    .unwrap_or(false)
+                {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+                require_publication_authority!();
+            }
+            if attempt_media_publication && session.actor_prepublication_producer.load(Acquire) {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            if attempt_media_publication && session.actor_managed_prepublication_process {
+                loop {
+                    if session.first_media_handoff_applied.load(Acquire) {
+                        break;
+                    }
+                    let applied = session.first_media_handoff_notify.notified();
+                    if session.first_media_handoff_applied.load(Acquire) {
+                        break;
+                    }
+                    require_publication_authority!();
+                    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), applied)
+                        .await
+                        .is_err()
+                    {
+                        return Err(MediaResponsePublicationRejection::StateChanged);
+                    }
+                    require_publication_authority!();
+                }
+            }
+            require_publication_authority!();
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
+            require_publication_authority!();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if object == crate::playback_control::RollingResponseObject::VideoMediaPlaylist && {
+                require_publication_authority!();
+                !tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    session.publish_compatibility_playlist(*producer_attempt, deadline),
+                )
+                .await
+                .unwrap_or(false)
+            } {
+                require_publication_authority!();
+                #[cfg(any(test, feature = "live-hls-recovery"))]
+                fail_prepublication_transaction(
+                    session,
+                    "actor-authorized playlist could not enter the exact compatibility attempt"
+                        .to_owned(),
+                )
+                .await;
+                #[cfg(not(any(test, feature = "live-hls-recovery")))]
+                session.control.fence_unavailable();
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            if !self.publication_authority_is_current(admitted_serving_generation)
+                || session.control.is_retired()
+            {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            return Ok(MediaResponseAuthorization {
+                session_id: session_id.to_owned(),
+                owner: owner.clone(),
+                release_gate: Arc::clone(&release_gate),
+                admitted_serving_generation,
+                kind: publication.kind,
+                object_name: publication.object_name,
+                rolling_generation_metadata_fingerprint,
+            });
+        }
+
+        let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        #[cfg(test)]
+        let admission_pause = self
+            .vod_publication_admission_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        #[cfg(test)]
+        if let Some(admission_pause) = admission_pause {
+            require_publication_authority!();
+            admission_pause.wait().await;
+            admission_pause.wait().await;
+            require_publication_authority!();
+        }
+        require_publication_authority!();
+        let owner_is_current = match publication.binding {
+            MediaResponsePublicationBinding::AttemptStatus => tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.vod
+                    .response_status_owner_is_current(session_id, vod_owner),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?,
+            MediaResponsePublicationBinding::GenerationMetadata
+            | MediaResponsePublicationBinding::AttemptMedia
+            | MediaResponsePublicationBinding::ProtocolOnly => tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.vod.response_owner_is_live(session_id, vod_owner),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?,
+        };
+        require_publication_authority!();
+        if !owner_is_current {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
+        }
+        Ok(MediaResponseAuthorization {
+            session_id: session_id.to_owned(),
+            owner: owner.clone(),
+            release_gate,
+            admitted_serving_generation,
+            kind: publication.kind,
+            object_name: publication.object_name,
+            rolling_generation_metadata_fingerprint: None,
+        })
+    }
+
+    /// Fence a bodyless startup/failure response against the exact Session
+    /// that classified it. A retryable 503 is actor-authorized protocol state;
+    /// a final 502 is bound to the exact Session's first-writer failure cell.
+    /// A true no-actor 404 has no owner and never enters this path.
+    pub(crate) async fn authorize_playlist_error_publication(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        error: &PlaylistError,
+        deadline: Instant,
+    ) -> Result<(), MediaResponsePublicationRejection> {
+        if self.session_release_is_active(session_id) {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        let admitted_serving_generation = self
+            .serving_authority
+            .admit()
+            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        macro_rules! require_error_authority {
+            () => {
+                if !self.publication_authority_is_current(admitted_serving_generation)
+                    || self.session_release_is_active(session_id)
+                {
+                    return Err(MediaResponsePublicationRejection::StateChanged);
+                }
+            };
+        }
+        let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        else {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
+        };
+        require_error_authority!();
+        let current = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        .get(session_id)
+        .cloned();
+        require_error_authority!();
+        let exact_current = current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, session));
+        let retired_integrity_owner =
+            current.is_none() && session.owns_retired_cache_integrity_failure(error);
+        if !exact_current && !retired_integrity_owner {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
+        }
+        let authorized = match error {
+            PlaylistError::StartupTimedOut(_) if session.actor_managed_response_publication => {
+                let publication = MediaResponsePublication::protocol_only("playlist-error");
+                require_error_authority!();
+                let authorized = session
+                    .control
+                    .authorize_response_publication(
+                        crate::playback_control::RollingResponsePublication::protocol_only(
+                            publication.rolling_object(),
+                            *producer_attempt,
+                        ),
+                        None,
+                        deadline,
+                    )
+                    .await
+                    .is_ok();
+                require_error_authority!();
+                authorized
+            }
+            PlaylistError::StartupTimedOut(_) => {
+                session.control.current_producer_attempt() == *producer_attempt
+                    && !session.control.is_retired()
+            }
+            PlaylistError::ProducerEnded(reason)
+                if session.actor_managed_prepublication_process =>
+            {
+                require_error_authority!();
+                let actor_failure = session
+                    .published_producer_ended_before(*producer_attempt, deadline)
+                    .await;
+                require_error_authority!();
+                let matches_actor = actor_failure.as_ref().is_some_and(|(actor_error, _)| {
+                    matches!(actor_error, PlaylistError::ProducerEnded(actor_reason) if actor_reason == reason)
+                });
+                if !matches_actor {
+                    false
+                } else {
+                    session
+                        .control
+                        .authorize_response_publication(
+                            crate::playback_control::RollingResponsePublication::attempt_status(
+                                // This actor-owned verdict describes the
+                                // rendition producer, whether the triggering
+                                // request was a playlist reload or a segment
+                                // beyond its frontier. ProtocolResponse is not
+                                // a valid attempt-status binding.
+                                crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                                *producer_attempt,
+                            ),
+                            None,
+                            deadline,
+                        )
+                        .await
+                        .is_ok()
+                }
+            }
+            PlaylistError::ProducerEnded(_) => false,
+            PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
+                session.failed.load(Relaxed) && session.failure_reason() == *error
+            }
+            PlaylistError::SessionGone => false,
+        };
+        if !authorized {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        require_error_authority!();
+        let current = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        .get(session_id)
+        .cloned();
+        require_error_authority!();
+        let exact_current = current
+            .as_ref()
+            .is_some_and(|current| Arc::ptr_eq(current, session));
+        let retired_integrity_owner =
+            current.is_none() && session.owns_retired_cache_integrity_failure(error);
+        if !self.publication_authority_is_current(admitted_serving_generation) {
+            Err(MediaResponsePublicationRejection::StateChanged)
+        } else if exact_current || retired_integrity_owner {
+            Ok(())
+        } else {
+            Err(MediaResponsePublicationRejection::OwnerGone)
+        }
+    }
+
+    /// Consume an exact response authorization at advertised EOF. The token
+    /// still carries the owner observed before publication, so completion can
+    /// never reconstruct authority from a reusable capability string.
+    pub(crate) async fn commit_authorized_media(
+        self: &Arc<Self>,
+        authorization: MediaResponseAuthorization,
+        complete_object: bool,
+        deadline: Instant,
+    ) -> Result<(), MediaResponsePublicationRejection> {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        let _release_transition = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            Arc::clone(&authorization.release_gate.transition).lock_owned(),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?;
+        if authorization.release_gate.released.load(Acquire) {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        let _serving_transition = self
+            .serving_authority
+            .commit_guard_before(authorization.admitted_serving_generation, deadline)
+            .await
+            .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+        if let Some(presentation_contract_fingerprint) = authorization
+            .rolling_generation_metadata_fingerprint
+            .as_deref()
+        {
+            let MediaResponseOwnerKind::Rolling { session, .. } = &authorization.owner.0 else {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            };
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(&authorization.session_id)
+            .cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if !session
+                .control
+                .commit_generation_metadata(
+                    presentation_contract_fingerprint,
+                    authorization.kind,
+                    deadline,
+                )
+                .await
+            {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(&authorization.session_id)
+            .cloned();
+            return if current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                Ok(())
+            } else {
+                Err(MediaResponsePublicationRejection::OwnerGone)
+            };
+        }
+        let committed = self
+            .commit_resolved_media_before(
+                &authorization.session_id,
+                &authorization.owner,
+                authorization.kind,
+                authorization.object_name.as_deref(),
+                complete_object,
+                deadline,
+            )
+            .await;
+        if committed {
+            Ok(())
+        } else {
+            Err(self
+                .response_publication_rejection(
+                    &authorization.session_id,
+                    &authorization.owner,
+                    deadline,
+                )
+                .await)
+        }
+    }
+
+    async fn response_publication_rejection(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        deadline: Instant,
+    ) -> MediaResponsePublicationRejection {
+        match &owner.0 {
+            MediaResponseOwnerKind::Rolling { session, .. } => {
+                let Ok(current) = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.sessions.lock(),
+                )
+                .await
+                else {
+                    return MediaResponsePublicationRejection::StateChanged;
+                };
+                let current = current.get(session_id).cloned();
+                if current
+                    .as_ref()
+                    .is_some_and(|current| Arc::ptr_eq(current, session))
+                {
+                    MediaResponsePublicationRejection::StateChanged
+                } else {
+                    MediaResponsePublicationRejection::OwnerGone
+                }
+            }
+            MediaResponseOwnerKind::Vod(owner) => {
+                if tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    self.vod.response_owner_is_live(session_id, owner),
+                )
+                .await
+                .unwrap_or(true)
+                {
+                    MediaResponsePublicationRejection::StateChanged
+                } else {
+                    MediaResponsePublicationRejection::OwnerGone
+                }
+            }
+        }
+    }
+
+    /// Commit a completed response against its resolved incarnation.
+    ///
+    /// The rolling actor or immutable registry must still own the capability
+    /// when response completion linearizes. Partial objects may renew demand,
+    /// but only a complete object moves the consumed frontier.
+    #[cfg(test)]
+    pub(crate) async fn commit_resolved_media(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        kind: &'static str,
+        object_name: Option<&str>,
+        complete_object: bool,
+    ) -> bool {
+        self.commit_resolved_media_before(
+            session_id,
+            owner,
+            kind,
+            object_name,
+            complete_object,
+            tokio::time::Instant::now().into_std() + Duration::from_secs(5),
+        )
+        .await
+    }
+
+    async fn commit_resolved_media_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        kind: &'static str,
+        object_name: Option<&str>,
+        complete_object: bool,
+        deadline: Instant,
+    ) -> bool {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return false;
+        }
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
+            let Ok(current) = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            else {
+                return false;
+            };
+            let current = current.get(session_id).cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return false;
+            }
+            let fetched_segment = complete_object
+                .then(|| object_name.and_then(segment_index))
+                .flatten();
+            let fetched_end_ms = if let Some(index) = fetched_segment {
+                let Ok(segments) = tokio::time::timeout_at(
+                    tokio::time::Instant::from_std(deadline),
+                    session.segments.lock(),
+                )
+                .await
+                else {
+                    return false;
+                };
+                segments.end_ms_of(index)
+            } else {
+                None
+            };
+            let media_handoff = fetched_segment.map(|index| {
+                self.ensure_flow_worker(session_id, Arc::clone(session));
+                session.control.media_commit_handoff(
+                    *producer_attempt,
+                    index,
+                    fetched_end_ms,
+                    Arc::clone(&session.compatibility_attempt),
+                    Arc::clone(&session.high_segment),
+                    Arc::clone(&session.fetched_end_ms),
+                )
+            });
+            if !session
+                .control
+                .commit_media(
+                    kind,
+                    *producer_attempt,
+                    fetched_segment,
+                    fetched_end_ms,
+                    media_handoff,
+                    deadline,
+                )
+                .await
+            {
+                return false;
+            }
+            #[cfg(test)]
+            {
+                let pause = session
+                    .response_projection_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .clone();
+                if let Some(pause) = pause {
+                    if tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), async {
+                        pause.wait().await;
+                        pause.wait().await;
+                    })
+                    .await
+                    .is_err()
+                    {
+                        return false;
+                    }
+                }
+            }
+            return true;
+        }
+        let vod_index = complete_object
+            .then(|| object_name.and_then(segment_index))
+            .flatten()
+            .and_then(|index| u32::try_from(index).ok());
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.commit_resolved_media(session_id, owner, vod_index),
+        )
+        .await
+        .unwrap_or(false)
+    }
+
+    /// Verify response ownership without renewing the lease or moving the
+    /// consumed frontier. This is the publication fence for streamed bodies;
+    /// their mutating commit happens only after the advertised bytes reach
+    /// EOF, so an abandoned response cannot masquerade as client progress.
+    #[allow(dead_code)] // Compatibility/test probe; production uses typed authorization.
+    pub(crate) async fn response_owner_is_live(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+    ) -> bool {
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
+            let current = self.sessions.lock().await.get(session_id).cloned();
+            return current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+                && session.control.current_producer_attempt() == *producer_attempt
+                && !session.control.is_retired();
+        }
+        let MediaResponseOwnerKind::Vod(owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        self.vod.response_owner_is_live(session_id, owner).await
+    }
+
+    /// Resolve frozen presentation facts and the exact current attempt owner
+    /// within one HTTP classification deadline. Rolling rows/probe JSON are
+    /// never re-read after generation creation. A retired-but-still-registered
+    /// Session is a current transition, not proof that the reusable id vanished.
+    pub(crate) async fn hls_presentation_before(
+        &self,
+        session_id: &str,
+        deadline: Instant,
+    ) -> HlsPresentationResolution {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return HlsPresentationResolution::StateChanged;
+        }
+        let vod_facts = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.hls_facts(session_id),
+        )
+        .await
+        {
+            Ok(facts) => facts,
+            Err(_) => return HlsPresentationResolution::StateChanged,
+        };
+        if let Some(facts) = vod_facts {
+            // The VOD registry freezes the file/recipe but does not yet retain
+            // raw codec side data. Preserve its existing Dolby/HEVC contract
+            // until that registry grows the missing immutable probe fact;
+            // rolling generations below never take this mutable-store path.
+            let probe_json = match tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.store.get_file_probe_json(facts.file.id),
+            )
+            .await
+            {
+                Ok(result) => result.ok().flatten(),
+                Err(_) => return HlsPresentationResolution::StateChanged,
+            };
             let (codecs, supplemental_codecs) = copied_hls_codecs(
                 &facts.file,
                 facts.audio_index,
@@ -11309,89 +18080,119 @@ impl TranscodeManager {
                 },
                 probe_json.as_deref(),
             );
-            return Some(HlsContext {
-                file_id: facts.file.id,
-                start_seconds: 0.0,
-                media_origin_seconds: 0.0,
-                codecs,
-                supplemental_codecs,
-                frame_rate: None,
-            });
+            return HlsPresentationResolution::Ready(
+                HlsContext {
+                    file_id: facts.file.id,
+                    start_seconds: 0.0,
+                    media_origin_seconds: 0.0,
+                    codecs,
+                    supplemental_codecs,
+                    frame_rate: frozen_video_frame_rate(probe_json.as_deref()),
+                },
+                facts.file,
+                MediaResponseOwner(MediaResponseOwnerKind::Vod(facts.response_owner)),
+            );
         }
-        let session = self.touch(session_id, "hls-context").await?;
-        Some(HlsContext {
-            file_id: session.file_id,
-            start_seconds: session.start_seconds,
-            media_origin_seconds: session.media_origin_seconds,
-            codecs: session.hls_codecs.clone(),
-            supplemental_codecs: session.hls_supplemental_codecs.clone(),
-            frame_rate: None,
-        })
+        let session = match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        {
+            Ok(sessions) => sessions.get(session_id).cloned(),
+            Err(_) => return HlsPresentationResolution::StateChanged,
+        };
+        let Some(session) = session else {
+            return HlsPresentationResolution::Gone;
+        };
+        if session.failed.load(Relaxed) {
+            return HlsPresentationResolution::Failed(PlaylistPublicationError::for_session(
+                session.failure_reason(),
+                &session,
+            ));
+        }
+        if session.control.is_retired() {
+            return HlsPresentationResolution::StateChanged;
+        }
+        let Some(presentation) = session.frozen_presentation.as_ref().cloned() else {
+            return HlsPresentationResolution::StateChanged;
+        };
+        HlsPresentationResolution::Ready(
+            presentation.context,
+            presentation.file,
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                producer_attempt: session.control.current_producer_attempt(),
+                session,
+            }),
+        )
     }
 
-    /// Share a producer's terminal startup verdict with every playlist reader.
-    ///
-    /// `false` means the producer is still running, exited cleanly, belongs to
-    /// a retired session, or does not exist because this is a cache hit. Only
-    /// a known non-zero exit from the session still registered under this id
-    /// is a failure, and callers invoke this only after finding no usable
-    /// playlist. Liveness is checked on both sides of child inspection: the
-    /// manager-wide guard is never held while a slow kill owns the per-session
-    /// child lock, while the final check still closes the remove-before-kill
-    /// teardown interval before the verdict is recorded.
-    async fn playlist_producer_failed(&self, session: &Arc<Session>, session_id: &str) -> bool {
-        if session.cached {
-            return false;
+    /// Resolve immutable presentation facts through an already-fenced
+    /// response owner. Rolling failures may retire their actor while the
+    /// exact Session remains registered; frozen subtitle metadata must not
+    /// turn that typed state into a live-facade 404 before final publication
+    /// admission gets to revalidate the owner.
+    pub(crate) async fn hls_presentation_for_owner_before(
+        &self,
+        session_id: &str,
+        owner: &MediaResponseOwner,
+        deadline: Instant,
+    ) -> Result<(HlsContext, plurx_core::domain::MediaFile), MediaResponsePublicationRejection>
+    {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
         }
-        let active = self
-            .sessions
-            .lock()
-            .await
-            .get(session_id)
-            .is_some_and(|active| Arc::ptr_eq(active, session));
-        if !active {
-            return false;
-        }
-        // A replacement holds this gate from before killing its predecessor
-        // until the successor is installed or has failed to spawn. Keep the
-        // playlist poll cadence instead of waiting behind that work; a later
-        // poll can judge the successor. Once acquired, retaining the gate
-        // through the final identity check prevents a fallback from starting
-        // between observation and the terminal failure store.
-        let Ok(_transition) = session.child_transition.try_lock() else {
-            return false;
-        };
-        let unsuccessful_exit = {
-            let mut child = session.child.lock().await;
-            if session.replacing_child.load(Acquire) {
-                return false;
-            }
-            child.as_mut().and_then(|child| match child.try_wait() {
-                Ok(Some(status)) if !status.success() => Some(status),
-                _ => None,
-            })
-        };
-        let Some(status) = unsuccessful_exit else {
-            return false;
-        };
-        let sessions = self.sessions.lock().await;
-        if !sessions
-            .get(session_id)
-            .is_some_and(|active| Arc::ptr_eq(active, session))
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
         {
-            return false;
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if session.failed.load(Relaxed)
+                || session.control.is_retired()
+                || session.control.current_producer_attempt() != *producer_attempt
+            {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            let presentation = session
+                .frozen_presentation
+                .as_ref()
+                .cloned()
+                .ok_or(MediaResponsePublicationRejection::StateChanged)?;
+            return Ok((presentation.context, presentation.file));
         }
-        tracing::error!(
-            session = %session_log_id(session_id),
-            %status,
-            "HLS producer exited unsuccessfully before publishing a usable playlist; \
-             failing the session"
-        );
-        // The exit status is the one fact that separates "this build refused
-        // the source" from "something killed it", and it is already in hand
-        // here. Record it so every later reader reports the same cause.
-        session.fail(PlaylistError::ProducerExited(status.to_string()));
-        true
+        let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        if !tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.response_owner_is_live(session_id, vod_owner),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
+        }
+        match self.hls_presentation_before(session_id, deadline).await {
+            HlsPresentationResolution::Ready(context, file, _) => Ok((context, file)),
+            HlsPresentationResolution::Gone => Err(MediaResponsePublicationRejection::OwnerGone),
+            HlsPresentationResolution::Failed(_) | HlsPresentationResolution::StateChanged => {
+                Err(MediaResponsePublicationRejection::StateChanged)
+            }
+        }
     }
 
     /// Read the current media playlist for a session.
@@ -11399,10 +18200,105 @@ impl TranscodeManager {
     /// Every terminal cause is named rather than collapsed — see
     /// [`PlaylistError`] for why an anonymous `None` was not survivable
     /// downstream.
-    pub async fn playlist(&self, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
-        let Some(session) = self.touch(session_id, "playlist").await else {
-            return Err(PlaylistError::SessionGone);
+    #[cfg(test)]
+    pub async fn playlist(self: &Arc<Self>, session_id: &str) -> Result<Vec<u8>, PlaylistError> {
+        self.playlist_with_owner(session_id)
+            .await
+            .map(|(bytes, _)| bytes)
+            .map_err(|error| error.error)
+    }
+
+    /// Resolve playlist bytes together with the exact rolling attempt that
+    /// supplied them. Composite resources such as native subtitle playlists
+    /// must carry this owner through their own response commit rather than
+    /// reconstructing ownership from a reusable session id afterward.
+    #[cfg(test)]
+    pub(crate) async fn playlist_with_owner(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+        self.playlist_with_owner_before(session_id, self.playlist_request_deadline())
+            .await
+    }
+
+    /// One absolute HTTP patience boundary. Reclassification may inspect a
+    /// newer attempt, but it must never mint another complete startup budget.
+    pub(crate) fn playlist_request_deadline(&self) -> Instant {
+        tokio::time::Instant::now().into_std() + self.playlist_wait()
+    }
+
+    pub(crate) async fn playlist_with_owner_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        deadline: Instant,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
+        let budget = self.playlist_wait();
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(PlaylistPublicationError::without_owner(
+                PlaylistError::StartupTimedOut(budget),
+            ));
+        }
+        // Resolve the exact registry incarnation even if its actor has just
+        // retired. A prepublication failure is stored before End and must
+        // remain publishable as its typed 502 while that exact Session still
+        // occupies the id; prefiltering retired actors here would erase the
+        // failure into an anonymous 404 before the owner fence can validate it.
+        let session = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .ok()
+        .and_then(|sessions| sessions.get(session_id).cloned());
+        let Some(session) = session else {
+            if tokio::time::Instant::now().into_std() >= deadline {
+                return Err(PlaylistPublicationError::without_owner(
+                    PlaylistError::StartupTimedOut(budget),
+                ));
+            }
+            return Err(PlaylistPublicationError::gone());
         };
+        match tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.playlist_with_owner_for_session_before(
+                session_id,
+                Arc::clone(&session),
+                deadline,
+                budget,
+            ),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) if session.failed.load(Relaxed) => Err(PlaylistPublicationError::for_session(
+                session.failure_reason(),
+                &session,
+            )),
+            Err(_) if session.control.is_retired() => Err(PlaylistPublicationError::for_session(
+                PlaylistError::StartupTimedOut(budget),
+                &session,
+            )),
+            Err(_) => {
+                tracing::warn!(
+                    session = %session_log_id(session_id),
+                    waited_s = budget.as_secs(),
+                    "playlist preparation exhausted its one absolute HTTP budget"
+                );
+                Err(PlaylistPublicationError::for_session(
+                    PlaylistError::StartupTimedOut(budget),
+                    &session,
+                ))
+            }
+        }
+    }
+
+    async fn playlist_with_owner_for_session_before(
+        self: &Arc<Self>,
+        session_id: &str,
+        session: Arc<Session>,
+        deadline: Instant,
+        budget: Duration,
+    ) -> Result<(Vec<u8>, MediaResponseOwner), PlaylistPublicationError> {
         // Hold the request until the playlist exists. On the transcode path
         // that is a beat after ffmpeg starts; on the copy path it is the
         // publish gate filling (COPY_PUBLISH_GATE_SECS), which on a
@@ -11417,8 +18313,6 @@ impl TranscodeManager {
         // spends one of a single error retry. A failed session still returns
         // immediately — the budget below is only ever spent on a session that
         // is genuinely still starting, never on one that has already lost.
-        let budget = self.playlist_wait();
-        let deadline = Instant::now() + budget;
         loop {
             // `touch` resolves the Arc once, but retirement is allowed to
             // remove that session while this request is waiting. The Arc
@@ -11426,12 +18320,32 @@ impl TranscodeManager {
             // addressable. Re-check the monotonic retirement verdict before
             // reading or serving so a superseded stream is reported as gone
             // promptly rather than held until the startup budget expires.
-            if session.retired.load(Acquire) {
-                return Err(PlaylistError::SessionGone);
-            }
             if session.failed.load(Relaxed) {
-                return Err(session.failure_reason());
+                return Err(PlaylistPublicationError::for_session(
+                    session.failure_reason(),
+                    &session,
+                ));
             }
+            if session.control.is_retired() {
+                return Err(PlaylistPublicationError::for_session(
+                    PlaylistError::StartupTimedOut(budget),
+                    &session,
+                ));
+            }
+            let Some(producer_attempt) = session.coherent_path_producer_attempt().await else {
+                if tokio::time::Instant::now().into_std() >= deadline {
+                    return Err(PlaylistPublicationError::for_session(
+                        PlaylistError::StartupTimedOut(budget),
+                        &session,
+                    ));
+                }
+                wait_for_playlist_poll_before(deadline).await;
+                continue;
+            };
+            // A startup request is allowed to span a pre-publication
+            // fallback. Fence each concrete read, not the whole wait, so old
+            // bytes are retried while valid successor bytes keep the original
+            // request alive.
             let playlist_bytes = if let Some(manifest) = &session.cache_manifest {
                 if session
                     .cache_location
@@ -11439,8 +18353,11 @@ impl TranscodeManager {
                     .is_some_and(|location| location.storage_class == "shared")
                 {
                     let Some(shared_cache) = self.shared_cache.as_ref() else {
-                        return Err(PlaylistError::SessionFailed(
-                            "shared cache coordinator is unavailable".to_owned(),
+                        return Err(PlaylistPublicationError::for_session(
+                            PlaylistError::SessionFailed(
+                                "shared cache coordinator is unavailable".to_owned(),
+                            ),
+                            &session,
                         ));
                     };
                     let manifest = Arc::clone(manifest);
@@ -11468,8 +18385,25 @@ impl TranscodeManager {
                     .ok()
                     .flatten()
             };
+            if session.replacing_child.load(Acquire)
+                || session.control.current_producer_attempt() != producer_attempt
+                || session.compatibility_producer_attempt() != producer_attempt
+            {
+                continue;
+            }
             if let Some(bytes) = playlist_bytes {
                 if !bytes.is_empty() {
+                    // A response body admitted before the actor's failure
+                    // verdict owns its bytes through EOF. A later playlist
+                    // reload is new demand beyond the retained frontier and
+                    // must receive the typed terminal producer state rather
+                    // than replay this partial EVENT playlist forever.
+                    if let Some((error, _)) = session
+                        .published_producer_ended_before(producer_attempt, deadline)
+                        .await
+                    {
+                        return Err(PlaylistPublicationError::for_session(error, &session));
+                    }
                     // ffmpeg rewrites an EVENT playlist after each segment. Do
                     // not let hls.js race away with the first one-segment
                     // version: its first reload is scheduled at the exact edge
@@ -11478,27 +18412,97 @@ impl TranscodeManager {
                     // first-response gate; cached VOD and copy have already
                     // opened it in their constructors, and every reload after
                     // the publication store below stays on the old fast path.
-                    if !session.playlist_published.load(Relaxed) {
-                        if !transcode_first_playlist_ready(&bytes) {
-                            if self.playlist_producer_failed(&session, session_id).await {
-                                return Err(session.failure_reason());
-                            }
-                            if Instant::now() >= deadline {
-                                return Err(PlaylistError::StartupTimedOut(budget));
-                            }
-                            tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
-                            continue;
+                    let Some(playlist_published) =
+                        session.compatibility_playlist_published(producer_attempt)
+                    else {
+                        continue;
+                    };
+                    if !playlist_published && !transcode_first_playlist_ready(&bytes) {
+                        if let Some((error, _)) = session
+                            .published_producer_ended_before(producer_attempt, deadline)
+                            .await
+                        {
+                            return Err(PlaylistPublicationError::for_session(error, &session));
                         }
-                        session.playlist_published.store(true, Relaxed);
+                        if tokio::time::Instant::now().into_std() >= deadline {
+                            return Err(PlaylistPublicationError::for_session(
+                                PlaylistError::StartupTimedOut(budget),
+                                &session,
+                            ));
+                        }
+                        wait_for_playlist_poll_before(deadline).await;
+                        continue;
                     }
-                    // The playlist just told us what is published — the one
-                    // moment the segment index can be refreshed for free.
-                    self.flow_control(&session, session_id).await;
-                    if session.retired.load(Acquire) {
-                        return Err(PlaylistError::SessionGone);
+                    // Actor readiness must come from the exact bytes this
+                    // response owns. A best-effort second filesystem read in
+                    // flow control cannot be the publication linearization
+                    // point: it may fail after these bytes were validated.
+                    let exact_index = SegmentIndex {
+                        segs: parse_playlist(&String::from_utf8_lossy(&bytes)),
+                        revision: 0,
+                    };
+                    #[cfg(test)]
+                    session.pause_playlist_publication_for_test().await;
+                    if !session
+                        .control
+                        .observe_publication_before(
+                            crate::playback_control::RollingPublicationObservation {
+                                producer_attempt,
+                                playlist_ready: true,
+                                published_segment: exact_index
+                                    .segs
+                                    .last()
+                                    .map(|segment| segment.index),
+                                published_end_ms: exact_index.produced_playable_end_ms(),
+                                next_media_sequence: exact_index.next_media_sequence(),
+                                resolved_fetched_segment: None,
+                                resolved_fetched_end_ms: None,
+                            },
+                            deadline,
+                        )
+                        .await
+                    {
+                        if session.control.is_retired() {
+                            return Err(PlaylistPublicationError::for_session(
+                                PlaylistError::StartupTimedOut(budget),
+                                &session,
+                            ));
+                        }
+                        continue;
+                    }
+                    // The exact bytes above are the response prerequisite.
+                    // Refreshing storage/accounting and signalling the child
+                    // is consequential background work, so queue it on the
+                    // session-owned worker instead of extending (or inheriting
+                    // cancellation from) this HTTP request.
+                    self.ensure_flow_worker(session_id, Arc::clone(&session));
+                    session.control.request_flow();
+                    if session.control.is_retired() {
+                        if session.failed.load(Relaxed) {
+                            return Err(PlaylistPublicationError::for_session(
+                                session.failure_reason(),
+                                &session,
+                            ));
+                        }
+                        return Err(PlaylistPublicationError::for_session(
+                            PlaylistError::StartupTimedOut(budget),
+                            &session,
+                        ));
+                    }
+                    if session.replacing_child.load(Acquire)
+                        || session.control.current_producer_attempt() != producer_attempt
+                        || session.compatibility_producer_attempt() != producer_attempt
+                    {
+                        continue;
                     }
                     if session.cached {
-                        return Ok(bytes);
+                        return Ok((
+                            bytes,
+                            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                                session: Arc::clone(&session),
+                                producer_attempt,
+                            }),
+                        ));
                     }
                     let first_retained = session.segments.lock().await.first_retained_index();
                     // A successor begins numbering at its epoch floor, so
@@ -11523,31 +18527,53 @@ impl TranscodeManager {
                                     now_unix.saturating_sub(session.started_unix),
                                 "served HLS playlist began sliding"
                             );
-                            self.emit_session_event(
-                                session_id,
-                                &session,
-                                "playlist_slide",
-                                SessionEventFields {
-                                    extra: Some(
-                                        serde_json::json!({
-                                            "first_retained_index": first_retained_index
-                                        })
-                                        .to_string(),
-                                    ),
-                                    ..SessionEventFields::default()
-                                },
-                            )
-                            .await;
+                            let manager = Arc::clone(self);
+                            let event_session = Arc::clone(&session);
+                            let event_session_id = session_id.to_owned();
+                            tokio::spawn(async move {
+                                manager
+                                    .emit_session_event(
+                                        &event_session_id,
+                                        &event_session,
+                                        "playlist_slide",
+                                        SessionEventFields {
+                                            extra: Some(
+                                                serde_json::json!({
+                                                    "first_retained_index": first_retained_index
+                                                })
+                                                .to_string(),
+                                            ),
+                                            ..SessionEventFields::default()
+                                        },
+                                    )
+                                    .await;
+                            });
                         }
                     }
-                    if session.retired.load(Acquire) {
-                        return Err(PlaylistError::SessionGone);
+                    if session.control.is_retired() {
+                        if session.failed.load(Relaxed) {
+                            return Err(PlaylistPublicationError::for_session(
+                                session.failure_reason(),
+                                &session,
+                            ));
+                        }
+                        return Err(PlaylistPublicationError::for_session(
+                            PlaylistError::StartupTimedOut(budget),
+                            &session,
+                        ));
                     }
-                    return Ok(served_live_playlist(
+                    let served = served_live_playlist(
                         bytes,
                         first_retained,
                         session.typeless_sliding,
                         session.takeover.as_ref(),
+                    );
+                    return Ok((
+                        served,
+                        MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                            session: Arc::clone(&session),
+                            producer_attempt,
+                        }),
                     ));
                 }
             }
@@ -11560,34 +18586,47 @@ impl TranscodeManager {
                     session_id,
                     &session,
                     "playlist_object_mismatch",
-                )
-                .await;
-                return Err(session.failure_reason());
+                );
+                return Err(PlaylistPublicationError::for_session(
+                    session.failure_reason(),
+                    &session,
+                ));
             }
-            // The stall watchdog deliberately grants a cold encoder its full
-            // startup grace, so it cannot surface a process that has already
-            // told us startup is impossible. This request polls much sooner
-            // and knows that no usable playlist was present above.
-            if self.playlist_producer_failed(&session, session_id).await {
-                return Err(session.failure_reason());
+            if let Some((error, _)) = session
+                .published_producer_ended_before(producer_attempt, deadline)
+                .await
+            {
+                return Err(PlaylistPublicationError::for_session(error, &session));
             }
-            if session.retired.load(Acquire) {
-                return Err(PlaylistError::SessionGone);
+            if session.failed.load(Relaxed) {
+                return Err(PlaylistPublicationError::for_session(
+                    session.failure_reason(),
+                    &session,
+                ));
+            }
+            if session.control.is_retired() {
+                return Err(PlaylistPublicationError::for_session(
+                    PlaylistError::StartupTimedOut(budget),
+                    &session,
+                ));
             }
             // Checked after the terminal verdicts, never before them: a
             // session that has already lost must not be reported as one that
             // merely ran out of time, and a session that is still inside the
             // recovery path must not be reported as terminal.
-            if Instant::now() >= deadline {
+            if tokio::time::Instant::now().into_std() >= deadline {
                 tracing::warn!(
                     session = %session_log_id(session_id),
                     waited_s = budget.as_secs(),
                     "no usable HLS playlist within the startup budget; telling the client \
                      to retry rather than that the stream failed"
                 );
-                return Err(PlaylistError::StartupTimedOut(budget));
+                return Err(PlaylistPublicationError::for_session(
+                    PlaylistError::StartupTimedOut(budget),
+                    &session,
+                ));
             }
-            tokio::time::sleep(PLAYLIST_WAIT_POLL).await;
+            wait_for_playlist_poll_before(deadline).await;
         }
     }
 
@@ -11598,7 +18637,7 @@ impl TranscodeManager {
     /// budget's *value* is pinned separately against the recovery graces it
     /// has to outlive, which is the relation whose absence caused #263.
     fn playlist_wait(&self) -> Duration {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         {
             let ms = self.playlist_wait_override_ms.load(Relaxed);
             if ms > 0 {
@@ -11615,14 +18654,83 @@ impl TranscodeManager {
     /// pruned prefix. The index keeps those duration-only entries even after
     /// their files are gone, so callers never reconstruct time from a segment
     /// number or the shortened playlist.
+    #[cfg(test)]
     pub async fn segment_window(&self, session_id: &str, segment_index: i64) -> Option<(f64, f64)> {
         if let Some(window) = self.vod.segment_window(session_id, segment_index).await {
             return Some(window);
         }
-        let session = self.touch(session_id, "segment-window").await?;
+        let session = self.live_session(session_id).await?;
         self.flow_control(&session, session_id).await;
         let (start_ms, end_ms) = session.segments.lock().await.window_ms_of(segment_index)?;
         Some((start_ms as f64 / 1000.0, end_ms as f64 / 1000.0))
+    }
+
+    /// Resolve subtitle timing through the same exact owner as the VTT body.
+    /// The old live-only facade erased terminal/transition state before HTTP
+    /// could classify it and could read a successor's catalog after an ABA.
+    pub(crate) async fn segment_window_for_owner_before(
+        &self,
+        session_id: &str,
+        segment_index: i64,
+        owner: &MediaResponseOwner,
+        deadline: Instant,
+    ) -> Result<Option<(f64, f64)>, MediaResponsePublicationRejection> {
+        if tokio::time::Instant::now().into_std() >= deadline {
+            return Err(MediaResponsePublicationRejection::StateChanged);
+        }
+        if let MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt,
+        } = &owner.0
+        {
+            let current = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                self.sessions.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .get(session_id)
+            .cloned();
+            if !current
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, session))
+            {
+                return Err(MediaResponsePublicationRejection::OwnerGone);
+            }
+            if session.failed.load(Relaxed)
+                || session.control.is_retired()
+                || session.control.current_producer_attempt() != *producer_attempt
+            {
+                return Err(MediaResponsePublicationRejection::StateChanged);
+            }
+            let window = tokio::time::timeout_at(
+                tokio::time::Instant::from_std(deadline),
+                session.segments.lock(),
+            )
+            .await
+            .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+            .window_ms_of(segment_index)
+            .map(|(start_ms, end_ms)| (start_ms as f64 / 1000.0, end_ms as f64 / 1000.0));
+            return Ok(window);
+        }
+        let MediaResponseOwnerKind::Vod(vod_owner) = &owner.0 else {
+            unreachable!("rolling response owner returned above")
+        };
+        if !tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.response_owner_is_live(session_id, vod_owner),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)?
+        {
+            return Err(MediaResponsePublicationRejection::OwnerGone);
+        }
+        tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.vod.segment_window(session_id, segment_index),
+        )
+        .await
+        .map_err(|_| MediaResponsePublicationRejection::StateChanged)
     }
 
     /// Open a segment for streaming, waiting for ffmpeg to produce it if
@@ -11636,18 +18744,46 @@ impl TranscodeManager {
     /// response stream, and opening it *here* closes the window where the
     /// retention sweep could unlink the path between resolving it and reading
     /// it: an unlinked file that is already open stays readable.
-    pub async fn segment(
-        &self,
+    pub(crate) async fn segment_for_publication(
+        self: &Arc<Self>,
         session_id: &str,
         name: &str,
-    ) -> Result<Option<SegmentFile>, SegmentOpenError> {
+    ) -> Result<SegmentPublication, SegmentOpenError> {
+        let deadline = Instant::now() + SEGMENT_WAIT;
         // Guard against path traversal: segment names are `segNNNNN.ts` only.
         if !is_safe_segment(name) {
-            return Ok(None);
+            return Ok(SegmentPublication::Missing(None));
         }
-        let Some(session) = self.touch(session_id, "segment").await else {
-            return Ok(None);
+        let session = tokio::time::timeout_at(
+            tokio::time::Instant::from_std(deadline),
+            self.sessions.lock(),
+        )
+        .await
+        .map_err(|_| SegmentOpenError::Capacity)?
+        .get(session_id)
+        .cloned();
+        let Some(session) = session else {
+            return Ok(SegmentPublication::Missing(None));
         };
+        // Negative classifications must carry the attempt that was current
+        // when this lookup began. If fallback crosses any later await, HTTP's
+        // AttemptStatus admission rejects this owner instead of authorizing a
+        // predecessor-derived 404 against the successor attempt.
+        let resolved_attempt = session.control.current_producer_attempt();
+        let current_owner = || {
+            MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+                session: Arc::clone(&session),
+                producer_attempt: resolved_attempt,
+            })
+        };
+        if session.failed.load(Relaxed) {
+            return Ok(SegmentPublication::Failed(
+                PlaylistPublicationError::for_session(session.failure_reason(), &session),
+            ));
+        }
+        if session.control.is_retired() {
+            return Ok(SegmentPublication::Pending(current_owner()));
+        }
         let path = session.dir.join(name);
         let idx = segment_index(name);
         let first_retained = session.segments.lock().await.first_retained_index();
@@ -11677,7 +18813,7 @@ impl TranscodeManager {
                 },
             )
             .await;
-            return Ok(None);
+            return Ok(SegmentPublication::Missing(Some(current_owner())));
         }
 
         let mut authenticated_cached_file = if let Some(manifest) = &session.cache_manifest {
@@ -11686,7 +18822,7 @@ impl TranscodeManager {
             // ordinary miss; only a listed object whose bytes fail validation
             // can convict and retire the generation.
             if !manifest.contains_object(name) {
-                return Ok(None);
+                return Ok(SegmentPublication::Missing(Some(current_owner())));
             }
             let verified_object = if session
                 .cache_location
@@ -11720,6 +18856,14 @@ impl TranscodeManager {
                         segment = name,
                         "cached object failed its generation manifest"
                     );
+                    // Ownership transfer is deliberately before telemetry:
+                    // the request can be cancelled at any later await without
+                    // abandoning invalidation or exact-session retirement.
+                    self.fail_cached_session_integrity(
+                        session_id,
+                        &session,
+                        "segment_object_mismatch",
+                    );
                     self.emit_session_event(
                         session_id,
                         &session,
@@ -11731,13 +18875,9 @@ impl TranscodeManager {
                         },
                     )
                     .await;
-                    self.fail_cached_session_integrity(
-                        session_id,
-                        &session,
-                        "segment_object_mismatch",
-                    )
-                    .await;
-                    return Ok(None);
+                    return Ok(SegmentPublication::Failed(
+                        PlaylistPublicationError::for_session(session.failure_reason(), &session),
+                    ));
                 }
             }
         } else {
@@ -11745,8 +18885,22 @@ impl TranscodeManager {
         };
 
         let started_waiting = Instant::now();
-        let deadline = Instant::now() + SEGMENT_WAIT;
         loop {
+            let Some(producer_attempt) = session.coherent_path_producer_attempt().await else {
+                if Instant::now() >= deadline {
+                    if session.failed.load(Relaxed) {
+                        return Ok(SegmentPublication::Failed(
+                            PlaylistPublicationError::for_session(
+                                session.failure_reason(),
+                                &session,
+                            ),
+                        ));
+                    }
+                    return Ok(SegmentPublication::Pending(current_owner()));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+                continue;
+            };
             let opened = if let Some(opened) = authenticated_cached_file.take() {
                 Some((opened.file, Some(opened.bytes), Some(opened.lease)))
             } else if session.cached {
@@ -11766,9 +18920,27 @@ impl TranscodeManager {
                     Some(len) => len,
                     None => match file.metadata().await {
                         Ok(metadata) => metadata.len(),
-                        Err(_) => return Ok(None),
+                        Err(_) => {
+                            return Ok(SegmentPublication::Missing(Some(MediaResponseOwner(
+                                MediaResponseOwnerKind::Rolling {
+                                    session: Arc::clone(&session),
+                                    producer_attempt,
+                                },
+                            ))));
+                        }
                     },
                 };
+                // The handle and its owner fence must describe the same
+                // producer attempt. If replacement crossed the open, discard
+                // the old handle and retry against the successor directory;
+                // sampling only at EOF would let predecessor bytes advance
+                // the successor's frontier.
+                if session.replacing_child.load(Acquire)
+                    || session.control.current_producer_attempt() != producer_attempt
+                    || session.compatibility_producer_attempt() != producer_attempt
+                {
+                    continue;
+                }
                 let waited = started_waiting.elapsed();
                 if idx.is_some() && waited >= SEGMENT_WAIT_EVENT_MIN {
                     let waited_ms = waited.as_millis().min(i64::MAX as u128) as i64;
@@ -11806,31 +18978,20 @@ impl TranscodeManager {
                     )
                     .await;
                 }
-                // The client's download frontier just advanced. Resolve it
-                // against the index's real EXTINF bounds — the fetched
-                // segment's own end time, not an index times a nominal
-                // duration — and re-run flow control, since a frontier that
-                // moved may have earned the encoder its slot back.
-                if let Some(i) = idx {
-                    let previous = session.high_segment.fetch_max(i, Relaxed);
-                    if i > previous {
-                        if let Some(end) = session.segments.lock().await.end_ms_of(i) {
-                            session.fetched_end_ms.fetch_max(end, Relaxed);
-                        }
-                        self.flow_control(&session, session_id).await;
-                    }
-                }
                 let encoder = (*session.encoder_label.lock().await).to_owned();
                 let delivery = SegmentDelivery::new(
-                    Arc::clone(&self.store),
-                    Arc::clone(&session),
-                    session_id,
-                    name,
-                    encoder,
+                    SegmentDeliveryContext {
+                        store: Arc::clone(&self.store),
+                        session: Arc::clone(&session),
+                        producer_attempt,
+                        session_id: session_id.to_owned(),
+                        segment: name.to_owned(),
+                        encoder,
+                    },
                     len,
                     snapshot_lease,
                 );
-                return Ok(Some(SegmentFile {
+                return Ok(SegmentPublication::Ready(SegmentFile {
                     file,
                     len,
                     delivery,
@@ -11871,22 +19032,36 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return Ok(None);
+                return Ok(SegmentPublication::Failed(
+                    PlaylistPublicationError::for_session(failure, &session),
+                ));
             }
-            let exited = {
-                let mut child = session.child.lock().await;
-                child
-                    .as_mut()
-                    .is_some_and(|c| matches!(c.try_wait(), Ok(Some(_))))
-            };
+            if let Some((failure, published_segment)) = session
+                .published_producer_ended_before(producer_attempt, deadline)
+                .await
+            {
+                let beyond_frontier = producer_request_beyond_frontier(idx, published_segment);
+                if beyond_frontier {
+                    let waited_ms =
+                        started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
+                    tracing::warn!(
+                        session = %session_log_id(session_id),
+                        segment = name,
+                        requested_segment = ?idx,
+                        published_segment = ?published_segment,
+                        waited_ms,
+                        reason = failure.code(),
+                        "HLS request crossed the retained frontier of an ended published producer"
+                    );
+                    return Ok(SegmentPublication::Failed(
+                        PlaylistPublicationError::for_session(failure, &session),
+                    ));
+                }
+            }
             let timed_out = Instant::now() >= deadline;
-            if exited || timed_out {
+            if timed_out {
                 let waited_ms = started_waiting.elapsed().as_millis().min(i64::MAX as u128) as i64;
-                let reason = if exited {
-                    "producer_exited"
-                } else {
-                    "producer_timeout"
-                };
+                let reason = "producer_timeout";
                 tracing::error!(
                     session = %session_log_id(session_id),
                     segment = name,
@@ -11921,10 +19096,28 @@ impl TranscodeManager {
                     },
                 )
                 .await;
-                return Ok(None);
+                return Ok(SegmentPublication::Pending(current_owner()));
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// Compatibility facade for internal probes and older tests. HTTP serving
+    /// uses [`Self::segment_for_publication`] so negative outcomes retain their
+    /// exact response owner and typed failure classification.
+    pub async fn segment(
+        self: &Arc<Self>,
+        session_id: &str,
+        name: &str,
+    ) -> Result<Option<SegmentFile>, SegmentOpenError> {
+        self.segment_for_publication(session_id, name)
+            .await
+            .map(|outcome| match outcome {
+                SegmentPublication::Ready(file) => Some(file),
+                SegmentPublication::Missing(_)
+                | SegmentPublication::Pending(_)
+                | SegmentPublication::Failed(_) => None,
+            })
     }
 
     /// Delete working directories under the transcode root that no live session
@@ -11985,7 +19178,7 @@ impl TranscodeManager {
     /// escape for a client that stops fetching: that client may leave the
     /// producer held while already-published media remains available. The
     /// `want_suspend == suspended` guard is load-bearing too: repeated polls
-    /// cannot re-signal the child or reset the watchdog's motion clock.
+    /// cannot re-signal the child or reset the actor's motion clock.
     /// SIGKILL still works on a stopped process, so idle/admin cleanup needs no
     /// special case.
     async fn apply_ahead_window(
@@ -11996,19 +19189,84 @@ impl TranscodeManager {
         global_live_bytes: i64,
         global_ahead_bytes: i64,
     ) {
-        let Some(ahead) = session.ahead().await else {
-            return; // nothing published yet — nothing to hold
+        // Control acceptance, expiry, retirement, child replacement, and
+        // producer signals all cross this gate. The actor remains the state
+        // authority; the gate only ensures that a flow decision made from one
+        // actor snapshot cannot signal a child after a newer lifecycle
+        // transition has already won.
+        let transition = session.child_transition.lock().await;
+        if session.control.is_retired() {
+            return;
+        }
+        let Some(lease) = session.control.snapshot().await else {
+            session.control.fence_unavailable();
+            return;
+        };
+        if lease.retired {
+            return;
+        }
+        let (ahead, published_end_ms) = {
+            let index = session.segments.lock().await;
+            (
+                ahead_of(&index, session.fetched_end_ms.load(Relaxed).max(0)),
+                index.produced_playable_end_ms(),
+            )
         };
         let suspended = session.suspended.load(Relaxed);
-        let hold = ahead_hold(
-            ahead,
+        let evaluation = evaluate_flow(FlowInputs {
+            physical_ahead: ahead,
+            published_end_ms,
+            media_origin_ms: (session.media_origin_seconds * 1_000.0).round() as i64,
+            lease_mode: lease.mode,
+            demand: lease.demand.as_ref(),
             global_live_bytes,
             global_ahead_bytes,
             limits,
-            suspended,
-        );
+            currently_suspended: suspended,
+        });
+        let hold = evaluation.hold;
         let want_suspend = hold.is_some();
         if want_suspend == suspended {
+            if let Some(hold) = hold {
+                let mut suspended_at = session.suspended_at.lock().await;
+                if let Some(previous) = suspended_at.as_mut() {
+                    if previous.hold != hold {
+                        let previous_reason = previous.hold.reason;
+                        previous.hold = hold;
+                        drop(suspended_at);
+                        drop(transition);
+                        tracing::info!(
+                            session = %session_log_id(session_id),
+                            previous_hold_reason = ?previous_reason,
+                            hold_reason = ?hold.reason,
+                            release_value = hold.release_value,
+                            production_policy = evaluation.policy,
+                            production_ahead_seconds = evaluation.production_ahead_seconds,
+                            production_target_seconds = evaluation.production_target_seconds,
+                            "transcode hold authority changed without resuming the producer"
+                        );
+                        self.emit_session_event(
+                            session_id,
+                            session,
+                            "hold_change",
+                            SessionEventFields {
+                                reason: Some("policy_change"),
+                                hold_reason: Some(hold.reason),
+                                extra: Some(flow_event_extra(
+                                    evaluation,
+                                    &lease,
+                                    ahead,
+                                    global_live_bytes,
+                                    global_ahead_bytes,
+                                    Some(previous_reason),
+                                )),
+                                ..SessionEventFields::default()
+                            },
+                        )
+                        .await;
+                    }
+                }
+            }
             return;
         }
         let signal = if want_suspend {
@@ -12018,60 +19276,85 @@ impl TranscodeManager {
         };
         let sent = {
             let child = session.child.lock().await;
-            match child.as_ref().and_then(|c| c.id()) {
-                // SAFETY: `kill(2)` with a pid this process owns and a signal
-                // constant. The child is alive as far as we know; a race with
-                // its exit yields ESRCH, which the return check handles.
-                Some(pid) => unsafe { libc::kill(pid as libc::pid_t, signal) == 0 },
-                None => false, // already reaped
+            match child.as_ref() {
+                // The sole process owner rechecks the actor's exact attempt
+                // and deadline fence immediately before signaling. No caller
+                // can race its cached pid against reaping or reuse.
+                Some(child) => child.signal(signal).await.unwrap_or(false),
+                None => false,
             }
         };
         if !sent {
             return;
         }
         if !want_suspend {
-            // Before the flag flips, so the watchdog can never observe
+            // Before the flag flips, so the actor can never observe
             // "running" beside a motion clock that still spans the suspension
             // — that read would fail a healthy session at the moment of its
             // resume, before ffmpeg has emitted a single post-SIGCONT block.
             session.progress.touch();
         }
-        session.suspended.store(want_suspend, Relaxed);
         if want_suspend {
-            let hold_reason = hold
-                .expect("a requested suspension has a hold reason")
-                .reason;
-            *session.suspended_at.lock().await = Some((Instant::now(), hold_reason));
+            let hold = hold.expect("a requested suspension has a hold reason");
+            *session.suspended_at.lock().await = Some(SuspendedAt {
+                since: Instant::now(),
+                hold,
+            });
+            session.suspended.store(true, Relaxed);
             let suspend_count = session.suspend_count.fetch_add(1, Relaxed) + 1;
+            crate::playback_control::record_producer_hold(hold.reason);
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count,
-                hold_reason = ?hold.map(|hold| hold.reason),
-                release_value = hold.map(|hold| hold.release_value),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
+                hold_reason = ?hold.reason,
+                release_value = hold.release_value,
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
                 global_live_bytes, global_ahead_bytes,
                 max_secs = limits.max_secs, max_bytes = limits.max_bytes,
-                "suspending transcode: far enough ahead of the client"
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "holding transcode producer"
             );
             self.emit_session_event(
                 session_id,
                 session,
                 "suspend",
                 SessionEventFields {
-                    hold_reason: Some(hold_reason),
+                    hold_reason: Some(hold.reason),
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        None,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
             .await;
         } else {
+            session.suspended.store(false, Relaxed);
             let held = session.suspended_at.lock().await.take();
-            let held_ms = held.map(|(at, _)| at.elapsed().as_millis().min(i64::MAX as u128) as i64);
-            let hold_reason = held.map(|(_, reason)| reason);
+            let held_ms =
+                held.map(|held| held.since.elapsed().as_millis().min(i64::MAX as u128) as i64);
+            let hold_reason = held.map(|held| held.hold.reason);
+            if let Some(hold_reason) = hold_reason {
+                crate::playback_control::record_producer_resume(hold_reason);
+            }
+            drop(transition);
             tracing::info!(
                 session = %session_log_id(session_id),
                 suspend_count = session.suspend_count.load(Relaxed),
-                ahead_seconds = ahead.seconds, ahead_bytes = ahead.bytes,
-                "resuming transcode: the client caught up"
+                ahead_seconds = ahead.map(|ahead| ahead.seconds),
+                ahead_bytes = ahead.map(|ahead| ahead.bytes),
+                production_policy = evaluation.policy,
+                production_ahead_seconds = evaluation.production_ahead_seconds,
+                production_target_seconds = evaluation.production_target_seconds,
+                "resuming transcode producer"
             );
             self.emit_session_event(
                 session_id,
@@ -12080,6 +19363,14 @@ impl TranscodeManager {
                 SessionEventFields {
                     hold_reason,
                     ms: held_ms,
+                    extra: Some(flow_event_extra(
+                        evaluation,
+                        &lease,
+                        ahead,
+                        global_live_bytes,
+                        global_ahead_bytes,
+                        hold_reason,
+                    )),
                     ..SessionEventFields::default()
                 },
             )
@@ -12131,6 +19422,60 @@ impl TranscodeManager {
             .insert(session_id.to_owned(), session);
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_subtitle_playlist_commit_pause(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .subtitle_playlist_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn pause_subtitle_playlist_commit_for_test(&self) {
+        let pause = self
+            .subtitle_playlist_commit_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(pause) = pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn install_vod_http_test_session(
+        &self,
+        session_id: &str,
+        file_id: i64,
+        base: &std::path::Path,
+    ) {
+        let file = self
+            .store
+            .get_file(file_id)
+            .await
+            .expect("HTTP VOD fixture file lookup")
+            .expect("HTTP VOD fixture file");
+        self.vod
+            .install_http_test_session(session_id, file, base)
+            .await;
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn vod_last_touch_for_test(&self, session_id: &str) -> Option<Instant> {
+        self.vod.last_touch_for_test(session_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_vod_terminal_detach_pause_for_test(&self, pause: Arc<tokio::sync::Barrier>) {
+        self.vod.set_terminal_detach_pause_for_test(pause);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn vod_has_attached_reader_for_test(&self, session_id: &str) -> bool {
+        self.vod.has_attached_reader_for_test(session_id).await
+    }
+
     /// Both byte views across every live session, from their cached figures —
     /// summing these must not cost a directory walk per session, or the flow
     /// controller could not run on every segment fetch.
@@ -12151,6 +19496,52 @@ impl TranscodeManager {
                     ahead + session.ahead_bytes.load(Relaxed),
                 )
             })
+    }
+
+    /// Ensure this rolling incarnation has exactly one detached consumer for
+    /// actor-owned flow tickets. The task is intentionally rooted in the
+    /// session, not in any HTTP request: accepted control remains effective
+    /// after cancellation, and response-body EOF never waits on a child
+    /// signal before it can publish END_STREAM.
+    fn ensure_flow_worker(self: &Arc<Self>, session_id: &str, session: Arc<Session>) {
+        if session.flow_worker_started.swap(true, AcqRel) {
+            return;
+        }
+        let manager = Arc::clone(self);
+        let session_id = session_id.to_owned();
+        tokio::spawn(async move {
+            let mut handled = 0_u64;
+            loop {
+                let ticket = session.control.next_flow_request(handled).await;
+                let is_current = manager
+                    .sessions
+                    .lock()
+                    .await
+                    .get(&session_id)
+                    .is_some_and(|current| Arc::ptr_eq(current, &session));
+                if session.control.is_retired() || !is_current {
+                    // Release any response already waiting on this generation;
+                    // it will observe retirement or replacement in status.
+                    session.control.complete_flow(ticket);
+                    break;
+                }
+                manager.flow_control(&session, &session_id).await;
+                #[cfg(test)]
+                let flow_pause = session
+                    .flow_completion_pause
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take();
+                #[cfg(test)]
+                if let Some(pause) = flow_pause {
+                    pause.wait().await;
+                    pause.wait().await;
+                }
+                handled = ticket;
+                session.control.complete_flow(ticket);
+            }
+            session.flow_worker_started.store(false, Release);
+        });
     }
 
     /// Re-evaluate one session after a client request refreshes the published
@@ -12174,48 +19565,59 @@ impl TranscodeManager {
         let mut ticker = tokio::time::interval(FLOW_CONTROL_REPAIR_INTERVAL);
         loop {
             ticker.tick().await;
-            let idle = Duration::from_secs(SESSION_IDLE_SECS);
+            let now_unix_ms = crate::media_sessions::unix_ms();
+            self.terminal_controls
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .retain(|_, operation| !operation.expired(now_unix_ms));
             let limits = self.ahead_limits().await;
             let mut expired = Vec::new();
             let mut live = Vec::new();
-            {
-                let sessions = self.sessions.lock().await;
-                for (id, s) in sessions.iter() {
-                    let last = s.last_request.lock().await;
-                    let idle_age = last.at.elapsed();
-                    if idle_age > idle {
-                        expired.push((id.clone(), Arc::clone(s), idle_age.as_secs(), last.kind));
-                    } else {
-                        live.push((id.clone(), Arc::clone(s)));
-                    }
+            let sessions = self
+                .sessions
+                .lock()
+                .await
+                .iter()
+                .map(|(id, session)| (id.clone(), Arc::clone(session)))
+                .collect::<Vec<_>>();
+            for (id, session) in sessions {
+                match self.session_reap_verdict(id, session).await {
+                    SessionReapVerdict::Live(id, session) => live.push((id, session)),
+                    SessionReapVerdict::CleanupOwned => {}
+                    SessionReapVerdict::Expired {
+                        id,
+                        session,
+                        idle_seconds,
+                        last_request,
+                        cleanup_reason,
+                    } => expired.push((id, session, idle_seconds, last_request, cleanup_reason)),
                 }
             }
-            for (id, session, idle_seconds, last_request) in expired {
+            for (id, session, idle_seconds, last_request, cleanup_reason) in expired {
                 // Kills a suspended child too — SIGKILL is not blockable and
                 // does not need the process scheduled to take effect.
-                if !self.retire_session(&id, &session).await {
-                    continue;
-                }
                 let end_reason = if session.failed.load(Relaxed) {
                     "failed"
                 } else {
-                    "idle"
+                    cleanup_reason
                 };
-                self.emit_session_event(
-                    &id,
-                    &session,
-                    "session_end",
-                    SessionEventFields {
-                        reason: Some(end_reason),
-                        ..SessionEventFields::default()
-                    },
-                )
-                .await;
+                let Ok(outcome) = self
+                    .retire_session_until_with_cause(&id, &session, None, end_reason)
+                    .await
+                else {
+                    continue;
+                };
+                if !outcome.removed {
+                    continue;
+                }
                 tracing::info!(
                     session = %session_log_id(&id),
                     idle_seconds,
                     last_request,
-                    "reaped idle transcode session"
+                    requested_reason = end_reason,
+                    winning_reason = %outcome.cause,
+                    participation = ?outcome.participation,
+                    "reaped transcode session after lease actor verdict"
                 );
             }
             // What this box actually achieves, remembered per class of work.
@@ -12247,10 +19649,74 @@ impl TranscodeManager {
             }
         }
     }
+
+    async fn session_reap_verdict(&self, id: String, session: Arc<Session>) -> SessionReapVerdict {
+        if session.retirement_cleanup_started.load(Acquire)
+            || session.prepublication_cleanup_active.load(Acquire)
+            || session.cache_integrity_cleanup_started.load(Acquire)
+        {
+            return SessionReapVerdict::CleanupOwned;
+        }
+        // Serialize the actor's expiry fence with every producer signal and
+        // child transition. A pending accepted-End handoff is live only for
+        // cleanup purposes: the actor is terminal, but removing its Arc before
+        // the replicated acknowledgement lands would discard the winner.
+        let transition = session.child_transition.lock().await;
+        if session.retirement_cleanup_started.load(Acquire)
+            || session.prepublication_cleanup_active.load(Acquire)
+            || session.cache_integrity_cleanup_started.load(Acquire)
+        {
+            drop(transition);
+            return SessionReapVerdict::CleanupOwned;
+        }
+        if session.terminal_response_pending.load(Acquire) {
+            drop(transition);
+            return SessionReapVerdict::Live(id, session);
+        }
+        let claim = session.control.claim_expiry().await;
+        drop(transition);
+        match claim {
+            Ok(crate::playback_control::RollingExpiryClaim::Claimed(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: "idle",
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Retired(lease)) => {
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: lease.idle_for.as_secs(),
+                    last_request: lease.last_renewal_kind,
+                    cleanup_reason: if lease.expiration_claimed {
+                        "idle"
+                    } else {
+                        "retired_recovery"
+                    },
+                }
+            }
+            Ok(crate::playback_control::RollingExpiryClaim::Live) => {
+                SessionReapVerdict::Live(id, session)
+            }
+            Err(_) => {
+                session.control.fence_unavailable();
+                SessionReapVerdict::Expired {
+                    id,
+                    session,
+                    idle_seconds: 0,
+                    last_request: "control-unavailable",
+                    cleanup_reason: "control_unavailable",
+                }
+            }
+        }
+    }
 }
 
 /// Only `segNNNNN.ts` names are valid segment requests.
-fn is_safe_segment(name: &str) -> bool {
+pub(crate) fn is_safe_segment(name: &str) -> bool {
     // fMP4 (copy-video) HLS: one init object per ownership generation.
     if is_init_object(name) {
         return true;
@@ -12284,6 +19750,19 @@ fn segment_was_pruned(index: Option<i64>, first_retained: Option<i64>) -> bool {
     matches!((index, first_retained), (Some(index), Some(first)) if index < first)
 }
 
+fn producer_request_beyond_frontier(
+    requested_segment: Option<i64>,
+    published_segment: Option<i64>,
+) -> bool {
+    match (requested_segment, published_segment) {
+        (Some(requested), Some(published)) => requested > published,
+        // A missing initialization/unnumbered object cannot be produced after
+        // the actor has ended the process, and no numbered segment was ever
+        // published when the frontier is absent.
+        (_, None) | (None, Some(_)) => true,
+    }
+}
+
 /// Delete published segments that have fallen out of the retention window.
 ///
 /// The window is measured back from the client's DOWNLOAD frontier, not from
@@ -12298,6 +19777,101 @@ fn segment_was_pruned(index: Option<i64>, first_retained: Option<i64>) -> bool {
 ///
 /// `init.mp4` and the playlist are never candidates — neither carries an
 /// EXTINF, so neither appears in the index.
+fn ensure_retention_cleanup(session: &Session) {
+    let should_start = {
+        let queue = session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        !queue.is_empty()
+            && session
+                .retention_cleanup_active
+                .compare_exchange(false, true, AcqRel, Acquire)
+                .is_ok()
+    };
+    if !should_start {
+        return;
+    }
+
+    #[cfg(test)]
+    let cleanup_pause = session
+        .retention_delete_pause
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    let queue = Arc::clone(&session.retention_cleanup_queue);
+    let active = Arc::clone(&session.retention_cleanup_active);
+    let garbage_bytes = Arc::clone(&session.retention_garbage_bytes);
+    let live_bytes = Arc::clone(&session.live_bytes);
+    tokio::spawn(async move {
+        #[cfg(test)]
+        if let Some(pause) = &cleanup_pause {
+            pause.wait().await;
+            pause.wait().await;
+        }
+        let pass_len = queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        for _ in 0..pass_len {
+            let next = queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .first()
+                .cloned();
+            let Some((path, _)) = next else {
+                break;
+            };
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        garbage = ?path.file_name(),
+                        %error,
+                        "retention garbage cleanup failed; bytes remain charged for retry"
+                    );
+                    // Do not let one permanently busy/corrupt entry strand
+                    // the independently deletable tail. Rotate this failure
+                    // behind the current pass; its accounting remains intact
+                    // and the next repair tick retries it once.
+                    let mut queued = queue
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    if let Some(position) = queued
+                        .iter()
+                        .position(|(queued_path, _)| queued_path == &path)
+                    {
+                        let failed = queued.remove(position);
+                        queued.push(failed);
+                    }
+                    continue;
+                }
+            }
+
+            // Serialize the queue removal and both accounting mutations with
+            // refresh/reset stores. Otherwise a refresh between two atomic
+            // decrements could publish a double-subtracted live total.
+            let mut queued = queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(position) = queued
+                .iter()
+                .position(|(queued_path, _)| queued_path == &path)
+            {
+                let bytes = queued.remove(position).1;
+                garbage_bytes.store(garbage_bytes.load(Relaxed).saturating_sub(bytes), Release);
+                live_bytes.store(live_bytes.load(Relaxed).saturating_sub(bytes), Release);
+            }
+        }
+        active.store(false, Release);
+        #[cfg(test)]
+        if let Some(pause) = &cleanup_pause {
+            pause.wait().await;
+        }
+    });
+}
+
 async fn gc_expired_segments(session: &Session) {
     // Never against a cache entry. Retention exists to bound the scratch a
     // live encoder is producing; a cached asset is a finished artifact that
@@ -12307,37 +19881,129 @@ async fn gc_expired_segments(session: &Session) {
     if session.cached {
         return;
     }
+    // A failed detached unlink remains queued and charged. The next repair
+    // tick retries it, while the active/queued check below refuses to hand off
+    // a second batch and thus bounds each session to one cleanup owner.
+    ensure_retention_cleanup(session);
+    // Segment names are reused by a replacement. Sample the attempt before
+    // waiting, then own the producer transition through a bounded metadata
+    // handoff to unservable, attempt-private names. A replacement that won
+    // first makes the sample stale; one that arrives later cannot clear/reseed
+    // the directory until no predecessor delete still names a served path.
+    let producer_attempt = session.control.current_producer_attempt();
+    let producer_transition = session.child_transition.lock().await;
+    if session.retention_cleanup_active.load(Acquire)
+        || !session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    {
+        return;
+    }
+    if session.replacing_child.load(Acquire)
+        || session.control.current_producer_attempt() != producer_attempt
+        || session.compatibility_producer_attempt() != producer_attempt
+    {
+        return;
+    }
     let frontier = session.fetched_end_ms.load(Relaxed);
     let keep_from = frontier - RETENTION_SECS * 1000;
     if keep_from <= 0 {
         return; // nothing can be old enough yet
     }
-    let doomed: Vec<String> = {
+    let doomed: Vec<(String, i64)> = {
         let index = session.segments.lock().await;
-        index.prunable(keep_from).map(|s| s.name.clone()).collect()
+        index
+            .prunable(keep_from)
+            .take(RETENTION_HANDOFF_BATCH)
+            .map(|segment| (segment.name.clone(), segment.bytes.max(0)))
+            .collect()
     };
     if doomed.is_empty() {
         return;
     }
-    for name in &doomed {
-        let _ = tokio::fs::remove_file(session.dir.join(name)).await;
+    let sweep = RETENTION_SWEEP_ID.fetch_add(1, Relaxed);
+    let mut moved = Vec::with_capacity(doomed.len());
+    for (name, indexed_bytes) in doomed {
+        let garbage = session.dir.join(format!(
+            ".plurx-retention-{producer_attempt}-{sweep}-{name}"
+        ));
+        match tokio::fs::rename(session.dir.join(&name), &garbage).await {
+            Ok(()) => {
+                let measured_bytes = match tokio::fs::metadata(&garbage).await {
+                    Ok(metadata) => i64::try_from(metadata.len()).unwrap_or(i64::MAX),
+                    Err(error) => {
+                        tracing::warn!(
+                            producer_attempt,
+                            segment = %name,
+                            %error,
+                            indexed_bytes,
+                            "retention could not remeasure handed-off bytes; retaining the completed-segment accounting"
+                        );
+                        indexed_bytes
+                    }
+                };
+                moved.push((name, garbage, measured_bytes.max(indexed_bytes)));
+            }
+            Err(error) => tracing::warn!(
+                producer_attempt,
+                segment = %name,
+                %error,
+                "retention could not hand off a predecessor segment"
+            ),
+        }
     }
-    // Forget their sizes so the budget stops counting bytes that are no longer
-    // on disk.
-    let doomed: std::collections::HashSet<&str> = doomed.iter().map(String::as_str).collect();
+    if moved.is_empty() {
+        return;
+    }
+    // Forget sizes only for paths whose rename completed. A failed handoff
+    // leaves the served name and its accounting intact for the next sweep.
+    let moved_paths: std::collections::HashMap<&str, (&PathBuf, i64)> = moved
+        .iter()
+        .map(|(name, path, bytes)| (name.as_str(), (path, *bytes)))
+        .collect();
     let mut index = session.segments.lock().await;
+    let mut garbage = Vec::with_capacity(moved.len());
     for seg in index.segs.iter_mut() {
-        if doomed.contains(seg.name.as_str()) {
+        if let Some((path, bytes)) = moved_paths.get(seg.name.as_str()) {
+            garbage.push(((*path).clone(), *bytes));
             seg.bytes = 0;
-            // The file is gone; without the flag every later refresh would
-            // re-stat it forever to relearn that.
+            // The served path is gone; without the flag every later refresh
+            // would re-stat it forever to relearn that.
             seg.pruned = true;
         }
     }
-    // The budget number follows the deletion now, not at the next refresh:
-    // freed disk a suspended session cannot trigger a refresh for should
-    // release the global cap on the reaper pass that freed it.
-    session.live_bytes.store(index.total_bytes(), Relaxed);
+    index.revision = index.revision.wrapping_add(1);
+    let handed_off_bytes = garbage
+        .iter()
+        .fold(0_i64, |total, (_, bytes)| total.saturating_add(*bytes));
+    {
+        let mut cleanup_queue = session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        cleanup_queue.extend(garbage);
+        let garbage_bytes = session
+            .retention_garbage_bytes
+            .load(Relaxed)
+            .saturating_add(handed_off_bytes);
+        session
+            .retention_garbage_bytes
+            .store(garbage_bytes, Release);
+        // Rename changes served ownership, not disk use. Keep every handed-off
+        // byte charged until detached cleanup confirms the path is absent.
+        session
+            .live_bytes
+            .store(index.total_bytes().saturating_add(garbage_bytes), Relaxed);
+    }
+    drop(index);
+    drop(producer_transition);
+
+    // Slow payload unlinks neither own the producer-path transition nor stall
+    // the sequential global repair loop. Hidden names are not valid HLS
+    // objects, and a successor may safely reuse every original segment name.
+    ensure_retention_cleanup(session);
 }
 
 /// A sensible video bitrate (kbps) for a target height.
@@ -12465,11 +20131,11 @@ const HDR10_4K_MAX_LUMA_SAMPLES: i64 = 8_912_896;
 /// Note the **H**igh tier: `should_serve_high_tier_media_playlist` already
 /// collapses a High-tier HDR master to its media rendition for AVPlayer, and
 /// this rung inherits that unchanged.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const HDR10_HLS_CODEC: &str = "hvc1.2.4.H120.90";
 /// Measured from the 2160p QSV output's hvcC: Main10, compatibility 4, High
 /// tier, level 150, constraint byte 0x90.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 
 /// The RFC 6381 `CODECS` value for a *re-encoded* HLS session.
@@ -12479,7 +20145,7 @@ const HDR10_4K_HLS_CODEC: &str = "hvc1.2.4.H150.90";
 /// read, and unlike an fMP4 session there is no `init.mp4` for
 /// `http::hls::exact_hls_context` to open (this muxer writes MPEG-TS). So the
 /// string is the grade's, and the grade is the pipeline's.
-#[cfg(test)]
+#[cfg(any(test, feature = "live-hls-recovery"))]
 fn transcoded_hls_codecs(grade: OutputGrade, target_height: i64) -> String {
     match grade {
         OutputGrade::Sdr => "avc1.640034,mp4a.40.2".to_owned(),
@@ -12696,6 +20362,54 @@ impl HlsDeliveryFixture {
     /// Publish a producer-less session under `session_id`, serving whatever
     /// files the caller writes into `dir`.
     pub(crate) async fn publish(dir: &std::path::Path, session_id: &str) -> Self {
+        Self::publish_with_takeover(dir, session_id, None).await
+    }
+
+    pub(crate) async fn publish_takeover(
+        dir: &std::path::Path,
+        session_id: &str,
+        incarnation_id: &str,
+        owner_epoch: i64,
+    ) -> Self {
+        Self::publish_with_takeover(
+            dir,
+            session_id,
+            Some(SessionTakeoverStart {
+                provisional_session_id: session_id.to_owned(),
+                incarnation_id: incarnation_id.to_owned(),
+                origin_base_ms: 0,
+                frontier_offset_ms: 0,
+                media_sequence: owner_epoch
+                    .saturating_mul(crate::media_sessions::TAKEOVER_SEQUENCE_STRIDE),
+                discontinuity_sequence: owner_epoch.saturating_sub(1),
+                owner_epoch,
+            }),
+        )
+        .await
+    }
+
+    async fn publish_with_separate_state_root(
+        session_dir: &std::path::Path,
+        state_root: &std::path::Path,
+        session_id: &str,
+    ) -> Self {
+        Self::publish_with_takeover_and_state_root(session_dir, state_root, session_id, None).await
+    }
+
+    async fn publish_with_takeover(
+        dir: &std::path::Path,
+        session_id: &str,
+        takeover: Option<SessionTakeoverStart>,
+    ) -> Self {
+        Self::publish_with_takeover_and_state_root(dir, dir, session_id, takeover).await
+    }
+
+    async fn publish_with_takeover_and_state_root(
+        session_dir: &std::path::Path,
+        state_root: &std::path::Path,
+        session_id: &str,
+        takeover: Option<SessionTakeoverStart>,
+    ) -> Self {
         use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
         use plurx_core::store::SqliteStore;
 
@@ -12735,19 +20449,37 @@ impl HlsDeliveryFixture {
             .await
             .expect("file");
 
-        let mut raw_session = test_session(dir.to_path_buf());
+        let mut raw_session = test_session(session_dir.to_path_buf());
+        raw_session.takeover = takeover;
         raw_session.file_id = file_id;
+        let frozen_file = store
+            .get_file(file_id)
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        raw_session.frozen_presentation = Some(FrozenHlsPresentation::new(
+            frozen_file,
+            HlsContext {
+                file_id,
+                start_seconds: 0.0,
+                media_origin_seconds: 0.0,
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                supplemental_codecs: None,
+                frame_rate: None,
+            },
+            &raw_session.kind,
+        ));
         let session = Arc::new(raw_session);
         let state = crate::state::AppState::new(
             "test".into(),
             Arc::clone(&store),
             crate::state::Dirs {
-                artwork: dir.join("artwork"),
-                transcode: dir.join("transcode"),
-                cache: dir.join("cache"),
-                subs: dir.join("subs"),
-                runtime_cache: dir.join("runtime"),
-                renditions: dir.join("renditions"),
+                artwork: state_root.join("artwork"),
+                transcode: state_root.join("transcode"),
+                cache: state_root.join("cache"),
+                subs: state_root.join("subs"),
+                runtime_cache: state_root.join("runtime"),
+                renditions: state_root.join("renditions"),
             },
             "test-node".into(),
             EncoderCaps::default(),
@@ -12769,6 +20501,159 @@ impl HlsDeliveryFixture {
     /// `delivered_bps` in status and in every playback event.
     pub(crate) fn delivered_bytes(&self) -> i64 {
         self.session.delivery.total_bytes()
+    }
+
+    pub(crate) fn file_id(&self) -> i64 {
+        self.session.file_id
+    }
+
+    pub(crate) async fn last_renewal_kind(&self) -> &'static str {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
+            .last_renewal_kind
+    }
+
+    pub(crate) fn fetched_segment(&self) -> i64 {
+        self.session.high_segment.load(Relaxed)
+    }
+
+    pub(crate) async fn actor_delivery(&self) -> crate::playback_control::RollingDeliverySnapshot {
+        self.session
+            .control
+            .snapshot()
+            .await
+            .expect("fixture control actor")
+            .delivery
+    }
+
+    pub(crate) async fn wait_for_delivery_projection(
+        &self,
+        expected_kind: &'static str,
+        expected_fetched_segment: Option<i64>,
+    ) -> crate::playback_control::RollingDeliverySnapshot {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let snapshot = self
+                    .session
+                    .control
+                    .snapshot()
+                    .await
+                    .expect("fixture control actor");
+                if snapshot.last_renewal_kind == expected_kind
+                    && snapshot.delivery.fetched_segment == expected_fetched_segment
+                {
+                    return snapshot.delivery;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached response completion reached the control actor")
+    }
+
+    pub(crate) async fn refresh_frozen_presentation_from_store(&mut self, session_id: &str) {
+        let file = self
+            .store
+            .get_file(self.session.file_id)
+            .await
+            .expect("fixture file lookup")
+            .expect("fixture file");
+        let registered = self
+            .state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .remove(session_id)
+            .expect("registered fixture session");
+        assert!(Arc::ptr_eq(&registered, &self.session));
+        drop(registered);
+
+        let session = Arc::get_mut(&mut self.session)
+            .expect("fixture owns the only session reference while rebuilding presentation");
+        let context = session
+            .frozen_presentation
+            .as_ref()
+            .expect("frozen fixture presentation")
+            .context
+            .clone();
+        session.frozen_presentation =
+            Some(FrozenHlsPresentation::new(file, context, &session.kind));
+        self.state
+            .transcode
+            .register_session_for_test(session_id, Arc::clone(&self.session))
+            .await;
+    }
+
+    pub(crate) async fn begin_producer_attempt(
+        &self,
+    ) -> Result<u64, crate::playback_control::ProducerAttemptRejection> {
+        let producer_attempt = self.session.control.begin_producer_attempt().await?;
+        self.session
+            .reset_compatibility_delivery(producer_attempt)
+            .await;
+        Ok(producer_attempt)
+    }
+
+    pub(crate) async fn hold_child_transition(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.session.child_transition.lock().await
+    }
+
+    pub(crate) fn pause_response_projection(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .response_projection_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) fn pause_playlist_publication(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) fn pause_control_after_acceptance(&self, pause: Arc<tokio::sync::Barrier>) {
+        *self
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(pause);
+    }
+
+    pub(crate) async fn worker_is_registered(&self, session_id: &str) -> bool {
+        self.state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .contains_key(session_id)
+    }
+
+    pub(crate) async fn reaper_pass_keeps_worker(&self, session_id: &str) -> bool {
+        let Some(session) = self
+            .state
+            .transcode
+            .sessions
+            .lock()
+            .await
+            .get(session_id)
+            .cloned()
+        else {
+            return false;
+        };
+        matches!(
+            self.state
+                .transcode
+                .session_reap_verdict(session_id.to_owned(), session)
+                .await,
+            SessionReapVerdict::Live(_, _)
+        )
     }
 
     /// Every `segment_delivery_*` row recorded so far, once at least `want` of
@@ -12829,28 +20714,56 @@ fn test_session(dir: PathBuf) -> Session {
         .kill_on_drop(true)
         .spawn()
         .expect("spawn placeholder child");
+    let control = crate::playback_control::RollingControlHandle::spawn("test-start");
     Session {
         dir,
-        child: Mutex::new(Some(child)),
+        response_incarnation: uuid::Uuid::new_v4(),
+        frozen_presentation: None,
+        actor_managed_response_publication: false,
+        actor_managed_prepublication_process: false,
+        actor_prepublication_producer: Arc::new(AtomicBool::new(false)),
+        response_publication_transition: Mutex::new(()),
+        first_media_handoff_applied: AtomicBool::new(false),
+        first_media_handoff_notify: tokio::sync::Notify::new(),
+        prepublication_cleanup_active: AtomicBool::new(false),
+        retirement_cleanup_started: AtomicBool::new(false),
+        retirement_cleanup_finished: AtomicBool::new(false),
+        retirement_settlement: std::sync::Mutex::new(None),
+        scratch_cleanup_started: AtomicBool::new(false),
+        retirement_context: None,
+        cache_integrity_cleanup_started: AtomicBool::new(false),
+        child: Mutex::new(Some(AttemptChild::new(0, child, control.clone()))),
         child_transition: Mutex::new(()),
-        watchdog_active: AtomicBool::new(false),
         replacing_child: AtomicBool::new(false),
-        retired: AtomicBool::new(false),
-        #[cfg(test)]
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         replacement_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        watchdog_verdict_pause: std::sync::Mutex::new(None),
-        #[cfg(test)]
-        watchdog_transition_pause: std::sync::Mutex::new(None),
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         activity_detail_pause: std::sync::Mutex::new(None),
+        control_applied_pause: std::sync::Mutex::new(None),
+        terminal_response_pending: Arc::new(AtomicBool::new(false)),
+        terminal_control: std::sync::Mutex::new(None),
+        flow_completion_pause: std::sync::Mutex::new(None),
+        playlist_publication_pause: std::sync::Mutex::new(None),
+        producer_install_pause: std::sync::Mutex::new(None),
+        refresh_after_read_pause: std::sync::Mutex::new(None),
+        path_owner_sample_pause: std::sync::Mutex::new(None),
+        retention_delete_pause: std::sync::Mutex::new(None),
+        response_projection_pause: std::sync::Mutex::new(None),
         #[cfg(test)]
+        first_media_owner_claim_pause: std::sync::Mutex::new(None),
+        #[cfg(any(test, feature = "live-hls-recovery"))]
         retirement_started: AtomicBool::new(false),
+        #[cfg(test)]
+        retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
+        #[cfg(test)]
+        scratch_cleanup_pause: std::sync::Mutex::new(None),
         cached: false,
         _cache_reader: None,
         subtitle_handle: None,
         cache_manifest: None,
         cache_location: None,
-        last_request: Mutex::new(LastRequest::now("test-start")),
+        control,
+        flow_worker_started: AtomicBool::new(false),
         file_id: 1,
         item_id: 1,
         item_title: "T".into(),
@@ -12867,19 +20780,21 @@ fn test_session(dir: PathBuf) -> Session {
         start_seconds: 0.0,
         media_origin_seconds: 0.0,
         grade: OutputGrade::Sdr,
-        hls_codecs: "avc1.640034,mp4a.40.2".into(),
-        hls_supplemental_codecs: None,
         target_height: 720,
         encoder_label: Mutex::new("test"),
         started_unix: 0,
-        failed: AtomicBool::new(false),
+        failed: Arc::new(AtomicBool::new(false)),
         failure: std::sync::Mutex::new(None),
         playlist_published: AtomicBool::new(false),
-        high_segment: AtomicI64::new(-1),
-        fetched_end_ms: AtomicI64::new(0),
+        high_segment: Arc::new(AtomicI64::new(-1)),
+        compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
+        fetched_end_ms: Arc::new(AtomicI64::new(0)),
         segments: Mutex::new(SegmentIndex::default()),
         ahead_bytes: AtomicI64::new(0),
-        live_bytes: AtomicI64::new(0),
+        live_bytes: Arc::new(AtomicI64::new(0)),
+        retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
+        retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+        retention_cleanup_active: Arc::new(AtomicBool::new(false)),
         progress: Arc::new(Progress::new()),
         class: std::sync::Mutex::new(String::new()),
         hw_slot: std::sync::Mutex::new(None),
@@ -12898,6 +20813,892 @@ fn test_session(dir: PathBuf) -> Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rolling_etag_changes_with_incarnation_and_producer_attempt() {
+        let first_dir = crate::test_tempdir().expect("first rolling ETag session");
+        let second_dir = crate::test_tempdir().expect("second rolling ETag session");
+        let first = Arc::new(test_session(first_dir.path().to_path_buf()));
+        let second = Arc::new(test_session(second_dir.path().to_path_buf()));
+        let first_attempt = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&first),
+            producer_attempt: 0,
+        });
+        let successor_attempt = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&first),
+            producer_attempt: 1,
+        });
+        let replacement_incarnation = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: second,
+            producer_attempt: 0,
+        });
+
+        let first_etag = first_attempt
+            .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+            .expect("rolling ETag");
+        assert_ne!(
+            first_etag,
+            successor_attempt
+                .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+                .expect("successor-attempt ETag")
+        );
+        assert_ne!(
+            first_etag,
+            replacement_incarnation
+                .rolling_etag("reusable-session", "seg00001.m4s", 4096)
+                .expect("replacement-incarnation ETag")
+        );
+    }
+
+    async fn activate_control_route(
+        store: &dyn Store,
+        session_id: &str,
+        generation: &str,
+        owner_node_id: &str,
+    ) {
+        let now_ms = crate::media_sessions::unix_ms();
+        let fingerprint = "a".repeat(64);
+        store
+            .claim_media_session_request(
+                7,
+                generation,
+                &fingerprint,
+                "player-control",
+                generation,
+                now_ms,
+                now_ms + 60_000,
+            )
+            .await
+            .expect("claim route");
+        assert!(store
+            .assign_media_session_request_owner(7, generation, generation, owner_node_id, now_ms,)
+            .await
+            .expect("assign route owner"));
+        let activation = plurx_core::domain::MediaSessionActivation {
+            incarnation_id: generation.to_owned(),
+            session_id: session_id.to_owned(),
+            user_id: 7,
+            playback_id: "player-control".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(generation.to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: owner_node_id.to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: plurx_core::domain::MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms,
+            lease_expires_at_ms: now_ms + 60_000,
+        };
+        store
+            .activate_media_session(&activation)
+            .await
+            .expect("activate route")
+            .expect("route accepted");
+        store
+            .settle_media_session_activation(
+                &activation,
+                plurx_core::domain::MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                now_ms,
+            )
+            .await
+            .expect("confirm route")
+            .expect("route confirmed");
+    }
+
+    #[tokio::test]
+    async fn live_control_renews_only_fresh_sequences_and_cannot_cross_a_fence() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        fixture
+            .session
+            .control
+            .set_renewal_for_test(Instant::now() - Duration::from_secs(10), "before-control")
+            .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, owner_epoch| crate::playback_control::LocalControlRequest {
+            session_id: &session_id,
+            generation: &generation,
+            owner_node_id: "test-node",
+            owner_epoch,
+            client_instance_id: &client,
+            sequence,
+            snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            ),
+        };
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("accepted control");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        assert_eq!(
+            accepted.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
+        let assert_explicit_status = |status: &HlsSessionInfo| {
+            let HlsSessionInfo::Live(status) = status else {
+                panic!("rolling control returned VOD status");
+            };
+            assert_eq!(status.lease_mode, "explicit");
+            assert_eq!(status.lease_state, "active");
+            assert_eq!(
+                status.lease_timeout_ms,
+                Some(crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS)
+            );
+            assert_eq!(status.control_demand, Some("active"));
+            assert_eq!(status.reported_position_ms, Some(10_000));
+            assert_eq!(status.client_runway_ms, Some(15_000));
+            assert_eq!(status.render_state, Some("rendering"));
+            assert_eq!(status.production_policy, "explicit_demand");
+            let producer_control = status
+                .producer_control
+                .as_ref()
+                .expect("rolling status carries actor projection");
+            assert!(producer_control.observation_only);
+            assert!(producer_control.last_applied_sequence > 0);
+        };
+        assert_explicit_status(&accepted.status);
+        let live_status = fixture
+            .state
+            .transcode
+            .hls_session_status(&session_id)
+            .await
+            .expect("live status");
+        assert_explicit_status(&live_status);
+        let accepted_lease = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("lease snapshot");
+        assert_eq!(accepted_lease.last_renewal_kind, "control");
+        assert_eq!(
+            accepted_lease.mode,
+            crate::playback_control::RollingLeaseMode::Explicit
+        );
+        assert_eq!(
+            accepted_lease
+                .demand
+                .as_ref()
+                .map(|demand| demand.position_ms),
+            Some(10_000)
+        );
+
+        fixture
+            .session
+            .control
+            .set_renewal_for_test(
+                Instant::now() - Duration::from_secs(10),
+                "accepted-sequence",
+            )
+            .await;
+
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, 1))
+            .await
+            .expect("local worker")
+            .expect("replay control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        let replay_lease = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("replay lease");
+        assert_eq!(replay_lease.last_renewal_kind, "accepted-sequence");
+        assert!(replay_lease.idle_for >= Duration::from_secs(10));
+
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(0, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::StaleSequence
+            ))
+        ));
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2, 2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::OwnerChanged
+            ))
+        ));
+        let rejected_lease = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("rejected lease");
+        assert_eq!(rejected_lease.last_renewal_kind, "accepted-sequence");
+        assert!(rejected_lease.idle_for >= Duration::from_secs(10));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let second_sequence = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, 1))
+            .await
+            .expect("local worker")
+            .expect("next fresh sequence remains admissible");
+        assert_eq!(
+            second_sequence.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        let renewed_lease = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("renewed lease");
+        assert_eq!(renewed_lease.last_renewal_kind, "control");
+        assert!(renewed_lease.idle_for < Duration::from_secs(1));
+
+        // Retirement is another command on the same mailbox. Once it wins,
+        // neither a later control nor a later media request can renew.
+        fixture.session.end_activity().await;
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(3, 1))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+        assert!(
+            !fixture
+                .session
+                .touch_attempt_if_active(
+                    "segment",
+                    fixture.session.control.current_producer_attempt(),
+                )
+                .await
+        );
+        assert!(fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .is_some_and(|lease| lease.retired));
+    }
+
+    #[tokio::test]
+    async fn accepted_rolling_control_end_returns_and_replays_terminal_status() {
+        let root = crate::test_tempdir().expect("fixture root");
+        let session_dir = root.path().join("session");
+        tokio::fs::create_dir(&session_dir)
+            .await
+            .expect("create empty session scratch");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish_with_separate_state_root(
+            &session_dir,
+            &root.path().join("state"),
+            &session_id,
+        )
+        .await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = crate::playback_control::PlaybackDemand::End;
+            snapshot.playback_rate = 0.0;
+            snapshot.render_state = crate::playback_control::RenderState::Ended;
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+        let retry_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let committer = crate::playback_control::RecoveringTerminalCommitter::with_retry_pause(
+            Arc::clone(&retry_pause),
+        );
+
+        let accepted = fixture
+            .state
+            .transcode
+            .hls_session_control_with_terminal(request(1), i64::MAX, Some(committer.clone()))
+            .await
+            .expect("local worker")
+            .expect("end accepted");
+        assert_eq!(
+            accepted.disposition,
+            crate::playback_control::ControlDisposition::Accepted
+        );
+        assert_eq!(accepted.lease_state, "ended");
+        let HlsSessionInfo::Live(status) = &accepted.status else {
+            panic!("rolling end returned VOD status");
+        };
+        assert_eq!(status.lease_state, "ended");
+        assert_eq!(status.control_demand, Some("end"));
+        assert_eq!(
+            fixture
+                .session
+                .control
+                .snapshot()
+                .await
+                .expect("terminal lease")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::End)
+        );
+        assert!(matches!(
+            accepted
+                .terminal_commit
+                .as_ref()
+                .expect("rolling terminal receipt")
+                .wait()
+                .await,
+            Err(())
+        ));
+        assert_eq!(committer.attempts(), 1);
+        assert!(
+            fixture
+                .state
+                .transcode
+                .retire_session(&session_id, &fixture.session)
+                .await,
+            "rolling cleanup may remove the retired worker after a bounded failed attempt"
+        );
+        assert!(
+            !fixture
+                .state
+                .transcode
+                .sessions
+                .lock()
+                .await
+                .contains_key(&session_id),
+            "the retry proof must use the manager terminal tombstone, not the live session"
+        );
+
+        let (replay_a, replay_b, ()) = tokio::join!(
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            ),
+            fixture.state.transcode.hls_session_control_with_terminal(
+                request(1),
+                i64::MAX,
+                Some(committer.clone()),
+            ),
+            async {
+                // The first replay has marked the one shared receipt running
+                // and entered the second durable attempt. The other replay
+                // now has a deterministic interval in which to contend.
+                retry_pause.wait().await;
+                tokio::task::yield_now().await;
+                assert_eq!(
+                    committer.attempts(),
+                    2,
+                    "both waiters must share one in-flight retry attempt"
+                );
+                retry_pause.wait().await;
+            }
+        );
+        let replay_a = replay_a
+            .expect("first local terminal worker")
+            .expect("first exact end replay");
+        let replay_b = replay_b
+            .expect("second local terminal worker")
+            .expect("second exact end replay");
+        assert_eq!(
+            replay_a.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(
+            replay_b.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert_eq!(replay_a.lease_state, "ended");
+        assert_eq!(replay_b.lease_state, "ended");
+        assert_eq!(committer.attempts(), 2);
+        let committed_a = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("first retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("first recovered terminal response");
+        let committed_b = replay_b
+            .terminal_commit
+            .as_ref()
+            .expect("second retried rolling terminal receipt")
+            .wait()
+            .await
+            .expect("second recovered terminal response");
+        assert_eq!(committed_a, committed_b);
+        assert_eq!(committed_a.server_time_unix_ms, 1);
+        assert!(matches!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(2))
+                .await,
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+            ))
+        ));
+        // Keep the filesystem-backed retirement and concurrent retry on real
+        // time. A start-paused runtime may auto-advance while async scratch
+        // cleanup is pending; under hosted load that can expire the receipt
+        // before the retry reaches `retry_pause`, leaving this test's barrier
+        // waiting for an attempt that correctly never starts. Freeze time only
+        // after the durable retry has completed, where advancing it exercises
+        // terminal tombstone expiry without mixing virtual time with real I/O.
+        tokio::time::pause();
+        let terminal_deadline = replay_a
+            .terminal_commit
+            .as_ref()
+            .expect("rolling terminal receipt")
+            .deadline_for_test();
+        tokio::time::advance(
+            terminal_deadline
+                .duration_since(tokio::time::Instant::now())
+                .saturating_sub(Duration::from_millis(1)),
+        )
+        .await;
+        assert_eq!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .expect("rolling operation retained before expiry")
+                .expect("exact rolling replay before expiry")
+                .disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        assert!(fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .hls_session_control(request(1))
+                .await
+                .is_none(),
+            "the rolling manager must drop the exact retained operation at acknowledgement expiry"
+        );
+        assert!(!fixture
+            .state
+            .transcode
+            .terminal_controls
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .contains_key(&session_id));
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(fixture
+            .state
+            .transcode
+            .hls_session_control(request(1))
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn accepted_hold_and_active_control_signal_the_real_producer_immediately() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = |sequence, demand| {
+            let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                crate::playback_control::ClientPlatform::Web,
+            );
+            snapshot.demand = demand;
+            if demand != crate::playback_control::PlaybackDemand::Active {
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+            }
+            crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence,
+                snapshot,
+            }
+        };
+
+        let hold = fixture
+            .state
+            .transcode
+            .hls_session_control(request(1, crate::playback_control::PlaybackDemand::Hold))
+            .await
+            .expect("local worker")
+            .expect("hold accepted");
+        assert_eq!(
+            hold.lease_timeout_ms,
+            crate::playback_control::ROLLING_EXPLICIT_LEASE_TIMEOUT_MS
+        );
+        let HlsSessionInfo::Live(hold_status) = hold.status else {
+            panic!("rolling hold returned VOD status");
+        };
+        assert!(hold_status.suspended);
+        assert_eq!(hold_status.control_demand, Some("hold"));
+        assert_eq!(hold_status.hold_reason, Some(AheadHoldReason::Demand));
+        assert_eq!(hold_status.production_target_seconds, Some(0));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let active = fixture
+            .state
+            .transcode
+            .hls_session_control(request(2, crate::playback_control::PlaybackDemand::Active))
+            .await
+            .expect("local worker")
+            .expect("active accepted");
+        let HlsSessionInfo::Live(active_status) = active.status else {
+            panic!("rolling active returned VOD status");
+        };
+        assert!(!active_status.suspended);
+        assert_eq!(active_status.control_demand, Some("active"));
+        assert_eq!(active_status.hold_reason, None);
+        assert_eq!(active_status.production_policy, "explicit_demand");
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: None,
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("flow events");
+                if events.iter().any(|event| event.event == "suspend")
+                    && events.iter().any(|event| event.event == "resume")
+                {
+                    return events;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("demand hold/resume events persisted");
+        let suspend = events
+            .iter()
+            .find(|event| event.event == "suspend")
+            .expect("demand suspend event");
+        assert_eq!(suspend.hold_reason.as_deref(), Some("demand"));
+        let extra: serde_json::Value = serde_json::from_str(
+            suspend
+                .extra
+                .as_deref()
+                .expect("demand suspend policy snapshot"),
+        )
+        .expect("valid demand suspend policy snapshot");
+        assert_eq!(extra["lease_mode"], "explicit");
+        assert_eq!(extra["lease_state"], "active");
+        assert_eq!(extra["lease_timeout_ms"], 30_000);
+        assert_eq!(extra["control_demand"], "hold");
+        assert_eq!(extra["production_policy"], "explicit_demand");
+        assert_eq!(extra["production_target_seconds"], 0);
+        assert_eq!(extra["producer_control"]["observation_only"], true);
+    }
+
+    #[tokio::test]
+    async fn cancelled_control_response_cannot_cancel_an_accepted_producer_transition() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .control_applied_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let request = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            let client = client.clone();
+            tokio::spawn(async move {
+                let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+                    crate::playback_control::ClientPlatform::Web,
+                );
+                snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+                snapshot.playback_rate = 0.0;
+                snapshot.render_state = crate::playback_control::RenderState::Waiting;
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot,
+                    })
+                    .await
+            })
+        };
+
+        // The actor has accepted, renewed, retained demand, and issued its
+        // flow ticket, but the request still owns the child transition gate.
+        pause.wait().await;
+        request.abort();
+        let request_error = match request.await {
+            Ok(_) => panic!("request unexpectedly completed"),
+            Err(error) => error,
+        };
+        assert!(request_error.is_cancelled());
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !fixture.session.suspended.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached flow worker applied accepted hold after cancellation");
+
+        let mut snapshot = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        snapshot.demand = crate::playback_control::PlaybackDemand::Hold;
+        snapshot.playback_rate = 0.0;
+        snapshot.render_state = crate::playback_control::RenderState::Waiting;
+        let replay = fixture
+            .state
+            .transcode
+            .hls_session_control(crate::playback_control::LocalControlRequest {
+                session_id: &session_id,
+                generation: &generation,
+                owner_node_id: "test-node",
+                owner_epoch: 1,
+                client_instance_id: &client,
+                sequence: 1,
+                snapshot,
+            })
+            .await
+            .expect("live session")
+            .expect("replayed control");
+        assert_eq!(
+            replay.disposition,
+            crate::playback_control::ControlDisposition::Replay
+        );
+        let HlsSessionInfo::Live(status) = replay.status else {
+            panic!("rolling replay returned VOD status");
+        };
+        assert!(status.suspended);
+        assert_eq!(status.hold_reason, Some(AheadHoldReason::Demand));
+    }
+
+    #[tokio::test]
+    async fn retirement_before_flow_completion_cannot_escape_as_active_control() {
+        let dir = crate::test_tempdir().expect("session dir");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let generation = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish(dir.path(), &session_id).await;
+        activate_control_route(
+            fixture.store.as_ref(),
+            &session_id,
+            &generation,
+            "test-node",
+        )
+        .await;
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *fixture
+            .session
+            .flow_completion_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let client = uuid::Uuid::new_v4().to_string();
+        let control = {
+            let manager = Arc::clone(&fixture.state.transcode);
+            let session_id = session_id.clone();
+            let generation = generation.clone();
+            tokio::spawn(async move {
+                manager
+                    .hls_session_control(crate::playback_control::LocalControlRequest {
+                        session_id: &session_id,
+                        generation: &generation,
+                        owner_node_id: "test-node",
+                        owner_epoch: 1,
+                        client_instance_id: &client,
+                        sequence: 1,
+                        snapshot: crate::playback_control::PlaybackDemandSnapshot::test_default(
+                            crate::playback_control::ClientPlatform::Web,
+                        ),
+                    })
+                    .await
+            })
+        };
+
+        // The actor accepted and producer policy ran, but the ticket has not
+        // yet released the HTTP response. Retirement wins in that interval.
+        pause.wait().await;
+        assert!(
+            fixture
+                .state
+                .transcode
+                .stop_session(&session_id, "test-retirement")
+                .await
+        );
+        pause.wait().await;
+        assert!(matches!(
+            control.await.expect("control task"),
+            Some(Err(
+                crate::playback_control::ControlStateError::SessionEnded
+                    | crate::playback_control::ControlStateError::OwnerTransition
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reap_loop_finishes_a_dropped_retirement_with_truthful_cause_and_cleanup() {
+        let root = crate::test_tempdir().expect("fixture root");
+        let session_dir = root.path().join("session");
+        tokio::fs::create_dir(&session_dir)
+            .await
+            .expect("create empty session scratch");
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let fixture = HlsDeliveryFixture::publish_with_separate_state_root(
+            &session_dir,
+            &root.path().join("state"),
+            &session_id,
+        )
+        .await;
+        // Model a caller disappearing after the actor committed explicit
+        // retirement but before it entered manager teardown. The actor-level
+        // regression drops the actual oneshot reply; this exercises the real
+        // repair loop that must recover the committed fence.
+        fixture.session.control.end().await.expect("end verdict");
+        assert!(fixture.session.control.is_retired());
+        assert!(!fixture
+            .state
+            .transcode
+            .renewable_session_ids()
+            .await
+            .contains(&session_id));
+
+        let reaper = tokio::spawn(Arc::clone(&fixture.state.transcode).reap_loop());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let map_gone = !fixture
+                    .state
+                    .transcode
+                    .sessions
+                    .lock()
+                    .await
+                    .contains_key(&session_id);
+                let child_exited = {
+                    let mut child = fixture.session.child.lock().await;
+                    child.as_mut().is_none_or(|child| {
+                        child
+                            .try_wait()
+                            .expect("placeholder child status")
+                            .is_some()
+                    })
+                };
+                let scratch_gone = tokio::fs::metadata(&fixture.session.dir).await.is_err();
+                if map_gone && child_exited && scratch_gone {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("repair loop must finish map, child, and scratch teardown");
+
+        let event = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(event) = fixture
+                    .store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        event: Some("session_end".to_owned()),
+                        limit: 20,
+                        ..plurx_core::domain::PlaybackEventQuery::default()
+                    })
+                    .await
+                    .expect("playback events")
+                    .into_iter()
+                    .find(|event| event.reason.as_deref() == Some("retired_recovery"))
+                {
+                    break event;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("retired recovery event persisted");
+        assert_eq!(
+            event.session_id.as_deref(),
+            Some(session_log_id(&session_id).as_str())
+        );
+        reaper.abort();
+        assert!(matches!(reaper.await, Err(error) if error.is_cancelled()));
+    }
 
     #[test]
     fn bearer_session_ids_are_stably_redacted_for_observability() {
@@ -13081,6 +21882,162 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+        }
+    }
+
+    #[test]
+    fn frozen_hls_presentation_fingerprint_covers_master_affecting_facts() {
+        let file = profile5_file();
+        let context = HlsContext {
+            file_id: file.id,
+            start_seconds: 12.5,
+            media_origin_seconds: 12.5,
+            codecs: "hvc1.2.4.L150.B0,mp4a.40.2".into(),
+            supplemental_codecs: Some("dvh1.08.09".into()),
+            frame_rate: Some(23_976.0 / 1_000.0),
+        };
+        let first = FrozenHlsPresentation::new(
+            file.clone(),
+            context.clone(),
+            &SessionKind::Transcode { height: 1080 },
+        );
+        let identical = FrozenHlsPresentation::new(
+            file.clone(),
+            context.clone(),
+            &SessionKind::Transcode { height: 1080 },
+        );
+        let changed = FrozenHlsPresentation::new(
+            file,
+            HlsContext {
+                codecs: "avc1.640034,mp4a.40.2".into(),
+                ..context
+            },
+            &SessionKind::Transcode { height: 1080 },
+        );
+
+        assert_eq!(first.contract_fingerprint, identical.contract_fingerprint);
+        assert_ne!(first.contract_fingerprint, changed.contract_fingerprint);
+    }
+
+    #[test]
+    fn frozen_frame_rate_prefers_average_and_rejects_zero_denominator() {
+        let probe = serde_json::json!({
+            "streams": [{
+                "codec_type": "video",
+                "avg_frame_rate": "24000/1001",
+                "r_frame_rate": "60/1"
+            }]
+        })
+        .to_string();
+        let invalid_average = serde_json::json!({
+            "streams": [{
+                "codec_type": "video",
+                "avg_frame_rate": "24000/0",
+                "r_frame_rate": "30000/1001"
+            }]
+        })
+        .to_string();
+
+        assert_eq!(
+            frozen_video_frame_rate(Some(&probe)),
+            Some(24_000.0 / 1_001.0)
+        );
+        assert_eq!(
+            frozen_video_frame_rate(Some(&invalid_average)),
+            Some(30_000.0 / 1_001.0)
+        );
+    }
+
+    #[test]
+    fn media_response_publication_maps_attempt_objects_without_url_inference() {
+        use crate::playback_control::RollingResponseObject;
+
+        assert_eq!(
+            MediaResponsePublication::attempt_media("playlist", Some("video.m3u8"))
+                .rolling_object(),
+            RollingResponseObject::VideoMediaPlaylist
+        );
+        assert_eq!(
+            MediaResponsePublication::attempt_media(
+                "segment-range-not-satisfiable",
+                Some("segment-12.m4s")
+            )
+            .rolling_object(),
+            RollingResponseObject::RangeNotSatisfiable
+        );
+        assert_eq!(
+            MediaResponsePublication::generation_metadata("master-playlist").rolling_object(),
+            RollingResponseObject::MasterPlaylist
+        );
+    }
+
+    #[tokio::test]
+    async fn actor_first_media_hook_is_idempotent() {
+        let dir = crate::test_tempdir().expect("session scratch");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.actor_prepublication_producer.store(true, Release);
+        let (handoff, applied) =
+            begin_first_media_publication_handoff(&session, "first-media-hook")
+                .await
+                .expect("first-media settlement capacity");
+        handoff.settle_for_test(true);
+        assert!(applied.await.expect("handoff application"));
+        assert!(!session.actor_prepublication_producer.load(Acquire));
+        assert!(session.first_media_handoff_applied.load(Acquire));
+
+        let (duplicate, duplicate_applied) =
+            begin_first_media_publication_handoff(&session, "first-media-hook")
+                .await
+                .expect("duplicate first-media settlement capacity");
+        duplicate.settle_for_test(true);
+        assert!(duplicate_applied
+            .await
+            .expect("duplicate handoff application"));
+        assert!(session.first_media_handoff_applied.load(Acquire));
+    }
+
+    #[test]
+    fn successful_exit_probe_requires_exact_terminal_endlist_and_indexed_frontier() {
+        let complete = completion_playlist_evidence(
+            7,
+            3,
+            Some(
+                b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nseg00000.ts\n\
+                   #EXTINF:1.5,\nseg00001.ts\n#EXT-X-ENDLIST\n",
+            ),
+        );
+        assert_eq!(complete.probe_sequence, 7);
+        assert_eq!(complete.producer_attempt, 3);
+        assert!(complete.end_list);
+        assert_eq!(complete.final_segment, Some(1));
+        assert_eq!(complete.final_end_ms, Some(3_500));
+
+        for partial in [
+            b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n".as_slice(),
+            b"#EXTM3U\n#EXT-X-ENDLIST\n#EXTINF:2.0,\nseg00000.ts\n".as_slice(),
+            b"not utf8: \xff\n".as_slice(),
+        ] {
+            let evidence = completion_playlist_evidence(8, 4, Some(partial));
+            assert!(!evidence.end_list);
+        }
+    }
+
+    #[test]
+    fn only_failed_closed_executor_exits_request_monitor_cleanup() {
+        assert_eq!(
+            PrepublicationExecutorExit::FailedClosed {
+                producer_attempt: 7,
+            }
+            .monitor_cleanup_attempt(),
+            Some(7)
+        );
+        for settled in [
+            PrepublicationExecutorExit::ActorTerminal,
+            PrepublicationExecutorExit::SessionGone,
+            PrepublicationExecutorExit::ActorFailureApplied,
+            PrepublicationExecutorExit::ActorCompletionApplied,
+        ] {
+            assert_eq!(settled.monitor_cleanup_attempt(), None, "{settled:?}");
         }
     }
 
@@ -13597,6 +22554,7 @@ mod tests {
     async fn a_session_measures_its_offset_from_the_origin_it_reached() {
         let dir = crate::test_tempdir().expect("tempdir");
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 120_000,
             frontier_offset_ms: 600_000,
@@ -13636,15 +22594,15 @@ mod tests {
 
         let dir = crate::test_tempdir().expect("tempdir");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
-
+        ));
         let mut session = test_session(dir.path().join("session"));
         session.takeover = Some(SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 0,
@@ -13674,6 +22632,58 @@ mod tests {
         assert!(
             !mgr.sessions.lock().await.contains_key("capability-a"),
             "the worker is gone, not merely reported as gone"
+        );
+    }
+
+    #[tokio::test]
+    async fn delayed_epoch_one_start_abort_cannot_reap_an_epoch_two_successor() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let mut session = test_session(dir.path().join("session"));
+        session.takeover = Some(SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
+            incarnation_id: "incarnation-a".to_owned(),
+            origin_base_ms: 0,
+            frontier_offset_ms: 0,
+            media_sequence: 2_000_000,
+            discontinuity_sequence: 1,
+            owner_epoch: 2,
+        });
+        mgr.sessions
+            .lock()
+            .await
+            .insert("capability-a".into(), Arc::new(session));
+
+        assert!(
+            !mgr.stop_session_for_owner("incarnation-a", "capability-a", 1, "delayed start abort",)
+                .await,
+            "an epoch-one cleanup cannot match the successor generation"
+        );
+        assert!(
+            !mgr.stop_vod_session_for_request(
+                "incarnation-a",
+                "capability-a",
+                "delayed start abort",
+            )
+            .await,
+            "a missing exact request mapping cannot fall through to VOD cleanup"
+        );
+        assert!(
+            mgr.sessions.lock().await.contains_key("capability-a"),
+            "both delayed epoch-one paths leave the epoch-two worker alive"
+        );
+        assert!(
+            mgr.stop_session_for_owner("incarnation-a", "capability-a", 2, "test cleanup",)
+                .await,
+            "the exact successor epoch remains independently stoppable"
         );
     }
 
@@ -14784,6 +23794,553 @@ mod tests {
         assert_eq!(p.out_time_ms(), Some(2_000));
     }
 
+    #[tokio::test]
+    async fn process_supervisor_reports_current_exit_and_fences_predecessor_exit() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-test");
+        let current_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("current attempt");
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn exiting producer");
+        let mut current = AttemptChild::new(current_attempt, child, control.clone());
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if current
+                    .try_wait()
+                    .expect("current producer status")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor observes current exit without a watchdog poll");
+        let current_delivery = control.snapshot().await.expect("actor snapshot").delivery;
+        assert_eq!(current_delivery.producer_attempt, current_attempt);
+        assert_eq!(
+            current_delivery
+                .producer_exit
+                .as_ref()
+                .map(|exit| (exit.success, exit.code)),
+            Some((false, Some(1)))
+        );
+
+        let predecessor_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        let child = tokio::process::Command::new("sh")
+            .args(["-c", "sleep 0.05; exit 7"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn delayed predecessor");
+        let mut predecessor = AttemptChild::new(predecessor_attempt, child, control.clone());
+        let successor_attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if predecessor
+                    .try_wait()
+                    .expect("predecessor status")
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor observes delayed predecessor exit");
+        let successor_delivery = control.snapshot().await.expect("actor snapshot").delivery;
+        assert_eq!(successor_delivery.producer_attempt, successor_attempt);
+        assert_eq!(
+            successor_delivery.producer_exit, None,
+            "a reaped predecessor cannot terminate its already-admitted successor"
+        );
+    }
+
+    #[tokio::test]
+    async fn process_supervisor_owns_signals_termination_and_reaping() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-signal");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            None,
+            "a newly admitted producer has no physical-flow acknowledgement"
+        );
+        assert!(child.signal(libc::SIGSTOP).await.expect("supervised stop"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "SIGSTOP is acknowledged for this attempt only after the supervisor's successful syscall"
+        );
+        assert!(child
+            .signal(libc::SIGCONT)
+            .await
+            .expect("supervised continue"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, false)),
+            "SIGCONT replaces the held acknowledgement with a running acknowledgement"
+        );
+        child.kill().await.expect("supervised kill waits for reap");
+        let status = child
+            .try_wait()
+            .expect("reaped status")
+            .expect("terminal status");
+        assert_eq!(child.id(), None, "a reaped owner never exposes its old pid");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt as _;
+            assert_eq!(status.signal(), Some(libc::SIGKILL));
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        let exit = control
+            .snapshot()
+            .await
+            .expect("actor snapshot")
+            .delivery
+            .producer_exit
+            .expect("exact attempt exit");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+    }
+
+    #[tokio::test]
+    async fn deferred_flow_signal_reauthorizes_attempt_before_touching_pid() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-capacity");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            let successor = control
+                .begin_producer_attempt()
+                .await
+                .expect("successor attempt");
+            assert!(successor > attempt);
+            control.release_producer_flow_capacity_for_test();
+            assert!(
+                !signal.await.expect("deferred signal verdict"),
+                "the predecessor signal must fail after exact-attempt re-authorization"
+            );
+            assert_eq!(
+                control.producer_flow_applied_for_test(),
+                None,
+                "a deferred predecessor cannot fabricate a physical acknowledgement"
+            );
+        }
+        control.release_producer_flow_capacity_for_test();
+        child.kill().await.expect("reap predecessor child");
+    }
+
+    #[tokio::test]
+    async fn deferred_flow_signal_wakes_fail_closed_when_control_is_fenced() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-unavailable");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let mut child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+        assert!(control.reserve_producer_flow_capacity_for_test());
+
+        {
+            let signal = child.signal(libc::SIGSTOP);
+            tokio::pin!(signal);
+            tokio::select! {
+                result = signal.as_mut() => panic!("full-capacity signal completed early: {result:?}"),
+                _ = control.wait_for_producer_flow_deferral_for_test() => {}
+            }
+            control.fence_unavailable();
+            assert!(
+                !signal.await.expect("fenced deferred signal verdict"),
+                "retirement must wake a capacity waiter before PID access"
+            );
+        }
+        control.release_producer_flow_capacity_for_test();
+        control.release_producer_flow_capacity_for_test();
+        child
+            .kill()
+            .await
+            .expect("cleanup command reaches supervisor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn actor_task_exit_fences_a_reserved_signal_and_cleanup_still_progresses() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-actor-exit");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = Arc::new(AttemptChild::new(
+            attempt,
+            long_running_child(),
+            control.clone(),
+        ));
+        let pause = Arc::new(std::sync::Barrier::new(2));
+        child.pause_signal_after_flow_reservation(Arc::clone(&pause));
+        let signal = {
+            let child = Arc::clone(&child);
+            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+        };
+
+        pause.wait();
+        assert!(
+            control.producer_transition_guard_is_held_for_test(),
+            "the reserved signal owns the transition fence before its syscall"
+        );
+        control.abort_actor_for_test();
+        control.wait_for_actor_exit_fence_for_test().await;
+        assert!(
+            !control.is_retired(),
+            "actor-exit retirement waits behind the already-authorized signal"
+        );
+        pause.wait();
+        assert!(signal
+            .await
+            .expect("reserved signal task")
+            .expect("pre-fence signal verdict"));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor-exit fence publishes retirement");
+        let sent = child.signal(libc::SIGCONT).await.expect("signal verdict");
+        assert!(
+            !sent,
+            "no process signal can linearize after actor-task retirement"
+        );
+
+        let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
+        child
+            .kill()
+            .await
+            .expect("cleanup command reaches exited actor's process supervisor");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn producer_signal_and_retirement_share_one_authorization_linearization() {
+        let control = crate::playback_control::RollingControlHandle::spawn("signal-fence");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = Arc::new(AttemptChild::new(
+            attempt,
+            long_running_child(),
+            control.clone(),
+        ));
+        let pause = Arc::new(std::sync::Barrier::new(2));
+        child.pause_signal_after_authorization(Arc::clone(&pause));
+        let signal = {
+            let child = Arc::clone(&child);
+            tokio::spawn(async move { child.signal(libc::SIGSTOP).await })
+        };
+
+        // The supervisor has authorized the exact attempt and still owns the
+        // transition guard immediately before the syscall.
+        pause.wait();
+        assert!(
+            control.producer_transition_guard_is_held_for_test(),
+            "the paused supervisor must own the transition guard"
+        );
+        let (started, contender_started) = std::sync::mpsc::channel();
+        let (fenced, observed) = std::sync::mpsc::channel();
+        let fence = {
+            let control = control.clone();
+            std::thread::spawn(move || {
+                started.send(()).expect("contender started");
+                control.fence_unavailable();
+                fenced.send(()).expect("fence observation");
+            })
+        };
+        contender_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("fence contender reached the guarded operation");
+        assert!(
+            observed.recv_timeout(Duration::from_millis(50)).is_err(),
+            "retirement cannot linearize between authorization and signal"
+        );
+        pause.wait();
+        assert!(signal
+            .await
+            .expect("signal task")
+            .expect("supervised signal"));
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "the successful SIGSTOP publishes the held flow for the authorized attempt"
+        );
+        observed
+            .recv_timeout(Duration::from_secs(1))
+            .expect("retirement follows the physical signal");
+        fence.join().expect("fence thread");
+        assert!(control.is_retired());
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "retirement does not fabricate a flow acknowledgement"
+        );
+        assert!(
+            !child
+                .signal(libc::SIGCONT)
+                .await
+                .expect("retired signal verdict"),
+            "no signal can land after the newer retirement fence"
+        );
+        assert_eq!(
+            control.producer_flow_applied_for_test(),
+            Some((attempt, true)),
+            "a stale SIGCONT cannot publish a running acknowledgement"
+        );
+
+        let mut child = Arc::try_unwrap(child).unwrap_or_else(|_| panic!("sole child owner"));
+        child.kill().await.expect("reap stopped child");
+    }
+
+    #[tokio::test]
+    async fn dropping_process_owner_terminates_and_reaps_without_a_pid_side_channel() {
+        let control = crate::playback_control::RollingControlHandle::spawn("supervisor-drop");
+        let attempt = control
+            .begin_producer_attempt()
+            .await
+            .expect("producer attempt");
+        let child = AttemptChild::new(attempt, long_running_child(), control.clone());
+        let pid = child.id().expect("running producer pid");
+        drop(child);
+
+        let exit = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Some(exit) = control
+                    .snapshot()
+                    .await
+                    .and_then(|lease| lease.delivery.producer_exit)
+                {
+                    break exit;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered supervisor reap");
+        assert!(!exit.success);
+        assert_eq!(exit.signal, Some(libc::SIGKILL));
+        #[cfg(unix)]
+        {
+            assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn status_falls_back_to_exact_process_facts_when_actor_is_unavailable() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let mut session = test_session(dir.path().to_owned());
+        if let Some(child) = session.child.get_mut().take() {
+            let mut child = child;
+            child.kill().await.expect("remove fixture child");
+        }
+        session.control = crate::playback_control::RollingControlHandle::unavailable_for_test();
+        session.progress.note_out_time(2_500);
+        session.progress.speed_milli.store(1_250, Relaxed);
+        session.progress.recent_milli.store(1_100, Relaxed);
+        session.suspended.store(true, Relaxed);
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn terminal producer");
+        *session.child.get_mut() = Some(AttemptChild::new(0, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if session
+                    .child
+                    .get_mut()
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()))
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("supervisor terminal observation");
+
+        let status = session_info(
+            "actor-unavailable",
+            &session,
+            AheadLimits {
+                max_secs: 0,
+                max_bytes: 0,
+                global_max_bytes: 0,
+            },
+            0,
+            0,
+        )
+        .await;
+        assert_eq!(status.lease_state, "unavailable");
+        assert_eq!(status.producer_state, "exited", "terminal precedes held");
+        assert_eq!(status.producer_attempt, Some(0));
+        assert_eq!(status.producer_exit_success, Some(false));
+        assert_eq!(status.producer_exit_code, Some(1));
+        assert_eq!(status.speed, None);
+        assert_eq!(status.recent_speed, None);
+        assert_eq!(status.out_time_ms, None);
+        assert_eq!(status.progress_idle_ms, -1);
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_never_combines_successor_process_facts_with_predecessor_actor_state() {
+        let dir = crate::test_tempdir().expect("status scratch");
+        let session = Arc::new(test_session(dir.path().to_owned()));
+        let predecessor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("predecessor attempt");
+        session.progress.begin_fenced_attempt(predecessor);
+        session.progress.note_out_time(1_000);
+        session.progress.speed_milli.store(900, Relaxed);
+        session.progress.recent_milli.store(800, Relaxed);
+        session
+            .control
+            .observe_producer_progress(predecessor, Some(1_000), Some(900), Some(800));
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("predecessor snapshot")
+                .delivery
+                .producer_out_time_ms,
+            Some(1_000)
+        );
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("remove fixture child");
+        }
+        *session.child.lock().await = Some(AttemptChild::new(
+            predecessor,
+            long_running_child(),
+            session.control.clone(),
+        ));
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .activity_detail_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let reader = {
+            let session = Arc::clone(&session);
+            tokio::spawn(async move {
+                session_info(
+                    "attempt-coherence",
+                    &session,
+                    AheadLimits {
+                        max_secs: 0,
+                        max_bytes: 0,
+                        global_max_bytes: 0,
+                    },
+                    0,
+                    0,
+                )
+                .await
+            })
+        };
+        pause.wait().await;
+
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("successor attempt");
+        session.progress.begin_fenced_attempt(successor);
+        session.progress.note_out_time(99_000);
+        session.progress.speed_milli.store(9_000, Relaxed);
+        session.progress.recent_milli.store(8_000, Relaxed);
+        let old_child = session.child.lock().await.take();
+        if let Some(mut old_child) = old_child {
+            old_child.kill().await.expect("reap predecessor fixture");
+        }
+        let child = tokio::process::Command::new("false")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn successor terminal producer");
+        *session.child.lock().await =
+            Some(AttemptChild::new(successor, child, session.control.clone()));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let terminal = session
+                    .child
+                    .lock()
+                    .await
+                    .as_mut()
+                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("successor terminal observation");
+        pause.wait().await;
+
+        let status = reader.await.expect("status reader");
+        assert_eq!(status.producer_attempt, Some(predecessor));
+        assert_eq!(status.out_time_ms, Some(1_000));
+        assert_eq!(status.speed, Some(0.9));
+        assert_eq!(status.recent_speed, Some(0.8));
+        assert_eq!(status.producer_exit_success, None);
+        assert_eq!(status.producer_exit_code, None);
+        assert_eq!(status.producer_state, "waiting");
+    }
+
     /// Cumulative speed hides a slowdown behind a fast start; the recent rate
     /// is what predicts whether the viewer's reserve is about to drain. The
     /// smoothing is tested as arithmetic — a test that had to sleep to make a
@@ -14856,57 +24413,75 @@ mod tests {
     /// reuse `touch` and nothing would visibly break.
     #[tokio::test]
     async fn polling_status_does_not_keep_a_session_alive() {
-        super::require_ffmpeg();
-        use plurx_core::store::SqliteStore;
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
-        let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
-            Arc::clone(&store),
-            work.path().to_path_buf(),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        );
-        let info = mgr
-            .start(file_id, 720, 0.0, None, None, "paul", "pb-paul")
-            .await
-            .expect("start");
+        let root = crate::test_tempdir().expect("status fixture");
+        let session_id = "status-does-not-renew";
+        let fixture = HlsDeliveryFixture::publish(root.path(), session_id).await;
+        let mgr = Arc::clone(&fixture.state.transcode);
 
         // Let the idle clock advance, then poll status several times.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        let before = mgr.session_status(&info.session_id).await.expect("status");
-        assert_eq!(before.hold_reason, None, "a running session is not held");
-        assert_eq!(before.resume_below_seconds, None);
-        assert_eq!(before.resume_below_bytes, None);
-        let before = before.idle_seconds;
-        for _ in 0..5 {
-            assert!(mgr.session_status(&info.session_id).await.is_some());
-        }
-        let after = mgr
-            .session_status(&info.session_id)
+        let before = fixture
+            .session
+            .control
+            .snapshot()
             .await
-            .expect("status")
-            .idle_seconds;
+            .expect("rolling actor");
         assert!(
-            after >= before,
+            before.idle_for >= Duration::from_millis(300),
+            "the fixture establishes a measurable pre-poll idle interval"
+        );
+        let before_status = mgr.session_status(session_id).await.expect("status");
+        assert_eq!(
+            before_status.hold_reason, None,
+            "a running session is not held"
+        );
+        assert_eq!(before_status.resume_below_seconds, None);
+        assert_eq!(before_status.resume_below_bytes, None);
+        for _ in 0..5 {
+            assert!(mgr.session_status(session_id).await.is_some());
+        }
+        let after = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor");
+        assert_eq!(
+            after.last_renewal_kind, "test-start",
+            "status polling must not renew the playback lease"
+        );
+        assert!(
+            after.idle_for >= before.idle_for,
             "idle time must keep running while status is polled"
         );
 
-        // A real fetch DOES reset it — the contrast that keeps the assertion
-        // above from passing vacuously on a session whose clock never moved.
-        // (`touch` is the shared front half of the playlist and segment
-        // readers; calling those here would long-poll for output this fixture
-        // can never produce.)
-        assert!(mgr.touch(&info.session_id, "test-fetch").await.is_some());
-        assert_eq!(
-            mgr.session_status(&info.session_id)
+        // A successfully resolved fetch DOES reset it — the contrast that
+        // keeps the assertion above from passing vacuously on a session whose
+        // clock never moved. This is the shared response commit point; the
+        // actual readers would long-poll for output this fixture cannot make.
+        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            producer_attempt: fixture.session.control.current_producer_attempt(),
+            session: Arc::clone(&fixture.session),
+        });
+        assert!(
+            mgr.commit_resolved_media(session_id, &owner, "test-fetch", None, true)
                 .await
-                .expect("status")
-                .idle_seconds,
-            0,
+        );
+        let renewed = fixture
+            .session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor");
+        assert_eq!(
+            renewed.last_renewal_kind, "test-fetch",
+            "the accepted response records its exact renewal source"
+        );
+        assert!(
+            renewed.idle_for < after.idle_for,
             "fetching from a session is what keeps it alive"
         );
-        assert!(mgr.stop_session(&info.session_id, "test").await);
+        assert!(mgr.stop_session(session_id, "test").await);
     }
 
     /// The playlist is the only place a copied segment's true duration is
@@ -14934,7 +24509,7 @@ mod tests {
         assert_eq!((segs[1].start_ms, segs[1].end_ms), (4_000, 14_500));
         assert_eq!((segs[2].start_ms, segs[2].end_ms), (14_500, 24_500));
 
-        let index = SegmentIndex { segs };
+        let index = SegmentIndex { segs, revision: 0 };
         assert_eq!(index.produced_playable_end_ms(), Some(24_500));
         assert_eq!(index.end_ms_of(1), Some(14_500));
         assert_eq!(index.window_ms_of(1), Some((4_000, 14_500)));
@@ -15196,6 +24771,7 @@ mod tests {
                    #EXTINF:2.000,\n\
                    seg00005.m4s\n";
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 8_000,
@@ -15243,6 +24819,7 @@ mod tests {
                    #EXTINF:2.000,\n\
                    seg2000001.m4s\n";
         let takeover = SessionTakeoverStart {
+            provisional_session_id: "provisional-a".to_owned(),
             incarnation_id: "incarnation-a".to_owned(),
             origin_base_ms: 0,
             frontier_offset_ms: 8_000,
@@ -15296,6 +24873,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:3.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[0].bytes = 111;
         index.segs[1].bytes = 222;
@@ -15336,6 +24914,7 @@ mod tests {
                      #EXTINF:2.0,\nseg00002.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(three),
+            revision: 0,
         };
         index.segs[0].bytes = 999;
         let one = "#EXTM3U\n#EXTINF:4.0,\nseg00000.ts\n";
@@ -15358,6 +24937,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[1].bytes = 555;
         // Same names, but the second segment now cuts at 5s, and a third
@@ -15375,6 +24955,63 @@ mod tests {
             "the rewritten cut, not the remembered one"
         );
         assert_eq!(index.segs[1].bytes, 0, "and no stale size survives it");
+    }
+
+    #[test]
+    fn a_prepared_stale_prefix_cannot_regress_a_newer_index() {
+        let three = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n\
+                     #EXTINF:2.0,\nseg00002.ts\n";
+        let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
+        let mut current = SegmentIndex {
+            segs: parse_playlist(three),
+            revision: 0,
+        };
+        current.segs[0].bytes = 111;
+        let observed = SegmentIndex {
+            segs: parse_playlist(two),
+            revision: 0,
+        };
+
+        assert_eq!(current.merge_prepared(0, observed), Some(false));
+        assert_eq!(current.segs.len(), 3, "an older concurrent read is ignored");
+        assert_eq!(current.segs[0].bytes, 111, "measured state is retained");
+    }
+
+    #[test]
+    fn an_older_same_attempt_rewrite_cannot_land_after_a_newer_one() {
+        let base = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
+        let newer = "#EXTM3U\n#EXTINF:3.0,\nseg00000.ts\n#EXTINF:3.0,\nseg00001.ts\n";
+        let older = "#EXTM3U\n#EXTINF:4.0,\nseg00000.ts\n#EXTINF:4.0,\nseg00001.ts\n";
+        let mut current = SegmentIndex {
+            segs: parse_playlist(base),
+            revision: 0,
+        };
+        let captured_revision = current.revision;
+
+        assert_eq!(
+            current.merge_prepared(
+                captured_revision,
+                SegmentIndex {
+                    segs: parse_playlist(newer),
+                    revision: 0,
+                },
+            ),
+            Some(true),
+            "the first completed rewrite lands"
+        );
+        assert_eq!(
+            current.merge_prepared(
+                captured_revision,
+                SegmentIndex {
+                    segs: parse_playlist(older),
+                    revision: 0,
+                },
+            ),
+            None,
+            "the out-of-order preparation is fenced by its captured revision"
+        );
+        assert_eq!(current.segs[0].end_ms, 3_000);
+        assert_eq!(current.revision, captured_revision + 1);
     }
 
     /// The two byte figures answer different questions (review §2.7): the
@@ -15395,6 +25032,7 @@ mod tests {
                     pruned: false,
                 })
                 .collect(),
+            revision: 0,
         };
         // Frontier at 20s: five segments ahead of it, five behind it —
         // retained for scrubbing, and every one of them still on disk.
@@ -15461,6 +25099,7 @@ mod tests {
         let two = "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXTINF:2.0,\nseg00001.ts\n";
         let mut index = SegmentIndex {
             segs: parse_playlist(two),
+            revision: 0,
         };
         index.segs[0].bytes = 0;
         index.segs[0].pruned = true;
@@ -15484,6 +25123,7 @@ mod tests {
                     pruned: false,
                 })
                 .collect(),
+            revision: 0,
         };
         // 40s published, nothing fetched → the whole 40s is reserve.
         let a = ahead_of(&index, 0).expect("published");
@@ -15498,6 +25138,174 @@ mod tests {
         assert_eq!((a.seconds, a.bytes), (0, 0));
         // Nothing published is not "zero ahead" — it is "don't know".
         assert_eq!(ahead_of(&SegmentIndex::default(), 0), None);
+    }
+
+    #[test]
+    fn explicit_flow_uses_reported_runway_and_preserves_capacity_bounds() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Web,
+        );
+        demand.position_ms = 120_000;
+        demand.buffered_through_ms = 140_000;
+        demand.playback_rate = 1.0;
+        let physical = Ahead {
+            seconds: 5,
+            bytes: 1_000,
+        };
+
+        let active = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(active.policy, "explicit_demand");
+        assert_eq!(active.production_ahead_seconds, Some(60));
+        assert_eq!(active.production_target_seconds, Some(50));
+        assert_eq!(
+            active.hold,
+            Some(AheadHold {
+                reason: AheadHoldReason::Time,
+                release_value: 50,
+            })
+        );
+
+        demand.playback_rate = 2.0;
+        let faster = evaluate_flow(FlowInputs {
+            physical_ahead: Some(physical),
+            published_end_ms: Some(80_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            faster.production_target_seconds,
+            Some(80),
+            "thirty seconds of wall-clock reserve becomes sixty media seconds at 2x"
+        );
+        assert_eq!(faster.hold, None);
+
+        demand.buffered_through_ms = 1_000_000;
+        assert_eq!(
+            explicit_production_target_seconds(&demand, limits.max_secs),
+            limits.max_secs,
+            "untrusted client runway cannot raise the configured time ceiling"
+        );
+
+        demand.buffered_through_ms = 140_000;
+        let capacity = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 0,
+                bytes: 2_001,
+            }),
+            published_end_ms: Some(120_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 1_000,
+            global_ahead_bytes: 1_000,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            capacity.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Bytes),
+            "explicit observations cannot bypass the physical scratch bound"
+        );
+
+        let unbounded_time = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 10_000,
+                bytes: 0,
+            }),
+            published_end_ms: Some(10_000_000),
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits: AheadLimits {
+                max_secs: 0,
+                max_bytes: 2_000,
+                global_max_bytes: 8_000,
+            },
+            currently_suspended: false,
+        });
+        assert_eq!(unbounded_time.production_target_seconds, None);
+        assert_eq!(
+            unbounded_time.hold, None,
+            "a zero configured time limit is disabled, not a target of zero"
+        );
+    }
+
+    #[test]
+    fn explicit_hold_stops_even_before_publication_and_seek_uses_its_target() {
+        let limits = AheadLimits {
+            max_secs: 180,
+            max_bytes: 2_000,
+            global_max_bytes: 8_000,
+        };
+        let mut demand = crate::playback_control::PlaybackDemandSnapshot::test_default(
+            crate::playback_control::ClientPlatform::Apple,
+        );
+        demand.demand = crate::playback_control::PlaybackDemand::Hold;
+        let holding = evaluate_flow(FlowInputs {
+            physical_ahead: None,
+            published_end_ms: None,
+            media_origin_ms: 0,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(
+            holding.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Demand)
+        );
+        assert_eq!(holding.production_target_seconds, Some(0));
+
+        demand.demand = crate::playback_control::PlaybackDemand::Active;
+        demand.position_ms = 10_000;
+        demand.seek_target_ms = Some(100_000);
+        demand.buffered_through_ms = 130_000;
+        demand.playback_rate = 1.0;
+        let seeking = evaluate_flow(FlowInputs {
+            physical_ahead: Some(Ahead {
+                seconds: 10,
+                bytes: 0,
+            }),
+            published_end_ms: Some(65_000),
+            media_origin_ms: 100_000,
+            lease_mode: crate::playback_control::RollingLeaseMode::Explicit,
+            demand: Some(&demand),
+            global_live_bytes: 0,
+            global_ahead_bytes: 0,
+            limits,
+            currently_suspended: false,
+        });
+        assert_eq!(seeking.production_ahead_seconds, Some(65));
+        assert_eq!(seeking.production_target_seconds, Some(60));
+        assert_eq!(
+            seeking.hold.map(|hold| hold.reason),
+            Some(AheadHoldReason::Time),
+            "the old pre-seek playhead must not inflate demand by ninety seconds"
+        );
     }
 
     #[test]
@@ -15616,6 +25424,7 @@ mod tests {
                         pruned: false,
                     })
                     .collect(),
+                revision: 0,
             })
             .collect();
         let global_live: i64 = indexes.iter().map(SegmentIndex::total_bytes).sum();
@@ -15655,6 +25464,15 @@ mod tests {
         assert!(!segment_was_pruned(Some(43), Some(42)));
         assert!(!segment_was_pruned(Some(41), None));
         assert!(!segment_was_pruned(None, Some(42)));
+    }
+
+    #[test]
+    fn an_ended_published_producer_fails_only_requests_beyond_its_frontier() {
+        assert!(!producer_request_beyond_frontier(Some(41), Some(42)));
+        assert!(!producer_request_beyond_frontier(Some(42), Some(42)));
+        assert!(producer_request_beyond_frontier(Some(43), Some(42)));
+        assert!(producer_request_beyond_frontier(Some(0), None));
+        assert!(producer_request_beyond_frontier(None, Some(42)));
     }
 
     #[tokio::test]
@@ -15736,11 +25554,14 @@ mod tests {
         raw_session.file_id = file_id;
         let session = Arc::new(raw_session);
         let mut delivery = SegmentDelivery::new(
-            Arc::clone(&store),
-            Arc::clone(&session),
-            "delivery-test",
-            "seg00001.m4s",
-            "test".to_owned(),
+            SegmentDeliveryContext {
+                store: Arc::clone(&store),
+                session: Arc::clone(&session),
+                producer_attempt: session.control.current_producer_attempt(),
+                session_id: "delivery-test".to_owned(),
+                segment: "seg00001.m4s".to_owned(),
+                encoder: "test".to_owned(),
+            },
             1_024,
             None,
         );
@@ -15871,6 +25692,34 @@ mod tests {
             .expect("write playlist");
     }
 
+    async fn complete_seeded_replacement(
+        session: Arc<Session>,
+        dir: PathBuf,
+        count: i64,
+        secs_each: f64,
+        first_segment: Option<&'static [u8]>,
+    ) -> u64 {
+        let (replacement, attempt) = session
+            .kill_child_for_replacement()
+            .await
+            .expect("prepublication replacement");
+        clear_session_dir(&dir).await.expect("clear predecessor");
+        session.confirm_predecessor_scratch_cleared();
+        seeded_session_dir(&dir, count, secs_each).await;
+        if let Some(bytes) = first_segment {
+            tokio::fs::write(dir.join("seg00000.ts"), bytes)
+                .await
+                .expect("write successor segment");
+        }
+        *session.child.lock().await = Some(AttemptChild::new(
+            session.control.current_producer_attempt(),
+            long_running_child(),
+            session.control.clone(),
+        ));
+        replacement.complete();
+        attempt
+    }
+
     /// The manager must hold the first live response while ffmpeg has only a
     /// one-segment EVENT playlist, then release it as soon as a second segment
     /// provides the startup cushion. This pins both the asynchronous polling
@@ -15883,12 +25732,12 @@ mod tests {
         seeded_session_dir(dir.path(), 1, 2.0).await;
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -15910,50 +25759,213 @@ mod tests {
         let text = String::from_utf8(playlist).expect("utf8 playlist");
         assert!(text.contains("seg00000.ts"));
         assert!(text.contains("seg00001.ts"));
-        assert!(session.playlist_published.load(Relaxed));
+        assert!(
+            !session.playlist_published.load(Relaxed),
+            "the read-only fixture does not impersonate response authorization"
+        );
+        let actor_delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert!(actor_delivery.playlist_ready);
+        assert_eq!(actor_delivery.published_segment, Some(1));
+        assert_eq!(actor_delivery.published_end_ms, Some(4_000));
+        assert_eq!(actor_delivery.next_media_sequence, 2);
+        let status = mgr.session_status("startup-gate").await.expect("status");
+        assert_eq!(status.producer_attempt, Some(0));
+        assert_eq!(status.playlist_ready, Some(true));
+        assert_eq!(status.published_segment, Some(1));
+        assert_eq!(status.published_end_ms, Some(4_000));
+        assert_eq!(status.next_media_sequence, Some(2));
+        assert_eq!(status.pending_fetched_segment, None);
     }
 
-    /// A producer that has already reported an unsuccessful exit cannot make
-    /// startup output later. The first playlist request must surface that
-    /// verdict instead of consuming the full 30-second publication window.
     #[tokio::test]
-    async fn playlist_fails_promptly_when_the_producer_exits_unsuccessfully() {
+    async fn waiting_playlist_rebinds_to_a_prepublication_successor_attempt() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
-        seeded_session_dir(dir.path(), 1, 2.0).await;
-        let mut child = tokio::process::Command::new("false")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn false");
-        let status = child.wait().await.expect("wait for false");
-        assert!(!status.success(), "the fixture must exit unsuccessfully");
-        let session = watchdog_session(dir.path(), Some(child), false);
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
+        mgr.playlist_wait_override_ms.store(5_000, Relaxed);
         mgr.sessions
             .lock()
             .await
-            .insert("early-exit".into(), Arc::clone(&session));
+            .insert("attempt-handoff".into(), Arc::clone(&session));
 
-        let playlist = tokio::time::timeout(Duration::from_millis(500), mgr.playlist("early-exit"))
-            .await
-            .expect("an unsuccessful producer exit must not consume the startup window");
-        // And it says *which* terminal cause, carrying the exit status: this
-        // is the one place the status is knowable, and an anonymous refusal
-        // here is what left #263's operator reading logs on a headless box.
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist("attempt-handoff").await }
+        });
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
         assert!(
-            matches!(&playlist, Err(PlaylistError::ProducerExited(status)) if !status.is_empty()),
-            "a failed startup must name the producer exit, got {playlist:?}"
+            !playlist.is_finished(),
+            "request is waiting on attempt zero"
         );
+
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("prepublication successor");
+        session.reset_compatibility_delivery(successor).await;
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+
+        let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
+            .await
+            .expect("successor playlist deadline")
+            .expect("playlist task")
+            .expect("the original request follows the successor");
+        assert!(String::from_utf8(bytes)
+            .expect("playlist text")
+            .contains("seg00001.ts"));
+        assert_eq!(session.control.current_producer_attempt(), successor);
+    }
+
+    #[tokio::test]
+    async fn predecessor_playlist_cannot_open_the_successor_startup_gate() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(5_000, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("publication-handoff".into(), Arc::clone(&session));
+
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist("publication-handoff").await }
+        });
+        pause.wait().await;
+
+        session.replacing_child.store(true, Release);
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("prepublication successor");
+        session.reset_compatibility_delivery(successor).await;
+        pause.wait().await;
+        clear_session_dir(dir.path())
+            .await
+            .expect("clear predecessor");
+        session.confirm_predecessor_scratch_cleared();
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        session.replacing_child.store(false, Release);
+
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
         assert!(
-            session.failed.load(Relaxed),
-            "the terminal startup verdict must be shared with later requests"
+            !playlist.is_finished(),
+            "one successor segment must not inherit the predecessor's open gate"
+        );
+        assert_eq!(
+            session.compatibility_playlist_published(successor),
+            Some(false)
+        );
+
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let bytes = tokio::time::timeout(Duration::from_secs(2), playlist)
+            .await
+            .expect("successor cushion deadline")
+            .expect("playlist task")
+            .expect("successor playlist");
+        assert!(String::from_utf8(bytes)
+            .expect("playlist text")
+            .contains("seg00001.ts"));
+        let delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert!(delivery.playlist_ready);
+        assert_eq!(delivery.published_segment, Some(1));
+        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(
+            session.compatibility_playlist_published(successor),
+            Some(false),
+            "the read-only fixture does not impersonate response authorization"
+        );
+    }
+
+    #[tokio::test]
+    async fn returned_playlist_bytes_publish_actor_readiness_without_a_second_read() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .playlist_publication_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("exact-publication".into(), Arc::clone(&session));
+
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist("exact-publication").await }
+        });
+        pause.wait().await;
+        tokio::fs::remove_file(dir.path().join("index.m3u8"))
+            .await
+            .expect("force the later refresh read to fail");
+        pause.wait().await;
+
+        let bytes = playlist
+            .await
+            .expect("playlist task")
+            .expect("the already-read exact playlist remains servable");
+        assert!(String::from_utf8(bytes)
+            .expect("playlist text")
+            .contains("seg00001.ts"));
+        let delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert!(delivery.playlist_ready);
+        assert_eq!(delivery.published_segment, Some(1));
+        assert_eq!(delivery.published_end_ms, Some(4_000));
+        assert_eq!(
+            session.kill_child_for_replacement().await.err(),
+            Some(crate::playback_control::ProducerAttemptRejection::PlaylistPublished),
+            "bytes returned to a client permanently close in-place fallback"
         );
     }
 
@@ -15961,8 +25973,8 @@ mod tests {
     /// own startup recovery, because a session inside that recovery is one the
     /// server is still successfully starting.
     ///
-    /// A stalled hardware start is given `FIRST_SEGMENT_GRACE` before it is
-    /// downgraded and then `SOFTWARE_GRACE` for the software fallback to
+    /// A stalled hardware start is given the actor hardware budget before it is
+    /// retried and then the actor software budget for the fallback to
     /// produce real output. The wait used to be an independently chosen 30 s,
     /// sized against the copy path's publish gate and never against this — so
     /// at 30 s the request 404'd, hls.js escalated it to a fatal
@@ -15972,21 +25984,100 @@ mod tests {
     /// Reverting the budget to that 30 s fails this assertion.
     #[test]
     fn the_playlist_wait_outlives_the_startup_recovery_it_has_to_cover() {
-        let recovery = FIRST_SEGMENT_GRACE + SOFTWARE_GRACE;
+        let recovery = ACTOR_HARDWARE_STARTUP_BUDGET + ACTOR_SOFTWARE_STARTUP_BUDGET;
         assert!(
             PLAYLIST_WAIT_BUDGET > recovery,
             "a playlist request may not give up ({PLAYLIST_WAIT_BUDGET:?}) while the \
              session is still inside its own hardware->software recovery ({recovery:?})"
         );
-        // And with room for each stage to actually render its verdict: the
-        // first-segment watch and the lifetime watchdog both re-ask on
-        // WATCHDOG_POLL, with a respawn between them. A budget that lands in
-        // the gap before the last verdict reports "still starting" for a
-        // session that has already lost.
-        assert!(
-            PLAYLIST_WAIT_BUDGET >= recovery + WATCHDOG_POLL * 2,
-            "the budget must clear the recovery's own polling cadence, not just its graces"
+        assert_eq!(
+            PLAYLIST_WAIT_BUDGET,
+            recovery + PLAYLIST_WAIT_SLACK,
+            "HTTP patience must be derived only from both actor budgets plus named handoff slack"
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn playlist_reclassification_reuses_one_absolute_deadline() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("playlist deadline dir");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(25, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("shared-deadline".into(), session);
+
+        let deadline = mgr.playlist_request_deadline();
+        assert!(matches!(
+            mgr.playlist_with_owner_before("shared-deadline", deadline)
+                .await
+                .map_err(|error| error.error),
+            Err(PlaylistError::StartupTimedOut(_))
+        ));
+        let after_first = tokio::time::Instant::now();
+        assert!(matches!(
+            mgr.playlist_with_owner_before("shared-deadline", deadline)
+                .await
+                .map_err(|error| error.error),
+            Err(PlaylistError::StartupTimedOut(_))
+        ));
+        assert_eq!(
+            tokio::time::Instant::now(),
+            after_first,
+            "reclassification must not mint another playlist wait budget"
+        );
+    }
+
+    #[tokio::test]
+    async fn playlist_deadline_bounds_work_after_exact_bytes_are_observed() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("playlist bounded work dir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.playlist_wait_override_ms.store(40, Relaxed);
+        mgr.sessions
+            .lock()
+            .await
+            .insert("bounded-ready-playlist".into(), Arc::clone(&session));
+
+        // Exact bytes and actor observation are ready, but the response still
+        // needs the retained-window projection. Holding that lock models any
+        // post-read storage/catalog stall: it must share the same deadline,
+        // not extend the request indefinitely after useful bytes exist.
+        let segments = session.segments.lock().await;
+        let budget = Duration::from_millis(40);
+        let started = Instant::now();
+        let refused = mgr
+            .playlist_with_owner_before("bounded-ready-playlist", mgr.playlist_request_deadline())
+            .await
+            .map_err(|error| error.error);
+        assert!(matches!(
+            refused,
+            Err(PlaylistError::StartupTimedOut(waited))
+                if waited == mgr.playlist_wait()
+        ));
+        assert!(
+            started.elapsed() >= budget && started.elapsed() < Duration::from_secs(1),
+            "the outer absolute deadline must own every await after the playlist read"
+        );
+        drop(segments);
     }
 
     /// The wait ends at its budget and not a poll before it.
@@ -15999,14 +26090,14 @@ mod tests {
     async fn a_playlist_is_held_for_the_whole_budget_and_no_longer() {
         use plurx_core::store::SqliteStore;
 
-        async fn manager(dir: &std::path::Path, budget_ms: u64) -> TranscodeManager {
+        async fn manager(dir: &std::path::Path, budget_ms: u64) -> Arc<TranscodeManager> {
             let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-            let mgr = TranscodeManager::new(
+            let mgr = Arc::new(TranscodeManager::new(
                 store,
                 dir.join("manager-work"),
                 EncoderCaps::default(),
                 Pipeline::Cpu,
-            );
+            ));
             mgr.playlist_wait_override_ms.store(budget_ms, Relaxed);
             mgr
         }
@@ -16037,6 +26128,14 @@ mod tests {
             "it must have actually waited rather than found the playlist already there"
         );
         publish.await.expect("publisher");
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "resolving bytes alone must not impersonate a completed HTTP response"
+        );
 
         // Never published. Refused at the deadline — and as a retryable
         // "still starting", never as a session that failed or went away.
@@ -16067,6 +26166,14 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "and it must actually end at the budget"
         );
+        assert!(
+            stuck
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "a timed-out playlist miss must not renew the playback lease"
+        );
     }
 
     /// A terminal verdict is reported as itself, immediately, by every later
@@ -16078,12 +26185,12 @@ mod tests {
         let dir = crate::test_tempdir().expect("tempdir");
         let session = watchdog_session(dir.path(), None, false);
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // A long budget, so a wait would be unmistakable: a session that has
         // already lost must not spend one poll of it.
         mgr.playlist_wait_override_ms.store(30_000, Relaxed);
@@ -16153,47 +26260,8 @@ mod tests {
         );
     }
 
-    /// A clean encoder exit is EOF, not evidence of a broken session. Its
-    /// final playlist may still be crossing the filesystem boundary, so the
-    /// ordinary startup window remains open and the failure flag stays clear.
-    #[tokio::test]
-    async fn playlist_does_not_report_a_clean_producer_exit_as_failure() {
-        use plurx_core::store::SqliteStore;
-
-        let dir = crate::test_tempdir().expect("tempdir");
-        let mut child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn true");
-        let status = child.wait().await.expect("wait for true");
-        assert!(status.success(), "the fixture must exit successfully");
-        let session = watchdog_session(dir.path(), Some(child), false);
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        );
-        mgr.sessions
-            .lock()
-            .await
-            .insert("clean-exit".into(), Arc::clone(&session));
-
-        let waiting =
-            tokio::time::timeout(Duration::from_millis(250), mgr.playlist("clean-exit")).await;
-        assert!(
-            waiting.is_err(),
-            "clean EOF keeps the ordinary publication window open"
-        );
-        assert!(
-            !session.failed.load(Relaxed),
-            "clean EOF must not poison the session"
-        );
-    }
-
-    /// A watchdog or copy-segmenter fallback deliberately kills one producer
-    /// before installing its replacement. That gap is not a terminal exit:
+    /// An actor-authorized retry deliberately kills one producer before
+    /// installing its replacement. That gap is not a terminal exit:
     /// playlist startup must keep waiting instead of poisoning the successor.
     #[tokio::test]
     async fn playlist_waits_while_a_killed_producer_is_being_replaced() {
@@ -16210,12 +26278,12 @@ mod tests {
             .await
             .expect("a live session may replace its child");
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             dir.path().join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
@@ -16233,6 +26301,260 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn published_attempt_rejection_preserves_the_predecessor() {
+        let dir = crate::test_tempdir().expect("dir");
+        let sentinel = dir.path().join("predecessor-segment");
+        tokio::fs::write(&sentinel, b"still playable")
+            .await
+            .expect("sentinel");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        assert!(
+            session
+                .control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt: 0,
+                    playlist_ready: true,
+                    published_segment: Some(0),
+                    published_end_ms: Some(4_000),
+                    next_media_sequence: 1,
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await
+        );
+
+        let hardware_rejection = match session.kill_child_for_replacement().await {
+            Err(rejection) => rejection,
+            Ok(_) => panic!("published hardware predecessor must not be changed"),
+        };
+        assert_eq!(
+            hardware_rejection,
+            crate::playback_control::ProducerAttemptRejection::PlaylistPublished
+        );
+        assert!(tokio::fs::metadata(&sentinel).await.is_ok());
+        assert!(session
+            .child
+            .lock()
+            .await
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(None))));
+
+        session.kill_child().await;
+    }
+
+    #[tokio::test]
+    async fn expired_attempt_cannot_install_a_spawned_replacement() {
+        let dir = crate::test_tempdir().expect("dir");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let (mut replacement, producer_attempt) = session
+            .kill_child_for_replacement()
+            .await
+            .expect("admit replacement before expiry");
+        session
+            .control
+            .set_renewal_for_test(
+                Instant::now() - Duration::from_secs(SESSION_IDLE_SECS + 1),
+                "expired-after-admission",
+            )
+            .await;
+
+        let candidate = long_running_child();
+        let candidate_pid = candidate.id();
+        assert!(candidate_pid.is_some());
+        let rejection = session
+            .install_replacement_child(producer_attempt, candidate)
+            .await;
+        assert_eq!(
+            rejection,
+            Err(crate::playback_control::ProducerAttemptRejection::SessionEnded),
+            "final actor authorization must report the expired attempt"
+        );
+        replacement.settle_terminal_rejection();
+        let lease = session.control.snapshot().await.expect("rolling actor");
+        assert!(lease.retired && lease.expiration_claimed);
+        assert!(
+            !session.failed.load(Relaxed),
+            "actor-owned expiry must not be relabeled as replacement cancellation"
+        );
+        assert!(
+            session.replacing_child.load(Acquire),
+            "terminal rejection remains path-fenced"
+        );
+        let mut installed = session.child.lock().await;
+        assert_ne!(
+            installed.as_ref().and_then(|child| child.id()),
+            candidate_pid
+        );
+        assert!(
+            installed
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the session retains only its already-dead predecessor handle"
+        );
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(candidate_pid.expect("candidate pid fits u32"))
+                .expect("candidate pid fits i32");
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH),
+                "install rejection returns only after the candidate is reaped"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_actor_mutation_before_reply_stays_fenced() {
+        let dir = crate::test_tempdir().expect("dir");
+        let predecessor = dir.path().join("seg00000.ts");
+        tokio::fs::write(&predecessor, b"predecessor")
+            .await
+            .expect("predecessor segment");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let reply_pause = Arc::new(tokio::sync::Barrier::new(2));
+        session
+            .control
+            .pause_producer_attempt_reply(Arc::clone(&reply_pause));
+
+        let replacement = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                let _ = session.kill_child_for_replacement().await;
+            }
+        });
+        reply_pause.wait().await;
+        assert_eq!(
+            session.control.current_producer_attempt(),
+            1,
+            "the actor has committed ownership before delivering its reply"
+        );
+        replacement.abort();
+        assert!(replacement
+            .await
+            .expect_err("replacement task must abort")
+            .is_cancelled());
+        assert!(session.replacing_child.load(Acquire));
+        assert!(session.failed.load(Relaxed));
+        assert!(predecessor.exists());
+
+        // Release the actor so it can observe the dropped reply and process
+        // the retirement command scheduled by the transaction's Drop.
+        reply_pause.wait().await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered actor retirement");
+        assert!(session.coherent_path_producer_attempt().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelled_post_admission_replacement_stays_fenced_and_retires() {
+        let dir = crate::test_tempdir().expect("dir");
+        let predecessor = dir.path().join("seg00000.ts");
+        tokio::fs::write(&predecessor, b"predecessor")
+            .await
+            .expect("predecessor segment");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .replacement_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+
+        let replacement = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move {
+                let _ = session.kill_child_for_replacement().await;
+            }
+        });
+        pause.wait().await;
+        tokio::task::yield_now().await;
+        assert_eq!(session.control.current_producer_attempt(), 1);
+        replacement.abort();
+        assert!(
+            replacement
+                .await
+                .expect_err("replacement task must abort")
+                .is_cancelled(),
+            "the fixture cancels after actor admission and projection reset"
+        );
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drop-triggered actor retirement");
+        assert!(session.replacing_child.load(Acquire));
+        assert!(session.failed.load(Relaxed));
+        assert!(predecessor.exists(), "the old bytes still physically exist");
+        assert!(
+            session.coherent_path_producer_attempt().await.is_none(),
+            "cancelled replacement cannot reopen predecessor paths as attempt one"
+        );
+    }
+
+    #[tokio::test]
+    async fn retirement_after_authorization_cannot_publish_a_replacement() {
+        let dir = crate::test_tempdir().expect("dir");
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let (mut replacement, producer_attempt) = session
+            .kill_child_for_replacement()
+            .await
+            .expect("admit replacement before retirement");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .producer_install_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+
+        let candidate = long_running_child();
+        let candidate_pid = candidate.id();
+        let install = session.install_replacement_child(producer_attempt, candidate);
+        let retire = async {
+            pause.wait().await;
+            session.control.end().await.expect("end verdict");
+            pause.wait().await;
+        };
+        let (result, ()) = tokio::join!(install, retire);
+
+        assert_eq!(
+            result,
+            Err(crate::playback_control::ProducerAttemptRejection::SessionEnded),
+            "retirement between actor admission and assignment must win"
+        );
+        replacement.settle_terminal_rejection();
+        assert!(!session.failed.load(Relaxed));
+        assert!(session.replacing_child.load(Acquire));
+        assert_ne!(
+            session
+                .child
+                .lock()
+                .await
+                .as_ref()
+                .and_then(|child| child.id()),
+            candidate_pid,
+            "the retired session cannot own the spawned candidate"
+        );
+        #[cfg(unix)]
+        {
+            let pid = i32::try_from(candidate_pid.expect("candidate pid fits u32"))
+                .expect("candidate pid fits i32");
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH),
+                "final-fence rejection returns only after the candidate is reaped"
+            );
+        }
+    }
+
     /// Drive the hardware-to-software fallback itself, paused after it kills
     /// the predecessor. This pins the production call site as well as the
     /// replacement marker: a playlist poll inside that gap must not poison the
@@ -16246,6 +26568,7 @@ mod tests {
         let file_id = seed_file(&store).await;
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let dir = crate::test_tempdir().expect("session dir");
         let session = Arc::new(test_session(dir.path().to_path_buf()));
         mgr.sessions
@@ -16304,11 +26627,93 @@ mod tests {
         session.kill_child().await;
     }
 
+    #[tokio::test]
+    async fn production_fallback_stays_fenced_when_predecessor_cleanup_fails() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let (mgr, _work, _cache) = cached_manager(&store);
+        let dir = crate::test_tempdir().expect("session dir");
+        seeded_session_dir(dir.path(), 1, 4.0).await;
+        let served_name = dir.path().join("init.mp4");
+        tokio::fs::create_dir(&served_name)
+            .await
+            .expect("undeletable served-name fixture");
+        tokio::fs::write(served_name.join("predecessor-bytes"), b"old")
+            .await
+            .expect("predecessor bytes");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.refresh_segments().await;
+        assert_eq!(session.live_bytes.load(Acquire), 1_024);
+
+        let mut opts = mgr.options_for_tone_map(
+            Encoder::VideoToolbox,
+            &file,
+            720,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Sdr,
+        );
+        opts.pipeline = Pipeline::Cpu;
+        let original_rate_control = opts.effective_rate_control;
+        let sw_pool = mgr.admissions.software_pool();
+        let result = TranscodeManager::downgrade_one_step(
+            &session,
+            &file,
+            &opts,
+            Encoder::VideoToolbox,
+            EffectiveRateControl::Vbr,
+            Pacing::unpaced(),
+            &sw_pool,
+            dir.path(),
+            "fallback-clear-failure",
+            &mgr.runtime_cache,
+        )
+        .await;
+
+        assert_eq!(result, original_rate_control);
+        assert!(served_name.join("predecessor-bytes").exists());
+        assert!(
+            session
+                .child
+                .lock()
+                .await
+                .as_mut()
+                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
+            "the slot retains only the deliberately stopped predecessor handle"
+        );
+        assert!(session.replacing_child.load(Acquire));
+        assert!(session.coherent_path_producer_attempt().await.is_none());
+        assert_eq!(
+            session.live_bytes.load(Acquire),
+            1_024,
+            "predecessor bytes remain charged until verified scratch clearing"
+        );
+        assert!(matches!(
+            session.failure_reason(),
+            PlaylistError::SessionFailed(reason)
+                if reason.contains("predecessor scratch could not be cleared")
+                    && reason.contains("init.mp4")
+        ));
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !session.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("storage failure retires actor ownership");
+    }
+
     /// A playlist request that already resolved the session Arc still observes
     /// retirement promptly. The Arc keeps the object alive; it does not make a
     /// superseded session an addressable stream until the startup budget ends.
     #[tokio::test]
-    async fn a_waiting_playlist_returns_session_gone_when_the_session_is_retired() {
+    async fn a_waiting_playlist_keeps_current_retirement_retryable_until_registry_removal() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("tempdir");
@@ -16330,16 +26735,19 @@ mod tests {
             let mgr = Arc::clone(&mgr);
             async move { mgr.playlist("retired-session").await }
         });
-        tokio::time::timeout(Duration::from_secs(1), async {
-            loop {
-                if session.last_request.lock().await.kind == "playlist" {
-                    break;
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("playlist request must acquire the live session");
+        tokio::time::sleep(PLAYLIST_WAIT_POLL * 2).await;
+        assert!(
+            !playlist.is_finished(),
+            "the playlist request acquired the session and is waiting for publication"
+        );
+        assert!(
+            session
+                .control
+                .snapshot()
+                .await
+                .is_some_and(|lease| lease.last_renewal_kind == "test-start"),
+            "waiting itself must not renew the lease"
+        );
         assert!(
             mgr.retire_session("retired-session", &session).await,
             "the production retirement path must own this live session"
@@ -16349,60 +26757,16 @@ mod tests {
             .await
             .expect("retirement must beat the 30-second startup budget")
             .expect("playlist task");
-        assert_eq!(refused, Err(PlaylistError::SessionGone));
+        assert!(matches!(refused, Err(PlaylistError::StartupTimedOut(_))));
         assert!(
             !session.failed.load(Relaxed),
             "routine retirement is gone/superseded, not a producer failure"
         );
     }
 
-    /// Inspecting one producer may wait behind a slow kill that holds its
-    /// child lock. That wait must not retain the manager-wide sessions lock
-    /// and freeze status, playlist, or stop work for unrelated viewers.
-    #[tokio::test]
-    async fn playlist_exit_check_does_not_block_an_unrelated_session() {
-        use plurx_core::store::SqliteStore;
-
-        let dir = crate::test_tempdir().expect("tempdir");
-        let wedged = watchdog_session(dir.path(), None, false);
-        let unrelated = watchdog_session(dir.path(), None, false);
-        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = Arc::new(TranscodeManager::new(
-            store,
-            dir.path().join("manager-work"),
-            EncoderCaps::default(),
-            Pipeline::Cpu,
-        ));
-        {
-            let mut sessions = mgr.sessions.lock().await;
-            sessions.insert("wedged".into(), Arc::clone(&wedged));
-            sessions.insert("unrelated".into(), unrelated);
-        }
-
-        let held_child = wedged.child.lock().await;
-        let exit_check = tokio::spawn({
-            let mgr = Arc::clone(&mgr);
-            let wedged = Arc::clone(&wedged);
-            async move { mgr.playlist_producer_failed(&wedged, "wedged").await }
-        });
-        // Let the exit check reach the held per-session child lock. The
-        // manager-wide lock must already be available again at that point.
-        tokio::time::sleep(Duration::from_millis(25)).await;
-
-        let status =
-            tokio::time::timeout(Duration::from_millis(250), mgr.session_status("unrelated")).await;
-        assert!(
-            status.is_ok(),
-            "a slow child inspection must not block an unrelated session's status"
-        );
-
-        drop(held_child);
-        assert!(!exit_check.await.expect("exit-check task"));
-    }
-
     /// Re-evaluating an unchanged running session must be a no-op. Without the
     /// state guard, a healthy playlist poll sends SIGCONT and touches the
-    /// motion clock, which prevents the stall watchdog from ever firing.
+    /// motion clock, which postpones the actor's producer-progress verdict.
     #[tokio::test]
     async fn unchanged_flow_control_state_does_not_touch_the_motion_clock() {
         use plurx_core::store::SqliteStore;
@@ -16438,6 +26802,455 @@ mod tests {
             session.progress.stalled_for() >= before,
             "an unchanged flow-control evaluation must not reset motion"
         );
+    }
+
+    #[tokio::test]
+    async fn refresh_ignores_predecessor_scratch_during_admitted_cutover() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = test_session(dir.path().to_path_buf());
+
+        session.replacing_child.store(true, Release);
+        let successor = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("prepublication successor");
+        session.reset_compatibility_delivery(successor).await;
+        session.refresh_segments().await;
+
+        assert!(session.segments.lock().await.segs.is_empty());
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery
+                .published_segment,
+            None,
+            "predecessor scratch cannot be attributed to the admitted successor"
+        );
+        session.replacing_child.store(false, Release);
+    }
+
+    #[tokio::test]
+    async fn an_older_playlist_read_cannot_land_with_a_newer_catalog_revision() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .refresh_after_read_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+
+        let older = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.refresh_segments().await }
+        });
+        pause.wait().await;
+
+        // The first refresh already owns the two-second bytes but has not
+        // merged them. A second refresh observes a rewritten three-second
+        // timeline and must be the only one allowed to spend revision zero.
+        seeded_session_dir(dir.path(), 2, 3.0).await;
+        session.refresh_segments().await;
+        pause.wait().await;
+        older.await.expect("older refresh task");
+
+        let index = session.segments.lock().await;
+        assert_eq!(index.revision, 1);
+        assert_eq!(index.end_ms_of(0), Some(3_000));
+        assert_eq!(index.produced_playable_end_ms(), Some(6_000));
+    }
+
+    #[tokio::test]
+    async fn playlist_owner_sampling_cannot_cross_a_complete_replacement_aba() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .path_owner_sample_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
+        *session
+            .replacement_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&replacement_pause));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("playlist-aba".into(), Arc::clone(&session));
+
+        let playlist = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.playlist_with_owner("playlist-aba").await }
+        });
+        owner_pause.wait().await;
+        let successor = tokio::spawn(complete_seeded_replacement(
+            Arc::clone(&session),
+            dir.path().to_path_buf(),
+            2,
+            3.0,
+            None,
+        ));
+        replacement_pause.wait().await;
+        owner_pause.wait().await;
+        replacement_pause.wait().await;
+        let successor = successor.await.expect("replacement task");
+
+        let (bytes, owner) = playlist
+            .await
+            .expect("playlist task")
+            .unwrap_or_else(|_| panic!("successor playlist"));
+        let text = String::from_utf8(bytes).expect("playlist text");
+        assert!(text.contains("#EXTINF:3.000"), "{text}");
+        assert!(!text.contains("#EXTINF:2.000"), "{text}");
+        assert!(matches!(
+            owner.0,
+            MediaResponseOwnerKind::Rolling {
+                producer_attempt,
+                ..
+            } if producer_attempt == successor
+        ));
+    }
+
+    #[tokio::test]
+    async fn segment_owner_sampling_cannot_cross_a_complete_replacement_aba() {
+        use plurx_core::store::SqliteStore;
+        use tokio::io::AsyncReadExt as _;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        let manager_dir = crate::test_tempdir().expect("manager tempdir");
+        seeded_session_dir(dir.path(), 1, 2.0).await;
+        tokio::fs::write(dir.path().join("seg00000.ts"), b"predecessor")
+            .await
+            .expect("predecessor segment");
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .path_owner_sample_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
+        *session
+            .replacement_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&replacement_pause));
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let mgr = Arc::new(TranscodeManager::new(
+            store,
+            manager_dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        mgr.sessions
+            .lock()
+            .await
+            .insert("segment-aba".into(), Arc::clone(&session));
+
+        let segment = tokio::spawn({
+            let mgr = Arc::clone(&mgr);
+            async move { mgr.segment("segment-aba", "seg00000.ts").await }
+        });
+        owner_pause.wait().await;
+        let successor = tokio::spawn(complete_seeded_replacement(
+            Arc::clone(&session),
+            dir.path().to_path_buf(),
+            1,
+            3.0,
+            Some(b"successor"),
+        ));
+        replacement_pause.wait().await;
+        owner_pause.wait().await;
+        replacement_pause.wait().await;
+        let successor = successor.await.expect("replacement task");
+
+        let mut segment = segment
+            .await
+            .expect("segment task")
+            .expect("segment open")
+            .expect("successor segment");
+        let mut bytes = Vec::new();
+        segment
+            .file
+            .read_to_end(&mut bytes)
+            .await
+            .expect("read successor segment");
+        assert_eq!(bytes, b"successor");
+        assert!(matches!(
+            segment.response_owner().0,
+            MediaResponseOwnerKind::Rolling {
+                producer_attempt,
+                ..
+            } if producer_attempt == successor
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_owner_sampling_cannot_cross_a_complete_replacement_aba() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 2, 2.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        let owner_pause = Arc::new(tokio::sync::Barrier::new(2));
+        let replacement_pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .path_owner_sample_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
+        *session
+            .replacement_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some(Arc::clone(&replacement_pause));
+
+        let refresh = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { session.refresh_segments().await }
+        });
+        owner_pause.wait().await;
+        let successor = tokio::spawn(complete_seeded_replacement(
+            Arc::clone(&session),
+            dir.path().to_path_buf(),
+            2,
+            3.0,
+            None,
+        ));
+        replacement_pause.wait().await;
+        owner_pause.wait().await;
+        refresh.await.expect("stale refresh task");
+        assert!(session.segments.lock().await.segs.is_empty());
+        replacement_pause.wait().await;
+        let successor = successor.await.expect("replacement task");
+
+        session.refresh_segments().await;
+        assert_eq!(
+            session.segments.lock().await.produced_playable_end_ms(),
+            Some(6_000)
+        );
+        let delivery = session
+            .control
+            .snapshot()
+            .await
+            .expect("rolling actor")
+            .delivery;
+        assert_eq!(delivery.producer_attempt, successor);
+        assert_eq!(delivery.published_end_ms, Some(6_000));
+    }
+
+    #[tokio::test]
+    async fn retention_finishes_predecessor_deletes_before_reused_successor_paths() {
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 100, 4.0).await;
+        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
+        let raw = tokio::fs::read_to_string(dir.path().join("index.m3u8"))
+            .await
+            .expect("seed playlist");
+        let mut seeded = SegmentIndex {
+            segs: parse_playlist(&raw),
+            revision: 0,
+        };
+        for segment in &mut seeded.segs {
+            segment.bytes = 1_024;
+        }
+        *session.segments.lock().await = seeded;
+        session.fetched_end_ms.store(300_000, Relaxed);
+
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .retention_delete_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let gc = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { gc_expired_segments(&session).await }
+        });
+        pause.wait().await;
+        let queued_during_pause = session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len();
+        assert!(queued_during_pause > 0);
+        assert!(session.retention_cleanup_active.load(Acquire));
+        gc_expired_segments(&session).await;
+        assert_eq!(
+            session
+                .retention_cleanup_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            queued_during_pause,
+            "a repeated repair tick cannot enqueue a second cleanup batch"
+        );
+
+        let replacement = tokio::spawn({
+            let session = Arc::clone(&session);
+            let path = dir.path().to_path_buf();
+            async move {
+                let (replacement, attempt) = session
+                    .kill_child_for_replacement()
+                    .await
+                    .expect("prepublication replacement");
+                clear_session_dir(&path).await.expect("clear predecessor");
+                session.confirm_predecessor_scratch_cleared();
+                seeded_session_dir(&path, 2, 2.0).await;
+                *session.child.lock().await = Some(AttemptChild::new(
+                    session.control.current_producer_attempt(),
+                    long_running_child(),
+                    session.control.clone(),
+                ));
+                replacement.complete();
+                attempt
+            }
+        });
+        gc.await.expect("retention task");
+        let successor = tokio::time::timeout(Duration::from_secs(1), replacement)
+            .await
+            .expect("slow garbage deletion cannot hold the path transition")
+            .expect("replacement task");
+        pause.wait().await;
+        pause.wait().await;
+        assert_eq!(session.control.current_producer_attempt(), successor);
+        assert!(dir.path().join("seg00000.ts").exists());
+        assert!(dir.path().join("seg00001.ts").exists());
+    }
+
+    #[tokio::test]
+    async fn failed_retention_garbage_unlink_cannot_reexpose_a_served_path() {
+        use plurx_core::store::SqliteStore;
+
+        let dir = crate::test_tempdir().expect("tempdir");
+        seeded_session_dir(dir.path(), 40, 4.0).await;
+        let session = Arc::new(test_session(dir.path().to_path_buf()));
+        session.refresh_segments().await;
+        session.fetched_end_ms.store(300_000, Relaxed);
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *session
+            .retention_delete_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+
+        gc_expired_segments(&session).await;
+        pause.wait().await;
+        let garbage = session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .first()
+            .map(|(path, _)| path.clone())
+            .expect("handed-off garbage path");
+        tokio::fs::remove_file(&garbage)
+            .await
+            .expect("replace garbage file");
+        tokio::fs::create_dir(&garbage)
+            .await
+            .expect("force remove_file failure");
+        pause.wait().await;
+        pause.wait().await;
+
+        assert!(!dir.path().join("seg00000.ts").exists());
+        assert!(session
+            .segments
+            .lock()
+            .await
+            .segs
+            .first()
+            .is_some_and(|segment| segment.pruned && segment.bytes == 0));
+        assert!(
+            tokio::fs::metadata(&garbage)
+                .await
+                .is_ok_and(|metadata| metadata.is_dir()),
+            "cleanup failure remains confined to an unservable garbage name"
+        );
+        let retained_bytes = 10 * 1_024;
+        let charged_garbage = session.retention_garbage_bytes.load(Acquire);
+        assert_eq!(
+            charged_garbage, 1_024,
+            "only the independently failed item remains charged"
+        );
+        assert_eq!(
+            session.live_bytes.load(Acquire),
+            retained_bytes + charged_garbage,
+            "failed physical deletion remains included in the hard scratch cap"
+        );
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            dir.path().join("manager-work"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("failed-garbage".into(), Arc::clone(&session));
+        assert_eq!(
+            manager.global_flow_bytes().await.0,
+            retained_bytes + charged_garbage,
+            "the global hard cap includes failed detached cleanup"
+        );
+        assert!(!session.retention_cleanup_active.load(Acquire));
+        assert_eq!(
+            session
+                .retention_cleanup_queue
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1,
+            "the failed item remains retryable without stranding the tail"
+        );
+        let mut entries = tokio::fs::read_dir(dir.path()).await.expect("session dir");
+        let mut hidden_garbage = 0;
+        while let Some(entry) = entries.next_entry().await.expect("directory entry") {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".plurx-retention-")
+            {
+                hidden_garbage += 1;
+            }
+        }
+        assert_eq!(
+            hidden_garbage, 1,
+            "the worker attempts and removes every independent tail entry"
+        );
+
+        tokio::fs::remove_dir(&garbage)
+            .await
+            .expect("release failed-cleanup fixture");
+        gc_expired_segments(&session).await;
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while session.retention_cleanup_active.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("queued retention retry");
+        assert!(session
+            .retention_cleanup_queue
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty());
+        assert_eq!(session.retention_garbage_bytes.load(Acquire), 0);
+        assert_eq!(session.live_bytes.load(Acquire), retained_bytes);
+        assert_eq!(manager.global_flow_bytes().await.0, retained_bytes);
     }
 
     /// Retention is measured back from the DOWNLOAD frontier and must leave a
@@ -16506,22 +27319,22 @@ mod tests {
 
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             store,
             p.join("manager-work"),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         mgr.sessions
             .lock()
             .await
             .insert("retained-window".into(), Arc::clone(&session));
-        let served = String::from_utf8(
-            mgr.playlist("retained-window")
-                .await
-                .expect("served playlist"),
-        )
-        .expect("playlist utf8");
+        let (served, playlist_owner) = mgr
+            .playlist_with_owner("retained-window")
+            .await
+            .map_err(|error| error.error)
+            .expect("served playlist");
+        let served = String::from_utf8(served).expect("playlist utf8");
         assert!(served.contains("#EXT-X-MEDIA-SEQUENCE:30"), "{served}");
         assert!(!served.contains("#EXT-X-PLAYLIST-TYPE:EVENT"), "{served}");
         assert!(!served.contains("seg00029.ts"), "{served}");
@@ -16529,6 +27342,34 @@ mod tests {
         for name in served.lines().filter(|line| line.ends_with(".ts")) {
             assert!(p.join(name).exists(), "served segment must exist: {name}");
         }
+        assert!(
+            mgr.commit_resolved_media(
+                "retained-window",
+                &playlist_owner,
+                "playlist",
+                Some("index.m3u8"),
+                true,
+            )
+            .await,
+            "the successful playlist delivery commits its exact owner"
+        );
+        let before_miss = session.control.snapshot().await.expect("rolling actor");
+        assert_eq!(before_miss.last_renewal_kind, "playlist");
+
+        assert!(mgr
+            .segment("retained-window", "seg00029.ts")
+            .await
+            .expect("pruned request")
+            .is_none());
+        let after_miss = session.control.snapshot().await.expect("rolling actor");
+        assert_eq!(
+            after_miss.last_renewal_kind, "playlist",
+            "a pruned media miss must not change the playback lease source"
+        );
+        assert!(
+            after_miss.idle_for >= before_miss.idle_for,
+            "a pruned media miss must not renew the playback lease"
+        );
 
         // Subtitle timing still sees the discarded prefix through the full
         // internal index: segment 30 begins at 120 seconds, not at zero.
@@ -16619,19 +27460,40 @@ mod tests {
     async fn a_client_fetch_releases_a_held_session_and_restarts_progress() {
         super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
+        use tokio::io::AsyncReadExt as _;
+
         let media = crate::test_tempdir().expect("media dir");
         let src = media.path().join("clip.mp4");
         write_real_video(&src, 60);
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file_at(&store, &src.to_string_lossy()).await;
+        let file_id = seed_file_with_probe_at(
+            &store,
+            &src.to_string_lossy(),
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(60_000),
+                container: Some("mp4".into()),
+                video_codec: Some("h264".into()),
+                width: Some(160),
+                height: Some(120),
+                ..Default::default()
+            },
+        )
+        .await;
+        let seeded = store
+            .get_file(file_id)
+            .await
+            .expect("read real fixture probe")
+            .expect("real fixture file");
+        assert_eq!(seeded.video_codec.as_deref(), Some("h264"));
+        assert_eq!((seeded.width, seeded.height), (Some(160), Some(120)));
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // Burst then crawl. The burst gives the session something to be ahead
         // *with* straight away; the realtime pace afterwards keeps it alive for
         // the rest of the test, because an unpaced copy of a short clip
@@ -16683,6 +27545,12 @@ mod tests {
             loop {
                 match session.progress.out_time_ms() {
                     Some(ms) if ms >= 3_000 => return ms,
+                    _ if session.failed.load(Acquire) => {
+                        panic!(
+                            "ffmpeg failed before its output timeline advanced: {:?}",
+                            session.failure_reason()
+                        );
+                    }
                     _ => tokio::time::sleep(Duration::from_millis(50)).await,
                 }
             }
@@ -16723,8 +27591,47 @@ mod tests {
                 "published media with an unmoved frontier is reserve; measured {ffmpeg_build}"
             );
 
+            // Publish the playlist through the same owner/authorization/EOF
+            // transaction as HTTP. The first-media handoff must happen here;
+            // neither a scratch-file refresh nor a later segment read may
+            // infer that a player has observed this generation.
+            let (playlist_bytes, playlist_owner) =
+                match mgr.playlist_with_owner(&info.session_id).await {
+                    Ok(publication) => publication,
+                    Err(_) => panic!("playlist publication failed"),
+                };
+            let playlist = std::str::from_utf8(&playlist_bytes).expect("UTF-8 playlist");
+            let newest = playlist
+                .lines()
+                .map(str::trim)
+                .rfind(|line| is_safe_segment(line) && segment_index(line).is_some())
+                .expect("advertised media segment")
+                .to_owned();
+            let playlist_deadline = Instant::now() + Duration::from_secs(5);
+            let playlist_authorization = mgr
+                .authorize_response_publication(
+                    &info.session_id,
+                    &playlist_owner,
+                    MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                    playlist_deadline,
+                )
+                .await
+                .expect("playlist response admission");
+            mgr.commit_authorized_media(playlist_authorization, true, playlist_deadline)
+                .await
+                .expect("playlist response EOF commit");
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert!(actor_delivery.playlist_ready);
+            assert!(session.first_media_handoff_applied.load(Acquire));
+            assert!(!session.actor_prepublication_producer.load(Acquire));
+
             // A window it has already exceeded suspends it, and a suspended
-            // encoder stops advancing — which is the property the watchdog relies
+            // encoder stops advancing — which is the property actor progress relies
             // on being able to tell apart from a wedge.
             mgr.flow_control(&session, &info.session_id).await;
             assert!(session.suspended.load(Relaxed), "session was held");
@@ -16745,20 +27652,67 @@ mod tests {
             // Fetch the newest published segment through the real request path.
             // That advances the download frontier, re-evaluates the same configured
             // limit, sends SIGCONT, and restarts actual encoder progress.
-            let newest = session
+            let opened = match mgr
+                .segment_for_publication(&info.session_id, &newest)
+                .await
+                .expect("segment resolution")
+            {
+                SegmentPublication::Ready(opened) => opened,
+                _ => panic!("advertised segment was not ready"),
+            };
+            let segment_owner = opened.response_owner();
+            let segment_authorization_deadline = Instant::now() + Duration::from_secs(5);
+            let segment_authorization = mgr
+                .authorize_response_publication(
+                    &info.session_id,
+                    &segment_owner,
+                    MediaResponsePublication::attempt_media("media-segment", Some(&newest)),
+                    segment_authorization_deadline,
+                )
+                .await
+                .expect("segment response admission");
+            let SegmentFile {
+                mut file,
+                len,
+                mut delivery,
+            } = opened;
+            let started = Instant::now();
+            let mut bytes = Vec::with_capacity(usize::try_from(len).expect("segment length"));
+            file.read_to_end(&mut bytes)
+                .await
+                .expect("read advertised segment");
+            delivery.note_read(bytes.len() as u64, started.elapsed());
+            assert_eq!(bytes.len() as u64, len, "read through advertised EOF");
+            assert!(delivery.finish(), "segment delivery reached exact EOF");
+            let segment_completion_deadline = Instant::now() + Duration::from_secs(5);
+            mgr.commit_authorized_media(segment_authorization, true, segment_completion_deadline)
+                .await
+                .expect("segment response EOF commit");
+            let fetched_index = segment_index(&newest).expect("numbered segment");
+            let fetched_end_ms = session
                 .segments
                 .lock()
                 .await
-                .segs
-                .last()
-                .expect("published segment")
-                .name
-                .clone();
-            assert!(mgr
-                .segment(&info.session_id, &newest)
+                .end_ms_of(fetched_index)
+                .expect("published segment duration");
+            let actor_delivery = session
+                .control
+                .snapshot()
                 .await
-                .expect("segment admission")
-                .is_some());
+                .expect("rolling actor")
+                .delivery;
+            assert_eq!(actor_delivery.fetched_segment, Some(fetched_index));
+            assert_eq!(actor_delivery.fetched_end_ms, fetched_end_ms);
+            mgr.flow_control(&session, &info.session_id).await;
+            let actor_delivery = session
+                .control
+                .snapshot()
+                .await
+                .expect("rolling actor")
+                .delivery;
+            assert!(actor_delivery.playlist_ready);
+            assert!(actor_delivery.published_segment >= Some(fetched_index));
+            assert!(actor_delivery.published_end_ms >= Some(fetched_end_ms));
             assert!(!session.suspended.load(Relaxed), "session was released");
             assert_eq!(
                 mgr.session_status(&info.session_id)
@@ -16865,7 +27819,27 @@ mod tests {
     }
 
     async fn seed_file_at(store: &Arc<dyn Store>, path: &str) -> i64 {
-        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary, ProbeResult};
+        seed_file_with_probe_at(
+            store,
+            path,
+            plurx_core::domain::ProbeResult {
+                duration_ms: Some(6_000_000),
+                container: Some("mkv".into()),
+                video_codec: Some("hevc".into()),
+                width: Some(3840),
+                height: Some(2160),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn seed_file_with_probe_at(
+        store: &Arc<dyn Store>,
+        path: &str,
+        probe: plurx_core::domain::ProbeResult,
+    ) -> i64 {
+        use plurx_core::domain::{ItemKind, LibraryKind, NewItem, NewLibrary};
         let lib = store
             .create_library(&NewLibrary {
                 name: "L".into(),
@@ -16888,20 +27862,7 @@ mod tests {
             .await
             .expect("movie");
         store
-            .upsert_file(
-                movie,
-                path,
-                1,
-                1,
-                &ProbeResult {
-                    duration_ms: Some(6_000_000),
-                    container: Some("mkv".into()),
-                    video_codec: Some("hevc".into()),
-                    width: Some(3840),
-                    height: Some(2160),
-                    ..Default::default()
-                },
-            )
+            .upsert_file(movie, path, 1, 1, &probe)
             .await
             .expect("file")
     }
@@ -17075,13 +28036,13 @@ mod tests {
     /// then written would let every racer through.
     #[tokio::test]
     async fn concurrent_starts_cannot_exceed_the_hardware_slot_cap() {
-        super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        // A box that believes it has NVENC. The encode will fail (there is no
-        // GPU here) but admission happens before the spawn, which is the point.
+        // A box that believes it has NVENC. Keep the returned permits alive
+        // instead of spawning an encoder that immediately fails on a runner
+        // without a GPU; the cap concerns simultaneous ownership, not how many
+        // failed producers can pass through the same slots over five seconds.
         let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
@@ -17096,40 +28057,41 @@ mod tests {
             .await
             .expect("cap");
 
-        // Five players, all at once, each with its own playback id so none
-        // supersedes another.
+        let workload = Workload {
+            source_height: 2160,
+            codec: "hevc",
+            hdr: None,
+            target_height: 1080,
+        };
         let mut starts = Vec::new();
-        for n in 0..5 {
+        for _ in 0..5 {
             let mgr = Arc::clone(&mgr);
             starts.push(tokio::spawn(async move {
-                mgr.start(file_id, 1080, 0.0, None, None, "paul", &format!("pb-{n}"))
+                mgr.admit_live(Encoder::Nvenc, workload, Duration::ZERO)
                     .await
             }));
         }
-        let mut admitted = 0;
+        let mut admitted = Vec::new();
         let mut refused = 0;
         for s in starts {
             match s.await.expect("join") {
-                Ok(_) => admitted += 1,
+                Ok(admission) => {
+                    assert_eq!(admission.encoder, Encoder::Nvenc);
+                    assert!(admission.hw_slot.is_some());
+                    assert!(admission.sw_permit.is_none());
+                    admitted.push(admission);
+                }
                 Err(why) => {
-                    // The 4K HEVC fixture is exactly the shape software cannot
-                    // carry, so the overflow is refused rather than downgraded
-                    // — and it says why rather than failing anonymously.
                     assert!(why.contains("hardware transcode slots"), "{why}");
                     refused += 1;
                 }
             }
         }
-        assert_eq!(admitted, 2, "the cap is the cap");
+        assert_eq!(admitted.len(), 2, "the cap is the cap");
         assert_eq!(refused, 3);
         assert_eq!(mgr.admissions.in_use(), 2, "and it is accounted for");
 
-        // Ending a session gives its slot back — the guard rides on the
-        // session, so every way one can end returns the slot.
-        let live: Vec<String> = mgr.sessions.lock().await.keys().cloned().collect();
-        for id in live {
-            assert!(mgr.stop_session(&id, "test").await);
-        }
+        drop(admitted);
         assert_eq!(mgr.admissions.in_use(), 0, "slots come back");
     }
 
@@ -17254,13 +28216,19 @@ mod tests {
 
     /// The budget is a bound on *joining*, not on existing: a second session
     /// that does not fit is refused with the reason, and space freed by a
-    /// stop is grantable again.
+    /// permit release is grantable again. Exercise the live-admission boundary
+    /// directly: the metadata-only fixture has no source file, so starting
+    /// ffmpeg would make process-exit cleanup race the capacity assertion.
     #[tokio::test]
     async fn the_software_pool_refuses_what_it_cannot_fit() {
-        super::require_ffmpeg();
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
+        let file = store
+            .get_file(file_id)
+            .await
+            .expect("file lookup")
+            .expect("seeded file");
         let work = crate::test_tempdir().expect("work");
         let mgr = TranscodeManager::new(
             Arc::clone(&store),
@@ -17275,11 +28243,12 @@ mod tests {
             .expect("budget");
 
         let first = mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-a")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
             .expect("first fits an empty pool");
+        assert_eq!(mgr.admissions.software_in_use(), 6);
         let refused = match mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-b")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
         {
             Err(why) => why,
@@ -17287,12 +28256,15 @@ mod tests {
         };
         assert!(refused.contains("software CPU pool"), "{refused}");
 
-        assert!(mgr.stop_session(&first.session_id, "test").await);
+        drop(first);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
         let second = mgr
-            .start(file_id, 1080, 0.0, None, None, "paul", "pb-c")
+            .admit_live(Encoder::Software, Workload::of(&file, 1080), Duration::ZERO)
             .await
             .expect("freed weight is grantable again");
-        assert!(mgr.stop_session(&second.session_id, "test").await);
+        assert_eq!(mgr.admissions.software_in_use(), 6);
+        drop(second);
+        assert_eq!(mgr.admissions.software_in_use(), 0);
     }
 
     /// On a tiny box every session is over budget; the empty-pool exception
@@ -17329,25 +28301,7 @@ mod tests {
         assert_eq!(mgr.admissions.software_in_use(), 0);
     }
 
-    // ---- the lifetime watchdog (review §2.3) --------------------------------
-
-    /// Every state that is not a stall, and the one that is. Each `Wait` here
-    /// is a healthy session the wrong verdict would kill mid-film.
-    #[test]
-    fn a_stall_is_the_only_thing_the_watchdog_calls_a_stall() {
-        let long = PROGRESS_STALL + Duration::from_secs(1);
-        let short = PROGRESS_STALL - Duration::from_secs(1);
-        // Failed elsewhere, or exited (EOF and kills both have their own
-        // reporters): the watch simply ends, whatever the clock says.
-        assert_eq!(watch_next(true, false, false, long), WatchNext::Done);
-        assert_eq!(watch_next(false, true, false, long), WatchNext::Done);
-        // Suspended: motionless on purpose, however long it lasts.
-        assert_eq!(watch_next(false, false, true, long), WatchNext::Wait);
-        // Moving recently enough.
-        assert_eq!(watch_next(false, false, false, short), WatchNext::Wait);
-        // Running, unsuspended, and the output has sat still too long.
-        assert_eq!(watch_next(false, false, false, long), WatchNext::Stall);
-    }
+    // ---- rolling session fixtures and lifecycle ----------------------------
 
     /// `moved_at_ms` freezes with the SIGSTOP — correctly — so without a
     /// resume re-baseline, the first check after SIGCONT reads the whole
@@ -17373,32 +28327,68 @@ mod tests {
         );
     }
 
-    /// A session for driving `watch_for_stall` directly: a real (harmless)
-    /// child process, a directory the test controls, and telemetry the test
-    /// can backdate.
-    fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
+    /// Generic rolling-session fixture: an optional real child, test-owned
+    /// scratch, and the actor/lifecycle state shared by unrelated tests below.
+    /// The historical helper name remains to keep this mechanical cut small.
+    fn watchdog_session_with_control(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+        control: crate::playback_control::RollingControlHandle,
+        producer_attempt: u64,
+    ) -> Arc<Session> {
         Arc::new(Session {
             dir: dir.to_path_buf(),
-            child: Mutex::new(child),
+            response_incarnation: uuid::Uuid::new_v4(),
+            frozen_presentation: None,
+            actor_managed_response_publication: actor_managed_prepublication,
+            actor_managed_prepublication_process: actor_managed_prepublication,
+            actor_prepublication_producer: Arc::new(AtomicBool::new(actor_managed_prepublication)),
+            response_publication_transition: Mutex::new(()),
+            first_media_handoff_applied: AtomicBool::new(false),
+            first_media_handoff_notify: tokio::sync::Notify::new(),
+            prepublication_cleanup_active: AtomicBool::new(false),
+            retirement_cleanup_started: AtomicBool::new(false),
+            retirement_cleanup_finished: AtomicBool::new(false),
+            retirement_settlement: std::sync::Mutex::new(None),
+            scratch_cleanup_started: AtomicBool::new(false),
+            retirement_context: None,
+            cache_integrity_cleanup_started: AtomicBool::new(false),
+            child: Mutex::new(
+                child.map(|child| AttemptChild::new(producer_attempt, child, control.clone())),
+            ),
             child_transition: Mutex::new(()),
-            watchdog_active: AtomicBool::new(false),
             replacing_child: AtomicBool::new(false),
-            retired: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             replacement_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_verdict_pause: std::sync::Mutex::new(None),
-            #[cfg(test)]
-            watchdog_transition_pause: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             activity_detail_pause: std::sync::Mutex::new(None),
+            control_applied_pause: std::sync::Mutex::new(None),
+            terminal_response_pending: Arc::new(AtomicBool::new(false)),
+            terminal_control: std::sync::Mutex::new(None),
+            flow_completion_pause: std::sync::Mutex::new(None),
+            playlist_publication_pause: std::sync::Mutex::new(None),
+            producer_install_pause: std::sync::Mutex::new(None),
+            refresh_after_read_pause: std::sync::Mutex::new(None),
+            path_owner_sample_pause: std::sync::Mutex::new(None),
+            retention_delete_pause: std::sync::Mutex::new(None),
+            response_projection_pause: std::sync::Mutex::new(None),
             #[cfg(test)]
+            first_media_owner_claim_pause: std::sync::Mutex::new(None),
+            #[cfg(any(test, feature = "live-hls-recovery"))]
             retirement_started: AtomicBool::new(false),
+            #[cfg(test)]
+            retirement_cleanup_handoff_pause: std::sync::Mutex::new(None),
+            #[cfg(test)]
+            scratch_cleanup_pause: std::sync::Mutex::new(None),
             cached,
             _cache_reader: None,
             subtitle_handle: None,
             cache_manifest: None,
             cache_location: None,
-            last_request: Mutex::new(LastRequest::now("test-start")),
+            control,
+            flow_worker_started: AtomicBool::new(false),
             file_id: 1,
             item_id: 1,
             item_title: "Watchdog Fixture".into(),
@@ -17411,19 +28401,21 @@ mod tests {
             start_seconds: 0.0,
             media_origin_seconds: 0.0,
             grade: OutputGrade::Sdr,
-            hls_codecs: "avc1.640034,mp4a.40.2".into(),
-            hls_supplemental_codecs: None,
             target_height: 1080,
             encoder_label: Mutex::new("test"),
             started_unix: 0,
-            failed: AtomicBool::new(false),
+            failed: Arc::new(AtomicBool::new(false)),
             failure: std::sync::Mutex::new(None),
             playlist_published: AtomicBool::new(false),
-            high_segment: AtomicI64::new(-1),
-            fetched_end_ms: AtomicI64::new(0),
+            high_segment: Arc::new(AtomicI64::new(-1)),
+            compatibility_attempt: Arc::new(std::sync::Mutex::new(0)),
+            fetched_end_ms: Arc::new(AtomicI64::new(0)),
             segments: Mutex::new(SegmentIndex::default()),
             ahead_bytes: AtomicI64::new(0),
-            live_bytes: AtomicI64::new(0),
+            live_bytes: Arc::new(AtomicI64::new(0)),
+            retention_garbage_bytes: Arc::new(AtomicI64::new(0)),
+            retention_cleanup_queue: Arc::new(std::sync::Mutex::new(Vec::new())),
+            retention_cleanup_active: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(Progress::new()),
             class: std::sync::Mutex::new(String::new()),
             hw_slot: std::sync::Mutex::new(None),
@@ -17439,11 +28431,254 @@ mod tests {
         })
     }
 
+    fn watchdog_session_with_publication(
+        dir: &std::path::Path,
+        child: Option<Child>,
+        cached: bool,
+        actor_managed_prepublication: bool,
+    ) -> Arc<Session> {
+        watchdog_session_with_control(
+            dir,
+            child,
+            cached,
+            actor_managed_prepublication,
+            crate::playback_control::RollingControlHandle::spawn("test-start"),
+            0,
+        )
+    }
+
+    fn watchdog_session(dir: &std::path::Path, child: Option<Child>, cached: bool) -> Arc<Session> {
+        watchdog_session_with_publication(dir, child, cached, false)
+    }
+
+    fn reserve_test_admissions(session: &Session, admissions: &Admissions) {
+        *session.hw_slot.lock().expect("hw slot mutex") = Some(
+            admissions
+                .try_acquire(1, Priority::Live)
+                .expect("test hardware slot"),
+        );
+        *session.sw_permit.lock().expect("sw permit mutex") =
+            Some(admissions.software_pool().take_forced(2));
+    }
+
+    async fn await_prepublication_cleanup(session: &Session) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.prepublication_cleanup_active.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("prepublication cleanup must settle");
+    }
+
+    async fn await_lifecycle_pause(pause: &LifecycleTestPause) {
+        tokio::time::timeout(Duration::from_secs(2), pause.reached.notified())
+            .await
+            .expect("lifecycle pause must be reached");
+    }
+
+    async fn await_scratch_removed(path: &std::path::Path) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached scratch cleanup must settle");
+    }
+
     #[tokio::test]
-    async fn serving_fence_kills_existing_and_transition_racing_children() {
+    async fn published_failure_cleanup_survives_waiter_cancellation_and_retains_media() {
+        let root = crate::test_tempdir().expect("published cleanup root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create published scratch");
+        let playlist = scratch.join("index.m3u8");
+        let segment = scratch.join("seg00000.ts");
+        tokio::fs::write(&playlist, b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n")
+            .await
+            .expect("seed published playlist");
+        tokio::fs::write(&segment, b"published media")
+            .await
+            .expect("seed published segment");
+
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        session.actor_prepublication_producer.store(false, Release);
+        session.first_media_handoff_applied.store(true, Release);
+        reserve_test_admissions(&session, &admissions);
+        let reap_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .expect("attempt child")
+            .terminate_before_reap_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+
+        let settlement = spawn_published_failure_cleanup_owner(
+            &session,
+            0,
+            11,
+            crate::playback_control::ProducerDecisionReason::ProgressDeadline,
+            "published-cleanup",
+        );
+        await_lifecycle_pause(&reap_pause).await;
+        drop(settlement);
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+        assert!(playlist.exists());
+        assert!(segment.exists());
+        assert!(!session.failed.load(Acquire));
+        assert!(!session.control.is_retired());
+
+        reap_pause.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while session.child.lock().await.is_some()
+                || admissions.in_use() != 0
+                || admissions.software_in_use() != 0
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached published cleanup must confirm reap and release capacity");
+        assert!(playlist.exists(), "published playlist must be retained");
+        assert!(segment.exists(), "published segment must be retained");
+        assert!(!session.failed.load(Acquire));
+        assert!(!session.control.is_retired());
+    }
+
+    #[tokio::test]
+    async fn successful_published_completion_reaps_child_and_returns_capacity_without_deleting_media(
+    ) {
+        let root = crate::test_tempdir().expect("published completion root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create completed scratch");
+        let playlist = scratch.join("index.m3u8");
+        let segment = scratch.join("seg00000.ts");
+        tokio::fs::write(
+            &playlist,
+            b"#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n#EXT-X-ENDLIST\n",
+        )
+        .await
+        .expect("seed completed playlist");
+        tokio::fs::write(&segment, b"completed media")
+            .await
+            .expect("seed completed segment");
+
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(successful_child()), false, true);
+        session.actor_prepublication_producer.store(false, Release);
+        session.first_media_handoff_applied.store(true, Release);
+        reserve_test_admissions(&session, &admissions);
+
+        assert_eq!(
+            spawn_published_completion_cleanup_owner(
+                &session,
+                0,
+                crate::playback_control::RollingProducerCompletionDisposition::CompleteUnverifiedDuration,
+                "published-completion",
+            )
+            .await
+            .expect("completion cleanup owner"),
+            PublishedFailureCleanupOutcome::Reaped
+        );
+        assert!(session.child.lock().await.is_none());
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(playlist.exists(), "completed playlist must be retained");
+        assert!(segment.exists(), "completed segment must be retained");
+        assert!(!session.failed.load(Acquire));
+        assert!(!session.control.is_retired());
+    }
+
+    #[tokio::test]
+    async fn present_segment_resolved_before_published_failure_is_rechecked_against_actor_frontier()
+    {
         use plurx_core::store::SqliteStore;
 
-        let root = crate::test_tempdir().expect("serving-fence root");
+        let root = crate::test_tempdir().expect("published frontier root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create frontier scratch");
+        tokio::fs::write(scratch.join("seg00000.ts"), b"published")
+            .await
+            .expect("seed published segment");
+        tokio::fs::write(scratch.join("seg00001.ts"), b"present but unpublished")
+            .await
+            .expect("seed beyond-frontier segment");
+        tokio::fs::write(scratch.join("init.mp4"), b"init")
+            .await
+            .expect("seed init segment");
+
+        let (control, mut registration) =
+            crate::playback_control::RollingControlHandle::spawn_prepublication_transcode(
+                "published-frontier-test",
+            );
+        registration.register().await.expect("register executor");
+        let producer_attempt = control
+            .begin_initial_producer_attempt(
+                crate::playback_control::InitialProducerPolicy::software(
+                    "published-frontier-contract".to_owned(),
+                    PROGRESS_STALL,
+                ),
+            )
+            .await
+            .expect("begin producer attempt");
+        assert!(
+            control
+                .observe_publication(crate::playback_control::RollingPublicationObservation {
+                    producer_attempt,
+                    playlist_ready: true,
+                    published_segment: Some(0),
+                    published_end_ms: Some(2_000),
+                    next_media_sequence: 1,
+                    resolved_fetched_segment: None,
+                    resolved_fetched_end_ms: None,
+                })
+                .await
+        );
+        let handoff = crate::playback_control::RollingFirstMediaPublicationHandoff::new();
+        assert_eq!(
+            control
+                .authorize_response_publication(
+                    crate::playback_control::RollingResponsePublication::attempt_media(
+                        crate::playback_control::RollingResponseObject::VideoMediaPlaylist,
+                        producer_attempt,
+                        None,
+                    ),
+                    Some(handoff),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Ok(crate::playback_control::RollingResponseAuthorization {
+                first_producer_media_publication: true,
+            })
+        );
+
+        let session = watchdog_session_with_control(
+            &scratch,
+            None,
+            false,
+            true,
+            control.clone(),
+            producer_attempt,
+        );
+        session.actor_prepublication_producer.store(false, Release);
+        session.first_media_handoff_applied.store(true, Release);
+        *session
+            .compatibility_attempt
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = producer_attempt;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let manager = Arc::new(TranscodeManager::new(
             store,
@@ -17451,6 +28686,1497 @@ mod tests {
             EncoderCaps::default(),
             Pipeline::Cpu,
         ));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("published-frontier".to_owned(), Arc::clone(&session));
+
+        // Resolve/open both paths before the failure wins. This is the exact
+        // request race: path existence alone used to authorize segment 1
+        // after the actor had retained only the frontier through segment 0.
+        let beyond = match manager
+            .segment_for_publication("published-frontier", "seg00001.ts")
+            .await
+            .expect("resolve beyond-frontier segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("present segment must resolve before failure"),
+        };
+        let retained = match manager
+            .segment_for_publication("published-frontier", "seg00000.ts")
+            .await
+            .expect("resolve retained segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("published segment must resolve before failure"),
+        };
+        let init = match manager
+            .segment_for_publication("published-frontier", "init.mp4")
+            .await
+            .expect("resolve init segment")
+        {
+            SegmentPublication::Ready(file) => file,
+            _ => panic!("init segment must resolve before failure"),
+        };
+
+        control.observe_producer_exit(producer_attempt, false, Some(1), None);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if control
+                    .snapshot()
+                    .await
+                    .is_some_and(|snapshot| snapshot.producer_control.producer_ended_with_proposal)
+                {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actor must commit the retained published failure");
+
+        assert!(matches!(
+            manager
+                .authorize_response_publication(
+                    "published-frontier",
+                    &beyond.response_owner(),
+                    MediaResponsePublication::attempt_media(
+                        "media-segment",
+                        Some("seg00001.ts"),
+                    ),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(MediaResponsePublicationRejection::ProducerEnded(reason))
+                if reason == "process_exit"
+        ));
+        for response_kind in ["segment-range", "segment-not-modified"] {
+            assert!(
+                matches!(
+                    manager
+                        .authorize_response_publication(
+                            "published-frontier",
+                            &beyond.response_owner(),
+                            MediaResponsePublication::attempt_media(
+                                response_kind,
+                                Some("seg00001.ts"),
+                            ),
+                            Instant::now() + Duration::from_secs(1),
+                        )
+                        .await,
+                    Err(MediaResponsePublicationRejection::ProducerEnded(reason))
+                        if reason == "process_exit"
+                ),
+                "{response_kind} must preserve the numeric segment coordinate"
+            );
+        }
+        assert!(manager
+            .authorize_response_publication(
+                "published-frontier",
+                &retained.response_owner(),
+                MediaResponsePublication::attempt_media("media-segment", Some("seg00000.ts")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_ok());
+        assert!(manager
+            .authorize_response_publication(
+                "published-frontier",
+                &init.response_owner(),
+                MediaResponsePublication::attempt_media("segment-range", Some("init.mp4")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .is_ok());
+    }
+
+    struct DropProbe(Arc<AtomicBool>);
+
+    impl Drop for DropProbe {
+        fn drop(&mut self) {
+            self.0.store(true, Release);
+        }
+    }
+
+    #[tokio::test]
+    async fn retirement_settlement_registers_notify_before_the_wait_gap() {
+        let settlement = Arc::new(RollingRetirementSettlement::new("ended"));
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *settlement
+            .wait_before_await_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+        let waiter = tokio::spawn({
+            let settlement = Arc::clone(&settlement);
+            async move { settlement.wait().await }
+        });
+
+        pause.wait().await;
+        settlement.complete(Ok(true));
+        pause.wait().await;
+        assert!(tokio::time::timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("registered Notify waiter must not lose completion")
+            .expect("settlement waiter task")
+            .expect("settlement result"));
+    }
+
+    #[tokio::test]
+    async fn response_publication_observes_authority_loss_before_watch_delivery() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("direct serving authority root");
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        let session = watchdog_session(&root.path().join("rolling"), None, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("direct-authority".to_owned(), Arc::clone(&session));
+        let owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session,
+            producer_attempt: 0,
+        });
+
+        fence.validation_set_ready(false).await;
+        assert!(
+            manager.serving_ready.load(Acquire),
+            "the teardown watch mirror has deliberately not consumed this loss"
+        );
+        assert_eq!(manager.serving_loss_generation.load(Acquire), 0);
+        assert!(matches!(
+            manager
+                .authorize_response_publication(
+                    "direct-authority",
+                    &owner,
+                    MediaResponsePublication::attempt_media("segment", Some("seg00000.ts")),
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn registration_observes_authority_loss_before_watch_delivery() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("direct registration authority root");
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        let session = watchdog_session(
+            &root.path().join("unpublished"),
+            Some(long_running_child()),
+            false,
+        );
+
+        fence.validation_set_ready(false).await;
+        assert!(manager.serving_ready.load(Acquire));
+        assert_eq!(manager.serving_loss_generation.load(Acquire), 0);
+        assert_eq!(
+            manager
+                .register_session("direct-registration", Arc::clone(&session), 0)
+                .await,
+            Err(SessionRegistrationRejection::ServingFence)
+        );
+        assert!(manager.sessions.lock().await.is_empty());
+        assert!(session.child.lock().await.is_none());
+        assert!(session.control.is_retired());
+    }
+
+    #[tokio::test]
+    async fn in_flight_vod_publication_rechecks_direct_serving_authority() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("in-flight VOD authority root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                Arc::clone(&store),
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        manager
+            .install_vod_http_test_session("vod-authority", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-authority")
+            .await
+            .expect("VOD publication fixture");
+        let pause = Arc::new(tokio::sync::Barrier::new(2));
+        *manager
+            .vod_publication_admission_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
+
+        let authorization = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move {
+                manager
+                    .authorize_response_publication(
+                        "vod-authority",
+                        &publication.owner,
+                        MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await
+            }
+        });
+        pause.wait().await;
+        fence.validation_set_ready(false).await;
+        pause.wait().await;
+
+        assert!(matches!(
+            authorization.await.expect("VOD authorization task"),
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+        assert!(
+            manager.serving_ready.load(Acquire),
+            "the async teardown mirror is not needed for in-flight rejection"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_vod_eof_cannot_commit_after_phase_one_release() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("VOD EOF release root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager
+            .install_vod_http_test_session("vod-eof-release", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-eof-release")
+            .await
+            .expect("VOD publication fixture");
+        let authorization = manager
+            .authorize_response_publication(
+                "vod-eof-release",
+                &publication.owner,
+                MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("response admitted before release");
+
+        manager
+            .begin_session_publication_fence("vod-eof-release")
+            .await;
+        assert!(matches!(
+            manager
+                .commit_authorized_media(
+                    authorization,
+                    true,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn authorized_vod_eof_cannot_commit_after_direct_authority_loss() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("VOD EOF authority root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
+        manager
+            .install_vod_http_test_session("vod-eof-authority", file_id, root.path())
+            .await;
+        let publication = manager
+            .vod_playlist("vod-eof-authority")
+            .await
+            .expect("VOD publication fixture");
+        let authorization = manager
+            .authorize_response_publication(
+                "vod-eof-authority",
+                &publication.owner,
+                MediaResponsePublication::attempt_media("playlist", Some("index.m3u8")),
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("response admitted before authority loss");
+
+        fence.validation_set_ready(false).await;
+        assert!(matches!(
+            manager
+                .commit_authorized_media(
+                    authorization,
+                    true,
+                    Instant::now() + Duration::from_secs(1),
+                )
+                .await,
+            Err(MediaResponsePublicationRejection::StateChanged)
+        ));
+    }
+
+    #[tokio::test]
+    async fn authority_fence_projects_the_entire_snapshot_before_actor_settlement() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("authority snapshot root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let blocked = watchdog_session(&root.path().join("blocked"), None, true);
+        let follower = watchdog_session(&root.path().join("follower"), None, true);
+        {
+            let mut sessions = manager.sessions.lock().await;
+            sessions.insert("a-blocked".to_owned(), Arc::clone(&blocked));
+            sessions.insert("b-follower".to_owned(), Arc::clone(&follower));
+        }
+        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        blocked
+            .control
+            .pause_producer_attempt_reply(Arc::clone(&actor_pause));
+        let actor_command = tokio::spawn({
+            let control = blocked.control.clone();
+            async move { control.begin_producer_attempt().await }
+        });
+        actor_pause.wait().await;
+
+        let fence = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move {
+                manager
+                    .fence_sessions(&["a-blocked".to_owned(), "b-follower".to_owned()])
+                    .await;
+            }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocked.control.is_retired() || !follower.control.is_retired() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the complete snapshot must fail closed synchronously");
+        assert!(
+            !fence.is_finished(),
+            "the blocked first actor must still hold settlement open"
+        );
+        let follower_owner = MediaResponseOwner(MediaResponseOwnerKind::Rolling {
+            session: Arc::clone(&follower),
+            producer_attempt: 0,
+        });
+        assert!(
+            matches!(
+                manager
+                    .authorize_response_publication(
+                        "b-follower",
+                        &follower_owner,
+                        MediaResponsePublication::attempt_media("segment", Some("seg00000.ts")),
+                        Instant::now() + Duration::from_secs(1),
+                    )
+                    .await,
+                Err(MediaResponsePublicationRejection::StateChanged)
+            ),
+            "a later snapshot member cannot publish while an earlier actor is stalled"
+        );
+
+        actor_pause.wait().await;
+        let _ = actor_command.await.expect("blocked actor command");
+        fence.await.expect("authority fence task");
+        assert_eq!(
+            blocked
+                .control
+                .snapshot()
+                .await
+                .expect("blocked actor snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        );
+        assert_eq!(
+            follower
+                .control
+                .snapshot()
+                .await
+                .expect("follower actor snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_stop_transfers_hold_before_stalled_actor_settlement() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("bounded stop root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = watchdog_session(
+            &root.path().join("session"),
+            Some(long_running_child()),
+            false,
+        );
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("bounded-stop".to_owned(), Arc::clone(&session));
+        let actor_pause = Arc::new(tokio::sync::Barrier::new(2));
+        session
+            .control
+            .pause_producer_attempt_reply(Arc::clone(&actor_pause));
+        let actor_command = tokio::spawn({
+            let control = session.control.clone();
+            async move { control.begin_producer_attempt().await }
+        });
+        actor_pause.wait().await;
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        assert!(
+            !manager
+                .stop_session_until(
+                    "bounded-stop",
+                    "replaced",
+                    tokio::time::Instant::now() + Duration::from_millis(20),
+                    DropProbe(Arc::clone(&dropped)),
+                )
+                .await,
+            "the caller deadline expires while actor settlement is stalled"
+        );
+        assert!(session.control.is_retired());
+        assert!(
+            !dropped.load(Acquire),
+            "the replacement hold belongs to detached teardown, not the timed-out caller"
+        );
+        assert!(
+            manager.sessions.try_lock().is_ok(),
+            "actor settlement must not retain the global registry lock"
+        );
+
+        actor_pause.wait().await;
+        let _ = actor_command.await.expect("blocked actor command");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !dropped.load(Acquire)
+                || manager.sessions.lock().await.contains_key("bounded-stop")
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached teardown must settle and release its hold");
+        assert!(session.child.lock().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn first_media_settlement_gap_keeps_confirmed_reap_ownership() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("first-media retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        reserve_test_admissions(&session, &admissions);
+        let owner_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .first_media_owner_claim_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&owner_pause));
+        let reap_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .expect("attempt child")
+            .terminate_before_reap_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("first-media-gap".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let (handoff, applied) = begin_first_media_publication_handoff(&session, "first-media-gap")
+            .await
+            .expect("first-media settlement capacity");
+        handoff.settle_for_test(true);
+        await_lifecycle_pause(&owner_pause).await;
+        assert!(!session.actor_prepublication_producer.load(Acquire));
+        assert!(!session.first_media_handoff_applied.load(Acquire));
+        assert!(
+            session.prepublication_process_cleanup_required(),
+            "retirement must retain confirmed-reap ownership until actor lifetime handoff publishes"
+        );
+
+        let retirement = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { manager.retire_session("first-media-gap", &session).await }
+        });
+        await_lifecycle_pause(&reap_pause).await;
+        assert!(session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+
+        owner_pause.release.notify_one();
+        assert!(applied.await.expect("first-media handoff application"));
+        reap_pause.release.notify_one();
+        assert!(retirement.await.expect("retirement task"));
+        await_prepublication_cleanup(&session).await;
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        await_scratch_removed(&scratch).await;
+        assert!(!scratch.exists());
+        session.fail(PlaylistError::SessionFailed("test complete".into()));
+    }
+
+    #[tokio::test]
+    async fn prepublication_retirement_holds_admissions_until_confirmed_reap() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("prepublication retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        tokio::fs::write(scratch.join("index.m3u8"), b"prepublication")
+            .await
+            .expect("seed scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        reserve_test_admissions(&session, &admissions);
+        let reap_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .child
+            .lock()
+            .await
+            .as_ref()
+            .expect("attempt child")
+            .terminate_before_reap_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&reap_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("prepublication".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let retirement = tokio::spawn({
+            let session = Arc::clone(&session);
+            async move { manager.retire_session("prepublication", &session).await }
+        });
+        await_lifecycle_pause(&reap_pause).await;
+        assert!(session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1, "hardware remains owned before reap");
+        assert_eq!(
+            admissions.software_in_use(),
+            2,
+            "software remains owned before reap"
+        );
+        assert!(scratch.exists(), "scratch remains owned before reap");
+        assert!(
+            !session.failed.load(Acquire),
+            "routine retirement is not a producer failure"
+        );
+
+        reap_pause.release.notify_one();
+        assert!(
+            retirement.await.expect("retirement task"),
+            "routine retirement must transfer cleanup ownership"
+        );
+        await_prepublication_cleanup(&session).await;
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(session.child.lock().await.is_none());
+        await_scratch_removed(&scratch).await;
+        assert!(!scratch.exists());
+        assert!(!session.failed.load(Acquire));
+    }
+
+    #[tokio::test]
+    async fn bounded_retirement_cleanup_survives_caller_cancellation() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("cancelled retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let admissions = Admissions::new();
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        reserve_test_admissions(&session, &admissions);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cancelled".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let retirement = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .retire_session_until(
+                        "cancelled",
+                        &session,
+                        Some(tokio::time::Instant::now() + Duration::from_secs(2)),
+                    )
+                    .await
+            }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+        assert!(
+            manager.sessions.try_lock().is_ok(),
+            "retirement must not hold the global registry while actor/cleanup handoff waits"
+        );
+        assert!(
+            manager.sessions.lock().await.contains_key("cancelled"),
+            "the retired Arc stays discoverable until its child is reaped"
+        );
+        let follower = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .retire_session_until_with_cause("cancelled", &session, None, "killed")
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !follower.is_finished(),
+            "prepublication followers must join the paused physical winner"
+        );
+
+        // Cancelling the bounded caller drops only its settlement wait. The
+        // already-spawned owner has the exact child, and a competing caller
+        // remains joined to that same physical terminal proof.
+        retirement.abort();
+        assert!(retirement
+            .await
+            .expect_err("retirement task must be cancelled")
+            .is_cancelled());
+        handoff_pause.release.notify_one();
+        let joined = follower
+            .await
+            .expect("prepublication follower task")
+            .expect("prepublication follower settlement");
+        assert_eq!(joined.participation, RollingRetirementParticipation::Joined);
+        assert_eq!(joined.cause.as_ref(), "ended");
+        assert!(joined.removed);
+        await_prepublication_cleanup(&session).await;
+
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(session.child.lock().await.is_none());
+        await_scratch_removed(&scratch).await;
+        assert!(!scratch.exists());
+        assert!(!session.failed.load(Acquire));
+    }
+
+    #[tokio::test]
+    async fn post_media_retirement_keeps_exact_resources_after_caller_cancellation() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("post-media retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let admissions = Admissions::new();
+        let session = watchdog_session(&scratch, Some(long_running_child()), false);
+        reserve_test_admissions(&session, &admissions);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        let scratch_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .scratch_cleanup_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&scratch_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("post-media".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let retirement = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move { manager.retire_session("post-media", &session).await }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(session.retirement_cleanup_started.load(Acquire));
+        assert!(!session.prepublication_cleanup_active.load(Acquire));
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+        assert!(manager.sessions.lock().await.contains_key("post-media"));
+        let follower = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .retire_session_until_with_cause("post-media", &session, None, "killed")
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !follower.is_finished(),
+            "a competing retirement must join the paused physical winner"
+        );
+
+        retirement.abort();
+        assert!(retirement
+            .await
+            .expect_err("retirement waiter must cancel")
+            .is_cancelled());
+        handoff_pause.release.notify_one();
+        let joined = follower
+            .await
+            .expect("retirement follower task")
+            .expect("retirement follower settlement");
+        assert_eq!(joined.participation, RollingRetirementParticipation::Joined);
+        assert_eq!(joined.cause.as_ref(), "ended");
+        assert!(joined.removed);
+        await_lifecycle_pause(&scratch_pause).await;
+        assert!(!manager.sessions.lock().await.contains_key("post-media"));
+        assert!(session.child.lock().await.is_none());
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        assert!(
+            scratch.exists(),
+            "physical settlement must not wait for unique scratch I/O"
+        );
+        spawn_rolling_scratch_cleanup_owner("post-media-duplicate".to_owned(), &session, None);
+        tokio::task::yield_now().await;
+        assert!(session.scratch_cleanup_started.load(Acquire));
+        assert!(
+            scratch.exists(),
+            "prepublication/universal followers cannot spawn a second scratch owner"
+        );
+
+        let events = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let events = store
+                    .playback_events(&plurx_core::domain::PlaybackEventQuery {
+                        since_ms: None,
+                        event: Some("session_end".to_owned()),
+                        limit: 50,
+                    })
+                    .await
+                    .expect("retirement event query")
+                    .into_iter()
+                    .filter(|event| {
+                        event.session_id.as_deref() == Some(session_log_id("post-media").as_str())
+                    })
+                    .collect::<Vec<_>>();
+                if !events.is_empty() {
+                    break events;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the winning retirement owner must retain event ownership");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].reason.as_deref(), Some("ended"));
+
+        scratch_pause.release.notify_one();
+        await_scratch_removed(&scratch).await;
+        assert!(!scratch.exists());
+    }
+
+    #[tokio::test]
+    async fn cached_retirement_survives_cancellation_without_deleting_cache() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("cached retirement root");
+        let cached_dir = root.path().join("cache-entry");
+        tokio::fs::create_dir_all(&cached_dir)
+            .await
+            .expect("create cache entry");
+        tokio::fs::write(cached_dir.join("index.m3u8"), b"cached")
+            .await
+            .expect("seed cache entry");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = watchdog_session(&cached_dir, None, true);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cached".to_owned(), Arc::clone(&session));
+
+        let retirement = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move { manager.retire_session("cached", &session).await }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        retirement.abort();
+        assert!(retirement
+            .await
+            .expect_err("cached retirement waiter must cancel")
+            .is_cancelled());
+        handoff_pause.release.notify_one();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while manager.sessions.lock().await.contains_key("cached") {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached cached retirement must remove its exact Arc");
+        assert!(
+            cached_dir.join("index.m3u8").exists(),
+            "session retirement must never delete a reusable cache generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn cache_integrity_retirement_followers_join_the_exact_winner() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("cache integrity follower root");
+        let cached_dir = root.path().join("cache-entry");
+        tokio::fs::create_dir_all(&cached_dir)
+            .await
+            .expect("create cache entry");
+        tokio::fs::write(cached_dir.join("index.m3u8"), b"cached")
+            .await
+            .expect("seed cache entry");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = watchdog_session(&cached_dir, None, true);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cache-integrity".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        manager.fail_cached_session_integrity("cache-integrity", &session, "test");
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(manager
+            .sessions
+            .lock()
+            .await
+            .contains_key("cache-integrity"));
+
+        let follower = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .retire_session_until_with_cause("cache-integrity", &session, None, "killed")
+                    .await
+            }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !follower.is_finished(),
+            "admin retirement must join the paused cache-integrity winner"
+        );
+
+        handoff_pause.release.notify_one();
+        let joined = follower
+            .await
+            .expect("cache integrity follower task")
+            .expect("cache integrity follower settlement");
+        assert_eq!(joined.participation, RollingRetirementParticipation::Joined);
+        assert_eq!(joined.cause.as_ref(), "failed");
+        assert!(joined.removed);
+        assert!(session.retirement_cleanup_finished.load(Acquire));
+        assert!(
+            cached_dir.join("index.m3u8").exists(),
+            "retiring a failed reader must preserve reusable cached bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn supersession_cancellation_finishes_vod_and_every_rolling_victim() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let root = crate::test_tempdir().expect("supersession transaction root");
+        let manager = Arc::new(TranscodeManager::new(
+            Arc::clone(&store),
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        manager
+            .install_vod_http_test_session("vod-victim", file_id, root.path())
+            .await;
+        let mut first = watchdog_session(
+            &root.path().join("rolling-a"),
+            Some(long_running_child()),
+            false,
+        );
+        let mut second = watchdog_session(
+            &root.path().join("rolling-b"),
+            Some(long_running_child()),
+            false,
+        );
+        for session in [&mut first, &mut second] {
+            // Match the fixed HTTP VOD fixture's immutable supersession key
+            // before either Arc is shared with the registry.
+            let session = Arc::get_mut(session).expect("unshared rolling fixture");
+            session.supersession_user = "[\"user_id\",1]".to_owned();
+            session.playback_id = "http-vod-test".to_owned();
+        }
+        let first_pause = Arc::new(LifecycleTestPause::new());
+        *first
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&first_pause));
+        {
+            let mut sessions = manager.sessions.lock().await;
+            sessions.insert("rolling-a".to_owned(), Arc::clone(&first));
+            sessions.insert("rolling-b".to_owned(), Arc::clone(&second));
+            manager.active_session_count.store(sessions.len(), Relaxed);
+        }
+
+        let supersession = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            async move {
+                manager
+                    .reap_superseded_before(None, "[\"user_id\",1]", "http-vod-test")
+                    .await
+            }
+        });
+        await_lifecycle_pause(&first_pause).await;
+        assert!(
+            !manager
+                .vod
+                .live_session_ids()
+                .await
+                .contains(&"vod-victim".to_owned()),
+            "VOD mutation precedes the first rolling Terminal boundary"
+        );
+        supersession.abort();
+        assert!(supersession
+            .await
+            .expect_err("supersession waiter must cancel")
+            .is_cancelled());
+        first_pause.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !manager.sessions.lock().await.is_empty()
+                || !first.retirement_cleanup_finished.load(Acquire)
+                || !second.retirement_cleanup_finished.load(Acquire)
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached transaction must finish every rolling victim");
+        assert!(first.child.lock().await.is_none());
+        assert!(second.child.lock().await.is_none());
+        assert!(first.retirement_cleanup_started.load(Acquire));
+        assert!(second.retirement_cleanup_started.load(Acquire));
+    }
+
+    #[tokio::test]
+    async fn retirement_removes_the_exact_arc_after_durable_id_adoption() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("adoption retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let retirement = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move { manager.retire_session("provisional", &session).await }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(
+            manager.adopt_session_id("provisional", "durable").await,
+            "durable activation may rename the exact Arc while End is in flight"
+        );
+        assert!(manager.sessions.lock().await.contains_key("durable"));
+
+        handoff_pause.release.notify_one();
+        assert!(retirement.await.expect("retirement task"));
+        assert!(
+            !manager.sessions.lock().await.contains_key("durable"),
+            "settlement removes the exact Arc at its adopted key"
+        );
+        await_prepublication_cleanup(&session).await;
+    }
+
+    #[tokio::test]
+    async fn retirement_finds_an_exact_arc_adopted_before_registry_entry() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("pre-adopted retirement root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("provisional-before".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+        assert!(
+            manager
+                .adopt_session_id("provisional-before", "durable-before")
+                .await
+        );
+
+        assert!(
+            manager.retire_session("provisional-before", &session).await,
+            "retirement owns the exact Arc even when its requested key was already adopted"
+        );
+        assert!(!manager.sessions.lock().await.contains_key("durable-before"));
+        await_prepublication_cleanup(&session).await;
+    }
+
+    #[tokio::test]
+    async fn adoption_panic_drops_cleanup_owner_at_the_moved_identity() {
+        use plurx_core::store::SqliteStore;
+
+        struct PanicAfterMoveOwner {
+            identity: String,
+            events: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl SessionAdoptionOwner for PanicAfterMoveOwner {
+            fn adopted_session_id(&mut self, durable_session_id: &str) {
+                self.identity = durable_session_id.to_owned();
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("adopted:{durable_session_id}"));
+                panic!("scripted panic after registry move");
+            }
+        }
+
+        impl Drop for PanicAfterMoveOwner {
+            fn drop(&mut self) {
+                self.events
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(format!("drop:{}", self.identity));
+            }
+        }
+
+        let root = crate::test_tempdir().expect("panic adoption root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("panic-provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+        let adoption = manager
+            .session_adoption_token("panic-durable")
+            .expect("adoption admission");
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let task = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let events = Arc::clone(&events);
+            async move {
+                let owner = PanicAfterMoveOwner {
+                    identity: "panic-provisional".to_owned(),
+                    events,
+                };
+                let _ = manager
+                    .adopt_session_id_with_owner(
+                        "panic-provisional",
+                        "panic-durable",
+                        adoption,
+                        owner,
+                    )
+                    .await;
+            }
+        });
+        assert!(task
+            .await
+            .expect_err("adoption callback must panic")
+            .is_panic());
+        assert!(manager.sessions.lock().await.contains_key("panic-durable"));
+        assert_eq!(
+            *events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["adopted:panic-durable", "drop:panic-durable"],
+            "the future owns cleanup and updates it synchronously with the map move"
+        );
+
+        manager
+            .stop_session("panic-durable", "panic adoption test cleanup")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn adoption_cancellation_drops_cleanup_owner_at_the_provisional_identity() {
+        use plurx_core::store::SqliteStore;
+
+        struct RecordingOwner {
+            identity: String,
+            dropped: Arc<std::sync::Mutex<Vec<String>>>,
+        }
+
+        impl SessionAdoptionOwner for RecordingOwner {
+            fn adopted_session_id(&mut self, durable_session_id: &str) {
+                self.identity = durable_session_id.to_owned();
+            }
+        }
+
+        impl Drop for RecordingOwner {
+            fn drop(&mut self) {
+                self.dropped
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .push(self.identity.clone());
+            }
+        }
+
+        let root = crate::test_tempdir().expect("cancelled adoption root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("cancel-provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+        let adoption = manager
+            .session_adoption_token("cancel-durable")
+            .expect("adoption admission");
+        let transition = Arc::clone(&adoption.gate.transition).lock_owned().await;
+        let dropped = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let task = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let dropped = Arc::clone(&dropped);
+            let entered = Arc::clone(&entered);
+            async move {
+                let owner = RecordingOwner {
+                    identity: "cancel-provisional".to_owned(),
+                    dropped,
+                };
+                entered.notify_one();
+                let _ = manager
+                    .adopt_session_id_with_owner(
+                        "cancel-provisional",
+                        "cancel-durable",
+                        adoption,
+                        owner,
+                    )
+                    .await;
+            }
+        });
+        entered.notified().await;
+        task.abort();
+        assert!(task
+            .await
+            .expect_err("adoption waiter must cancel")
+            .is_cancelled());
+        drop(transition);
+
+        assert!(manager
+            .sessions
+            .lock()
+            .await
+            .contains_key("cancel-provisional"));
+        assert!(!manager.sessions.lock().await.contains_key("cancel-durable"));
+        assert_eq!(
+            *dropped
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            vec!["cancel-provisional"],
+            "cancellation before the registry move drops the move-owned cleanup capability at its provisional id"
+        );
+        manager
+            .stop_session("cancel-provisional", "cancelled adoption test cleanup")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn durable_adoption_cannot_publish_after_release_generation() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("release adoption root");
+        let scratch = root.path().join("scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session =
+            watchdog_session_with_publication(&scratch, Some(long_running_child()), false, true);
+        manager
+            .sessions
+            .lock()
+            .await
+            .insert("release-provisional".to_owned(), Arc::clone(&session));
+        manager.active_session_count.store(1, Relaxed);
+
+        let before_end = manager
+            .session_adoption_token("release-durable")
+            .expect("release gate admission");
+        manager.begin_session_release("release-durable").await;
+        manager.complete_session_release("release-durable");
+        assert!(
+            !manager
+                .adopt_session_id_with_token("release-provisional", "release-durable", before_end,)
+                .await,
+            "an operation admitted before End observes the monotone release generation"
+        );
+
+        let after_end = manager
+            .session_adoption_token("release-durable")
+            .expect("release gate admission");
+        assert!(
+            !manager
+                .adopt_session_id_with_token("release-provisional", "release-durable", after_end,)
+                .await,
+            "the retained terminal gate closes the post-completion ABA window"
+        );
+        assert!(manager
+            .sessions
+            .lock()
+            .await
+            .contains_key("release-provisional"));
+        assert!(
+            manager
+                .stop_session("release-provisional", "test cleanup")
+                .await
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_adoption_generations_have_a_hard_live_bound() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("adoption capacity root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let mut tokens = Vec::with_capacity(MAX_IN_FLIGHT_SESSION_ADOPTION_GATES);
+        for index in 0..MAX_IN_FLIGHT_SESSION_ADOPTION_GATES {
+            tokens.push(
+                manager
+                    .session_adoption_token(&format!("probe-{index}"))
+                    .expect("capacity admits the documented number of distinct probes"),
+            );
+        }
+        assert!(manager.session_adoption_token("probe-overflow").is_none());
+        tokens.pop();
+        assert!(
+            manager.session_adoption_token("probe-recovered").is_some(),
+            "dropping the final token frees its exact admission"
+        );
+    }
+
+    #[tokio::test]
+    async fn serving_fence_kills_existing_and_transition_racing_children() {
+        use plurx_core::cluster::migration::status::ReplicationMonitor;
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("serving-fence root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let fence =
+            crate::serving_fence::ServingFence::new(ReplicationMonitor::sqlite().metrics_handle());
+        let manager = Arc::new(
+            TranscodeManager::new(
+                store,
+                root.path().join("manager"),
+                EncoderCaps::default(),
+                Pipeline::Cpu,
+            )
+            .with_serving_authority(fence.authority()),
+        );
         let existing = watchdog_session(
             &root.path().join("existing"),
             Some(long_running_child()),
@@ -17462,36 +30188,16 @@ mod tests {
             .await
             .insert("existing".to_owned(), Arc::clone(&existing));
 
-        let (serving_tx, serving_rx) =
-            tokio::sync::watch::channel(crate::serving_fence::ServingState {
-                ready: true,
-                loss_generation: 0,
-            });
-        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(serving_rx));
+        let fence_loop = tokio::spawn(Arc::clone(&manager).serving_fence_loop(fence.subscribe()));
         // Publish loss and recovery without yielding. A boolean watch could
         // coalesce this to `true` and preserve the old child; the generation
         // makes the lost authority permanent for generation zero.
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: false,
-                loss_generation: 1,
-            })
-            .expect("publish quorum loss");
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: true,
-                loss_generation: 1,
-            })
-            .expect("publish quorum recovery");
+        fence.validation_set_ready(false).await;
+        fence.validation_set_ready(true).await;
         tokio::time::timeout(Duration::from_secs(2), async {
             loop {
-                let stopped = existing
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some()));
-                if existing.retired.load(Acquire)
+                let stopped = existing.retirement_cleanup_finished.load(Acquire);
+                if existing.control.is_retired()
                     && stopped
                     && manager.sessions.lock().await.is_empty()
                 {
@@ -17503,12 +30209,7 @@ mod tests {
         .await
         .expect("existing child must be retired promptly");
 
-        serving_tx
-            .send(crate::serving_fence::ServingState {
-                ready: false,
-                loss_generation: 2,
-            })
-            .expect("publish second quorum loss");
+        fence.validation_set_ready(false).await;
         tokio::time::timeout(Duration::from_secs(2), async {
             while manager.serving_ready.load(Acquire) {
                 tokio::task::yield_now().await;
@@ -17521,379 +30222,158 @@ mod tests {
         // after its first snapshot. `register_session` is the other half of
         // the race proof: the late child must retire itself.
         let late = watchdog_session(&root.path().join("late"), Some(long_running_child()), false);
-        assert!(
-            !manager.register_session("late", Arc::clone(&late)).await,
+        assert_eq!(
+            manager.register_session("late", Arc::clone(&late), 0).await,
+            Err(SessionRegistrationRejection::ServingFence),
             "a transition-racing session must not publish"
         );
-        assert!(late.retired.load(Acquire));
+        assert!(late.control.is_retired());
         assert!(manager.sessions.lock().await.is_empty());
         assert!(
-            late.child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| child.try_wait().is_ok_and(|status| status.is_some())),
-            "the rejected late child must already be reaped"
+            late.child.lock().await.is_none(),
+            "the rejected late child must already be reaped and released"
         );
 
-        drop(serving_tx);
+        drop(fence);
         fence_loop.await.expect("serving fence loop");
     }
 
-    /// A process that outlives the test unless the watchdog kills it.
+    #[tokio::test]
+    async fn initial_registration_reauthorizes_after_waiting_for_the_registry() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("registration root");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let session = watchdog_session(
+            &root.path().join("delayed"),
+            Some(long_running_child()),
+            false,
+        );
+
+        let registry = manager.sessions.lock().await;
+        let registration = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move { manager.register_session("delayed", session, 0).await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !registration.is_finished(),
+            "the fixture must actually wait behind the registry lock"
+        );
+        session.control.end().await.expect("end verdict");
+        drop(registry);
+
+        assert_eq!(
+            registration.await.expect("registration task"),
+            Err(SessionRegistrationRejection::Producer(
+                crate::playback_control::ProducerAttemptRejection::SessionEnded
+            ))
+        );
+        assert!(manager.sessions.lock().await.is_empty());
+        assert!(
+            session.child.lock().await.is_none(),
+            "the unregistered child is synchronously reaped and released"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_copy_registration_rejection_keeps_exact_cleanup_ownership() {
+        use plurx_core::store::SqliteStore;
+
+        let root = crate::test_tempdir().expect("cancelled copy registration root");
+        let scratch = root.path().join("copy-scratch");
+        tokio::fs::create_dir_all(&scratch)
+            .await
+            .expect("create copy scratch");
+        tokio::fs::write(scratch.join("index.m3u8"), b"unpublished")
+            .await
+            .expect("seed copy scratch");
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let manager = Arc::new(TranscodeManager::new(
+            store,
+            root.path().join("manager"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        ));
+        let admissions = Admissions::new();
+        let mut session = watchdog_session(&scratch, Some(long_running_child()), false);
+        Arc::get_mut(&mut session)
+            .expect("unshared copy fixture")
+            .method = crate::delivery::Method::HlsCopy;
+        reserve_test_admissions(&session, &admissions);
+        let handoff_pause = Arc::new(LifecycleTestPause::new());
+        *session
+            .retirement_cleanup_handoff_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&handoff_pause));
+        session
+            .control
+            .end()
+            .await
+            .expect("pre-registration terminal");
+
+        let registration = tokio::spawn({
+            let manager = Arc::clone(&manager);
+            let session = Arc::clone(&session);
+            async move {
+                manager
+                    .register_session("unregistered-copy", session, 0)
+                    .await
+            }
+        });
+        await_lifecycle_pause(&handoff_pause).await;
+        assert!(manager.sessions.lock().await.is_empty());
+        assert_eq!(admissions.in_use(), 1);
+        assert_eq!(admissions.software_in_use(), 2);
+        assert!(session.child.lock().await.is_some());
+
+        registration.abort();
+        assert!(registration
+            .await
+            .expect_err("registration waiter must cancel")
+            .is_cancelled());
+        handoff_pause.release.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !session.retirement_cleanup_finished.load(Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached unregistered copy cleanup must settle");
+        assert!(session.child.lock().await.is_none());
+        assert_eq!(admissions.in_use(), 0);
+        assert_eq!(admissions.software_in_use(), 0);
+        await_scratch_removed(&scratch).await;
+    }
+
+    /// A process that outlives the test unless lifecycle cleanup reaps it.
     fn long_running_child() -> Child {
         let mut cmd = tokio::process::Command::new("sleep");
         cmd.arg("60").kill_on_drop(true);
         cmd.spawn().expect("spawn sleep")
     }
 
-    /// Backdate the motion clock so `stalled_for` reads past the threshold
-    /// without the test waiting it out.
-    fn force_stalled(p: &Progress) {
-        p.moved_at_ms.store(
-            p.started.elapsed().as_millis() as i64 - 2 * PROGRESS_STALL.as_millis() as i64,
-            Relaxed,
-        );
+    fn successful_child() -> Child {
+        let mut cmd = tokio::process::Command::new("true");
+        cmd.kill_on_drop(true);
+        cmd.spawn().expect("spawn successful child")
     }
 
-    /// Drive virtual time in poll-sized hops until the watchdog settles.
-    ///
-    /// Hop-sized on purpose: under a paused clock, auto-advance jumps to the
-    /// *nearest* pending timer whenever every task is off doing file I/O — so
-    /// a single distant `timeout` wrapped around the watchdog is a deadline
-    /// the clock can leap straight to while the watchdog sits in a playlist
-    /// read. Small hops leave it nothing to leap past. Bounded, so a watchdog
-    /// that never reaches a verdict fails the test instead of hanging it.
-    async fn settle(handle: tokio::task::JoinHandle<()>) {
-        for _ in 0..1_000 {
-            if handle.is_finished() {
-                handle.await.expect("watchdog task");
-                return;
-            }
-            tokio::time::sleep(WATCHDOG_POLL).await;
-        }
-        panic!("the watchdog did not settle inside the bounded window");
-    }
-
-    /// THE §2.3 regression: the watchdog used to return at the first playable
-    /// segment, so a pipeline that wedged after producing was nobody's
-    /// problem — the client drained its buffer into a hang. Virtual time; the
-    /// only real thing here is the child process the verdict must kill.
-    #[tokio::test(start_paused = true)]
-    async fn the_watchdog_outlives_the_first_segment() {
-        let dir = crate::test_tempdir().expect("dir");
-        // The playlist lists a finished segment: the session HAS produced.
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        force_stalled(&session.progress);
-
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-
-        assert!(
-            session.failed.load(Relaxed),
-            "a mid-stream wedge must fail the session even though a segment was published"
-        );
-        let killed = session
-            .child
-            .lock()
-            .await
-            .as_mut()
-            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))));
-        assert!(killed, "and the wedged process must be gone");
-    }
-
-    /// Session teardown deliberately kills a live child without failing the
-    /// session. The detached watchdog must observe that exit as `Done`, not
-    /// wait until the motion clock turns an ordinary stop into a false stall.
-    #[tokio::test(start_paused = true)]
-    async fn an_ordinary_kill_ends_the_watchdog_without_a_stall() {
-        let dir = crate::test_tempdir().expect("dir");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "ordinary-stop".into(),
-        ));
-
-        session.kill_child().await;
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-
-        assert!(
-            !session.failed.load(Relaxed),
-            "a deliberately killed child must end the watchdog without a stall verdict"
-        );
-    }
-
-    /// Reproduce the copy-segmenter's `Unsupported` transition after the
-    /// lifetime watchdog has observed its predecessor but before it acts on
-    /// that observation. The successor must survive the stale verdict, and
-    /// the same watchdog must still judge a later successor stall.
-    async fn assert_copy_replacement_invalidates_watchdog_verdict(next: WatchNext) {
-        let dir = crate::test_tempdir().expect("dir");
-        let child = match next {
-            WatchNext::Done => {
-                let mut child = tokio::process::Command::new("false")
-                    .kill_on_drop(true)
-                    .spawn()
-                    .expect("spawn failed predecessor");
-                let status = child.wait().await.expect("wait for predecessor");
-                assert!(!status.success(), "the predecessor must fail");
-                child
-            }
-            WatchNext::Stall => long_running_child(),
-            WatchNext::Wait => panic!("the race needs an actionable watchdog verdict"),
-        };
-        let session = watchdog_session(dir.path(), Some(child), false);
-        if next == WatchNext::Stall {
-            force_stalled(&session.progress);
-        }
-
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .watchdog_verdict_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "copy-replacement-race".into(),
-        ));
-
-        // The first rendezvous proves the watchdog already chose the stale
-        // predecessor verdict. Keep it paused while the exact replacement
-        // transaction used by `copyseg::Outcome::Unsupported` kills that
-        // predecessor, resets telemetry, and publishes the successor.
-        pause.wait().await;
-        *session
-            .watchdog_verdict_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let replacement = session
-            .kill_child_for_replacement()
-            .await
-            .expect("a live session may replace its child");
-        session.progress.begin_attempt();
-        *session.child.lock().await = Some(long_running_child());
-        drop(replacement);
-        pause.wait().await;
-
-        // Let the resumed watchdog either act on its stale verdict (the bug)
-        // or re-evaluate the newly published producer (the contract).
-        for _ in 0..100 {
-            if session.failed.load(Relaxed) || watchdog.is_finished() {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
-        assert!(
-            !session.failed.load(Relaxed),
-            "the predecessor verdict must not fail the replacement"
-        );
-        assert!(
-            !watchdog.is_finished(),
-            "replacement must not permanently abandon watchdog coverage"
-        );
-        assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(None))),
-            "the replacement producer must survive the stale verdict"
-        );
-
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-        assert!(
-            session.failed.load(Relaxed),
-            "the watchdog must still fail a later stall in the replacement"
-        );
-        assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "the later successor stall must kill that producer"
-        );
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn copy_replacement_invalidates_an_in_flight_stall_verdict() {
-        assert_copy_replacement_invalidates_watchdog_verdict(WatchNext::Stall).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn copy_replacement_invalidates_an_in_flight_done_verdict() {
-        assert_copy_replacement_invalidates_watchdog_verdict(WatchNext::Done).await;
-    }
-
-    /// The mirror ordering: the copy reader has already decided its stream is
-    /// unsupported, but the watchdog owns `child_transition` before the
-    /// reader can begin the replacement. A terminal predecessor verdict must
-    /// not be followed by an unmonitored successor.
-    async fn assert_watchdog_first_copy_replacement(next: WatchNext) {
-        let dir = crate::test_tempdir().expect("dir");
-        let child = match next {
-            WatchNext::Done => {
-                let mut child = tokio::process::Command::new("false")
-                    .kill_on_drop(true)
-                    .spawn()
-                    .expect("spawn failed predecessor");
-                let status = child.wait().await.expect("wait for predecessor");
-                assert!(!status.success(), "the predecessor must fail");
-                child
-            }
-            WatchNext::Stall => long_running_child(),
-            WatchNext::Wait => panic!("the race needs an actionable watchdog verdict"),
-        };
-        let session = watchdog_session(dir.path(), Some(child), false);
-        if next == WatchNext::Stall {
-            force_stalled(&session.progress);
-        }
-
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .watchdog_transition_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "watchdog-first-copy-replacement".into(),
-        ));
-
-        // The first rendezvous proves the watchdog owns the transition. The
-        // already-decided copy fallback now queues behind it, exactly the
-        // ordering missed by the replacement-first regressions above.
-        pause.wait().await;
-        *session
-            .watchdog_transition_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
-        let replacement_session = Arc::clone(&session);
-        let replacement = tokio::spawn(async move {
-            let Some(replacement) = replacement_session.begin_copy_child_replacement().await else {
-                return false;
-            };
-            replacement_session.progress.begin_attempt();
-            *replacement_session.child.lock().await = Some(long_running_child());
-            spawn_watch_for_stall(
-                Arc::clone(&replacement_session),
-                replacement_session.dir.clone(),
-                "watchdog-first-copy-successor".into(),
-            );
-            drop(replacement);
-            true
-        });
-        assert!(
-            !replacement.is_finished(),
-            "the decided fallback must wait behind the watchdog transition"
-        );
-        pause.wait().await;
-
-        settle(watchdog).await;
-        let installed = replacement.await.expect("copy fallback task");
-        if next == WatchNext::Done {
-            assert!(installed, "an exited predecessor may still fall back");
-            assert!(
-                session.watchdog_active.load(Acquire),
-                "the successor must have lifetime watchdog coverage before publication"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(None))),
-                "the covered successor must remain alive"
-            );
-            assert!(
-                !session.failed.load(Relaxed),
-                "Done is not a terminal session failure"
-            );
-            force_stalled(&session.progress);
-            for _ in 0..1_000 {
-                if session.failed.load(Relaxed) && !session.watchdog_active.load(Acquire) {
-                    break;
-                }
-                tokio::time::sleep(WATCHDOG_POLL).await;
-            }
-            assert!(
-                session.failed.load(Relaxed),
-                "the fresh watchdog must detect a later successor stall"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-                "the fresh watchdog must kill the later stalled successor"
-            );
-        } else {
-            assert!(
-                !installed,
-                "a terminal failed verdict must prevent a late successor"
-            );
-            assert!(
-                session
-                    .child
-                    .lock()
-                    .await
-                    .as_mut()
-                    .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-                "no successor may remain after the watchdog failed the session"
-            );
-            assert!(
-                session.failed.load(Relaxed),
-                "the Stall verdict must remain terminal"
-            );
-            assert!(
-                !session.watchdog_active.load(Acquire),
-                "a terminal failed session has no producer left to watch"
-            );
-        }
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn winning_stall_watchdog_prevents_a_late_copy_replacement() {
-        assert_watchdog_first_copy_replacement(WatchNext::Stall).await;
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn winning_done_watchdog_rearms_for_a_late_copy_replacement() {
-        assert_watchdog_first_copy_replacement(WatchNext::Done).await;
-    }
-
-    /// The copy reader can decide `Unsupported` immediately before a viewer
+    /// An actor-authorized replacement can begin immediately before a viewer
     /// stops the session. If replacement already owns `child_transition`,
     /// teardown must wait for successor publication and then kill that
     /// successor; removing the manager entry independently lets an untracked
     /// encoder survive the stop.
     #[tokio::test]
-    async fn stop_waits_for_copy_replacement_and_kills_its_successor() {
+    async fn stop_waits_for_replacement_and_kills_its_successor() {
         use plurx_core::store::SqliteStore;
 
         let dir = crate::test_tempdir().expect("dir");
@@ -17919,12 +30399,16 @@ mod tests {
         let replacement = tokio::spawn({
             let session = Arc::clone(&session);
             async move {
-                let replacement = session
-                    .begin_copy_child_replacement()
+                let (replacement, producer_attempt) = session
+                    .kill_child_for_replacement()
                     .await
-                    .expect("the live copy session may begin fallback");
-                *session.child.lock().await = Some(long_running_child());
-                drop(replacement);
+                    .expect("the live session may begin actor-authorized replacement");
+                *session.child.lock().await = Some(AttemptChild::new(
+                    producer_attempt,
+                    long_running_child(),
+                    session.control.clone(),
+                ));
+                replacement.complete();
             }
         });
         pause.wait().await;
@@ -17956,23 +30440,19 @@ mod tests {
             "the stopped session must stay retired"
         );
         assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "no replacement producer may survive session retirement"
+            session.child.lock().await.is_none(),
+            "no replacement producer may survive confirmed session retirement"
         );
 
         // Scratch is not the lifetime oracle. Even if a stale directory is
         // present again after teardown, the monotonic retirement verdict must
-        // refuse an already-decided `Unsupported` fallback.
+        // refuse an already-decided replacement.
         tokio::fs::create_dir_all(&session.dir)
             .await
             .expect("recreate stale scratch");
-        assert!(
-            session.begin_copy_child_replacement().await.is_none(),
+        assert_eq!(
+            session.kill_child_for_replacement().await.err(),
+            Some(crate::playback_control::ProducerAttemptRejection::SessionEnded),
             "a retired session must never publish another producer"
         );
     }
@@ -17999,6 +30479,15 @@ mod tests {
 
         manager.fence_sessions(&["fenced-renewal".to_owned()]).await;
         assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("authority-fenced snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence)
+        );
+        assert_eq!(
             manager.active_session_ids().await,
             vec!["fenced-renewal".to_owned()],
             "the teardown barrier keeps the worker discoverable for cleanup"
@@ -18009,6 +30498,16 @@ mod tests {
         );
         drop(transition);
         assert!(manager.stop_session("fenced-renewal", "test").await);
+        assert_eq!(
+            session
+                .control
+                .snapshot()
+                .await
+                .expect("cleanup preserves terminal snapshot")
+                .terminal,
+            Some(crate::playback_control::RollingTerminalCause::AuthorityFence),
+            "later cleanup cannot relabel authority loss as an ordinary end"
+        );
     }
 
     /// The inverse transition ordering matters too: a hardware fallback can
@@ -18031,7 +30530,7 @@ mod tests {
             .lock()
             .await
             .as_ref()
-            .and_then(tokio::process::Child::id)
+            .and_then(AttemptChild::id)
             .expect("placeholder process id");
         let predecessor_generation = session.progress.generation();
         mgr.sessions
@@ -18073,124 +30572,18 @@ mod tests {
         )
         .await;
 
-        assert!(session.retired.load(Acquire));
+        assert!(session.control.is_retired());
         assert!(
             mgr.sessions.lock().await.get("retirement-first").is_none(),
             "the retired session must remain unregistered"
         );
-        let mut child = session.child.lock().await;
-        assert!(
-            child.is_some(),
-            "retirement must retain the reaped predecessor handle"
-        );
+        let child = session.child.lock().await;
         assert_eq!(
             session.progress.generation(),
             predecessor_generation,
             "fallback must not begin or publish a successor process after retirement (predecessor pid {predecessor_pid})"
         );
-        assert!(
-            child
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "the retired predecessor must remain dead"
-        );
-    }
-
-    /// Flow control SIGSTOPs a session that has run far enough ahead; that is
-    /// health, not a stall — for as long as it lasts. And the resume path
-    /// re-baselines the clock, so the suspension itself can never be read
-    /// back as one.
-    #[tokio::test(start_paused = true)]
-    async fn a_suspended_session_is_never_judged() {
-        let dir = crate::test_tempdir().expect("dir");
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXTINF:2.0,\nseg00000.ts\n",
-        )
-        .await
-        .expect("playlist");
-        let session = watchdog_session(dir.path(), Some(long_running_child()), false);
-        session.suspended.store(true, Relaxed);
-        force_stalled(&session.progress);
-
-        let watchdog = tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        ));
-        // Long enough (in virtual time) for many verdicts, were one coming.
-        tokio::time::sleep(SOFTWARE_GRACE + 20 * WATCHDOG_POLL).await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "a suspended session is motionless on purpose"
-        );
-
-        // Resume, the way `apply_ahead_window` does: clock first, flag second.
-        session.progress.touch();
-        session.suspended.store(false, Relaxed);
-        tokio::time::sleep(WATCHDOG_POLL).await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "the suspension must not be read back as a stall at resume"
-        );
-
-        // Now a real wedge: running, unsuspended, output sits still.
-        force_stalled(&session.progress);
-        settle(watchdog).await;
-        assert!(
-            session.failed.load(Relaxed),
-            "a wedge after the resume is still caught"
-        );
-    }
-
-    /// EOF is success: the encoder finishing the film exits, and the watch
-    /// ends without a verdict — nothing here may mark that session failed.
-    #[tokio::test(start_paused = true)]
-    async fn an_exited_encoder_ends_the_watch_without_a_verdict() {
-        let dir = crate::test_tempdir().expect("dir");
-        let mut child = tokio::process::Command::new("true")
-            .kill_on_drop(true)
-            .spawn()
-            .expect("spawn true");
-        // Already exited before the watch begins — the deterministic version
-        // of "the encoder reached EOF". (tokio caches the status, so the
-        // watchdog's `try_wait` sees it.)
-        child.wait().await.expect("exit");
-        let session = watchdog_session(dir.path(), Some(child), false);
-        // Backdated clock: if the exit check did not come first, this would
-        // read as a stall — the assertion below is what makes EOF win.
-        force_stalled(&session.progress);
-
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "an exit is EOF or a kill; both already have owners reporting them"
-        );
-    }
-
-    /// A cached session has no process; every stall question about it is
-    /// about nothing, and `failed` on it would poison a finished asset other
-    /// viewers want.
-    #[tokio::test(start_paused = true)]
-    async fn a_cached_session_is_not_watched() {
-        let dir = crate::test_tempdir().expect("dir");
-        let session = watchdog_session(dir.path(), None, true);
-        force_stalled(&session.progress);
-        settle(tokio::spawn(watch_for_stall(
-            Arc::clone(&session),
-            dir.path().to_path_buf(),
-            "wd".into(),
-        )))
-        .await;
-        assert!(
-            !session.failed.load(Relaxed),
-            "nothing to watch, no verdict"
-        );
+        assert!(child.is_none(), "the retired predecessor must be reaped");
     }
 
     // ---- the pre-transcode cache, serving side (PERF-PLAN §6.3) -------------
@@ -18363,6 +30756,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let hash = recipe_hash_for(&mgr, &file, 1080).await;
         let relative = "fa/manifest-session";
@@ -18413,20 +30807,182 @@ mod tests {
         tokio::fs::write(dir.join("seg00001.ts"), b"corrupt listed object")
             .await
             .expect("corrupt listed segment");
-        assert!(mgr
-            .segment(&info.session_id, "seg00001.ts")
+        let corrupt_session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("cached session before integrity failure");
+        let retirement_gate = corrupt_session.child_transition.lock().await;
+        let error = match mgr
+            .segment_for_publication(&info.session_id, "seg00001.ts")
             .await
             .expect("segment admission")
-            .is_none());
-        assert_eq!(mgr.active_sessions().await, 0);
-        assert!(
-            store
+        {
+            SegmentPublication::Failed(error) => error,
+            _ => panic!("corrupt listed segment did not publish a typed failure"),
+        };
+        assert!(corrupt_session
+            .cache_integrity_cleanup_started
+            .load(Acquire));
+        assert_eq!(
+            error.error,
+            PlaylistError::SessionFailed(CACHED_MEDIA_INTEGRITY_FAILURE.to_owned()),
+            "segment integrity publishes its exact failure before detached cleanup"
+        );
+        assert_eq!(
+            mgr.active_sessions().await,
+            1,
+            "the detecting request does not own retirement while its gate is held"
+        );
+        drop(retirement_gate);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let retired = mgr.active_sessions().await == 0;
+                let invalidated = store
+                    .cache_hit(&hash, NODE)
+                    .await
+                    .expect("cache lookup")
+                    .is_none();
+                if retired && invalidated {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached segment-integrity cleanup");
+
+        let owner = error.owner.as_ref().expect("exact cached failure owner");
+        mgr.authorize_playlist_error_publication(
+            &info.session_id,
+            owner,
+            &error.error,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("retired exact segment failure remains publishable");
+    }
+
+    #[tokio::test]
+    async fn cached_playlist_integrity_cleanup_survives_request_cancellation_and_keeps_owner() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let file_id = seed_file(&store).await;
+        let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
+        let file = store.get_file(file_id).await.expect("get").expect("file");
+        let hash = recipe_hash_for(&mgr, &file, 1080).await;
+        let relative = "fb/playlist-integrity-owner";
+        let dir = seed_cache_dir(cache.path(), relative).await;
+        let manifest = plurx_core::transcode::manifest::publish(
+            &dir,
+            "00000000-0000-4000-8000-000000000601:1",
+            &[
+                "index.m3u8".to_owned(),
+                "seg00000.ts".to_owned(),
+                "seg00001.ts".to_owned(),
+                "seg00002.ts".to_owned(),
+            ],
+        )
+        .await
+        .expect("publish generation manifest");
+        complete_manifest_cache(&store, file_id, &hash, relative, &manifest.manifest_digest).await;
+
+        let info = mgr
+            .start(
+                file_id,
+                1080,
+                0.0,
+                None,
+                None,
+                "paul",
+                "pb-playlist-integrity",
+            )
+            .await
+            .expect("cached start");
+        let session = mgr
+            .sessions
+            .lock()
+            .await
+            .get(&info.session_id)
+            .cloned()
+            .expect("cached session before integrity failure");
+        tokio::fs::write(dir.join("index.m3u8"), b"corrupt cached playlist")
+            .await
+            .expect("corrupt cached playlist");
+
+        // Pin retirement after the detached owner has been installed. The
+        // detecting request can then be cancelled without also owning the
+        // registry removal that its exact failure response must survive.
+        let retirement_gate = session.child_transition.lock().await;
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+        let request_manager = Arc::clone(&mgr);
+        let request_session_id = info.session_id.clone();
+        let request = tokio::spawn(async move {
+            let error = match request_manager
+                .playlist_with_owner(&request_session_id)
+                .await
+            {
+                Err(error) => error,
+                Ok(_) => panic!("corrupt cached playlist was published"),
+            };
+            let _ = error_tx.send(error);
+            std::future::pending::<()>().await;
+        });
+        let error = tokio::time::timeout(Duration::from_secs(2), error_rx)
+            .await
+            .expect("synchronous cached-playlist failure")
+            .expect("request published its failure owner");
+        assert_eq!(
+            error.error,
+            PlaylistError::SessionFailed(CACHED_MEDIA_INTEGRITY_FAILURE.to_owned())
+        );
+        assert!(session.cache_integrity_cleanup_started.load(Acquire));
+        request.abort();
+        assert!(request
+            .await
+            .expect_err("cancelled detecting request")
+            .is_cancelled());
+
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while store
                 .cache_hit(&hash, NODE)
                 .await
                 .expect("cache lookup")
-                .is_none(),
-            "a listed corrupt object did not invalidate the exact generation"
+                .is_some()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached invalidation survives request cancellation");
+        assert_eq!(
+            mgr.active_sessions().await,
+            1,
+            "the detached owner is still waiting on exact retirement"
         );
+
+        drop(retirement_gate);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while mgr.active_sessions().await != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached retirement survives request cancellation");
+
+        let owner = error.owner.as_ref().expect("exact cached failure owner");
+        mgr.authorize_playlist_error_publication(
+            &info.session_id,
+            owner,
+            &error.error,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .expect("retired exact cached failure remains publishable");
     }
 
     #[tokio::test]
@@ -18632,6 +31188,7 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
         let hash = recipe_hash_for(&mgr, &file, 1080).await;
         let dir = seed_cache_dir(cache.path(), "cd/entry").await;
@@ -18790,6 +31347,7 @@ mod tests {
         write_real_video(&source, 6);
         let file_id = seed_real_file(&store, &source).await;
         let (mgr, _work, cache) = cached_manager(&store);
+        let mgr = Arc::new(mgr);
         let file = store.get_file(file_id).await.expect("get").expect("file");
 
         let hash = mgr
@@ -19647,12 +32205,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
 
         // Defaults with an empty store.
         let prefs = mgr.lang_prefs().await;
@@ -19744,12 +32302,12 @@ mod tests {
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
         let work = crate::test_tempdir().expect("work");
-        let mgr = TranscodeManager::new(
+        let mgr = Arc::new(TranscodeManager::new(
             Arc::clone(&store),
             work.path().to_path_buf(),
             EncoderCaps::default(),
             Pipeline::Cpu,
-        );
+        ));
         // Two players deliberately coexist below; this test is about the
         // supersession key, not the CPU pool, so give the pool room — on a
         // 2-core runner the machine-derived budget would refuse the second
@@ -19916,8 +32474,19 @@ mod tests {
             "one request id reused by two players must not collide"
         );
 
-        let first = mgr.create_session(&request, "paul").await.expect("create");
-        let again = mgr.create_session(&request, "paul").await.expect("replay");
+        let supersession_user = serde_json::json!(["username", "paul"]).to_string();
+        let first_creation = mgr
+            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .await
+            .expect("create");
+        assert!(first_creation.created);
+        let again_creation = mgr
+            .create_session_inner(&request, "paul", &supersession_user, None, None, None)
+            .await
+            .expect("replay");
+        assert!(!again_creation.created);
+        let first = first_creation.info;
+        let again = again_creation.info;
         assert_eq!(
             first.session_id, again.session_id,
             "a replayed create must not spawn a second encoder"
@@ -19956,15 +32525,16 @@ mod tests {
         assert!(mgr.stop_session(&revived.session_id, "test").await);
     }
 
-    /// The check-then-act race the reservation exists to close: two creates
-    /// carrying the same request id, in flight at the same time, must produce
-    /// one session between them — not one encoder each with the loser handed
-    /// a stream its twin's supersession already killed. No interleaving is
-    /// asserted, only the outcome, so this passes whether the runtime overlaps
-    /// them or happens to serialize them.
+    /// The check-then-act race the reservation exists to close: a follower
+    /// carrying the same request id while the owner is still in flight must
+    /// recover the one live session the owner records. Exercise that claim
+    /// transition directly so a deliberately prompt producer failure cannot
+    /// turn this into the separate stale-ready-key recovery contract.
     #[tokio::test]
     async fn concurrent_creates_with_one_request_id_share_one_session() {
-        super::require_ffmpeg();
+        use std::future::Future as _;
+        use std::task::{Context, Poll, Waker};
+
         use plurx_core::store::SqliteStore;
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
         let file_id = seed_file(&store).await;
@@ -19991,19 +32561,42 @@ mod tests {
             presentation: Default::default(),
             block_budget_secs: None,
         };
+        let supersession_user = serde_json::json!(["username", "paul"]).to_string();
 
-        let (a, b) = tokio::join!(
-            mgr.create_session(&request, "paul"),
-            mgr.create_session(&request, "paul"),
+        let first = mgr
+            .claim_request("req-race", &request, &supersession_user)
+            .await
+            .expect("first claim");
+        let Claimed::Mine(claim, _) = first else {
+            panic!("the first request owns the reservation")
+        };
+
+        let mut follower = Box::pin(mgr.claim_request("req-race", &request, &supersession_user));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(
+            matches!(follower.as_mut().poll(&mut context), Poll::Pending),
+            "the identical follower waits on the in-flight reservation"
         );
-        let a = a.expect("first create");
-        let b = b.expect("second create");
-        assert_eq!(
-            a.session_id, b.session_id,
-            "both callers must be handed the one session the id names"
+
+        let session_id = "coalesced-request-session";
+        let mut session = test_session(work.path().join("coalesced-session"));
+        session.file_id = file_id;
+        mgr.sessions
+            .lock()
+            .await
+            .insert(session_id.to_owned(), Arc::new(session));
+        claim.complete(
+            session_id,
+            &std::collections::HashSet::from([session_id.to_owned()]),
         );
+
+        let recovered = match follower.await.expect("follower claim") {
+            Claimed::Recovered(info) => info,
+            Claimed::Mine(_, _) => panic!("the follower must not reserve a second create"),
+        };
+        assert_eq!(recovered.session_id, session_id);
         assert_eq!(mgr.active_sessions().await, 1, "and exactly one exists");
-        assert!(mgr.stop_session(&a.session_id, "test").await);
+        assert!(mgr.stop_session(session_id, "test").await);
     }
 
     /// A create that fails must clear its reservation on the way out. The
@@ -20355,15 +32948,16 @@ mod tests {
         let held = mgr
             .acquire_cluster_replacement_gate(
                 key.clone(),
+                None,
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
             .expect("first replacement owns its gate");
         let error = match mgr
-            .acquire_cluster_replacement_gate(key.clone(), tokio::time::Instant::now())
+            .acquire_cluster_replacement_gate(key.clone(), None, tokio::time::Instant::now())
             .await
         {
-            Ok(_) => panic!("a timed-out replacement must never reach predecessor reap"),
+            Ok(_) => panic!("a timed-out replacement must never begin provisional creation"),
             Err(error) => error,
         };
         assert!(is_retryable_capacity_error(&error), "{error}");
@@ -20372,6 +32966,7 @@ mod tests {
         let reacquired = mgr
             .acquire_cluster_replacement_gate(
                 key,
+                None,
                 tokio::time::Instant::now() + Duration::from_secs(1),
             )
             .await
@@ -20379,8 +32974,45 @@ mod tests {
         drop(reacquired);
     }
 
+    /// The cluster replacement guard already spans provisional worker creation
+    /// through the ingress activation verdict. A typed reopen must bind its
+    /// predecessor to that same lifetime so the lease loop cannot terminalize
+    /// it while the successor has not yet won the activation CAS.
     #[tokio::test]
-    async fn clustered_replacement_rechecks_deadline_before_predecessor_reap() {
+    async fn clustered_replacement_gate_protects_its_exact_predecessor_route() {
+        use plurx_core::store::SqliteStore;
+
+        let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
+        let work = crate::test_tempdir().expect("work");
+        let mgr = TranscodeManager::new(
+            store,
+            work.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
+        let predecessor = "replacement-activation-predecessor";
+        let guard = mgr
+            .acquire_cluster_replacement_gate(
+                "replacement-activation-player".to_owned(),
+                Some(predecessor),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .expect("replacement owns its gate");
+        assert!(
+            crate::media_sessions::settlement_protected_ids().contains(predecessor),
+            "the predecessor is protected throughout provisional successor creation"
+        );
+
+        drop(guard);
+        assert!(
+            !crate::media_sessions::settlement_protected_ids().contains(predecessor),
+            "a definitive activation or abort releases stale-settlement protection"
+        );
+    }
+
+    #[tokio::test]
+    async fn legacy_supersession_rechecks_deadline_before_predecessor_reap() {
         use plurx_core::store::SqliteStore;
 
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
@@ -20790,34 +33422,5 @@ mod tests {
             Some(720)
         );
         drop(claim);
-    }
-
-    #[tokio::test]
-    async fn producing_requires_a_listed_segment() {
-        let dir = crate::test_tempdir().expect("tempdir");
-        // No playlist yet.
-        assert!(!session_producing(dir.path()).await);
-        // Header only, no segment listed (ffmpeg has started but nothing finished).
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n",
-        )
-        .await
-        .expect("write playlist");
-        assert!(!session_producing(dir.path()).await);
-        // A bare `seg*.ts` FILE existing must NOT count (the old bug) — only a
-        // playlist entry does.
-        tokio::fs::write(dir.path().join("seg00000.ts.tmp"), b"partial")
-            .await
-            .expect("write temp seg");
-        assert!(!session_producing(dir.path()).await);
-        // A finished, listed segment: producing.
-        tokio::fs::write(
-            dir.path().join("index.m3u8"),
-            "#EXTM3U\n#EXT-X-VERSION:3\n#EXTINF:4.000,\nseg00000.ts\n",
-        )
-        .await
-        .expect("write playlist with segment");
-        assert!(session_producing(dir.path()).await);
     }
 }

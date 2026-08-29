@@ -29,19 +29,8 @@ impl Client {
             params,
         };
 
-        match self.execute_req(sql.clone()).await {
-            Ok(res) => Ok(res),
-            Err(err) => {
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    self.execute_req(sql).await
-                } else {
-                    Err(err)
-                }
-            }
-        }
+        self.retry_db_after_leader_change(|| self.execute_req(sql.clone()))
+            .await
     }
 
     #[inline(always)]
@@ -143,19 +132,9 @@ impl Client {
             params,
         };
 
-        let rows = match self.execute_returning_req(sql.clone()).await {
-            Ok(res) => res,
-            Err(err) => {
-                if self
-                    .was_leader_update_error(&err, &self.inner.leader_db, &self.inner.tx_client_db)
-                    .await
-                {
-                    self.execute_returning_req(sql).await?
-                } else {
-                    return Err(err);
-                }
-            }
-        };
+        let rows = self
+            .retry_db_after_leader_change(|| self.execute_returning_req(sql.clone()))
+            .await?;
 
         let mut res: Vec<Result<crate::Row, Error>> = Vec::with_capacity(rows.len());
         for row in rows {

@@ -1763,6 +1763,23 @@ test("VOD readiness waits for the exact file built by an indexing pass", () => {
   }, 42), false);
 });
 
+test("VOD acceptance pauses startup indexing until its fixture scan is complete", () => {
+  const source = fs.readFileSync(LAB, "utf8");
+  const start = source.indexOf("async function startServer");
+  const end = source.indexOf("\nfunction cdpBrowserArgs", start);
+  const server = source.slice(start, end);
+  const pause = server.indexOf("body: { vod_index_mins: 0 }");
+  const library = server.indexOf('const library = await api(baseUrl, "/libraries"');
+  const scan = server.indexOf('"fixture scan"', library);
+  const enable = server.indexOf("vod_presentation: true");
+
+  assert.ok(start >= 0 && end > start, "the server harness remains inspectable");
+  assert.ok(pause >= 0, "the startup indexer is explicitly paused");
+  assert.ok(pause < library, "indexing is paused before the fixture library can scan");
+  assert.ok(library < scan, "the fixture library reaches its explicit scan wait");
+  assert.ok(scan < enable, "indexing is re-enabled only after the scan wait");
+});
+
 test("the manifest keeps the stall-recovery suite reviewable and opt-in", () => {
   const manifest = lab.loadManifest();
   const suite = manifest.suites["stall-recovery"];
@@ -2032,6 +2049,36 @@ test("the raw Chromium driver is safe to launch in an unprivileged runner contai
   assert.ok(args.includes("--user-data-dir=/tmp/playback-lab-chrome-profile"));
   assert.equal(args.at(-1), "http://127.0.0.1:41001");
   assert.equal(lab.CDP_DEVTOOLS_TIMEOUT_MS, 90_000, "cold shared hosts need bounded startup headroom");
+});
+
+test("the raw Chromium driver creates a page when headless shell exposes none", async () => {
+  const calls = [];
+  const page = {
+    type: "page",
+    webSocketDebuggerUrl: "ws://127.0.0.1:41002/devtools/page/created",
+  };
+  const request = async (url, options = {}) => {
+    calls.push({ url, method: options.method || "GET" });
+    if (url.endsWith("/json/list")) {
+      return { json: async () => [{ type: "browser" }] };
+    }
+    return { ok: true, json: async () => page };
+  };
+
+  const target = await lab.findOrCreateCdpPageTarget(
+    "http://127.0.0.1:41002",
+    "http://127.0.0.1:41001/#/player/7",
+    request,
+  );
+
+  assert.deepEqual(target, page);
+  assert.deepEqual(calls, [
+    { url: "http://127.0.0.1:41002/json/list", method: "GET" },
+    {
+      url: "http://127.0.0.1:41002/json/new?http%3A%2F%2F127.0.0.1%3A41001%2F%23%2Fplayer%2F7",
+      method: "PUT",
+    },
+  ]);
 });
 
 runAll().then(() => {

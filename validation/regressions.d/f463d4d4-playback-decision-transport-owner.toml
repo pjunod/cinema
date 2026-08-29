@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f463d4d4"]
+points = ["playback.pipeline", "validation.framework"]
+checks = ["catalog-contract", "rust-gate", "rust-gate-ci"]
+reason = "The control handle deliberately retains the sole strong decision-transport reference while the passive executor holds only Weak. A field-local dead-code allowance documents this production lifetime ownership and preserves fail-closed teardown; tests read the field to prove weak ownership and actor-loss behavior."

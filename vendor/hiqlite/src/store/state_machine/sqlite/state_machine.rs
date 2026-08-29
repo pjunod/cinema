@@ -84,6 +84,11 @@ use uuid::Uuid;
 type Entry = openraft::Entry<TypeConfigSqlite>;
 type SnapshotData = tokio::fs::File;
 
+#[cfg(any(feature = "backup", test))]
+fn committed_backup_owner(log_id: &LogId<NodeId>) -> NodeId {
+    log_id.leader_id.node_id
+}
+
 // TODO uses a `Mutex<_>` inside. We could make this pool a lot
 //  faster by building our own lock-free one.
 pub type SqlitePool = deadpool::unmanaged::Pool<rusqlite::Connection>;
@@ -986,6 +991,8 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
         let mut replies = Vec::with_capacity(entries_len);
 
         for entry in entries {
+            #[cfg(feature = "backup")]
+            let backup_owner = committed_backup_owner(&entry.log_id);
             let last_applied_log_id = Some(entry.log_id);
 
             // TODO if we always collect 1 in-flight req in a temp var to always have 1 req prepared
@@ -1067,10 +1074,10 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 }
 
                 #[cfg(feature = "backup")]
-                EntryPayload::Normal(QueryWrite::Backup((node_id, ts))) => {
+                EntryPayload::Normal(QueryWrite::Backup((_requested_node_id, ts))) => {
                     let (ack, rx) = oneshot::channel();
                     let req = WriterRequest::Backup(writer::BackupRequest {
-                        node_id,
+                        node_id: backup_owner,
                         target_folder: self.path_backups.clone(),
                         ts,
                         #[cfg(feature = "s3")]
@@ -1371,6 +1378,21 @@ impl RaftStateMachine<TypeConfigSqlite> for StateMachineSqlite {
                 }))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod backup_owner_contracts {
+    use super::committed_backup_owner;
+    use openraft::{CommittedLeaderId, LogId};
+
+    #[test]
+    fn backup_owner_follows_the_accepting_leader_after_a_client_handoff() {
+        let stale_client_sample = 1;
+        let accepted = LogId::new(CommittedLeaderId::new(7, 2), 41);
+
+        assert_eq!(committed_backup_owner(&accepted), 2);
+        assert_ne!(committed_backup_owner(&accepted), stale_client_sample);
     }
 }
 

@@ -1,0 +1,195 @@
+name: effort ci
+
+on:
+  pull_request:
+    branches:
+      - "effort/**"
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Every new task revision supersedes the previous compile-only verdict. The
+# full qualification workflow is separate and never uses this concurrency key.
+concurrency:
+  group: effort-ci-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  scope:
+    name: effort validation scope
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 2
+    outputs:
+      rust: ${{ steps.scope.outputs.rust }}
+      apple: ${{ steps.scope.outputs.apple }}
+      android_jvm: ${{ steps.scope.outputs.android_jvm }}
+      web_layout: ${{ steps.scope.outputs.web_layout }}
+      docs_only: ${{ steps.scope.outputs.docs_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Select affected compile surfaces
+        id: scope
+        env:
+          VALIDATION_BASE: ${{ github.event.pull_request.base.sha }}
+        run: >-
+          python3 -m validation.ci_scope
+          --event pull_request --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+      - name: Validate the configured runner mode
+        env:
+          CI_RUNNER_MODE: ${{ vars.CI_RUNNER_MODE || 'self-hosted' }}
+        run: |
+          case "$CI_RUNNER_MODE" in
+            self-hosted|github) ;;
+            *) echo "::error::CI_RUNNER_MODE must be self-hosted or github"; exit 1 ;;
+          esac
+
+  preflight:
+    name: effort policy and contract preflight
+    needs: scope
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Audit corrective-history evidence
+        run: make history-check
+      - name: Check validation catalog and contract unit tests
+        run: |
+          make validation-lint
+          python3 -m unittest discover -s tests/validation -p 'test_*.py'
+      - name: Check CI, deploy, and shipping contracts
+        run: make operations-check
+      - name: Record the documentation-only lane
+        if: needs.scope.outputs.docs_only == 'true'
+        run: echo "Documentation-only effort diff; compile surfaces are skipped."
+
+  rust_compile:
+    name: effort Rust compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.rust == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: effort-rust
+      - name: Compile every Rust target without executing tests
+        run: make effort-rust-check
+
+  web_static:
+    name: effort web static contracts
+    needs: [scope, preflight]
+    if: needs.scope.outputs.web_layout == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: Check embedded JavaScript and theme contracts
+        run: make web-check
+
+  apple_compile:
+    name: effort Apple compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.apple == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["macos-26"]' || '["self-hosted","macOS","ARM64","lab","apple","xcode-26"]') }}
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: ${{ vars.CI_RUNNER_MODE == 'github' && '/Applications/Xcode_26.6.app/Contents/Developer' || '/Applications/Xcode.app/Contents/Developer' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen on the disposable GitHub runner
+        if: vars.CI_RUNNER_MODE == 'github'
+        run: HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_CLEANUP=1 brew install xcodegen
+      - name: Verify the pinned Apple toolchain
+        run: |
+          xcode_version="$(xcodebuild -version)"
+          grep -Fxq "Xcode 26.6" <<< "$xcode_version"
+          grep -Fxq "Build version 17F113" <<< "$xcode_version"
+          test "$(xcodegen --version)" = "Version: 2.46.0"
+      - name: Cache DerivedData
+        uses: actions/cache@v4
+        with:
+          path: clients/apple/build/DerivedData
+          key: effort-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-${{ hashFiles('clients/apple/Sources/**', 'clients/apple/Tests/**') }}
+          restore-keys: |
+            effort-apple-dd-${{ hashFiles('clients/apple/project.yml') }}-
+            apple-dd-
+      - name: Compile iOS and tvOS without running simulator tests
+        run: make apple-build
+
+  android_compile:
+    name: effort Android compile
+    needs: [scope, preflight]
+    if: needs.scope.outputs.android_jvm == 'true'
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","android-kvm"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reuse the pinned Android toolchain image from GHCR
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="ghcr.io/${GITHUB_REPOSITORY,,}/android-build:$(sha256sum clients/android/Dockerfile | cut -c1-16)"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin || true
+          if docker pull "$tag"; then
+            docker tag "$tag" plurx-android-build
+          else
+            make android-image \
+              && docker tag plurx-android-build "$tag" \
+              && docker push "$tag" || true
+          fi
+          echo "PLURX_ANDROID_IMAGE_READY=1" >> "$GITHUB_ENV"
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            clients/android/.gradle-docker/caches
+            clients/android/.gradle-docker/wrapper
+          key: effort-gradle-${{ hashFiles('clients/android/build.gradle.kts', 'clients/android/settings.gradle.kts', 'clients/android/app/build.gradle.kts', 'clients/android/gradle/libs.versions.toml', 'clients/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: effort-gradle-
+      - name: Compile the Android debug application without running tests
+        run: make android
+
+  effort_gate:
+    name: Effort development gate
+    if: always()
+    needs:
+      - scope
+      - preflight
+      - rust_compile
+      - web_static
+      - apple_compile
+      - android_compile
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
+    timeout-minutes: 2
+    steps:
+      - name: Require policy and every affected compile surface
+        env:
+          SCOPE_RESULT: ${{ needs.scope.result }}
+          PREFLIGHT_RESULT: ${{ needs.preflight.result }}
+          RUST_RESULT: ${{ needs.rust_compile.result }}
+          WEB_RESULT: ${{ needs.web_static.result }}
+          APPLE_RESULT: ${{ needs.apple_compile.result }}
+          ANDROID_RESULT: ${{ needs.android_compile.result }}
+        run: |
+          for result in \
+            "$SCOPE_RESULT" "$PREFLIGHT_RESULT" "$RUST_RESULT" \
+            "$WEB_RESULT" "$APPLE_RESULT" "$ANDROID_RESULT"; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "An effort validation job ended with: $result"; exit 1 ;;
+            esac
+          done

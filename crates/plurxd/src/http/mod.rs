@@ -5,9 +5,11 @@
 //! Plex-compat façade (a separate crate) and playback routes mount alongside
 //! in later slices.
 
+mod analysis;
 mod auth;
 mod browse;
 mod cluster;
+pub(crate) mod cluster_operations;
 pub mod comingsoon;
 pub use comingsoon::ComingSoonCache;
 mod dto;
@@ -66,6 +68,7 @@ use axum::Router;
 
 use crate::state::AppState;
 use plurx_core::cluster::membership::LocalServingRole;
+use serde::{Deserialize, Serialize};
 
 pub fn router(state: AppState) -> Router {
     let api = Router::new()
@@ -109,10 +112,24 @@ pub fn router(state: AppState) -> Router {
             post(cluster::issue_learner_join_token),
         )
         .route("/cluster/nodes", get(cluster::nodes))
+        .route("/cluster/status", get(cluster_operations::aggregate))
+        .route(
+            "/cluster/support-bundle",
+            get(cluster_operations::support_bundle),
+        )
+        .route(
+            "/cluster/nodes/{node_id}/restart-preparation",
+            post(cluster_operations::prepare_restart).delete(cluster_operations::cancel_restart),
+        )
         .route(
             "/cluster/nodes/{node_id}/promote",
             post(cluster::promote_node),
         )
+        .route(
+            "/cluster/nodes/{node_id}/maintenance",
+            post(cluster::enter_maintenance).delete(cluster::exit_maintenance),
+        )
+        .route("/cluster/election", post(cluster::force_election))
         .route("/cluster/ingress", get(cluster::ingress))
         .route("/cluster/media", get(internal_media::directory))
         .route(
@@ -194,6 +211,9 @@ pub fn router(state: AppState) -> Router {
         .route("/items/{id}", get(browse::item_detail).patch(items::edit))
         .route("/items/{id}/reanalyze", post(items::reanalyze))
         .route("/items/{id}/refresh-artwork", post(items::refresh_artwork))
+        .route("/files/{id}/analysis", post(analysis::request))
+        .route("/analysis/summary", get(analysis::summary))
+        .route("/analysis/jobs", get(analysis::jobs))
         .route("/hubs", get(browse::hubs))
         .route("/home/previews", get(browse::home_previews))
         .route("/search", get(browse::search))
@@ -277,6 +297,12 @@ pub fn router(state: AppState) -> Router {
         // Before the `{segment}` catch-all in intent, though the router
         // prefers the static segment regardless of registration order.
         .route("/hls/{session}/status", get(hls::status))
+        .route(
+            "/hls/{session}/control",
+            post(hls::control).layer(DefaultBodyLimit::max(
+                crate::playback_control::MAX_REQUEST_BYTES,
+            )),
+        )
         // Capability auth (the session id is the credential) so a closing tab
         // can send this with `keepalive`, which cannot set headers.
         .route("/hls/{session}", delete(hls::delete))
@@ -320,6 +346,7 @@ pub fn router(state: AppState) -> Router {
         .route("/", get(root_dispatch))
         .route("/assets/hls.min.js", get(web::hls_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
+        .route("/assets/playback-control.js", get(web::playback_control_js))
         .route("/assets/reader.js", get(web::reader_js))
         .route("/assets/reader.css", get(web::reader_css))
         .route("/connect.svg", get(web::connect_qr))
@@ -331,6 +358,10 @@ pub fn router(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(system::metrics))
         .route(internal_activity::PATH, get(internal_activity::snapshot))
+        .route(
+            cluster_operations::INTERNAL_PATH,
+            get(cluster_operations::local),
+        )
         .route(
             crate::media_pool::SNAPSHOT_PATH,
             get(internal_media::snapshot),
@@ -347,9 +378,19 @@ pub fn router(state: AppState) -> Router {
             )),
         )
         .route(
+            "/internal/media/fragment-index/{cache_key}",
+            get(internal_media::fragment_index),
+        )
+        .route(
             crate::media_sessions::START_PATH,
             post(internal_media_sessions::start).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::ACTIVATE_PATH,
+            post(internal_media_sessions::activate).layer(DefaultBodyLimit::max(
+                crate::media_sessions::MAX_ACTIVATION_REQUEST_BYTES,
             )),
         )
         .route(
@@ -362,6 +403,12 @@ pub fn router(state: AppState) -> Router {
             crate::media_sessions::RELAY_PATH,
             post(internal_media_sessions::relay).layer(DefaultBodyLimit::max(
                 crate::media_sessions::MAX_CONTROL_REQUEST_BYTES,
+            )),
+        )
+        .route(
+            crate::media_sessions::CONTROL_PATH,
+            post(internal_media_sessions::control).layer(DefaultBodyLimit::max(
+                crate::playback_control::MAX_RELAY_BYTES,
             )),
         )
         .nest("/api/v1", api)
@@ -390,6 +437,93 @@ pub fn router(state: AppState) -> Router {
 
 const LEARNER_ROUTE_INELIGIBLE_JSON: &str = r#"{"code":"learner_route_ineligible","message":"this non-voting learner serves only bounded catalogue reads and declared node-local media routes"}"#;
 const NODE_REMOVAL_FENCED_JSON: &str = r#"{"code":"node_removal_fenced","message":"this cluster node is draining or has been removed"}"#;
+const NODE_MAINTENANCE_JSON: &str = r#"{"code":"node_maintenance","message":"this cluster node is in maintenance mode and is not accepting new work"}"#;
+
+/// Maintenance keeps enough surface alive to administer the node and drain
+/// already-issued media capabilities. Everything that can begin fresh work is
+/// refused, including catalogue browsing that may lead a client to select this
+/// ingress for a new stream.
+fn maintenance_route_eligible(method: &Method, path: &str) -> bool {
+    if method == Method::GET
+        && (matches!(path, "/" | "/healthz" | "/readyz" | "/metrics")
+            || path.starts_with("/assets/")
+            || path.starts_with("/icons/")
+            || matches!(path, "/manifest.webmanifest" | "/connect.svg")
+            || matches!(
+                path,
+                "/api/v1/me"
+                    | "/api/v1/auth/login"
+                    | "/api/v1/auth/logout"
+                    | "/api/v1/activity"
+                    | "/api/v1/activity/detail"
+                    | "/api/v1/system/logs"
+            ))
+    {
+        return true;
+    }
+    if method == Method::GET
+        && matches!(
+            path,
+            "/api/v1/cluster/nodes"
+                | "/api/v1/cluster/status"
+                | "/api/v1/cluster/support-bundle"
+                | "/api/v1/cluster/media"
+                | "/api/v1/cluster/ingress"
+                | cluster_operations::INTERNAL_PATH
+        )
+    {
+        return true;
+    }
+    if method == Method::POST && matches!(path, "/api/v1/auth/login" | "/api/v1/auth/logout") {
+        return true;
+    }
+    if method == Method::POST && path == "/api/v1/cluster/election" {
+        return true;
+    }
+    if matches!(method, &Method::POST | &Method::DELETE)
+        && path.starts_with("/api/v1/cluster/nodes/")
+        && path.ends_with("/maintenance")
+    {
+        return true;
+    }
+    if method == Method::DELETE
+        && path.starts_with("/api/v1/cluster/nodes/")
+        && path.ends_with("/restart-preparation")
+    {
+        return true;
+    }
+    if method == Method::POST
+        && matches!(
+            path,
+            crate::media_sessions::ABORT_PATH
+                | crate::media_sessions::RELAY_PATH
+                | crate::media_sessions::CONTROL_PATH
+        )
+    {
+        return true;
+    }
+    let segments = path.trim_matches('/').split('/').collect::<Vec<_>>();
+    let existing_media_read = method == Method::GET
+        && (matches!(
+            segments.as_slice(),
+            ["api", "v1", "hls", _, _]
+                | ["api", "v1", "hls", _, "subs", _, _]
+                | ["api", "v1", "publication", _, _]
+                | ["api", "v1", "stream", _, "status"]
+                | ["api", "v1", "offline", "packages", _]
+                | ["api", "v1", "offline", "media", _, _]
+                | ["api", "v1", "offline", "media", _, _, _]
+                | ["api", "v1", "offline", "media", _, "subs", _, _]
+        ) || (segments.len() >= 6 && segments[0..3] == ["api", "v1", "publication"]));
+    let existing_media_control = (method == Method::POST
+        && matches!(segments.as_slice(), ["api", "v1", "hls", _, "control"]))
+        || (method == Method::DELETE
+            && matches!(
+                segments.as_slice(),
+                ["api", "v1", "hls", _] | ["api", "v1", "publication", _]
+            ));
+    existing_media_read || existing_media_control
+}
 
 /// One published route matrix for the non-voting capacity role.
 ///
@@ -410,7 +544,15 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     {
         return true;
     }
-    if method == Method::GET && path == "/api/v1/cluster/nodes" {
+    if method == Method::GET
+        && matches!(
+            path,
+            "/api/v1/cluster/nodes"
+                | "/api/v1/cluster/status"
+                | "/api/v1/cluster/support-bundle"
+                | cluster_operations::INTERNAL_PATH
+        )
+    {
         return true;
     }
     if method == Method::POST && path == "/api/v1/cluster/leave" {
@@ -425,8 +567,10 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
                 crate::media_pool::OFFERS_PATH
                     | crate::shared_cache::CANARY_PATH
                     | crate::media_sessions::START_PATH
+                    | crate::media_sessions::ACTIVATE_PATH
                     | crate::media_sessions::ABORT_PATH
                     | crate::media_sessions::RELAY_PATH
+                    | crate::media_sessions::CONTROL_PATH
             ))
     {
         return true;
@@ -494,7 +638,9 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
     let node_local_create = method == Method::POST
         && matches!(
             segments.as_slice(),
-            ["api", "v1", "files", _, "hls", "sessions"] | ["api", "v1", "files", _, "publication"]
+            ["api", "v1", "files", _, "hls", "sessions"]
+                | ["api", "v1", "files", _, "publication"]
+                | ["api", "v1", "hls", _, "control"]
         );
     let node_local_close = method == Method::DELETE
         && matches!(
@@ -511,6 +657,17 @@ async fn cluster_capacity_gate(
 ) -> Response {
     let path = request.uri().path();
     let method = request.method();
+    if state.membership.local_maintenance_active() && !maintenance_route_eligible(method, path) {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [
+                (header::CONTENT_TYPE, "application/json"),
+                (header::RETRY_AFTER, "1"),
+            ],
+            NODE_MAINTENANCE_JSON,
+        )
+            .into_response();
+    }
     match state.membership.local_serving_role().await {
         Ok(LocalServingRole::Unclustered | LocalServingRole::Voter) => next.run(request).await,
         Ok(LocalServingRole::Learner) if learner_route_eligible(method, path) => {
@@ -578,28 +735,83 @@ async fn healthz() -> &'static str {
     "ok\n"
 }
 
-/// Readiness: this node can do work (storage answers).
-async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
-    if let Some(policy) = state.serving.http_policy("/readyz") {
-        if policy.status != 200 {
-            return (
-                StatusCode::from_u16(policy.status).expect("serving policy status"),
-                policy.body,
-            );
-        }
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ReadinessFailure {
+    Maintenance,
+    QuorumUnavailable,
+    StoreUnavailable,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct ReadinessEvaluation {
+    pub(crate) ready: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) reason: Option<ReadinessFailure>,
+}
+
+/// One typed readiness decision shared by `/readyz` and cluster status.
+///
+/// Replicated nodes use only the passive serving fence. A local SQLite node
+/// retains its existing bounded Store ping because it has no quorum proof.
+pub(crate) async fn evaluate_readiness(state: &AppState) -> ReadinessEvaluation {
+    if state.membership.local_maintenance_active() {
+        return ReadinessEvaluation {
+            ready: false,
+            reason: Some(ReadinessFailure::Maintenance),
+        };
     }
     // A fresh quorum watermark is already a recent replicated-store proof.
     // Do not turn readiness into another multi-second Store request exactly
     // when an isolated node needs to self-fence promptly.
     if state.serving.is_quorum_managed() {
-        return (StatusCode::OK, "ready\n");
+        return if state.serving.is_ready() {
+            ReadinessEvaluation {
+                ready: true,
+                reason: None,
+            }
+        } else {
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::QuorumUnavailable),
+            }
+        };
     }
     match state.store.ping().await {
-        Ok(()) => (StatusCode::OK, "ready\n"),
+        Ok(()) => ReadinessEvaluation {
+            ready: true,
+            reason: None,
+        },
         Err(error) => {
             tracing::warn!(%error, "readiness probe failed");
-            (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n")
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::StoreUnavailable),
+            }
         }
+    }
+}
+
+/// Readiness: this node can do work (storage answers).
+async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    match evaluate_readiness(&state).await {
+        ReadinessEvaluation { ready: true, .. } => (StatusCode::OK, "ready\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::Maintenance),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "maintenance\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::QuorumUnavailable),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "quorum unavailable\n"),
+        ReadinessEvaluation {
+            reason: Some(ReadinessFailure::StoreUnavailable),
+            ..
+        } => (StatusCode::SERVICE_UNAVAILABLE, "store unavailable\n"),
+        ReadinessEvaluation {
+            ready: false,
+            reason: None,
+        } => (StatusCode::SERVICE_UNAVAILABLE, "readiness unknown\n"),
     }
 }
 
@@ -608,6 +820,29 @@ async fn mutable_media_serving_gate(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    let starts_media = crate::serving_fence::ServingFence::starts_mutable_media(
+        request.method().as_str(),
+        request.uri().path(),
+    );
+    let _restart_admission = if starts_media {
+        match state.serving.try_restart_admission().await {
+            Some(admission) => Some(admission),
+            None => {
+                let mut response = (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    [(header::CONTENT_TYPE, "application/json")],
+                    crate::serving_fence::RESTART_DRAIN_JSON,
+                )
+                    .into_response();
+                response
+                    .headers_mut()
+                    .insert(header::RETRY_AFTER, HeaderValue::from_static("5"));
+                return response;
+            }
+        }
+    } else {
+        None
+    };
     let Some(policy) = state.serving.http_policy(request.uri().path()) else {
         return next.run(request).await;
     };
@@ -682,12 +917,96 @@ mod tests {
         }
         for (method, path) in [
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ACTIVATE_PATH),
             (Method::POST, crate::media_sessions::ABORT_PATH),
+            (Method::POST, crate::media_sessions::CONTROL_PATH),
         ] {
             assert!(learner_route_eligible(&method, path), "{method} {path}");
         }
+    }
+
+    #[test]
+    fn maintenance_route_matrix_keeps_admin_and_existing_sessions_but_blocks_new_work() {
+        for (method, path) in [
+            (Method::GET, "/healthz"),
+            (Method::GET, "/readyz"),
+            (Method::GET, "/api/v1/cluster/nodes"),
+            (Method::GET, "/api/v1/cluster/status"),
+            (Method::GET, "/api/v1/cluster/support-bundle"),
+            (Method::GET, cluster_operations::INTERNAL_PATH),
+            (Method::POST, "/api/v1/auth/login"),
+            (Method::POST, "/api/v1/auth/logout"),
+            (Method::POST, "/api/v1/cluster/election"),
+            (Method::DELETE, "/api/v1/cluster/nodes/node-b/maintenance"),
+            (
+                Method::DELETE,
+                "/api/v1/cluster/nodes/node-b/restart-preparation",
+            ),
+            (Method::GET, "/api/v1/hls/session/index.m3u8"),
+            (Method::GET, "/api/v1/publication/session/chapter.xhtml"),
+            (Method::DELETE, "/api/v1/hls/session"),
+            (Method::POST, crate::media_sessions::ABORT_PATH),
+            (Method::POST, crate::media_sessions::CONTROL_PATH),
+        ] {
+            assert!(maintenance_route_eligible(&method, path), "{method} {path}");
+        }
+        for (method, path) in [
+            (Method::GET, "/api/v1/libraries"),
+            (Method::GET, "/api/v1/files/8/decision"),
+            (Method::GET, "/api/v1/files/8/direct"),
+            (Method::POST, "/api/v1/files/8/hls/sessions"),
+            (Method::POST, crate::media_sessions::START_PATH),
+            (Method::POST, crate::media_sessions::ACTIVATE_PATH),
+            (Method::POST, "/api/v1/cluster/join-tokens"),
+            (Method::DELETE, "/api/v1/cluster/nodes/node-b"),
+            (Method::POST, "/api/v1/libraries"),
+        ] {
+            assert!(
+                !maintenance_route_eligible(&method, path),
+                "{method} {path}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn playback_control_routes_reject_oversized_bodies_before_handler_work() {
+        let app = test_app();
+        let session = uuid::Uuid::new_v4();
+        let public = Request::builder()
+            .method("POST")
+            .uri(format!("/api/v1/hls/{session}/control"))
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_REQUEST_BYTES
+                    + 1
+            ]))
+            .expect("public control request");
+        assert_eq!(
+            app.clone()
+                .oneshot(public)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let internal = Request::builder()
+            .method("POST")
+            .uri(crate::media_sessions::CONTROL_PATH)
+            .header("content-type", "application/json")
+            .body(Body::from(vec![
+                b'x';
+                crate::playback_control::MAX_RELAY_BYTES + 1
+            ]))
+            .expect("internal control request");
+        assert_eq!(
+            app.oneshot(internal).await.expect("response").status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
     }
 
     #[test]
@@ -967,7 +1286,15 @@ mod tests {
     #[tokio::test]
     async fn quorum_loss_keeps_liveness_but_fences_readiness_and_mutable_media() {
         let (app, state) = test_app_with_state();
-        state.serving.validation_set_ready(false);
+        state.serving.validation_set_ready(false).await;
+
+        assert_eq!(
+            evaluate_readiness(&state).await,
+            ReadinessEvaluation {
+                ready: false,
+                reason: Some(ReadinessFailure::QuorumUnavailable),
+            }
+        );
 
         let (status, body) = call_text(&app, get("/healthz", None)).await;
         assert_eq!(status, StatusCode::OK);
@@ -2738,6 +3065,49 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn playback_control_preview_is_default_off_and_persists_explicit_changes() {
+        use plurx_core::store::keys;
+
+        let (app, state) = test_app_with_state();
+        let admin = setup_admin(&app).await;
+        let (status, initial) = call(&app, get("/api/v1/settings", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{initial}");
+        assert_eq!(initial["playback_control_protocol_v1"], json!(false));
+        assert_eq!(
+            state
+                .store
+                .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                .await
+                .expect("setting"),
+            None,
+            "an upgrade must not advertise a new client contract implicitly"
+        );
+
+        for enabled in [true, false] {
+            let (status, body) = call(
+                &app,
+                put(
+                    "/api/v1/settings",
+                    Some(&admin),
+                    json!({ "playback_control_protocol_v1": enabled }),
+                ),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(body["playback_control_protocol_v1"], json!(enabled));
+            assert_eq!(
+                state
+                    .store
+                    .get_setting(keys::PLAYBACK_CONTROL_PROTOCOL_V1)
+                    .await
+                    .expect("setting")
+                    .as_deref(),
+                Some(if enabled { "1" } else { "0" })
+            );
+        }
+    }
+
     /// N1's two settings move as one complete replicated pair. JSON null
     /// clears the optional quality override. The response shows the requested
     /// values; the manager carries the separately validated effective answer
@@ -3259,6 +3629,23 @@ mod tests {
             assert_eq!(body["code"], "membership_unavailable", "{route}");
         }
 
+        for route in [
+            "/api/v1/cluster/election",
+            "/api/v1/cluster/nodes/node-b/maintenance",
+        ] {
+            let (status, _) = call(&app, post(route, None, json!({}))).await;
+            assert_eq!(status, StatusCode::UNAUTHORIZED, "{route}");
+            let (status, body) = call(&app, post(route, Some(&admin), json!({}))).await;
+            assert_eq!(status, StatusCode::CONFLICT, "{route}: {body}");
+            assert_eq!(body["code"], "membership_unavailable", "{route}");
+        }
+        let maintenance = "/api/v1/cluster/nodes/node-b/maintenance";
+        let (status, _) = call(&app, delete(maintenance, None)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let (status, body) = call(&app, delete(maintenance, Some(&admin))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["code"], "membership_unavailable");
+
         let (status, _) = call(
             &app,
             put(
@@ -3548,6 +3935,7 @@ mod tests {
                 .cloned()
                 .collect::<std::collections::BTreeSet<_>>(),
             [
+                "analysis",
                 "deliveries",
                 "offline",
                 "producing",
@@ -3558,11 +3946,38 @@ mod tests {
             .into_iter()
             .map(str::to_owned)
             .collect(),
-            "SQLite gains no clustered-only field"
+            "SQLite gains analysis health but no clustered-only field"
         );
+        assert_eq!(detail["analysis"]["enabled"], false);
+        assert_eq!(detail["analysis"]["total"], 0);
         assert!(
             detail["sessions"].as_array().is_some_and(Vec::is_empty),
             "native sessions retains its existing array shape"
+        );
+
+        call(
+            &app,
+            post(
+                "/api/v1/users",
+                Some(&admin),
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let (_, login) = call(
+            &app,
+            post(
+                "/api/v1/auth/login",
+                None,
+                json!({ "username": "viewer", "password": "longenough" }),
+            ),
+        )
+        .await;
+        let viewer = login["token"].as_str().expect("viewer token");
+        let (_, viewer_detail) = call(&app, get("/api/v1/activity/detail", Some(viewer))).await;
+        assert!(
+            viewer_detail.get("analysis").is_none(),
+            "operator queue health stays out of ordinary household responses"
         );
     }
 
@@ -6980,6 +7395,7 @@ mod tests {
             "/icons/apple-touch-icon.png",
             "/assets/hls.min.js",
             "/assets/playback-policy.js",
+            "/assets/playback-control.js",
             "/assets/reader.js",
             "/assets/reader.css",
             "/healthz",
@@ -7792,6 +8208,85 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(decision["audio_offset_ms"], 0);
+
+        // Analysis control is a separate durable queue, not an alias for the
+        // synchronous ffprobe repair endpoint below. Keep the media worker
+        // preempted so this request remains visibly queued for the status API.
+        let _waiting_viewer = state.transcode.test_mark_live_waiting();
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_INDEX_CLUSTER_CACHE, "1")
+            .await
+            .expect("enable analysis queue");
+        assert_eq!(
+            call(
+                &app,
+                post(
+                    &format!("/api/v1/files/{}/analysis", s.file),
+                    None,
+                    json!({ "force": false, "components": ["fragment_index"] }),
+                ),
+            )
+            .await
+            .0,
+            StatusCode::UNAUTHORIZED
+        );
+        let (status, requested) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/analysis", s.file),
+                Some(&admin),
+                json!({ "force": false, "components": ["fragment_index"] }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{requested}");
+        assert_eq!(requested["file_id"], s.file.to_string());
+        assert_eq!(requested["state"], "queued");
+        tokio::task::yield_now().await;
+        let (status, analysis) = call(&app, get("/api/v1/analysis/jobs", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{analysis}");
+        assert_eq!(analysis["rows"][0]["request_id"], requested["request_id"]);
+        assert_eq!(analysis["rows"][0]["item_id"], s.ep.to_string());
+        assert_eq!(analysis["rows"][0]["job_id"], "");
+        assert_eq!(analysis["rows"][0]["disposition"], "working");
+        assert_eq!(analysis["rows"][0]["action"], "none");
+        assert_eq!(analysis["filtered_total"], 1);
+        assert_eq!(analysis["page_size"], 25);
+        assert!(analysis["next_cursor"].is_null());
+        let (status, summary) = call(&app, get("/api/v1/analysis/summary", Some(&admin))).await;
+        assert_eq!(status, StatusCode::OK, "{summary}");
+        assert_eq!(summary["enabled"], true);
+        assert_eq!(summary["queued"], 1);
+        assert_eq!(summary["active"], 1);
+        assert_eq!(summary["total"], 1);
+        assert_eq!(summary["scope"], "active_and_recent_terminal");
+        assert_eq!(summary["terminal_window"], 8192);
+        assert_eq!(
+            call(
+                &app,
+                get("/api/v1/analysis/jobs?filter=unknown", Some(&admin))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            call(
+                &app,
+                get("/api/v1/analysis/jobs?cursor=not-a-cursor", Some(&admin))
+            )
+            .await
+            .0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(activity["analysis"]["enabled"], true);
+        assert_eq!(activity["analysis"]["queued"], 1);
+        assert_eq!(activity["analysis"]["active"], 1);
+        assert_eq!(activity["analysis"]["total"], 1);
+        drop(_waiting_viewer);
+
         // Progress on a missing item → 404.
         assert_eq!(
             call(
@@ -8664,10 +9159,20 @@ mod tests {
             .await
             .expect("file read")
             .expect("file");
-        let outcome = crate::fragindex::build(
+        let probe_json = state
+            .store
+            .get_file_probe_json(file_id)
+            .await
+            .expect("probe read");
+        let video = plurx_core::transcode::CopyVideoOptions::from_probe(
             &file,
+            probe_json.as_deref(),
             state.transcode.dv_strippable(),
             false,
+        );
+        let outcome = crate::fragindex::build(
+            &file,
+            video,
             state.transcode.runtime_cache_dir(),
             std::time::Duration::from_secs(120),
         )
@@ -9061,6 +9566,78 @@ mod tests {
             )
             .await,
             StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn unindexed_copy_uses_live_recovery_when_enabled() {
+        crate::transcode::require_ffmpeg();
+        let (app, state) = test_state();
+        let admin = setup_admin(&app).await;
+        let seeded = seed_content(&state).await;
+        prepare_vod_copy_fixture(&state, seeded.file, 16).await;
+        let source_item = state
+            .store
+            .get_file(seeded.file)
+            .await
+            .expect("read prepared file")
+            .expect("prepared file")
+            .item_id;
+        let (_, indexed_detail) = call(
+            &app,
+            get(&format!("/api/v1/items/{source_item}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(indexed_detail["files"][0]["vod_index_status"], "indexed");
+        assert!(
+            state
+                .store
+                .forget_fragment_index(seeded.file)
+                .await
+                .expect("remove fixture index"),
+            "the setup must leave a real but unindexed source"
+        );
+        let (_, pending_detail) = call(
+            &app,
+            get(&format!("/api/v1/items/{source_item}"), Some(&admin)),
+        )
+        .await;
+        assert_eq!(pending_detail["files"][0]["vod_index_status"], "pending");
+        let (_, decision) = call(
+            &app,
+            get(
+                &format!("/api/v1/files/{}/decision", seeded.file),
+                Some(&admin),
+            ),
+        )
+        .await;
+        assert_eq!(decision["vod_indexed"], false, "{decision}");
+        state
+            .store
+            .put_setting(plurx_core::store::keys::VOD_LIVE_RECOVERY, "1")
+            .await
+            .expect("enable recovery");
+
+        let (status, started) = call(
+            &app,
+            post(
+                &format!("/api/v1/files/{}/hls/sessions", seeded.file),
+                Some(&admin),
+                json!({
+                    "playback_id": "unindexed-live-recovery",
+                    "request_id": "unindexed-live-recovery-attempt",
+                    "copy": true
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{started}");
+        assert_eq!(started["vod"], false, "{started}");
+
+        let (_, activity) = call(&app, get("/api/v1/activity/detail", Some(&admin))).await;
+        assert_eq!(
+            activity["deliveries"][0]["presentation"], "live-recovery",
+            "{activity}"
         );
     }
 

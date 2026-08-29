@@ -8,6 +8,9 @@
 
 use std::time::Duration;
 
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncRead, AsyncReadExt};
+
 use plurx_core::domain::MediaFile;
 use plurx_core::transcode::{
     output_size, EffectiveRateControl, Encoder, OutputGrade, Pacing, Pipeline,
@@ -67,6 +70,333 @@ static DOVI_RESHAPE_HW: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
+    tokio::sync::OnceCell::const_new();
+
+const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+const ENGINE_PROBE_MAX_BYTES: u64 = 1024 * 1024;
+const ENGINE_OBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
+
+#[derive(Clone)]
+struct FragmentIndexEngine {
+    digest: String,
+    objects: Vec<(std::path::PathBuf, String)>,
+    usable: bool,
+}
+
+/// Digest the executable bytes and its complete self/dependency reports once
+/// per daemon. Fragment indexes compare copied sample sizes, so two nominally
+/// equal ffmpeg versions are not interchangeable unless the actual engine is.
+pub async fn fragment_index_engine_digest() -> String {
+    FRAGMENT_INDEX_ENGINE
+        .get_or_init(fragment_index_engine_inner)
+        .await
+        .digest
+        .clone()
+}
+
+/// Fail closed if the configured executable or any loaded dependency has
+/// changed since the daemon established the cache-key digest. Callers check
+/// both before spawning and before publication, so an in-place engine upgrade
+/// cannot emit bytes under the retired identity; restart establishes a new
+/// digest and keyspace.
+pub async fn fragment_index_engine_is_current() -> bool {
+    let engine = FRAGMENT_INDEX_ENGINE
+        .get_or_init(fragment_index_engine_inner)
+        .await;
+    engine.usable && engine_objects_are_current(&engine.objects)
+}
+
+fn engine_objects_are_current(objects: &[(std::path::PathBuf, String)]) -> bool {
+    objects.iter().all(|(path, expected)| {
+        std::fs::metadata(path)
+            .ok()
+            .and_then(|metadata| engine_object_version(&metadata).ok())
+            .is_some_and(|current| &current == expected)
+    })
+}
+
+async fn fragment_index_engine_inner() -> FragmentIndexEngine {
+    let bin = ffmpeg_bin();
+    let resolved = resolve_executable_path(&bin);
+    let mut digest = Sha256::new();
+    digest.update(b"plurx/fragment-index/engine\0");
+    let mut usable = true;
+    let mut objects = Vec::new();
+
+    let version_output = {
+        let mut command = tokio::process::Command::new(&bin);
+        command.arg("-version");
+        bounded_command_output(command).await
+    };
+    match version_output {
+        Ok(output) => {
+            digest.update((output.stdout.len() as u64).to_be_bytes());
+            digest.update(output.stdout);
+            digest.update((output.stderr.len() as u64).to_be_bytes());
+            digest.update(output.stderr);
+        }
+        Err(error) => {
+            usable = false;
+            digest.update(error.as_bytes());
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    let dependency_probe = resolved.as_ref().map(|path| ("ldd", path));
+    #[cfg(target_os = "macos")]
+    let dependency_probe = resolved.as_ref().map(|path| ("otool", path));
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let dependency_probe: Option<(&str, &std::path::PathBuf)> = None;
+    let mut dependency_paths = Vec::new();
+    if let Some((tool, path)) = dependency_probe {
+        let mut command = tokio::process::Command::new(tool);
+        #[cfg(target_os = "macos")]
+        command.arg("-L");
+        command.arg(path);
+        match bounded_command_output(command).await {
+            Ok(output) => {
+                let stdout = normalized_dependency_report(&output.stdout);
+                match dependency_paths_from_report(&stdout) {
+                    Ok(paths) => dependency_paths = paths,
+                    Err(error) => {
+                        usable = false;
+                        digest.update(error.as_bytes());
+                    }
+                }
+            }
+            Err(error) => {
+                usable = false;
+                digest.update(error.as_bytes());
+            }
+        }
+    } else {
+        usable = false;
+    }
+
+    if let Some(path) = resolved {
+        dependency_paths.push(path);
+    } else {
+        usable = false;
+    }
+    dependency_paths.sort();
+    dependency_paths.dedup();
+    let mut object_digests = Vec::new();
+    for path in dependency_paths {
+        match hash_engine_object(&path).await {
+            Ok((object_digest, version)) => {
+                object_digests.push(object_digest);
+                objects.push((path, version));
+            }
+            Err(error) => {
+                usable = false;
+                digest.update(error.as_bytes());
+            }
+        }
+    }
+    object_digests.sort();
+    for object_digest in object_digests {
+        digest.update((object_digest.len() as u64).to_be_bytes());
+        digest.update(object_digest);
+    }
+    FragmentIndexEngine {
+        digest: hex::encode(digest.finalize()),
+        objects,
+        usable,
+    }
+}
+
+struct BoundedOutput {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn bounded_command_output(
+    mut command: tokio::process::Command,
+) -> Result<BoundedOutput, String> {
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "engine probe has no stdout".to_owned())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "engine probe has no stderr".to_owned())?;
+    let collect = async move {
+        let (stdout, stderr, status) =
+            tokio::join!(read_bounded(stdout), read_bounded(stderr), child.wait());
+        let status = status.map_err(|error| error.to_string())?;
+        if !status.success() {
+            return Err(format!("engine probe exited {status}"));
+        }
+        Ok(BoundedOutput {
+            stdout: stdout?,
+            stderr: stderr?,
+        })
+    };
+    tokio::time::timeout(ENGINE_PROBE_TIMEOUT, collect)
+        .await
+        .map_err(|_| "engine probe timed out".to_owned())?
+}
+
+async fn read_bounded(input: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> {
+    let mut bytes = Vec::new();
+    input
+        .take(ENGINE_PROBE_MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > ENGINE_PROBE_MAX_BYTES {
+        return Err("engine probe exceeded its output bound".to_owned());
+    }
+    Ok(bytes)
+}
+
+async fn hash_engine_object(path: &std::path::Path) -> Result<(Vec<u8>, String), String> {
+    let metadata = tokio::fs::metadata(path)
+        .await
+        .map_err(|error| format!("stat {}: {error}", path.display()))?;
+    if metadata.len() > ENGINE_OBJECT_MAX_BYTES {
+        return Err(format!(
+            "engine object {} exceeds size bound",
+            path.display()
+        ));
+    }
+    let version = engine_object_version(&metadata)?;
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .map_err(|error| format!("open {}: {error}", path.display()))?;
+    let mut object = Sha256::new();
+    let mut buffer = vec![0_u8; 256 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .await
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        object.update(&buffer[..read]);
+    }
+    let after = file
+        .metadata()
+        .await
+        .map_err(|error| format!("re-stat {}: {error}", path.display()))?;
+    if engine_object_version(&after)? != version {
+        return Err(format!(
+            "engine object {} changed while hashing",
+            path.display()
+        ));
+    }
+    Ok((object.finalize().to_vec(), version))
+}
+
+#[cfg(unix)]
+fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
+    use std::os::unix::fs::MetadataExt;
+    Ok(format!(
+        "{}:{}:{}:{}:{}:{}:{}",
+        metadata.dev(),
+        metadata.ino(),
+        metadata.size(),
+        metadata.mtime(),
+        metadata.mtime_nsec(),
+        metadata.ctime(),
+        metadata.ctime_nsec()
+    ))
+}
+
+#[cfg(not(unix))]
+fn engine_object_version(metadata: &std::fs::Metadata) -> Result<String, String> {
+    let modified = metadata
+        .modified()
+        .map_err(|error| error.to_string())?
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| error.to_string())?;
+    Ok(format!("{}:{}", metadata.len(), modified.as_nanos()))
+}
+
+#[cfg(target_os = "linux")]
+fn dependency_paths_from_report(report: &[u8]) -> Result<Vec<std::path::PathBuf>, String> {
+    let mut paths = Vec::new();
+    for line in String::from_utf8_lossy(report).lines() {
+        if line.contains("=> not found") {
+            return Err(format!("unresolved ffmpeg dependency: {}", line.trim()));
+        }
+        let trimmed = line.trim();
+        let candidate = trimmed
+            .split_once("=>")
+            .map(|(_, rest)| rest.trim())
+            .unwrap_or(trimmed)
+            .split_whitespace()
+            .next()
+            .unwrap_or_default();
+        if candidate.starts_with('/') {
+            paths.push(
+                std::fs::canonicalize(candidate)
+                    .map_err(|error| format!("resolve dependency {candidate}: {error}"))?,
+            );
+        }
+    }
+    Ok(paths)
+}
+
+#[cfg(target_os = "macos")]
+fn dependency_paths_from_report(report: &[u8]) -> Result<Vec<std::path::PathBuf>, String> {
+    String::from_utf8_lossy(report)
+        .lines()
+        .skip(1)
+        .map(|line| {
+            let candidate = line.split_whitespace().next().unwrap_or_default();
+            if !candidate.starts_with('/') {
+                return Err(format!("unresolved ffmpeg dependency: {candidate}"));
+            }
+            std::fs::canonicalize(candidate)
+                .map_err(|error| format!("resolve dependency {candidate}: {error}"))
+        })
+        .collect()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn dependency_paths_from_report(_report: &[u8]) -> Result<Vec<std::path::PathBuf>, String> {
+    Err("dependency attestation is unavailable on this platform".to_owned())
+}
+
+/// Linux ldd appends ASLR load addresses to otherwise stable dependency
+/// identities. They differ per invocation and would make equal nodes compute
+/// different cache keys, so retain the complete report except those runtime
+/// addresses. macOS otool output passes through unchanged.
+fn normalized_dependency_report(report: &[u8]) -> Vec<u8> {
+    String::from_utf8_lossy(report)
+        .lines()
+        .map(|line| {
+            line.rsplit_once(" (0x")
+                .filter(|(_, suffix)| suffix.ends_with(')'))
+                .map_or(line, |(identity, _)| identity)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .into_bytes()
+}
+
+fn resolve_executable_path(bin: &str) -> Option<std::path::PathBuf> {
+    let path = std::path::Path::new(bin);
+    if path.components().count() > 1 {
+        return std::fs::canonicalize(path).ok();
+    }
+    std::env::var_os("PATH")
+        .into_iter()
+        .flat_map(|value| std::env::split_paths(&value).collect::<Vec<_>>())
+        .map(|directory| directory.join(bin))
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| std::fs::canonicalize(candidate).ok())
+}
 
 /// Does this build carry a given bitstream filter? Matched on a whole line of
 /// `ffmpeg -bsfs`, which lists exactly one filter per line — a substring
@@ -100,13 +430,11 @@ fn merged_output(stdout: &[u8], stderr: &[u8]) -> String {
 /// from the answer is a pure function below, so a missing binary and a build
 /// without a feature are classified by tested code rather than by the spawn.
 async fn probe_ffmpeg(args: &[&str]) -> Result<String, String> {
-    match tokio::process::Command::new(ffmpeg_bin())
-        .args(args)
-        .output()
-        .await
-    {
+    let mut command = tokio::process::Command::new(ffmpeg_bin());
+    command.args(args);
+    match bounded_command_output(command).await {
         Ok(out) => Ok(merged_output(&out.stdout, &out.stderr)),
-        Err(e) => Err(e.to_string()),
+        Err(error) => Err(error),
     }
 }
 
@@ -840,6 +1168,22 @@ mod tests {
         let ancient = PacingCaps::default();
         assert_eq!(ancient.resolve(2.0, 90.0, true).args(), vec!["-re"]);
         assert!(ancient.resolve(2.0, 90.0, false).args().is_empty());
+    }
+
+    #[test]
+    fn replacing_an_attested_engine_object_withdraws_the_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let path = directory.path().join("ffmpeg");
+        let replacement = directory.path().join("replacement");
+        std::fs::write(&path, b"engine-a").expect("write original");
+        std::fs::write(&replacement, b"engine-b").expect("write replacement");
+        let expected = engine_object_version(&std::fs::metadata(&path).expect("metadata"))
+            .expect("object version");
+        let objects = vec![(path.clone(), expected)];
+        assert!(engine_objects_are_current(&objects));
+        std::fs::remove_file(&path).expect("unlink original");
+        std::fs::rename(replacement, &path).expect("install replacement");
+        assert!(!engine_objects_are_current(&objects));
     }
 
     #[tokio::test]

@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["7cc37319"]
+reason = "This commit only adds the classifier assertion cleanup to an existing regressions.d coverage record; it does not change runtime or validation behavior."
+ignore = true

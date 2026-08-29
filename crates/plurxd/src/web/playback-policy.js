@@ -51,6 +51,25 @@
       : "transcode";
   }
 
+  function controlLeasePresentation(mode) {
+    switch (mode) {
+      case "explicit":
+        return Object.freeze({ ownership: "demand-owned", label: "explicit" });
+      case "vod":
+        return Object.freeze({ ownership: "immutable VOD", label: "VOD" });
+      default:
+        return Object.freeze({ ownership: "passive", label: "legacy" });
+    }
+  }
+
+  function controlLeaseMode(reportedMode, vod = false, acceptedSequence = 0) {
+    if (["legacy", "explicit", "vod"].includes(reportedMode)) {
+      return reportedMode;
+    }
+    if (vod) return "vod";
+    return Number(acceptedSequence) > 0 ? "explicit" : "legacy";
+  }
+
   function transcodeHeight(quality) {
     return /^\d+$/.test(String(quality || ""))
       ? Number.parseInt(quality, 10)
@@ -978,6 +997,8 @@
     AUTO_DEFAULTS,
     DECODE_LIMIT_DEFAULTS,
     qualityForce,
+    controlLeaseMode,
+    controlLeasePresentation,
     transcodeHeight,
     normalizedLadder,
     initialAutoRung,

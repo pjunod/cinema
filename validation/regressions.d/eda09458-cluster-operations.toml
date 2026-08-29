@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["eda09458"]
+points = ["cluster.operations"]
+checks = ["rust-gate", "cluster-auth", "security-boundaries", "web-membership", "operations-contract"]
+reason = "The cluster operations fixtures retain conservative all-voter aggregation, identity and freshness refusal, WAL evidence, restart-drain linearization and expiry, create-only bounded support and backup artifacts, and the absence of any recovery apply path; the web and operations contract suites retain the matching admin controls, rollout, and guarded recovery surface."

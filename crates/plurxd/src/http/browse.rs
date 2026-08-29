@@ -349,8 +349,29 @@ pub async fn item_detail(
         let available = tokio::fs::metadata(&path).await.is_ok();
         let raw_probe = state.catalogue.get_file_probe_json(f.id).await?;
         let duration_ms = f.duration_ms.unwrap_or(0).max(0);
+        let vod_index_status = if f.video_codec.is_none() {
+            None
+        } else if !crate::copyseg::supports(f.video_codec.as_deref()) {
+            Some("unsupported")
+        } else {
+            let video = plurx_core::transcode::CopyVideoOptions::from_probe(
+                &f,
+                raw_probe.as_deref(),
+                crate::ffmpeg::has_dovi_rpu().await,
+                false,
+            );
+            let identity = crate::fragindex::identity_for(&f, video);
+            Some(
+                if state.store.fragment_index(f.id, &identity).await?.is_some() {
+                    "indexed"
+                } else {
+                    "pending"
+                },
+            )
+        };
         let mut dto = FileDto::from_media_file(f, &playback_prefs);
         dto.available = available;
+        dto.vod_index_status = vod_index_status;
         dto.part_offset_ms = part_offset_ms;
         dto.chapters = chapters_from_probe_json(raw_probe.as_deref());
         if item.kind == ItemKind::Audiobook {

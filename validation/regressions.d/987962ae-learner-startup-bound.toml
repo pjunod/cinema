@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["987962ae"]
+points = ["cluster.auth", "cluster.membership"]
+checks = ["rust-gate", "cluster-auth"]
+reason = "The separate-process learner lifecycle compacts roughly 10,000 entries, removes its first learner, then admits a sparse replacement that must install the compacted state before promotion and restart. The cluster-auth gate now gives that learner the same bounded 120-second snapshot-start allowance as the existing catch-up proof, while initial and promoted-voter starts retain the 45-second bound; the child owns the complete pre-ready deadline and must return a typed timeout before the parent grace expires."

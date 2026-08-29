@@ -3,7 +3,7 @@ use crate::{Error, NodeId};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU32, AtomicUsize};
-use stream::ClientStreamReq;
+use stream::{ClientLeaderChange, ClientStreamReq};
 use tokio::sync::{RwLock, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -57,8 +57,12 @@ pub(crate) struct DbClient {
     pub(crate) state: Option<Arc<AppState>>,
     #[cfg(feature = "cache")]
     pub(crate) leader_cache: Arc<RwLock<(NodeId, String)>>,
+    #[cfg(feature = "cache")]
+    pub(crate) leader_recovery_cache: Arc<LeaderRecovery>,
     #[cfg(feature = "sqlite")]
     pub(crate) leader_db: Arc<RwLock<(NodeId, String)>>,
+    #[cfg(feature = "sqlite")]
+    pub(crate) leader_recovery_db: Arc<LeaderRecovery>,
     pub(crate) nodes: Vec<String>,
     /// Keep remote proxy endpoints authoritative across reconnects. Without
     /// this, discovery and ForwardToLeader handling replace them with the
@@ -67,8 +71,12 @@ pub(crate) struct DbClient {
     pub(crate) client: Option<reqwest::Client>,
     #[cfg(feature = "cache")]
     pub(crate) tx_client_cache: flume::Sender<ClientStreamReq>,
+    #[cfg(feature = "cache")]
+    pub(crate) tx_leader_cache: flume::Sender<ClientLeaderChange>,
     #[cfg(feature = "sqlite")]
     pub(crate) tx_client_db: flume::Sender<ClientStreamReq>,
+    #[cfg(feature = "sqlite")]
+    pub(crate) tx_leader_db: flume::Sender<ClientLeaderChange>,
     pub(crate) tls_config: Option<Arc<rustls::ClientConfig>>,
     #[cfg(feature = "cache")]
     pub(crate) tls_no_verify: bool,
@@ -90,4 +98,64 @@ pub(crate) struct DbClient {
     pub(crate) rate_limit_db: Option<AtomicU32>,
     #[cfg(feature = "sqlite")]
     pub(crate) rate_limit_db_await: crossbeam::channel::Sender<oneshot::Sender<Result<(), Error>>>,
+}
+
+#[derive(Default)]
+pub(crate) struct LeaderRecovery {
+    state: tokio::sync::Mutex<LeaderRecoveryState>,
+}
+
+#[derive(Default)]
+struct LeaderRecoveryState {
+    generation: u64,
+    in_flight: Option<(u64, watch::Receiver<Option<bool>>)>,
+}
+
+impl LeaderRecovery {
+    pub(crate) async fn join_or_begin(
+        &self,
+    ) -> (
+        u64,
+        watch::Receiver<Option<bool>>,
+        Option<watch::Sender<Option<bool>>>,
+    ) {
+        let mut state = self.state.lock().await;
+        if let Some((generation, receiver)) = state.in_flight.as_ref() {
+            (*generation, receiver.clone(), None)
+        } else {
+            state.generation = state.generation.saturating_add(1);
+            let generation = state.generation;
+            let (sender, receiver) = watch::channel(None);
+            state.in_flight = Some((generation, receiver.clone()));
+            (generation, receiver, Some(sender))
+        }
+    }
+
+    pub(crate) async fn complete(
+        &self,
+        generation: u64,
+        sender: watch::Sender<Option<bool>>,
+        succeeded: bool,
+    ) {
+        sender.send_replace(Some(succeeded));
+        let mut state = self.state.lock().await;
+        if state
+            .in_flight
+            .as_ref()
+            .is_some_and(|(active, _)| *active == generation)
+        {
+            state.in_flight = None;
+        }
+    }
+
+    pub(crate) async fn wait(mut receiver: watch::Receiver<Option<bool>>) -> bool {
+        loop {
+            if let Some(succeeded) = *receiver.borrow() {
+                return succeeded;
+            }
+            if receiver.changed().await.is_err() {
+                return false;
+            }
+        }
+    }
 }

@@ -37,12 +37,28 @@ use crate::error::StoreError;
 // v6 adds revision-bound ebook reading state; v7 adds first-class book facts;
 // v8 adds monotone cluster-work leases; v9 adds the distributed whole-title
 // speculative-transcode queue; v10 adds live media-session routing; v11 adds
-// storage-keyed shared-cache generations and reader pins. Every additive step
-// is applied through Raft before the daemon opens the store. v5 remains a
+// storage-keyed shared-cache generations and reader pins; v12 adds the small
+// replicated catalog and fenced queue for content-addressed fragment indexes;
+// v13 adds durable operator analysis requests ahead of content addressing;
+// v14 adds bounded terminal-control acknowledgement replay; v15 adds the
+// indexes that keep the analysis operations projection cheap under polling;
+// v16 persists the first terminal cause; v17 adds the replacement-publication
+// fence; v18 installs the atomic request-claim trigger for that fence on
+// clusters which had already reached v17. Every additive
+// step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
-// schemas still fail closed.
-pub const AUTH_SCHEMA_VERSION: i64 = 11;
+// schemas still fail closed. Version-step targets are named independently of
+// `AUTH_SCHEMA_VERSION` so a later bump cannot silently make an older handler
+// skip intermediate migrations.
+const FRAGMENT_INDEX_SCHEMA_VERSION: i64 = 12;
+const ANALYSIS_REQUEST_SCHEMA_VERSION: i64 = 13;
+const TERMINAL_ACK_SCHEMA_VERSION: i64 = 14;
+const ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION: i64 = 15;
+const TERMINAL_REASON_SCHEMA_VERSION: i64 = 16;
+const PUBLICATION_FENCE_SCHEMA_VERSION: i64 = 17;
+const PUBLICATION_CLAIM_SCHEMA_VERSION: i64 = 18;
+pub const AUTH_SCHEMA_VERSION: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -51,6 +67,13 @@ const LEASE_SCHEMA_MIGRATION_SOURCE: i64 = 7;
 const PRETRANSCODE_SCHEMA_MIGRATION_SOURCE: i64 = 8;
 const MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE: i64 = 9;
 const SHARED_CACHE_SCHEMA_MIGRATION_SOURCE: i64 = 10;
+const FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = 11;
+const ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE: i64 = FRAGMENT_INDEX_SCHEMA_VERSION;
+const TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_REQUEST_SCHEMA_VERSION;
+const ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_ACK_SCHEMA_VERSION;
+const TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION;
+const PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_REASON_SCHEMA_VERSION;
+const PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -84,7 +107,7 @@ const STORE_TIMEOUT: Duration = Duration::from_secs(3);
 const AUTHORITY_READ_RETRY_DELAY: Duration = Duration::from_millis(100);
 const AUTHORITY_READ_MAX_ATTEMPTS: usize = 2;
 const IDEMPOTENT_WRITE_RETRY_DELAY: Duration = Duration::from_millis(100);
-const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 3;
+const IDEMPOTENT_WRITE_MAX_ATTEMPTS: usize = 5;
 const REPLICATED_STORE_TIMEOUT: &str = "replicated store operation timed out";
 
 const AUTH_SCHEMA: &str = r#"
@@ -794,9 +817,10 @@ where
 ///
 /// A timed-out consensus request is ambiguous: it may still have committed.
 /// Callers must therefore supply an operation whose repeated execution writes
-/// byte-for-byte equivalent durable state. Three three-second attempts plus
-/// the two short delays stay inside the accepted ten-second leader-election
-/// recovery window without relaxing [`STORE_TIMEOUT`] for any other call.
+/// byte-for-byte equivalent durable state. Five three-second attempts plus
+/// the four short delays stay inside the accepted sixteen-second
+/// leader-election and stream-reconnect recovery window without relaxing
+/// [`STORE_TIMEOUT`] for any other call.
 async fn time_idempotent_write_with_retry<T, F, Fut>(
     metrics: &'static StoreOperationMetrics,
     mut operation: F,
@@ -1179,6 +1203,7 @@ impl HiqliteAuthStore {
         super::hiqlite_pretranscode::install_schema(&client).await?;
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
+        super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -1397,7 +1422,10 @@ impl HiqliteAuthStore {
                                 super::hiqlite_sessions::MEDIA_PLAYBACK_POINTERS_SCHEMA,
                                 params!(),
                             ),
-                            (super::hiqlite_sessions::MEDIA_SESSIONS_SCHEMA, params!()),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSIONS_V10_SCHEMA,
+                                params!(),
+                            ),
                             (
                                 super::hiqlite_sessions::MEDIA_SESSIONS_OWNER_INDEX,
                                 params!(),
@@ -1436,7 +1464,7 @@ impl HiqliteAuthStore {
                          WHERE singleton = 1 AND schema_version = $3"
                             .to_owned(),
                         params!(
-                            AUTH_SCHEMA_VERSION,
+                            FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE,
                             now,
                             SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
                         ),
@@ -1444,6 +1472,174 @@ impl HiqliteAuthStore {
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE, attempt)
                         .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        fragment_index_schema_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            FRAGMENT_INDEX_SCHEMA_VERSION,
+                            now,
+                            FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_request_schema_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_REQUEST_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_TERMINAL_ACKS_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_TERMINAL_ACKS_EXPIRY_INDEX,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    TERMINAL_ACK_SCHEMA_VERSION,
+                                    now,
+                                    TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_history_index_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_TERMINAL_REASON_MIGRATION,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    TERMINAL_REASON_SCHEMA_VERSION,
+                                    now,
+                                    TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE, attempt)
+                        .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_sessions::MEDIA_SESSION_PUBLICATION_FENCE_MIGRATION,
+                                params!(),
+                            ),
+                            (
+                                super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    PUBLICATION_FENCE_SCHEMA_VERSION,
+                                    now,
+                                    PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    PUBLICATION_CLAIM_SCHEMA_VERSION,
+                                    now,
+                                    PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
                 }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
@@ -1597,7 +1793,28 @@ impl HiqliteAuthStore {
     pub async fn validation_reset_contract_state(&self) -> Result<(), StoreError> {
         self.telemetry.clear().await?;
         let statements = vec![
+            ("DELETE FROM analysis_requests".to_owned(), params!()),
+            (
+                "DELETE FROM cluster_fragment_index_locations".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_artifacts".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_jobs".to_owned(),
+                params!(),
+            ),
+            (
+                "DELETE FROM cluster_fragment_index_sources".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_playback_pointers".to_owned(), params!()),
+            (
+                "DELETE FROM media_session_terminal_acks".to_owned(),
+                params!(),
+            ),
             ("DELETE FROM media_sessions".to_owned(), params!()),
             ("DELETE FROM media_session_requests".to_owned(), params!()),
             ("DELETE FROM job_leases".to_owned(), params!()),
@@ -1666,7 +1883,8 @@ impl HiqliteAuthStore {
             "SELECT resource, owner_node_id, fence, revision, expires_at_ms, updated_at_ms FROM job_leases ORDER BY resource",
             "SELECT user_id, request_id, request_fingerprint, playback_id, state, claim_expires_at_ms, incarnation_id, owner_node_id, response_json, updated_at_ms FROM media_session_requests ORDER BY user_id, request_id",
             "SELECT user_id, playback_id, current_incarnation_id, updated_at_ms FROM media_playback_pointers ORDER BY user_id, playback_id",
-            "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
+            "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, publication_ready_at_ms, recipe_json, response_json, produced_playable_through_ms, fetched_through_ms, media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms FROM media_sessions ORDER BY incarnation_id",
+            "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, client_instance_id, sequence, request_fingerprint, response_json, expires_at_ms, updated_at_ms FROM media_session_terminal_acks ORDER BY session_id",
         ] {
             validate_sql(sql)?;
         }
@@ -1738,10 +1956,19 @@ impl HiqliteAuthStore {
             .await?,
             media_sessions: self.client().query_map(
                 "SELECT incarnation_id, session_id, user_id, playback_id, request_fingerprint, \
-                        owner_node_id, owner_epoch, lease_expires_at_ms, state, recipe_json, \
-                        response_json, produced_playable_through_ms, fetched_through_ms, \
+                        owner_node_id, owner_epoch, lease_expires_at_ms, state, terminal_reason, \
+                        publication_ready_at_ms, recipe_json, response_json, \
+                        produced_playable_through_ms, fetched_through_ms, \
                         media_origin_ms, media_sequence, discontinuity_sequence, updated_at_ms \
                    FROM media_sessions ORDER BY incarnation_id",
+                params!(),
+            )
+            .await?,
+            media_session_terminal_acks: self.client().query_map(
+                "SELECT incarnation_id, session_id, owner_node_id, owner_epoch, \
+                        client_instance_id, sequence, request_fingerprint, response_json, \
+                        expires_at_ms, updated_at_ms \
+                   FROM media_session_terminal_acks ORDER BY session_id",
                 params!(),
             )
             .await?,
@@ -2679,7 +2906,14 @@ fn schema_migration_action(
         | LEASE_SCHEMA_MIGRATION_SOURCE
         | PRETRANSCODE_SCHEMA_MIGRATION_SOURCE
         | MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE
-        | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE => {
+        | SHARED_CACHE_SCHEMA_MIGRATION_SOURCE
+        | FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE
+        | TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
+        | TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
+        | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
+        | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -2726,6 +2960,7 @@ struct AuthStoreDump {
     media_session_requests: Vec<MediaSessionRequestDumpRow>,
     media_playback_pointers: Vec<MediaPlaybackPointerDumpRow>,
     media_sessions: Vec<MediaSessionDumpRow>,
+    media_session_terminal_acks: Vec<MediaSessionTerminalAckDumpRow>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -3058,6 +3293,8 @@ dump_row!(MediaSessionDumpRow {
     owner_epoch: i64,
     lease_expires_at_ms: i64,
     state: String,
+    terminal_reason: Option<String>,
+    publication_ready_at_ms: i64,
     recipe_json: String,
     response_json: String,
     produced_playable_through_ms: i64,
@@ -3067,6 +3304,18 @@ dump_row!(MediaSessionDumpRow {
     discontinuity_sequence: i64,
     updated_at_ms: i64,
 });
+dump_row!(MediaSessionTerminalAckDumpRow {
+    incarnation_id: String,
+    session_id: String,
+    owner_node_id: String,
+    owner_epoch: i64,
+    client_instance_id: String,
+    sequence: i64,
+    request_fingerprint: String,
+    response_json: String,
+    expires_at_ms: i64,
+    updated_at_ms: i64,
+});
 
 #[cfg(test)]
 mod tests {
@@ -3074,6 +3323,35 @@ mod tests {
 
     static TEST_STORE_OPERATION_METRICS: LazyLock<StoreOperationMetrics> =
         LazyLock::new(StoreOperationMetrics::default);
+
+    #[test]
+    fn media_session_dump_retains_terminal_and_publication_fence_fields() {
+        let row = MediaSessionDumpRow {
+            incarnation_id: "incarnation".to_owned(),
+            session_id: "session".to_owned(),
+            user_id: 1,
+            playback_id: "playback".to_owned(),
+            request_fingerprint: "fingerprint".to_owned(),
+            owner_node_id: "node".to_owned(),
+            owner_epoch: 2,
+            lease_expires_at_ms: 3,
+            state: "ended".to_owned(),
+            terminal_reason: Some("deleted".to_owned()),
+            publication_ready_at_ms: 4,
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            produced_playable_through_ms: 5,
+            fetched_through_ms: 6,
+            media_origin_ms: 7,
+            media_sequence: 8,
+            discontinuity_sequence: 9,
+            updated_at_ms: 10,
+        };
+
+        let encoded = serde_json::to_value(row).expect("serialize media session dump row");
+        assert_eq!(encoded["terminal_reason"], "deleted");
+        assert_eq!(encoded["publication_ready_at_ms"], 4);
+    }
 
     #[tokio::test(start_paused = true)]
     async fn replaceable_write_gate_pins_window_failure_retry_and_terminal_bypass() {
@@ -3651,6 +3929,18 @@ mod tests {
     }
 
     #[test]
+    fn idempotent_writes_fit_the_end_to_end_leader_recovery_budget() {
+        assert_eq!(STORE_TIMEOUT, Duration::from_secs(3));
+        assert!(
+            STORE_TIMEOUT * IDEMPOTENT_WRITE_MAX_ATTEMPTS as u32
+                + IDEMPOTENT_WRITE_RETRY_DELAY
+                    * ((IDEMPOTENT_WRITE_MAX_ATTEMPTS.saturating_sub(1)) as u32)
+                < crate::cluster::migration::REPLICATED_LEADER_RECOVERY_BUDGET,
+            "the retried exact-state path must retain its sixteen-second outer recovery budget"
+        );
+    }
+
+    #[test]
     fn store_operation_histogram_pins_boundaries_and_saturates() {
         let metrics = StoreOperationMetrics::default();
         metrics.record(
@@ -4055,9 +4345,68 @@ mod tests {
     #[test]
     fn daemon_schema_gate_accepts_the_complete_supported_chain() {
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 6,
+            FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            FRAGMENT_INDEX_SCHEMA_VERSION,
+            "v11 must advance exactly one step to the fragment-index schema"
+        );
+        assert_eq!(
+            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE, FRAGMENT_INDEX_SCHEMA_VERSION,
+            "the analysis migration must start from the exact v12 shape"
+        );
+        assert_eq!(
+            ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_REQUEST_SCHEMA_VERSION,
+            "v12 must advance exactly one step to the analysis-request schema"
+        );
+        assert_eq!(
+            TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE, ANALYSIS_REQUEST_SCHEMA_VERSION,
+            "the terminal-ack migration must start from the exact v13 shape"
+        );
+        assert_eq!(
+            TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE + 1,
+            TERMINAL_ACK_SCHEMA_VERSION,
+            "v13 must advance exactly one step to the terminal-ack schema"
+        );
+        assert_eq!(
+            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE, TERMINAL_ACK_SCHEMA_VERSION,
+            "the analysis-index migration must start from the exact v14 shape"
+        );
+        assert_eq!(
+            ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION,
+            "v14 must advance exactly one step to the analysis-index schema"
+        );
+        assert_eq!(
+            TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE, ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION,
+            "the terminal-reason migration must start from the exact v15 shape"
+        );
+        assert_eq!(
+            TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE + 1,
+            TERMINAL_REASON_SCHEMA_VERSION,
+            "v15 must advance exactly one step to the terminal-reason schema"
+        );
+        assert_eq!(
+            PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE, TERMINAL_REASON_SCHEMA_VERSION,
+            "the publication-fence migration must start from the exact v16 shape"
+        );
+        assert_eq!(
+            PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE + 1,
+            PUBLICATION_FENCE_SCHEMA_VERSION,
+            "v16 must advance exactly one step to the publication-fence schema"
+        );
+        assert_eq!(
+            PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE, PUBLICATION_FENCE_SCHEMA_VERSION,
+            "the publication-claim migration must start from the exact v17 shape"
+        );
+        assert_eq!(
+            PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE + 1,
+            PUBLICATION_CLAIM_SCHEMA_VERSION,
+            "v17 must advance exactly one step to the publication-claim schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 13,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v11 step"
+            "this implementation contains every additive v5→v18 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -4108,6 +4457,70 @@ mod tests {
             )
             .expect("media-session predecessor"),
             SchemaMigrationAction::MigrateFrom(MEDIA_SESSION_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("shared-cache predecessor"),
+            SchemaMigrationAction::MigrateFrom(SHARED_CACHE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("fragment-index predecessor"),
+            SchemaMigrationAction::MigrateFrom(FRAGMENT_INDEX_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("analysis-request predecessor"),
+            SchemaMigrationAction::MigrateFrom(ANALYSIS_REQUEST_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("terminal-ack predecessor"),
+            SchemaMigrationAction::MigrateFrom(TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("analysis-index predecessor"),
+            SchemaMigrationAction::MigrateFrom(ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("terminal-reason predecessor"),
+            SchemaMigrationAction::MigrateFrom(TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("publication-fence predecessor"),
+            SchemaMigrationAction::MigrateFrom(PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("publication-claim predecessor"),
+            SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {
