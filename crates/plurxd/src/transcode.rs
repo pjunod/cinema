@@ -29050,7 +29050,7 @@ mod tests {
         .await
         .expect("actor must commit the retained published failure");
 
-        assert_eq!(
+        assert!(matches!(
             manager
                 .authorize_response_publication(
                     "published-frontier",
@@ -29062,26 +29062,26 @@ mod tests {
                     Instant::now() + Duration::from_secs(1),
                 )
                 .await,
-            Err(MediaResponsePublicationRejection::ProducerEnded(
-                "process_exit".to_owned()
-            ))
-        );
+            Err(MediaResponsePublicationRejection::ProducerEnded(reason))
+                if reason == "process_exit"
+        ));
         for response_kind in ["segment-range", "segment-not-modified"] {
-            assert_eq!(
-                manager
-                    .authorize_response_publication(
-                        "published-frontier",
-                        &beyond.response_owner(),
-                        MediaResponsePublication::attempt_media(
-                            response_kind,
-                            Some("seg00001.ts"),
-                        ),
-                        Instant::now() + Duration::from_secs(1),
-                    )
-                    .await,
-                Err(MediaResponsePublicationRejection::ProducerEnded(
-                    "process_exit".to_owned()
-                )),
+            assert!(
+                matches!(
+                    manager
+                        .authorize_response_publication(
+                            "published-frontier",
+                            &beyond.response_owner(),
+                            MediaResponsePublication::attempt_media(
+                                response_kind,
+                                Some("seg00001.ts"),
+                            ),
+                            Instant::now() + Duration::from_secs(1),
+                        )
+                        .await,
+                    Err(MediaResponsePublicationRejection::ProducerEnded(reason))
+                        if reason == "process_exit"
+                ),
                 "{response_kind} must preserve the numeric segment coordinate"
             );
         }
