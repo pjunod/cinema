@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["a3c8cab0"]
+commits = ["3df80d35"]
 points = ["web.experience"]
 checks = ["web-membership", "web-static"]
 reason = "Each reading this commit corrects is pinned by a retained assertion in tests/web/cluster-membership.test.js: the quorum watermark and the applied index are read from one direct sample with commit_index and applied_index deliberately separated in the fixture, an unobserved store reports unknown while a proven-unavailable one reports unavailable, an open WAL holding unflushed entries is coloured as the fault it is, the freshness row is offset by the aggregate's own observation stamp so it ages, and a machine with no committed roster renders neither a restart-safety verdict nor arithmetic over zero voters."
