@@ -1,7 +1,10 @@
 # Playback control protocol M4 — one producer deadline
 
-**Status:** implementation contract
-**Baseline:** `origin/main` at `9063bb1e` (PR #626)
+**Status:** implementation contract; copy-lifetime cut implemented but
+implemented on the active candidate branch and awaiting final PR validation
+**Contract baseline:** `9063bb1e` (PR #626)
+**Current merged baseline:** `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
+(PR #641)
 **Parent design:**
 [`PLAYBACK-CONTROL-PROTOCOL-PLAN.md`](PLAYBACK-CONTROL-PROTOCOL-PLAN.md)
 **Delivery ledger:**
@@ -37,6 +40,53 @@ M4 does not:
 The old rolling presentation therefore remains usable as the VOD fallback,
 but its producer lifecycle no longer depends on polling tasks racing each
 other.
+
+### Current copy-lifetime cut
+
+The active working tree makes the rolling actor the copy producer's lifetime
+owner. A pipe reader reports one typed fact: `Unsupported`, invalid
+configuration, reader failure, completion, or lifecycle cancellation. Only
+`Unsupported` may consume one frozen direct-HLS retry recipe. Direct-HLS and
+takeover attempts have no reader classifier or retry; their process exits are
+classified immediately.
+
+Pipe completion and successful process exit rendezvous under one bounded
+actor classification deadline. Neither fact is success alone; after both
+arrive, the existing ENDLIST/frontier probe proves completion. The legacy copy
+startup/progress watcher, watchdog election, request-side child-exit inference,
+and in-place copy fallback policy are removed. General child/resource
+serialization remains where response, flow, retirement, retention, or cleanup
+ordering still requires it, but it cannot infer copy failure or choose a
+retry.
+
+This cut changes no client wire and continues to return `action:none`. The
+compatible server must deploy before separate passive Apple and Android
+reporter PRs; active mobile action consumption follows later. No broad unit
+suite has run. Compile-only
+`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds,
+and the ownership recount has zero mismatches across 32 source symbols and
+seven entrypoints. The first adversarial pass found a P2 `Unsupported`/EPIPE
+ordering race; the repair retains `ChildStdout` through typed actor
+classification and adds a both-order actor test. A second independent review
+found a P2 where local `SessionDir.started`/playlist existence downgraded
+structural `Unsupported` to `ReaderFailed` even though only actor-authorized
+response publication may close retry. The repair always preserves structural
+`Unsupported`; the actor chooses `Retry` before media admission or `Fail` with
+`RetainPublished` afterward. Regression
+`copy_unsupported_retry_closes_only_after_actor_media_admission` covers the
+boundary. A residual EOF form of the same P2 was then found:
+`copyseg::finish` collapsed structural `Segmenter::finish` `Unsupported` to
+`ReaderFailed`; that path now preserves `Unsupported` too. Regression
+`an_unsupported_final_tail_stays_typed_after_local_playlist_creation` uses
+`max_seconds=0` with a local playlist already present, alongside the actor
+publication regression. Compile-only cargo check and the zero-mismatch ledger
+recount are green, including 15 `RetainPublished` owners. Both independent
+current-worktree reviews formally approve all three runtime fixes with no
+actionable P0–P3. Corrected `fmp4`/`copyseg` comments
+state that malformed input is a reader failure, structural `Unsupported` is
+actor/publication-gated, and odd-track handling is not an unconditional
+fallback. The one broad unit run, remaining static checks, cluster/hosted
+gates, PR, and merge remain.
 
 ## 2. Existing owners and their replacement
 
@@ -875,9 +925,11 @@ those values as structured fields.
 The validation catalog gains a source check over playback server modules. It
 fails if an unapproved recovery pattern is introduced, including:
 
-- the deleted symbol names `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`,
-  `PROGRESS_STALL`, `WATCHDOG_POLL`, `child_transition`, `watchdog_active`,
-  `replacing_child`, `downgrade_one_step`, and `watch_for_stall`;
+- the deleted recovery-owner names `FIRST_SEGMENT_GRACE`, `SOFTWARE_GRACE`,
+  `WATCHDOG_POLL`, `watchdog_active`, `begin_copy_child_replacement`, and
+  `watch_for_stall`, plus any use of `PROGRESS_STALL`, `child_transition`,
+  `replacing_child`, or `downgrade_one_step` as a copy recovery voter rather
+  than an enumerated actor policy value or lifecycle fence;
 - a detached `sleep` loop that inspects producer or publication state and then
   kills, starts, or swaps a process; or
 - any child replacement outside the named process executor.
@@ -936,6 +988,10 @@ misclassified as a watchdog.
 | retry/install, then authority loss | authority cleanup reaches pending supervisor; late install is rejected |
 | copy `Unsupported` and timeout | one pre-publication retry total |
 | copy `Unsupported` and generic exit | Unsupported classification owns the reason and sole retry token |
+| copy reader completes before successful process exit | wait under the existing classification deadline; do not complete or renew it |
+| successful copy process exit arrives before reader completion | wait under the same classification deadline; do not infer success from exit alone |
+| direct-HLS or takeover process exits | classify immediately; no reader rendezvous and no retry recipe |
+| invalid configuration, reader failure, or copy deadline | one final actor failure; never reinterpret it as `Unsupported` |
 | zero exit without valid ENDLIST/frontier | typed partial-success failure, never complete |
 | post-publication failure cleanup expires | terminate/reap continues; published scratch and catalogs remain readable; original decision reason remains |
 | pre-publication failure cleanup completes | reap is confirmed before scratch is discarded and compatibility projections reset |
@@ -950,7 +1006,12 @@ misclassified as a watchdog.
 ## 10. Verification order
 
 Per the delivery instruction, implementation is reviewed adversarially before
-unit tests run.
+unit tests run. Steps 1–5 are represented in the active candidate
+tree; their correctness and owner counts are not accepted until step 7. No
+broad unit run has occurred. Compile-only
+`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds
+without executing tests, and the static ownership recount is clean at 32
+source symbols and seven entrypoints, including 15 `RetainPublished` owners.
 
 1. Generate the checked source catalog of every child/recovery/failure owner
    and map each current `child_transition` invariant.

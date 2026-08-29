@@ -41,9 +41,10 @@ use std::ops::Range;
 /// what it claims to be, [`Fmp4Error::Unsupported`] means it is legal MP4 that
 /// this reader deliberately does not handle (an explicit `base_data_offset`,
 /// say — ffmpeg only writes one without `default_base_moof`, which plurx
-/// always passes). Both land in the same place at runtime: one warning and a
-/// respawn onto the legacy muxer path. Naming them apart is for whoever reads
-/// that warning.
+/// always passes). The distinction is policy-bearing: malformed input is a
+/// reader failure, while Unsupported remains a typed shape fact that the
+/// rolling actor may route to one frozen legacy-muxer retry only before media
+/// publication. After publication the actor retains the admitted timeline.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Fmp4Error {
     /// The bytes do not parse as the box structure they claim.
