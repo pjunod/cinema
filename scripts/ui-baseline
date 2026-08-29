@@ -1414,19 +1414,28 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         settle(page)
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
-        for refusal in refusals[:5]:
-            detail = ""
-            try:
-                body = json.loads(refusal.text())
-                if isinstance(body, dict) and body.get("code"):
-                    detail = f" code={body['code']}"
-            except Exception:  # noqa: BLE001 - diagnosis must never fail the run
-                detail = ""
-            problems.append(
-                f"http {refusal.status}: "
-                f"{api_path(urlparse(refusal.url).path)}{detail}"
-            )
+        # Refusals annotate a capture that is already failing; they never
+        # fail one on their own. Some fetches are non-ok by design — the
+        # segment-playlist probe, the subtitle sidecar, the reader search —
+        # and promoting those to failures would turn a handled condition into
+        # a red layout gate. They also go in FRONT of the console errors: a
+        # 503 storm produces one console error per fetch, and the typed code
+        # is the one line worth keeping when the list is truncated.
         if problems:
+            annotations = []
+            for refusal in refusals[:5]:
+                detail = ""
+                try:
+                    body = json.loads(refusal.text())
+                    if isinstance(body, dict) and body.get("code"):
+                        detail = f" code={body['code']}"
+                except Exception:  # noqa: BLE001 - diagnosis must never fail a run
+                    detail = ""
+                annotations.append(
+                    f"http {refusal.status}: "
+                    f"{api_path(urlparse(refusal.url).path)}{detail}"
+                )
+            problems = annotations + problems
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}
         for call in api_calls:

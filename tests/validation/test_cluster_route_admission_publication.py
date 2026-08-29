@@ -93,6 +93,24 @@ def function_body(source: str, signature: str) -> str:
     raise AssertionError(f"unbalanced braces in {signature!r}")
 
 
+def block_body(source: str, header: str) -> tuple[int, int]:
+    """Return the (start, end) offsets of a block whose header ends in `{`."""
+    if source.count(header) != 1:
+        raise AssertionError(f"{header!r} must appear exactly once")
+    masked = strip_rust(source)
+    start = source.index(header)
+    opening = start + len(header) - 1
+    depth = 0
+    for index in range(opening, len(masked)):
+        if masked[index] == "{":
+            depth += 1
+        elif masked[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return start, index + 1
+    raise AssertionError(f"unbalanced braces in {header!r}")
+
+
 class RequestGatePublicationTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -111,8 +129,12 @@ class RequestGatePublicationTest(unittest.TestCase):
                     f"renamed, rename it here too rather than losing the check",
                 )
                 self.assertIn(f"{guard}::new(", body)
+                # Every commit, not just the one bound to a local named
+                # `publication`: `Guard::new(&slot).commit(true);` before the
+                # read is the original defect written in one line, and an
+                # anchored name would not see it.
                 self.assertEqual(
-                    len(re.findall(r"\bpublication\.commit\(", body)),
+                    len(re.findall(r"\.commit\(", body)),
                     1,
                     f"{signature} must publish once, at the end; every extra "
                     f"publication is a window in which the request gate "
@@ -136,12 +158,70 @@ class RequestGatePublicationTest(unittest.TestCase):
                     f"publication goes through its guard, whose Drop is what "
                     f"fails closed",
                 )
-                self.assertNotIn(
-                    ".store(",
-                    body,
-                    f"{signature} must contain no atomic store at all; the "
-                    f"only publication is the guard commit",
+                for mutator in (".store(", "::store(", ".swap(", "::swap(",
+                                ".compare_exchange", ".fetch_"):
+                    self.assertNotIn(
+                        mutator,
+                        body,
+                        f"{signature} must contain no atomic mutation at all "
+                        f"({mutator}); the only publication is the guard "
+                        f"commit",
+                    )
+
+    def test_every_use_of_a_gate_slot_is_a_read_or_a_guard(self) -> None:
+        """Naming the field is not the only way to write it — but reaching it is.
+
+        A helper taking `&AtomicBool` writes the slot without spelling
+        `local_maintenance`, so forbidding spellings of `.store(` beside the
+        field name cannot see it. What it cannot avoid is *obtaining* the slot,
+        and that names the field. So this enumerates every occurrence of each
+        field in the module and requires it to be one of four things: the
+        declaration, the initializer, a borrow handed to that slot's
+        publication guard, or a load. A helper call, a direct store, a swap, a
+        second guard — none of them match, whatever they are called.
+        """
+        allowed = {
+            "local_serving_role": (
+                "local_serving_role: AtomicU8,",
+                "local_serving_role: AtomicU8::new(",
+                "LocalServingRolePublication::new(&inner.local_serving_role)",
+                "inner.local_serving_role.load(",
+                # the public accessor the request gate calls, which only reads
+                "pub async fn local_serving_role(",
+            ),
+            "local_maintenance": (
+                "local_maintenance: AtomicBool,",
+                "local_maintenance: AtomicBool::new(",
+                "LocalMaintenancePublication::new(&inner.local_maintenance)",
+                "inner.local_maintenance.load(",
+                # the public accessor the request gate calls, which only reads
+                "pub fn local_maintenance_active(",
+            ),
+        }
+        masked = strip_rust(self.source)
+        for slot, contexts in allowed.items():
+            with self.subTest(slot=slot):
+                occurrences = [m.start() for m in re.finditer(rf"\b{slot}\b", masked)]
+                self.assertGreaterEqual(
+                    len(occurrences),
+                    4,
+                    f"{slot} vanished from the module; if it was renamed, "
+                    f"rename it here rather than losing the contract",
                 )
+                for at in occurrences:
+                    window = self.source[max(0, at - 60) : at + 80]
+                    if any(context in window for context in contexts):
+                        continue
+                    line = self.source.count("\n", 0, at) + 1
+                    line_start = self.source.rfind("\n", 0, at) + 1
+                    line_end = self.source.find("\n", at)
+                    self.fail(
+                        f"membership.rs:{line} reaches {slot} outside a read or "
+                        f"its publication guard: "
+                        f"{self.source[line_start:line_end].strip()!r}. Every "
+                        f"write goes through the guard, whose Drop is what "
+                        f"fails closed."
+                    )
 
     def test_nothing_in_the_module_writes_either_slot_by_name(self) -> None:
         """A helper called from the refresh is the same defect, one frame down.
@@ -170,7 +250,8 @@ class RequestGatePublicationTest(unittest.TestCase):
             ("true", "LocalMaintenancePublication"),
         ):
             with self.subTest(guard=guard):
-                body = function_body(self.source, f"impl Drop for {guard}<'_> {{")
+                start, end = block_body(self.source, f"impl Drop for {guard}<'_> {{")
+                body = self.source[start:end]
                 self.assertIn("if !self.committed", body)
                 self.assertIn(closed, body)
 
