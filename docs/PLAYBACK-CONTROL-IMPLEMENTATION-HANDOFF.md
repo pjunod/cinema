@@ -1325,7 +1325,8 @@ After the active prepublication candidate, the remaining work is:
 8. Extend the shared index with exact intro/credits annotations, subtitle
    windows, force-analysis controls, queue/current-work visibility, and
    instrumentation.
-9. Add clustered rolling/VOD takeover and planned drain.
+9. Complete planned drain, VOD resurrection, rolling-successor failover, and
+   compatibility-takeover retirement.
 10. Complete mixed-fleet cutover and delete compatibility polling paths.
 
 ## 7. Completion definition
