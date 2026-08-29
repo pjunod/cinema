@@ -36,12 +36,14 @@ use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
     CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
-    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionTakeover, MediaSessionTerminalAck, MetadataPatch,
-    NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob,
-    OfflineCreateOutcome, OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery,
-    PretranscodeRequirements, PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite,
-    TraktAuth,
+    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionActivationSettlement,
+    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
+    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
+    MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
+    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
+    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
+    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
+    MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
@@ -76,6 +78,46 @@ const CONTRACT_RAFT_SECRET: &str = "plurx-store-contract-raft";
 const CONTRACT_API_SECRET: &str = "plurx-store-contract-api";
 #[cfg(feature = "hiqlite-contract-tests")]
 const CONTRACT_INSTANCE_ID: &str = "00000000-0000-4000-8000-000000000090";
+
+/// Exact replicated media-session shape shared by schemas v10 through v15.
+///
+/// Historical migration fixtures start from the current bootstrap and must
+/// replace this table, not merely lower `cluster_meta`: v16 and v17 add
+/// constrained columns whose later `ALTER TABLE` steps intentionally fail on
+/// an inconsistent marker/schema pair.
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA: &str =
+    "CREATE TABLE media_sessions (
+        incarnation_id                TEXT PRIMARY KEY,
+        session_id                    TEXT NOT NULL UNIQUE,
+        user_id                       INTEGER NOT NULL,
+        playback_id                   TEXT NOT NULL,
+        request_fingerprint           TEXT NOT NULL,
+        owner_node_id                 TEXT NOT NULL,
+        owner_epoch                   INTEGER NOT NULL CHECK (owner_epoch > 0),
+        lease_expires_at_ms           INTEGER NOT NULL,
+        state                         TEXT NOT NULL CHECK (state IN ('starting', 'active', 'ended')),
+        recipe_json                   TEXT NOT NULL,
+        response_json                 TEXT NOT NULL,
+        produced_playable_through_ms  INTEGER NOT NULL DEFAULT 0,
+        fetched_through_ms            INTEGER NOT NULL DEFAULT 0,
+        media_origin_ms               INTEGER NOT NULL DEFAULT 0,
+        media_sequence                INTEGER NOT NULL DEFAULT 0,
+        discontinuity_sequence        INTEGER NOT NULL DEFAULT 0,
+        updated_at_ms                 INTEGER NOT NULL
+    ) STRICT";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_OWNER_INDEX: &str = "CREATE INDEX media_sessions_owner
+        ON media_sessions(owner_node_id, state, lease_expires_at_ms)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_USER_INDEX: &str = "CREATE INDEX media_sessions_user
+        ON media_sessions(user_id, state, lease_expires_at_ms)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX: &str = "CREATE INDEX media_sessions_expiry
+        ON media_sessions(state, lease_expires_at_ms, incarnation_id)";
+#[cfg(feature = "hiqlite-contract-tests")]
+const MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX: &str = "CREATE INDEX media_sessions_retention
+        ON media_sessions(state, updated_at_ms, incarnation_id)";
 
 #[cfg(feature = "hiqlite-contract-tests")]
 static HIQLITE_CASE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
@@ -356,14 +398,22 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
+    "settle_media_session_activation",
+    "publish_media_session_activation",
+    "arm_media_session_handoff",
+    "complete_media_session_handoff",
+    "arm_media_session_terminal_projection",
+    "complete_media_session_terminal_projection",
     "fail_media_session_request",
     "media_session_route",
     "media_session_route_by_incarnation",
+    "media_session_route_for_playback",
     "record_media_session_terminal_ack",
     "media_session_terminal_ack",
     "renew_media_sessions",
     "expired_media_sessions",
     "claim_media_session_takeover",
+    "end_media_session_if_owner",
     "end_media_session",
     "maintain_media_sessions",
     "owned_media_sessions",
@@ -433,6 +483,678 @@ where
             .expect("reset replicated contract state");
         contract(Arc::new(store), "hiqlite-3-voter").await;
     }
+}
+
+async fn confirm_media_activation(
+    store: &dyn Store,
+    activation: &MediaSessionActivation,
+    publication_ready_at_ms: i64,
+    backend: &str,
+) -> MediaSessionRoute {
+    store
+        .settle_media_session_activation(
+            activation,
+            MediaSessionActivationSettlement::Confirm {
+                publication_ready_at_ms,
+            },
+            activation.now_ms,
+        )
+        .await
+        .unwrap_or_else(|error| panic!("{backend}: confirm media activation: {error}"))
+        .unwrap_or_else(|| panic!("{backend}: media activation confirmation must win"))
+}
+
+#[tokio::test]
+async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("activation-settle-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create activation-settle user: {error}"));
+        let fingerprint = "e".repeat(64);
+        let request_id = "activation-settle-request";
+        let incarnation_id = "00000000-0000-4000-8000-0000000000e1";
+        let activation = MediaSessionActivation {
+            incarnation_id: incarnation_id.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e2".to_owned(),
+            user_id: user.id,
+            playback_id: "activation-settle-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some(request_id.to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "activation-settle-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"prepared"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 100,
+            lease_expires_at_ms: 200,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    &activation.playback_id,
+                    incarnation_id,
+                    100,
+                    200,
+                )
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: claim activation-settle request: {error}"
+                )),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                request_id,
+                incarnation_id,
+                &activation.owner_node_id,
+                101,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own activation-settle request: {error}")));
+
+        let prepared = store
+            .activate_media_session(&activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare activation-settle route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: prepare activation-settle route must win"));
+        assert_eq!(
+            prepared.route.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: prepare leaves publication blocked"
+        );
+        assert_eq!(
+            store
+                .media_session_route_by_incarnation(incarnation_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read prepared route: {error}"))
+                .expect("prepared route")
+                .publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}: durable prepare remains blocked"
+        );
+        assert!(store
+            .owned_media_sessions(&activation.owner_node_id, 150)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list blocked owned route: {error}"))
+            .is_empty());
+        assert!(store
+            .renew_media_sessions(
+                &activation.owner_node_id,
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_id.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 10,
+                    fetched_through_ms: 10,
+                    media_sequence: 1,
+                }],
+                150,
+                300,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew blocked route: {error}"))
+            .is_empty());
+        assert!(store
+            .expired_media_sessions(300, None, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list blocked takeover inventory: {error}"))
+            .is_empty());
+        assert!(store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation_id.to_owned(),
+                expected_owner_node_id: activation.owner_node_id.clone(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "activation-survivor".to_owned(),
+                now_ms: 300,
+                lease_expires_at_ms: 400,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim blocked takeover: {error}"))
+            .is_none());
+
+        let confirmed = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        assert_eq!(confirmed.publication_ready_at_ms, 0, "{backend}");
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    &activation.playback_id,
+                    "00000000-0000-4000-8000-0000000000e3",
+                    120,
+                    220,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: in-flight confirmed request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id: current, .. }
+                if current == incarnation_id
+        ));
+        assert!(store
+            .owned_media_sessions(&activation.owner_node_id, 150)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list unpublished confirmed route: {error}"))
+            .is_empty());
+        assert!(store
+            .renew_media_sessions(
+                &activation.owner_node_id,
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_id.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 10,
+                    fetched_through_ms: 10,
+                    media_sequence: 1,
+                }],
+                150,
+                300,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew unpublished confirmed route: {error}"))
+            .is_empty());
+        assert!(store
+            .publish_media_session_activation(user.id, request_id, incarnation_id, 151)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish confirmed route: {error}"))
+            .is_some());
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    &activation.playback_id,
+                    "00000000-0000-4000-8000-0000000000e3",
+                    152,
+                    252,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay published request: {error}")),
+            MediaSessionRequestClaim::Resolved(route) if route.incarnation_id == incarnation_id
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions(&activation.owner_node_id, 152)
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: list published confirmed route: {error}"
+                ))
+                .len(),
+            1,
+            "{backend}: published route enters owned inventory"
+        );
+        let taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation_id.to_owned(),
+                expected_owner_node_id: activation.owner_node_id.clone(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "activation-survivor".to_owned(),
+                now_ms: 250,
+                lease_expires_at_ms: 350,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: take over published route: {error}"))
+            .expect("published route takeover");
+        assert_eq!(taken.owner_node_id, "activation-survivor", "{backend}");
+        let replayed = store
+            .publish_media_session_activation(user.id, request_id, incarnation_id, 251)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay published after takeover: {error}"))
+            .expect("resolved publication replay after takeover");
+        assert_eq!(replayed.incarnation_id, incarnation_id, "{backend}");
+        assert_eq!(replayed.owner_node_id, "activation-survivor", "{backend}");
+
+        let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
+        let race_activation = MediaSessionActivation {
+            incarnation_id: race_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
+            user_id: user.id,
+            playback_id: "activation-race-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("activation-race-request".to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: activation.owner_node_id.clone(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"race"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 200,
+            lease_expires_at_ms: 400,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "activation-race-request",
+                    &fingerprint,
+                    &race_activation.playback_id,
+                    race_incarnation,
+                    200,
+                    300,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim activation race: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "activation-race-request",
+                race_incarnation,
+                &race_activation.owner_node_id,
+                201,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own activation race: {error}")));
+        store
+            .activate_media_session(&race_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare activation race: {error}"))
+            .expect("activation race prepare");
+        confirm_media_activation(store.as_ref(), &race_activation, 0, backend).await;
+        let (abandon_result, publish_result) = tokio::join!(
+            store.settle_media_session_activation(
+                &race_activation,
+                MediaSessionActivationSettlement::Abandon,
+                220,
+            ),
+            store.publish_media_session_activation(
+                user.id,
+                "activation-race-request",
+                race_incarnation,
+                220,
+            )
+        );
+        let abandon_result =
+            abandon_result.unwrap_or_else(|error| panic!("{backend}: race abandon: {error}"));
+        let publish_result =
+            publish_result.unwrap_or_else(|error| panic!("{backend}: race publish: {error}"));
+        let final_route = store
+            .media_session_route_by_incarnation(race_incarnation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read activation race route: {error}"))
+            .expect("activation race route remains durable");
+        let publish_won = final_route.state == "active";
+        let abandon_won = final_route.state == "ended";
+        assert_eq!(
+            publish_won as u8 + abandon_won as u8,
+            1,
+            "{backend}: one race winner"
+        );
+        if publish_won {
+            assert!(
+                publish_result.is_some(),
+                "{backend}: publication winner result"
+            );
+            assert_eq!(final_route.publication_ready_at_ms, 0, "{backend}");
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        user.id,
+                        "activation-race-request",
+                        &fingerprint,
+                        &race_activation.playback_id,
+                        race_incarnation,
+                        221,
+                        321,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: replay race publication: {error}")),
+                MediaSessionRequestClaim::Resolved(_)
+            ));
+        } else {
+            assert!(
+                publish_result.is_none(),
+                "{backend}: abandoned route was published"
+            );
+            assert!(abandon_result.is_none(), "{backend}: abandon winner result");
+            assert_eq!(
+                final_route.publication_ready_at_ms,
+                MEDIA_SESSION_PUBLICATION_BLOCKED
+            );
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        user.id,
+                        "activation-race-request",
+                        &fingerprint,
+                        &race_activation.playback_id,
+                        "00000000-0000-4000-8000-0000000000e5",
+                        221,
+                        321,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: reclaim abandoned race: {error}")),
+                MediaSessionRequestClaim::Acquired { .. }
+            ));
+        }
+
+        let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
+        let finite_request_id = "activation-finite-handoff";
+        let finite_activation = MediaSessionActivation {
+            incarnation_id: finite_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
+            user_id: user.id,
+            playback_id: activation.playback_id.clone(),
+            expected_predecessor_incarnation_id: Some(incarnation_id.to_owned()),
+            fence_predecessor: true,
+            request_id: Some(finite_request_id.to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "finite-owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"finite"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 260,
+            lease_expires_at_ms: 360,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    260,
+                    320,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim finite handoff: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                finite_request_id,
+                finite_incarnation,
+                &finite_activation.owner_node_id,
+                261,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own finite handoff: {error}")));
+        store
+            .activate_media_session(&finite_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare finite handoff: {error}"))
+            .expect("finite handoff prepare");
+        let finite_boundary = 261_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let finite_claim_expires_at_ms = finite_boundary.saturating_add(101);
+        confirm_media_activation(store.as_ref(), &finite_activation, finite_boundary, backend)
+            .await;
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    300,
+                    360,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay finite handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                claim_expires_at_ms,
+                ..
+            } if claim_expires_at_ms == finite_claim_expires_at_ms
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("finite-owner", 300)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: own finite route: {error}"))
+                .len(),
+            1,
+            "{backend}: finite starting route is renewable"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "finite-owner",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 1,
+                        fetched_through_ms: 1,
+                        media_sequence: 1,
+                    }],
+                    300,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew finite route: {error}")),
+            vec![finite_incarnation.to_owned()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .expired_media_sessions(401, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list finite takeover: {error}"))
+                .iter()
+                .filter(|route| route.incarnation_id == finite_incarnation)
+                .count(),
+            1,
+            "{backend}: finite starting route is failover-eligible"
+        );
+        let finite_taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: finite_incarnation.to_owned(),
+                expected_owner_node_id: "finite-owner".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "finite-survivor".to_owned(),
+                now_ms: 401,
+                lease_expires_at_ms: 501,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: take over finite route: {error}"))
+            .expect("finite route takeover");
+        assert_eq!(finite_taken.owner_node_id, "finite-survivor", "{backend}");
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    402,
+                    502,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay taken-over handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                owner_node_id: Some(owner),
+                claim_expires_at_ms,
+                ..
+            } if owner == "finite-survivor"
+                && claim_expires_at_ms == finite_claim_expires_at_ms
+        ));
+        let finite_ready = store
+            .complete_media_session_handoff(
+                finite_incarnation,
+                "finite-survivor",
+                2,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                402,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete finite handoff: {error}"))
+            .expect("finite handoff ready");
+        assert_eq!(finite_ready.publication_ready_at_ms, 0, "{backend}");
+        let ready_claim_expires_at_ms = finite_ready.lease_expires_at_ms.saturating_add(1);
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    403,
+                    503,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay ready handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                owner_node_id: Some(owner),
+                claim_expires_at_ms,
+                ..
+            } if owner == "finite-survivor"
+                && claim_expires_at_ms == ready_claim_expires_at_ms
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("finite-survivor", 403)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: own ready retry grace: {error}"))
+                .len(),
+            1,
+            "{backend}: completed handoff retains one retry grace lease"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "finite-survivor",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 2,
+                        produced_playable_through_ms: 2,
+                        fetched_through_ms: 2,
+                        media_sequence: 2,
+                    }],
+                    403,
+                    550,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew ready retry grace: {error}")),
+            vec![finite_incarnation.to_owned()],
+            "{backend}"
+        );
+        assert!(
+            store
+                .owned_media_sessions("finite-survivor", 404)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: close ready retry grace: {error}"))
+                .is_empty(),
+            "{backend}: ready starting route leaves inventory after one grace renewal"
+        );
+        assert!(
+            store
+                .renew_media_sessions(
+                    "finite-survivor",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 2,
+                        produced_playable_through_ms: 3,
+                        fetched_through_ms: 3,
+                        media_sequence: 3,
+                    }],
+                    404,
+                    600,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reject extra ready renewal: {error}"))
+                .is_empty(),
+            "{backend}: ready retry grace cannot renew twice"
+        );
+        let finite_published = store
+            .publish_media_session_activation(user.id, finite_request_id, finite_incarnation, 405)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish taken-over handoff: {error}"))
+            .expect("taken-over finite publication");
+        assert_eq!(
+            finite_published.owner_node_id, "finite-survivor",
+            "{backend}"
+        );
+
+        let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
+        let failed_confirm_activation = MediaSessionActivation {
+            incarnation_id: failed_confirm_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
+            user_id: user.id,
+            playback_id: "activation-failed-confirm-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("activation-failed-confirm".to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: activation.owner_node_id,
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 300,
+            lease_expires_at_ms: 500,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "activation-failed-confirm",
+                    &"e".repeat(64),
+                    &failed_confirm_activation.playback_id,
+                    failed_confirm_incarnation,
+                    300,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim failed-confirm request: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "activation-failed-confirm",
+                failed_confirm_incarnation,
+                &failed_confirm_activation.owner_node_id,
+                301,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own failed-confirm request: {error}")));
+        store
+            .activate_media_session(&failed_confirm_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare failed-confirm route: {error}"))
+            .expect("failed-confirm route prepare");
+        confirm_media_activation(store.as_ref(), &failed_confirm_activation, 0, backend).await;
+        assert!(store
+            .fail_media_session_request(
+                user.id,
+                "activation-failed-confirm",
+                failed_confirm_incarnation,
+                301,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail confirmed request: {error}")));
+        let retried_confirmation = store
+            .settle_media_session_activation(
+                &failed_confirm_activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                302,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry failed confirmation: {error}"))
+            .expect("failed request confirmation remains ready");
+        assert_eq!(retried_confirmation.publication_ready_at_ms, 0, "{backend}");
+        store
+            .settle_media_session_activation(
+                &failed_confirm_activation,
+                MediaSessionActivationSettlement::Abandon,
+                303,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: abandon failed confirmation: {error}"));
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -949,8 +1671,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .await
             .unwrap_or_else(|error| panic!("{backend}: assign request owner: {error}")));
 
-        let first = store
-            .activate_media_session(&MediaSessionActivation {
+        let first_activation = MediaSessionActivation {
                 incarnation_id: incarnation_a.to_owned(),
                 session_id: session_a.to_owned(),
                 user_id: first_user.id,
@@ -962,15 +1683,20 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: r#"{"version":1}"#.to_owned(),
                 response_json: r#"{"session":"a"}"#.to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 12_500,
                 now_ms: 130,
                 lease_expires_at_ms: 330,
-            })
+        };
+        let first = store
+            .activate_media_session(&first_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: activate first session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: first activation must win"));
+        let confirmed_first = confirm_media_activation(store.as_ref(), &first_activation, 0, backend).await;
         assert!(first.predecessor.is_none(), "{backend}");
         assert_eq!(first.route.owner_epoch, 1, "{backend}");
+        assert_eq!(confirmed_first.publication_ready_at_ms, 0, "{backend}");
         assert!(store
             .acquire_cache_consumer_pin(
                 &CacheConsumerPin {
@@ -998,14 +1724,52 @@ async fn media_session_contract_runs_through_dyn_store() {
                     240,
                 )
                 .await
+                .unwrap_or_else(|error| panic!("{backend}: in-flight activation request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. }
+                if incarnation_id == incarnation_a
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("node-a", 140)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list unpublished route: {error}"))
+                .len(),
+            0,
+            "{backend}: confirmed but unpublished route remains hidden"
+        );
+        assert!(store
+            .publish_media_session_activation(first_user.id, "attempt-a", incarnation_a, 141)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish activation: {error}"))
+            .is_some());
+        assert_eq!(
+            store
+                .owned_media_sessions("node-a", 141)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list published route: {error}"))
+                .len(),
+            1,
+            "{backend}: published route enters owned inventory"
+        );
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    140,
+                    240,
+                )
+                .await
                 .unwrap_or_else(|error| panic!("{backend}: replay resolved request: {error}")),
             MediaSessionRequestClaim::Resolved(route) if route.session_id == session_a
         ));
 
         let session_b = "00000000-0000-4000-8000-0000000000b2";
         let incarnation_b = "00000000-0000-4000-8000-0000000000a3";
-        let second = store
-            .activate_media_session(&MediaSessionActivation {
+        let second_activation = MediaSessionActivation {
                 incarnation_id: incarnation_b.to_owned(),
                 session_id: session_b.to_owned(),
                 user_id: second_user.id,
@@ -1017,17 +1781,22 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-b".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 // Write-once at activation. Every generation's frontier is
                 // measured from this zero, so a claim that rewrote it would
                 // silently reinterpret every offset already published.
                 media_origin_ms: 90_000,
                 now_ms: 145,
                 lease_expires_at_ms: 345,
-            })
+        };
+        let second = store
+            .activate_media_session(&second_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: activate cross-user session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: cross-user activation must win"));
+        let confirmed_second = confirm_media_activation(store.as_ref(), &second_activation, 0, backend).await;
         assert!(second.predecessor.is_none(), "{backend}");
+        assert_eq!(confirmed_second.publication_ready_at_ms, 0, "{backend}");
         assert_eq!(
             store
                 .owned_media_sessions("node-b", 344)
@@ -1040,26 +1809,37 @@ async fn media_session_contract_runs_through_dyn_store() {
 
         let session_a2 = "00000000-0000-4000-8000-0000000000b3";
         let incarnation_a2 = "00000000-0000-4000-8000-0000000000a4";
+        let superseding_activation = MediaSessionActivation {
+            incarnation_id: incarnation_a2.to_owned(),
+            session_id: session_a2.to_owned(),
+            user_id: first_user.id,
+            playback_id: "shared-playback".to_owned(),
+            expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
+            fence_predecessor: true,
+            request_id: None,
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "node-a".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 150,
+            lease_expires_at_ms: 350,
+        };
         let superseding = store
-            .activate_media_session(&MediaSessionActivation {
-                incarnation_id: incarnation_a2.to_owned(),
-                session_id: session_a2.to_owned(),
-                user_id: first_user.id,
-                playback_id: "shared-playback".to_owned(),
-                expected_predecessor_incarnation_id: Some(incarnation_a.to_owned()),
-                fence_predecessor: true,
-                request_id: None,
-                request_fingerprint: fingerprint.clone(),
-                owner_node_id: "node-a".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                media_origin_ms: 0,
-                now_ms: 150,
-                lease_expires_at_ms: 350,
-            })
+            .activate_media_session(&superseding_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: supersede session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: superseding activation must win"));
+        let publication_not_before_ms =
+            151_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let confirmed_superseding = confirm_media_activation(
+            store.as_ref(),
+            &superseding_activation,
+            publication_not_before_ms,
+            backend,
+        )
+        .await;
         assert_eq!(
             superseding
                 .predecessor
@@ -1081,13 +1861,80 @@ async fn media_session_contract_runs_through_dyn_store() {
             .unwrap_or_else(|error| panic!("{backend}: inspect predecessor pin: {error}")),
             "{backend}: fencing a predecessor must delete its shared-cache pin"
         );
+        let ended_predecessor = store
+            .media_session_route(session_a)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: predecessor route remains durable"));
+        assert_eq!(ended_predecessor.state, "ended", "{backend}");
         assert_eq!(
-            store
-                .media_session_route(session_a)
-                .await
-                .unwrap_or_else(|error| panic!("{backend}: inspect predecessor: {error}"))
-                .map(|route| route.state),
-            Some("ended".to_owned()),
+            ended_predecessor.terminal_reason.as_deref(),
+            Some("superseded"),
+            "{backend}"
+        );
+        assert_eq!(
+            ended_predecessor.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+        let terminal_projection_not_before_ms =
+            151_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let armed_terminal = store
+            .arm_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                terminal_projection_not_before_ms,
+                151,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm terminal projection: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal projection must arm"));
+        assert_eq!(
+            armed_terminal.publication_ready_at_ms,
+            terminal_projection_not_before_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_projection_not_before_ms,
+                },
+                152,
+            )
+            .await
+            .is_err(),
+            "{backend}: an unelapsed terminal boundary is not proof"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                2,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                152,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong terminal epoch: {error}"))
+            .is_none(),
+            "{backend}: a stale owner epoch cannot clear terminal projection"
+        );
+        let projected_terminal = store
+            .complete_media_session_terminal_projection(
+                incarnation_a,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                152,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete terminal projection: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal projection must complete"));
+        assert_eq!(
+            projected_terminal.publication_ready_at_ms, 0,
             "{backend}"
         );
         assert_eq!(
@@ -1097,6 +1944,192 @@ async fn media_session_contract_runs_through_dyn_store() {
                 .unwrap_or_else(|error| panic!("{backend}: inspect current incarnation: {error}"))
                 .map(|route| route.session_id),
             Some(session_a2.to_owned()),
+            "{backend}"
+        );
+        assert_eq!(
+            confirmed_superseding.publication_ready_at_ms,
+            publication_not_before_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "wrong-owner",
+                1,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                151,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong handoff owner: {error}"))
+            .is_none());
+        let armed = confirmed_superseding.clone();
+        assert_eq!(
+            armed.publication_ready_at_ms,
+            publication_not_before_ms,
+            "{backend}"
+        );
+        let renewed = store
+            .renew_media_sessions(
+                "node-a",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_a2.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 10_000,
+                    fetched_through_ms: 5_000,
+                    media_sequence: 7,
+                }],
+                155,
+                500,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew successor before replay: {error}"));
+        assert_eq!(renewed, vec![incarnation_a2.to_owned()], "{backend}");
+        let armed_replay = store
+            .activate_media_session(&superseding_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay armed activation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: armed activation replay must resolve"));
+        assert_eq!(
+            armed_replay.route.publication_ready_at_ms, publication_not_before_ms,
+            "{backend}: replay returns the durable armed boundary"
+        );
+        assert_eq!(armed_replay.route.lease_expires_at_ms, 500, "{backend}");
+        assert_eq!(
+            armed_replay.route.produced_playable_through_ms, 10_000,
+            "{backend}: replay preserves produced progress"
+        );
+        assert_eq!(
+            armed_replay.route.fetched_through_ms, 5_000,
+            "{backend}: replay preserves fetched progress"
+        );
+        assert_eq!(armed_replay.route.media_sequence, 7, "{backend}");
+        assert_eq!(armed_replay.route.updated_at_ms, 155, "{backend}");
+        assert!(store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: publication_not_before_ms - 1,
+                },
+                publication_not_before_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong handoff boundary: {error}"))
+            .is_none(),
+            "{backend}: a different armed boundary cannot publish"
+        );
+        let published = store
+            .complete_media_session_handoff(
+                incarnation_a2,
+                "node-a",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: publication_not_before_ms,
+                },
+                publication_not_before_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete elapsed handoff: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: elapsed handoff must complete"));
+        assert_eq!(published.publication_ready_at_ms, 0, "{backend}");
+        let published_replay = store
+            .activate_media_session(&superseding_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay published activation: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: published activation replay must resolve"));
+        assert_eq!(
+            published_replay.route.publication_ready_at_ms, 0,
+            "{backend}: replay cannot restore the activation sentinel"
+        );
+        assert_eq!(published_replay.route.lease_expires_at_ms, 500, "{backend}");
+        assert_eq!(
+            published_replay.route.produced_playable_through_ms, 10_000,
+            "{backend}"
+        );
+        assert_eq!(published_replay.route.fetched_through_ms, 5_000, "{backend}");
+        assert_eq!(published_replay.route.media_sequence, 7, "{backend}");
+
+        let boundary_incarnation = "00000000-0000-4000-8000-0000000000aa";
+        let boundary_session = "00000000-0000-4000-8000-0000000000bb";
+        store
+            .activate_media_session(&MediaSessionActivation {
+                incarnation_id: boundary_incarnation.to_owned(),
+                session_id: boundary_session.to_owned(),
+                user_id: second_user.id,
+                playback_id: "terminal-boundary".to_owned(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "node-b".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: 153,
+                lease_expires_at_ms: 353,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: activate terminal-boundary route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal-boundary activation must win"));
+        let ended_boundary = store
+            .end_media_session(boundary_session, "admin_stop", 154)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: end terminal-boundary route: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal-boundary route must end"));
+        assert_eq!(
+            ended_boundary.publication_ready_at_ms,
+            MEDIA_SESSION_PUBLICATION_BLOCKED,
+            "{backend}"
+        );
+        let terminal_boundary_ms =
+            155_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let armed_boundary = store
+            .arm_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                terminal_boundary_ms,
+                155,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: arm terminal fallback: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal fallback must arm"));
+        assert_eq!(
+            armed_boundary.publication_ready_at_ms, terminal_boundary_ms,
+            "{backend}"
+        );
+        assert!(store
+            .complete_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_boundary_ms - 1,
+                },
+                terminal_boundary_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reject wrong terminal boundary: {error}"))
+            .is_none(),
+            "{backend}: a different terminal boundary cannot complete projection"
+        );
+        let completed_boundary = store
+            .complete_media_session_terminal_projection(
+                boundary_incarnation,
+                "node-b",
+                1,
+                MediaSessionProjectionCompletion::SafetyBoundaryElapsed {
+                    expected_not_before_ms: terminal_boundary_ms,
+                },
+                terminal_boundary_ms,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete terminal fallback: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: terminal fallback must complete"));
+        assert_eq!(
+            completed_boundary.publication_ready_at_ms, 0,
             "{backend}"
         );
 
@@ -1113,6 +2146,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 160,
                 lease_expires_at_ms: 360,
@@ -1136,6 +2170,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 161,
                 lease_expires_at_ms: 361,
@@ -1206,7 +2241,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             "{backend}"
         );
         assert_eq!(renewed_route.fetched_through_ms, 10_000, "{backend}");
-        assert_eq!(renewed_route.media_sequence, 5, "{backend}");
+        assert_eq!(renewed_route.media_sequence, 7, "{backend}");
 
         // Monotone progress (§8.8). A generation that restarts its local
         // encoder resets its own index and will heartbeat a lower frontier;
@@ -1241,7 +2276,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         assert_eq!(held.produced_playable_through_ms, 20_000, "{backend}");
         assert_eq!(held.fetched_through_ms, 10_000, "{backend}");
         assert_eq!(
-            held.media_sequence, 5,
+            held.media_sequence, 7,
             "{backend}: the sequence high-water mark is what a successor \
              starts above; it may never move backwards"
         );
@@ -1288,7 +2323,7 @@ async fn media_session_contract_runs_through_dyn_store() {
         );
 
         let expired = store
-            .expired_media_sessions(399, 64)
+            .expired_media_sessions(399, None, 64)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list takeover candidates: {error}"));
         let expired_b = expired
@@ -1341,7 +2376,7 @@ async fn media_session_contract_runs_through_dyn_store() {
             .is_empty());
 
         let ended = store
-            .end_media_session(session_a2, 410)
+            .end_media_session(session_a2, "deleted", 410)
             .await
             .unwrap_or_else(|error| panic!("{backend}: end current session: {error}"))
             .unwrap_or_else(|| panic!("{backend}: ended route exists"));
@@ -1427,6 +2462,7 @@ async fn media_session_contract_runs_through_dyn_store() {
                 owner_node_id: "node-a".to_owned(),
                 recipe_json: "{}".to_owned(),
                 response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
                 media_origin_ms: 0,
                 now_ms: 440,
                 lease_expires_at_ms: 640,
@@ -1507,26 +2543,29 @@ async fn terminal_control_ack_atomically_fences_takeover_and_outlives_settlement
             .unwrap_or_else(|error| panic!("{backend}: create user: {error}"));
         let incarnation = "00000000-0000-4000-8000-00000000f001";
         let session = "00000000-0000-4000-8000-00000000f002";
+        let terminal_activation = MediaSessionActivation {
+            incarnation_id: incarnation.to_owned(),
+            session_id: session.to_owned(),
+            user_id: user.id,
+            playback_id: "terminal-ack-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: "f".repeat(64),
+            owner_node_id: "node-terminal".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_000,
+            lease_expires_at_ms: 10_000,
+        };
         store
-            .activate_media_session(&MediaSessionActivation {
-                incarnation_id: incarnation.to_owned(),
-                session_id: session.to_owned(),
-                user_id: user.id,
-                playback_id: "terminal-ack-playback".to_owned(),
-                expected_predecessor_incarnation_id: None,
-                fence_predecessor: false,
-                request_id: None,
-                request_fingerprint: "f".repeat(64),
-                owner_node_id: "node-terminal".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                media_origin_ms: 0,
-                now_ms: 1_000,
-                lease_expires_at_ms: 10_000,
-            })
+            .activate_media_session(&terminal_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
             .unwrap_or_else(|| panic!("{backend}: activation must win"));
+        confirm_media_activation(store.as_ref(), &terminal_activation, 0, backend).await;
         let acknowledgement = MediaSessionTerminalAck {
             incarnation_id: incarnation.to_owned(),
             session_id: session.to_owned(),
@@ -1631,26 +2670,29 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         let incarnation = "00000000-0000-4000-8000-00000000e001";
         let session = "00000000-0000-4000-8000-00000000e002";
 
+        let takeover_activation = MediaSessionActivation {
+            incarnation_id: incarnation.to_owned(),
+            session_id: session.to_owned(),
+            user_id: user.id,
+            playback_id: "takeover-end-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: None,
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "node-old".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 4_000,
+            now_ms: 1_000,
+            lease_expires_at_ms: 2_000,
+        };
         store
-            .activate_media_session(&MediaSessionActivation {
-                incarnation_id: incarnation.to_owned(),
-                session_id: session.to_owned(),
-                user_id: user.id,
-                playback_id: "takeover-end-playback".to_owned(),
-                expected_predecessor_incarnation_id: None,
-                fence_predecessor: false,
-                request_id: None,
-                request_fingerprint: fingerprint.clone(),
-                owner_node_id: "node-old".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                media_origin_ms: 4_000,
-                now_ms: 1_000,
-                lease_expires_at_ms: 2_000,
-            })
+            .activate_media_session(&takeover_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: activate: {error}"))
             .unwrap_or_else(|| panic!("{backend}: activation must win"));
+        confirm_media_activation(store.as_ref(), &takeover_activation, 0, backend).await;
 
         let taken = store
             .claim_media_session_takeover(&MediaSessionTakeover {
@@ -1667,16 +2709,60 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
         assert_eq!(taken.owner_node_id, "node-new", "{backend}");
         assert_eq!(taken.owner_epoch, 2, "{backend}");
 
-        let ended = store
-            .end_media_session(session, 3_000)
+        assert!(store
+            .end_media_session_if_owner(&MediaSessionEnd {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                expected_owner_node_id: "node-old".to_owned(),
+                expected_owner_epoch: 1,
+                expected_lease_expires_at_ms: 2_000,
+                terminal_reason: "replaced".to_owned(),
+                now_ms: 2_500,
+            })
             .await
-            .unwrap_or_else(|error| panic!("{backend}: end: {error}"))
-            .unwrap_or_else(|| panic!("{backend}: ending a live session returns its route"));
+            .unwrap_or_else(|error| panic!("{backend}: stale exact end: {error}"))
+            .is_none());
+
+        assert!(
+            store
+                .end_media_session_if_owner(&MediaSessionEnd {
+                    incarnation_id: incarnation.to_owned(),
+                    session_id: session.to_owned(),
+                    expected_owner_node_id: "node-new".to_owned(),
+                    expected_owner_epoch: 2,
+                    expected_lease_expires_at_ms: 13_000,
+                    terminal_reason: "replaced".to_owned(),
+                    now_ms: 2_500,
+                })
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale lease-boundary end: {error}"))
+                .is_none(),
+            "{backend}: an exact owner read from before renewal cannot end the renewed lease"
+        );
+
+        let ended = store
+            .end_media_session_if_owner(&MediaSessionEnd {
+                incarnation_id: incarnation.to_owned(),
+                session_id: session.to_owned(),
+                expected_owner_node_id: "node-new".to_owned(),
+                expected_owner_epoch: 2,
+                expected_lease_expires_at_ms: 14_000,
+                terminal_reason: "admin_stop".to_owned(),
+                now_ms: 3_000,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: exact end: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: exact current-owner end returns its route"));
         assert_eq!(
             ended.owner_node_id, "node-new",
             "{backend}: the end must name the owner it is actually stopping"
         );
         assert_eq!(ended.owner_epoch, 2, "{backend}");
+        assert_eq!(
+            ended.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}: the first terminal decision is returned"
+        );
 
         let route = store
             .media_session_route(session)
@@ -1684,6 +2770,11 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
             .unwrap_or_else(|error| panic!("{backend}: read ended route: {error}"))
             .unwrap_or_else(|| panic!("{backend}: the ended row is retained"));
         assert_eq!(route.state, "ended", "{backend}");
+        assert_eq!(
+            route.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}"
+        );
         assert!(
             route.lease_expires_at_ms <= 3_000,
             "{backend}: an ended incarnation keeps no live lease"
@@ -1717,17 +2808,22 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
 
         // Idempotent, and still reporting the same owner.
         let again = store
-            .end_media_session(session, 3_100)
+            .end_media_session(session, "deleted", 3_100)
             .await
             .unwrap_or_else(|error| panic!("{backend}: repeat end: {error}"))
             .unwrap_or_else(|| panic!("{backend}: repeat end still resolves the route"));
         assert_eq!(again.owner_node_id, "node-new", "{backend}");
+        assert_eq!(
+            again.terminal_reason.as_deref(),
+            Some("admin_stop"),
+            "{backend}: an idempotent later End cannot relabel the first writer"
+        );
 
         // §7.2: a delete racing a takeover resolves to ended. Once ended, no
         // survivor may claim the incarnation back into life.
         assert!(
             store
-                .expired_media_sessions(4_000, 64)
+                .expired_media_sessions(4_000, None, 64)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: post-end inventory: {error}"))
                 .iter()
@@ -1754,6 +2850,92 @@ async fn ending_a_taken_over_session_acts_on_the_current_owner() {
 }
 
 #[tokio::test]
+async fn media_session_expired_inventory_cursor_advances_past_a_full_refused_page() {
+    for_each_backend(|store, backend| async move {
+        let user = store
+            .create_user("session-expiry-cursor-user", "hash", false)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: create cursor user: {error}"));
+        let fingerprint = "e".repeat(64);
+        for index in 0_u128..33 {
+            let incarnation_id = uuid::Uuid::from_u128(0x4000 + index).to_string();
+            let activation = MediaSessionActivation {
+                incarnation_id,
+                session_id: uuid::Uuid::from_u128(0x5000 + index).to_string(),
+                user_id: user.id,
+                playback_id: format!("expiry-cursor-{index}"),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "cursor-owner".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: 100,
+                lease_expires_at_ms: 200
+                    + i64::try_from(index).expect("33-row cursor index fits in i64"),
+            };
+            store
+                .activate_media_session(&activation)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: seed cursor route {index}: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: cursor route {index} must activate"));
+            confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        }
+
+        let first = store
+            .expired_media_sessions(1_000, None, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: first cursor page: {error}"));
+        assert_eq!(first.len(), 16, "{backend}");
+        let second = store
+            .expired_media_sessions(
+                1_000,
+                first.last().map(MediaSessionTakeoverCursor::from),
+                16,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: second cursor page: {error}"));
+        assert_eq!(second.len(), 16, "{backend}");
+        let third = store
+            .expired_media_sessions(
+                1_000,
+                second.last().map(MediaSessionTakeoverCursor::from),
+                16,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: third cursor page: {error}"));
+        assert_eq!(third.len(), 1, "{backend}");
+
+        let routes = first
+            .iter()
+            .chain(&second)
+            .chain(&third)
+            .collect::<Vec<_>>();
+        assert_eq!(routes.len(), 33, "{backend}");
+        assert_eq!(
+            routes
+                .iter()
+                .map(|route| route.incarnation_id.as_str())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            33,
+            "{backend}: an exclusive cursor must neither repeat nor skip a route"
+        );
+        assert!(
+            routes.windows(2).all(|pair| {
+                (pair[0].lease_expires_at_ms, pair[0].incarnation_id.as_str())
+                    < (pair[1].lease_expires_at_ms, pair[1].incarnation_id.as_str())
+            }),
+            "{backend}: pages preserve the documented keyset ordering"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
 async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
     for_each_backend(|store, backend| async move {
         let user = store
@@ -1766,26 +2948,29 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             let incarnation_id = uuid::Uuid::from_u128(0x1000 + index).to_string();
             let session_id = uuid::Uuid::from_u128(0x2000 + index).to_string();
             let playback_id = format!("cap-playback-{index}");
+            let activation = MediaSessionActivation {
+                incarnation_id: incarnation_id.clone(),
+                session_id,
+                user_id: user.id,
+                playback_id: playback_id.clone(),
+                expected_predecessor_incarnation_id: None,
+                fence_predecessor: false,
+                request_id: None,
+                request_fingerprint: fingerprint.clone(),
+                owner_node_id: "cap-node".to_owned(),
+                recipe_json: "{}".to_owned(),
+                response_json: "{}".to_owned(),
+                publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+                media_origin_ms: 0,
+                now_ms: 100,
+                lease_expires_at_ms: 10_000,
+            };
             store
-                .activate_media_session(&MediaSessionActivation {
-                    incarnation_id: incarnation_id.clone(),
-                    session_id,
-                    user_id: user.id,
-                    playback_id: playback_id.clone(),
-                    expected_predecessor_incarnation_id: None,
-                    fence_predecessor: false,
-                    request_id: None,
-                    request_fingerprint: fingerprint.clone(),
-                    owner_node_id: "cap-node".to_owned(),
-                    recipe_json: "{}".to_owned(),
-                    response_json: "{}".to_owned(),
-                    media_origin_ms: 0,
-                    now_ms: 100,
-                    lease_expires_at_ms: 10_000,
-                })
+                .activate_media_session(&activation)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: seed capped session: {error}"))
                 .unwrap_or_else(|| panic!("{backend}: capped session {index} must activate"));
+            confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
             if index == 0 {
                 predecessor = Some(incarnation_id);
             }
@@ -1837,27 +3022,42 @@ async fn media_session_same_playback_replacement_is_admitted_at_user_cap() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: own capped replacement: {error}")));
+        let replacement_activation = MediaSessionActivation {
+            incarnation_id: replacement.clone(),
+            session_id: uuid::Uuid::from_u128(0x4000).to_string(),
+            user_id: user.id,
+            playback_id: "cap-playback-0".to_owned(),
+            expected_predecessor_incarnation_id: predecessor.clone(),
+            fence_predecessor: true,
+            request_id: Some("cap-replacement".to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "cap-node".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 1_003,
+            lease_expires_at_ms: 10_000,
+        };
         let outcome = store
-            .activate_media_session(&MediaSessionActivation {
-                incarnation_id: replacement,
-                session_id: uuid::Uuid::from_u128(0x4000).to_string(),
-                user_id: user.id,
-                playback_id: "cap-playback-0".to_owned(),
-                expected_predecessor_incarnation_id: predecessor,
-                fence_predecessor: true,
-                request_id: Some("cap-replacement".to_owned()),
-                request_fingerprint: fingerprint,
-                owner_node_id: "cap-node".to_owned(),
-                recipe_json: "{}".to_owned(),
-                response_json: "{}".to_owned(),
-                media_origin_ms: 0,
-                now_ms: 1_003,
-                lease_expires_at_ms: 10_000,
-            })
+            .activate_media_session(&replacement_activation)
             .await
             .unwrap_or_else(|error| panic!("{backend}: activate capped replacement: {error}"))
             .unwrap_or_else(|| panic!("{backend}: capped replacement must activate"));
         assert!(outcome.predecessor.is_some(), "{backend}");
+        let publication_not_before_ms =
+            1_003_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let confirmed_replacement = confirm_media_activation(
+            store.as_ref(),
+            &replacement_activation,
+            publication_not_before_ms,
+            backend,
+        )
+        .await;
+        assert_eq!(
+            confirmed_replacement.publication_ready_at_ms, publication_not_before_ms,
+            "{backend}"
+        );
     })
     .await;
 }
@@ -1940,6 +3140,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: 120,
             lease_expires_at_ms: 320,
@@ -2006,6 +3207,7 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
             owner_node_id: "removed-node".to_owned(),
             recipe_json: "{}".to_owned(),
             response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
             media_origin_ms: 0,
             now_ms: 150,
             lease_expires_at_ms: 350,
@@ -2013,6 +3215,99 @@ async fn hiqlite_media_activation_requires_its_lease_mutation() {
         .await
         .expect("reject removed-owner media lease")
         .is_none());
+}
+
+#[cfg(feature = "hiqlite-contract-tests")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+async fn hiqlite_stale_activation_transaction_cannot_revoke_a_renewed_lease() {
+    let _case = HIQLITE_CASE.lock().await;
+    let cluster = ContractCluster::start().await;
+    let store = open_contract_hiqlite_store(&cluster).await;
+    store
+        .validation_reset_contract_state()
+        .await
+        .expect("reset replicated activation replay state");
+    let user = store
+        .create_user("activation-replay-user", "hash", false)
+        .await
+        .expect("create activation replay user");
+    let incarnation_id = "00000000-0000-4000-8000-0000000000d1";
+    let session_id = "00000000-0000-4000-8000-0000000000d2";
+    let activation = MediaSessionActivation {
+        incarnation_id: incarnation_id.to_owned(),
+        session_id: session_id.to_owned(),
+        user_id: user.id,
+        playback_id: "activation-replay-playback".to_owned(),
+        expected_predecessor_incarnation_id: None,
+        fence_predecessor: false,
+        request_id: None,
+        request_fingerprint: "d".repeat(64),
+        owner_node_id: "activation-replay-node".to_owned(),
+        recipe_json: "{}".to_owned(),
+        response_json: "{}".to_owned(),
+        publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+        media_origin_ms: 0,
+        now_ms: 100,
+        lease_expires_at_ms: 300,
+    };
+    let (pointer_read, release_stale_transaction) =
+        HiqliteAuthStore::validation_pause_next_activation_after_pointer_read();
+    let stale_store = store.clone();
+    let stale_activation = activation.clone();
+    let stale_replay =
+        tokio::spawn(async move { stale_store.activate_media_session(&stale_activation).await });
+    tokio::time::timeout(Duration::from_secs(10), pointer_read)
+        .await
+        .expect("stale activation reaches pointer-read seam")
+        .expect("stale activation publishes pointer-read seam");
+
+    store
+        .activate_media_session(&activation)
+        .await
+        .expect("winning activation")
+        .expect("winning activation commits");
+    confirm_media_activation(&store, &activation, 0, "hiqlite").await;
+    assert_eq!(
+        store
+            .renew_media_sessions(
+                "activation-replay-node",
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_id.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 22_000,
+                    fetched_through_ms: 11_000,
+                    media_sequence: 9,
+                }],
+                200,
+                1_000,
+            )
+            .await
+            .expect("renew winning activation"),
+        vec![incarnation_id.to_owned()]
+    );
+    release_stale_transaction
+        .send(())
+        .expect("release stale activation transaction");
+
+    let replay = stale_replay
+        .await
+        .expect("join stale activation replay")
+        .expect("stale activation replay result")
+        .expect("stale activation resolves exact committed route");
+    assert_eq!(replay.route.lease_expires_at_ms, 1_000);
+    assert_eq!(replay.route.updated_at_ms, 200);
+    assert_eq!(replay.route.produced_playable_through_ms, 22_000);
+    assert_eq!(replay.route.fetched_through_ms, 11_000);
+    assert_eq!(replay.route.media_sequence, 9);
+    assert_eq!(
+        store
+            .media_session_route_by_incarnation(incarnation_id)
+            .await
+            .expect("read route after stale replay")
+            .expect("route remains active"),
+        replay.route,
+        "the stale transaction must be entirely read-only"
+    );
 }
 
 #[tokio::test]
@@ -5952,7 +7247,7 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
 
 #[cfg(feature = "hiqlite-contract-tests")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
+async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
     let _case = HIQLITE_CASE.lock().await;
     let cluster = ContractCluster::start().await;
     let client = Client::remote(
@@ -5984,6 +7279,73 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
 
     client
         .txn([
+            (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_bound_terminal_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_supersede_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TRIGGER analysis_requests_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX analysis_requests_one_active_source",
+                hiqlite::params!(),
+            ),
+            ("DROP INDEX analysis_requests_status", hiqlite::params!()),
+            ("DROP INDEX analysis_requests_due", hiqlite::params!()),
+            ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
+            (
+                "DROP TRIGGER cluster_fragment_indexes_cancel_source",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_locations_node",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_artifacts_file",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_due",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_locations",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP TABLE cluster_fragment_index_artifacts",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE cluster_fragment_index_jobs", hiqlite::params!()),
+            (
+                "DROP TABLE cluster_fragment_index_sources",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "DROP TRIGGER transcode_cache_location_identity_au",
                 hiqlite::params!(),
@@ -6030,7 +7392,7 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
     );
     let migrated = HiqliteAuthStore::open_or_migrate(client.clone(), &telemetry)
         .await
-        .expect("daemon v10 to v11 migration");
+        .expect("daemon v10 through current migration");
     assert_eq!(
         migrated
             .get_setting("migration.v10.proof")
@@ -6067,11 +7429,26 @@ async fn replicated_v10_store_migrates_exactly_to_v11_on_daemon_open() {
                           'transcode_cache_location_identity_au')",
             2,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
+        ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
             .await
-            .expect("inspect migrated v11 shared-cache schema");
+            .expect("inspect migrated current shared-cache schema");
         assert_eq!(rows.len(), 1, "{sql}");
         assert_eq!(rows[0].value, expected, "{sql}");
     }
@@ -6112,6 +7489,14 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
     client
         .txn([
             (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
+            (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
             ),
@@ -6130,6 +7515,17 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "UPDATE cluster_meta SET schema_version = 12 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -6191,6 +7587,21 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                           'analysis_requests_bound_terminal_history')",
             3,
         ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
+        ),
     ] {
         let rows: Vec<I64Value> = client
             .query_consistent_map(sql, hiqlite::params!())
@@ -6203,6 +7614,14 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
 
     client
         .txn([
+            (
+                "DROP INDEX analysis_requests_result_history",
+                hiqlite::params!(),
+            ),
+            (
+                "DROP INDEX cluster_fragment_index_jobs_status_history",
+                hiqlite::params!(),
+            ),
             (
                 "DROP TRIGGER analysis_requests_bound_terminal_history",
                 hiqlite::params!(),
@@ -6222,6 +7641,11 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             ("DROP INDEX analysis_requests_status", hiqlite::params!()),
             ("DROP INDEX analysis_requests_due", hiqlite::params!()),
             ("DROP TABLE analysis_requests", hiqlite::params!()),
+            (
+                "DROP INDEX media_session_terminal_acks_expiry",
+                hiqlite::params!(),
+            ),
+            ("DROP TABLE media_session_terminal_acks", hiqlite::params!()),
             (
                 "DROP TRIGGER cluster_fragment_indexes_cancel_source",
                 hiqlite::params!(),
@@ -6251,6 +7675,12 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                 "DROP TABLE cluster_fragment_index_sources",
                 hiqlite::params!(),
             ),
+            ("DROP TABLE media_sessions", hiqlite::params!()),
+            (MEDIA_SESSIONS_V10_TO_V15_FIXTURE_SCHEMA, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_OWNER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
+            (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
             (
                 "UPDATE cluster_meta SET schema_version = 11 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -6416,6 +7846,21 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
                           'analysis_requests_supersede_source', \
                           'analysis_requests_bound_terminal_history')",
             4,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'table' \
+             AND name = 'media_session_terminal_acks'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM sqlite_master WHERE type = 'index' \
+             AND name = 'media_session_terminal_acks_expiry'",
+            1,
+        ),
+        (
+            "SELECT COUNT(*) AS value FROM pragma_table_info('media_sessions') \
+             WHERE name IN ('terminal_reason', 'publication_ready_at_ms')",
+            2,
         ),
     ] {
         let rows: Vec<I64Value> = client
@@ -8939,7 +10384,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 234, "review the Store method count");
+    assert_eq!(declared.len(), 242, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

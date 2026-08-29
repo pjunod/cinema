@@ -1,26 +1,143 @@
 # Playback control rewrite — implementation handoff
 
-**Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `dba35f98` (PR #624)
-**Active PR:** [#626](https://github.com/pjunod/plurx/pull/626)
-**Active branch:** `codex/playback-control-m4-producer-decision`
-**Last merged exact head:** `12083a5991d27fa88c72c03f344ee5e3939382bb`
-(PR #624; hosted run `33118301414` green; merge `dba35f98`)
-**Last reviewed exact head:** `1ead394488df1f3ba6730ec21697ad8e357a31ff`
-(final documentation approval; runtime head `981ebb51` was unanimously
-approved)
-**Current implementation:** behavior-neutral decision transport committed at
-`c04898e2`, with liveness/compile repairs at `732d3442` and executor-loss race
-repairs at `91486148`, absorbing executor-state/poll-contract repairs at
-`ba3a504d`, and first-settlement preservation at `4d0a0c0f`: one immutable
-actor slot, non-consuming actor polling, one move-only bounded executor inbox,
-a passive weak-reference executor, and status projection; post-test inventory,
-enum-warning, and strong lifetime-owner lint repairs are committed through
-`f463d4d4`
-**Test state:** focused Rust playback control passed 85/85 twice without
-warnings; ownership inventory passed 7/7; `make check` and
-`make cluster-check` passed; PR #626 hosted run `33127652859` passed every
-selected job and the aggregate validation gate on reviewed head `1ead3944`
+**Updated:** 2026-08-29
+**Merged baseline:** `origin/main` at `253f3200` (through PR #638)
+**Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
+**Active branch:** `codex/playback-control-m4-prepublication`
+**Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
+(PR #626; hosted run `33129200705` green; merge `9063bb1e`)
+**Current review candidate:** the local committed tip above runtime repairs
+through `4da3bbde`, regression evidence closed through `44947095`,
+hosted-preflight owner-inventory reconciliation `c4a1d96d`, final-Rust repair
+`c48a9867`, hosted-gate repair `600a95aa`, evidence mapping `700bcdd9`, hosted
+structural-inventory reconciliation `c94cdcf3` mapped through `4ad4a4da`, and
+hosted lifecycle-fixture repair `4b76a34e` mapped through `7dc30a42`. The
+remote PR points to reviewed head `37b8cc43`; the local candidate adds the
+seven-test repair, its evidence mapping, and this synchronized ledger. That
+source implements three-phase Prepare/Confirm/Publish-or-Abandon activation,
+atomic claim transitions through SQLite v36 and Hiqlite v18, finite-handoff
+renewal and takeover, current-owner retry publication, and resolved-replay
+freshness. Store, lifecycle, and end-to-end integration reviewers unanimously
+approved every repaired source delta with no remaining P0–P3 finding after
+exact head `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached
+remote-START restart-admission loss and the required cluster gate exposed five
+Hiqlite placeholder-order defects. Two independent adversarial lanes approve
+the earlier code and evidence with no actionable P0–P3 finding. Corrected
+behavior/docs head `cdc27aa8` passed exact review and was pushed; run
+`33234021296` then exposed only the three test-shape inventory counts
+reconciled at `c94cdcf3` and mapped through `4ad4a4da`. Run `33234420211`
+passed every selected substantive lane other than fast Rust and completed its
+hosted broad suite with
+1,281 passing, seven failing, and three ignored tests. Repair `4b76a34e`
+closes all seven stale lifecycle fixtures by exact name, and `7dc30a42` maps
+the evidence. Three source reviews and one mapped-tip review approve those
+commits with no actionable P0–P3 finding. Documentation review, push, one
+fresh hosted rerun, and merge are next.
+**Implementation freeze before that repair:** `611d60cf` (rebased from
+`f02bf5b5`)
+in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
+**Validation-evidence freeze:** `ffd587c9` (rebased from `95cd9a2e`)
+for regression-history evidence; owner-inventory reconciliation
+`8af50d8d`, superseded for the current source by hosted-preflight reconciliation
+`c4a1d96d`; compile repair `27f88504`; its mapping `03a365ba`;
+assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
+cleanup through `77e292d1`; historical-schema fixture and completion proof
+`411bf818` through `4d38a084`; and their append-only mappings on branch
+`codex/playback-control-m4-prepublication`.
+**Current candidate identity:** the local tip containing this handoff; after
+push, PR #636's body pins the exact full object ID because a commit cannot
+contain its own hash.
+**Runtime review state before the serving-fence repair:** exact runtime head
+`b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
+`77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
+approval before the rebase. The directly affected rerun
+compiled successfully and ran 641 tests: 606 passed initially, all five
+deterministic failures passed after exact repairs, and all 30 socket fixtures
+passed by exact name with loopback access.
+**Current implementation:** the candidate assembles actor-owned
+prepublication recovery, exact response admission, cancellation-safe process
+and resource settlement, authoritative local/remote routing, bounded relay
+stream ownership, and per-rendition VOD build/cleanup ownership. The newest
+wave makes cluster replacement make-before-break, persists a replay-visible
+successor publication fence and the first durable terminal cause, separates
+durable confirmation from exact response publication, makes
+release a publication-fence/Store-cause/exact-projection transaction, and
+binds bodyless status, typed error, and EOF publication to exact response
+authority. It also actor-fences copy and rolling-cache response publication,
+and gives hard node failure an exact replayable takeover CAS with
+abort/join-before-stop provisional ownership and a confirmed bootstrap renewal
+before durable-ID adoption and seed/publication.
+The legacy published-lifetime and copy recovery decisions still remain
+disjoint compatibility owners; this cut does not claim their deletion.
+**Validation state:** `make unit` ran exactly once at the pre-rebase commit now
+mapped to `b1eeba78`; compilation failed before tests on 11 Store errors. After
+approved repairs, all 641 directly affected historical tests are accounted
+green without a second full-suite run. On the current repair, the activation
+Store contract, five daemon activation/replay tests, two SQLite migrations,
+two Hiqlite schema tests, and the placeholder-order invariant pass. The first
+required cluster run passed every vendor WAL/Hiqlite probe and 61/67 Store
+contracts; `4da3bbde` repaired all six failed paths plus one latent Abandon
+binding, and every failed three-voter name passes on exact rerun. The complete
+cluster harness, seven activation tests,
+and two Activity tests pass. Formatting, workspace Clippy, validation catalog,
+history, 123 operations contracts, 52 benchmark checks, and web policy pass.
+Hosted run `33226975369` stopped in fast preflight on sixteen stale exact-count
+sentinels before downstream jobs. Three reviewers independently recomputed and
+approved the inventory-only `c4a1d96d` repair; the two exact failed validation
+methods pass 2/2, catalog lint passes, and the complete hosted-equivalent Python
+validation catalog passes 68/68. Hosted rerun `33227941555` stopped solely
+because docs commit `9ee007a8` matched the corrective-history classifier;
+unanimously reviewed mapping `9471d129` records that docs-only scope, and the
+exact history-policy rerun passes with all 1,100 corrective commits accounted.
+Hosted run `33228540108` passed validation scope, mobile release version,
+policy/contract preflight, WAL recovery, cluster daemon contracts, and the
+complete replicated Store/topology lane. Fast Rust exposed two stale Core
+contracts, a software-admission fixture whose nonexistent source let process
+cleanup race its capacity assertion, a paused-time VOD stress fixture, and two
+playlist tests waiting on a barrier no longer reached by the actor observation
+path; the latter hangs carried the job to its 30-minute cancellation. Three
+review lanes approved the repair in two rounds. The two Core contracts, the
+software admission contract, both playlist races, and the VOD fairness/
+fail-closed contract now pass by exact name. No broad local suite was rerun.
+Hosted rerun `33230939191` passed validation scope, mobile release version,
+policy/contract preflight, WAL recovery, cluster daemon contracts, and the
+complete replicated Store/topology lane. Fast Rust then reported eight
+completed failures and one rolling-control test that remained in cleanup until
+the 30-minute job bound. Static review traced seven failures and the hang to
+stale fixture layout/synchronization: scratch and AppState roots overlapped,
+the serving-fence fixture drove a watch mirror instead of the synchronous
+authority, VOD cleanup was asserted through the rolling registry, detached EOF
+projection was observed synchronously, subtitle metadata was frozen before its
+Store update, and two barrier assumptions did not prove waiter ownership. One
+remaining failure exposed a production delivery-accounting race: after the
+body synchronously acknowledged and yielded a chunk, a simultaneous receiver
+close could win the producer select and record zero bytes. The repair gives
+only a successful acknowledgement priority; canceled acknowledgements still
+fall through to body/no-progress deadline or receiver-close classification.
+Both VOD and rolling pumps now share that ordering. Two adversarial lanes
+approve the integrated repair. All nine exact hosted names pass; the complete
+suite has not been rerun locally. Hosted run `33234021296` then stopped in
+preflight because the whole-module ownership ledger had not counted the new
+test-only synchronization shapes. Two reviewers independently proved the exact
+net additions: one joined waiter task, nine bounded fixture timers, and six
+Barrier `wait` tokens conservatively matched as process-shaped; no production
+owner changed. Repair `c94cdcf3` changes only those three exact expectations,
+the exact validation method passes, and `4ad4a4da` maps the evidence. Hosted
+run `33234420211` then passed validation scope, mobile-version policy,
+contract preflight, WAL recovery, every daemon contract, and the complete
+replicated Store/topology lane. Its one broad fast-Rust run completed with
+1,281 passes, seven failures, and three ignored tests. All seven failures were
+stale fixture assumptions: actor time coordinates, read-only playlist
+publication, playlist-owner retention, status-poll idle baselines, hardware
+capacity setup, request-claim coalescing, and first-playlist ownership.
+`4b76a34e` repairs those fixtures without changing production behavior, and
+all seven pass by exact name. Three source reviews approve the repair with no
+actionable P0–P3 finding; `7dc30a42` maps it and has an independent exact-head
+approval. Package Clippy with warnings denied, formatting, diff inspection,
+the exact ownership inventory, validation lint, and history are green. No
+second manual/local broad unit run occurred. The required hosted rerun will
+execute its normal fast-Rust gate. Documentation review, push, one fresh
+hosted rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -40,10 +157,13 @@ commit, exact-head review, test gate, merge, and milestone transition.
 - Use proper commits and PRs. Do not merge around red or skipped required
   evidence.
 - For each PR, obtain adversarial approval of one immutable exact head before
-  running unit tests. If a later correction changes that head, obtain another
-  exact-head approval before merge.
-- Merge only after focused tests, `make check`, `make cluster-check`, and every
-  required hosted check are green, with no unresolved actionable review item.
+  running unit tests. Run the full local unit suite once on that merge
+  candidate. If it fails, rerun only failed or directly affected tests after
+  fixes; review every behavioral fix and obtain exact-head approval before
+  merge.
+- Merge only after that one full unit run, required non-unit cluster/integration
+  gates, and every required hosted check are green, with no unresolved
+  actionable review item.
 - Keep this handoff and `PLAYBACK-CONTROL-STATUS.md` truthful. Foundations and
   inactive state are not complete runtime behavior.
 
@@ -70,19 +190,409 @@ The rewrite is not starting from scratch:
 - PR #624: bounded shared command/producer sequencing and observation-only
   projection, merged as `dba35f98` after unanimous exact-head review, green
   local full/cluster gates, and hosted run `33118301414`.
+- PR #626: immutable decision slot, non-consuming poll contract, and bounded
+  passive executor transport, merged as `9063bb1e` after exact-head review,
+  focused Rust 85/85, ownership 7/7, local full/cluster gates, and hosted run
+  `33129200705`.
 
-The active branch builds on #624 with reusable local evidence: focused
-playback-control tests, the ownership inventory, `make check`, and
-`make cluster-check` are green. Hosted run `33127652859` passed every selected
-job and the aggregate PR validation gate on reviewed head `1ead3944`; only the
-evidence-only status update, its final-head hosted validation, and merge remain
-for PR #626.
-Legacy watchdogs, recovery actions, response admission, and compatibility
-owners remain active; no decision/action cutover has happened.
+The active branch starts from merged #626. Commit `43bd459d` corrected the
+response-publication contract before implementation: frozen generation
+metadata leaves retry available, attempt media closes it atomically, current
+attempt-derived bodyless responses carry an explicit exact-attempt status
+fence, actor-derived errors have explicit non-media fences, and the retry recipe carries the exact
+presentation-contract fingerprint. One adversarial pass found four defects;
+the corrected delta is approved. The later full unit invocation at the commit
+now mapped to `b1eeba78`
+stopped during Store compilation before executing any active-branch test.
 
-The merged actor is behavior-neutral for recovery. Legacy rolling watchdogs
-and in-place replacement still operate until later M4 slices transfer action
-authority to the actor/executor and then delete the old owners.
+### Active prepublication review ledger
+
+The pre-commit review used three independent scopes and did not build or run
+tests. At that stage, the repaired working tree received targeted approval
+with no remaining P1/P2/P3 finding:
+
+- actor review repaired executor-loss cutoff visibility, exact-deadline
+  first-media ownership, synchronous publication projection, cancellation-safe
+  follower blocking, retry-neutral generation metadata, and move-only handoff
+  settlement;
+- transcode review repaired immediate-exit retry replay, HEVC/Dolby Vision
+  first-media classification, registry-lock scope, bounded confirmed reap,
+  abandoned termination replies, cleanup-owner exclusion from global repair,
+  and retirement fencing; and
+- HTTP review repaired false `404` collapse, stale `503` publication,
+  retired-session failure classification, exact streamed EOF settlement,
+  range binding, subtitle typed-error propagation, and exact rolling/VOD owner
+  fencing.
+
+Those were working-tree approvals, not the immutable merge-candidate approval.
+Formal review of `ab3808b1` subsequently found these additional defects:
+
+- P1: routine End/expiry/supersession could return hardware/software admission
+  before the exact prepublication child was confirmed reaped;
+- P2: the mechanical owner ledger omitted the replyless termination request,
+  shared terminal wait, and reap-attempt timeout;
+- P2: a same-incarnation publication race could collapse to fatal `404`;
+- P2: rolling ETags did not bind Session incarnation/attempt and could validate
+  different equal-length successor bytes;
+- P2: each playlist reclassification restarted the whole startup wait instead
+  of sharing one absolute request budget; and
+- P2: actor admission, first-media handoff, commit, and detached EOF settlement
+  had no actual lifecycle bound or bounded settlement owner.
+
+The continuation ledger itself was the P3: it still described runtime and docs
+as uncommitted. Exact head `e40c56d4` closes every earlier formal item: routine
+prepublication retirement transfers child, scratch, and admissions to a
+confirmed-reap owner; every new lifecycle action/timer is counted; response
+state races stay typed `503`; rolling validators bind incarnation and exact
+attempt; playlist reclassification shares one deadline; actor admission,
+first-media application, buffered commit, and streamed EOF settlement are
+bounded; and the continuation ledger names the real committed heads.
+
+A final moving-tree audit then found that the playlist byte-resolution path
+itself still awaited an unbounded actor observation, synchronous flow-control
+refresh, registry/storage/segment locks, and fixed polling sleeps. The repair
+puts the whole operation under the existing absolute playlist deadline, makes
+the HTTP observation command deadline-aware and fail-closed after
+cancellation, clamps polling to the remaining time, queues consequential flow
+work to the session-owned worker, detaches non-response slide telemetry, and
+publishes cached-integrity failure before cleanup can be cancelled.
+
+Formal review of that head then found the remaining blockers: EOF actor commit
+and compatibility projection were not one cancellation-safe application;
+first-media settlement lacked finite owner capacity; corrupt-cache cleanup
+could still be cancelled after publishing failure; master, VTT, segment, and
+retired-but-registered outcomes could still become false `404`; and subtitle
+preparation plus VOD resurrection escaped their advertised deadlines. Those
+findings are repaired. Follow-up integration review found the remaining
+retirement-import, stale-status, bodyless-admission, request-deadline,
+remote-handoff, and VOD-negative-owner defects. Those repairs were frozen and
+committed as `1bee10d9f6f6d427151dbc3587089b367806c30a`.
+
+Formal review of exact `1bee10d9` ran read-only, without builds or tests, and
+returned **REQUEST CHANGES**. Actor review found no runtime P1/P2/P3. The
+combined rejection ledger is:
+
+- P1: ownerless VOD `Pending`, `Busy`, `ProducerFailed`, `Io`, and `Gone`
+  outcomes could publish stale status after another session reattached with
+  the same ID;
+- P1: `OwnerGone` mapped directly to `404`, erasing both an active remote
+  handoff and a durable terminal result;
+- P1: relay ingress, transport, and owner handling each minted a new deadline,
+  so the owner could publish after the ingress request had been abandoned;
+- P1: default copy and rolling-cache delivery bypassed actor publication
+  admission;
+- P1: VOD resurrection could be cancelled after predecessor detach but before
+  successor attachment and registry insertion, leaving neither generation
+  durably reachable;
+- P2: transformed init bytes retained the original object's strong ETag;
+- P2: VOD exact-EOF, touch, and frontier commit could partially mutate before
+  cancellation interrupted the rest of the ownership transfer;
+- P2: first-media handoff cleared prepublication projection before lifetime
+  and cleanup ownership had transferred;
+- P2: the global sessions lock remained held across slow VOD supersession;
+- P2: the same global lock remained held across an unbounded actor `End`;
+- P3: HTTP conditional handling did not implement weak ETag comparison; and
+- P3 documentation: the status and handoff still named `0e80c6ba` or
+  `e40c56d4` as current instead of recording the frozen `1bee10d9` rejection.
+
+Runtime repair `8cc28bc8134412149829a37a0cfe8ba83f5da795` closed that review ledger:
+
+- every VOD success, miss, error, and tombstone retains exact attachment
+  authority through bodyless status admission;
+- durable route resolution distinguishes absent, terminal, active-local, and
+  active-remote state, and `OwnerGone` performs one bounded authoritative
+  reclassification;
+- one authenticated absolute resource deadline crosses ingress, relay
+  transport, owner routing, and local handling, with per-resource ceilings and
+  conservative clock-skew handling;
+- VOD resurrection, supersession, and EOF/frontier mutation are
+  cancellation-safe ownership transactions;
+- copy and rolling-cache publication enter the actor with an immutable
+  response contract and a shared monotone failure fence;
+- first-media projection cannot clear confirmed-reap ownership before the
+  retained lifetime owner is visible;
+- VOD transformed-init validators name the transformed representation, and
+  conditional GET uses weak comparison; and
+- global rolling-session locks no longer span VOD supersession or actor End.
+
+The pre-freeze review then found three more races: Terminal could be
+queued before a deadline yet retire the predecessor after the caller reported
+failure; durable-ID adoption before retirement's first registry check could
+hide the exact predecessor; and the copy watchdog published its actor-visible
+failure only after waiting for process reap. The same runtime commit bounds
+only Terminal admission before treating End as irreversible, resolves and
+removes retirement targets by exact `Arc` across ID adoption, and publishes
+the copy failure fence before kill/reap. Focused regressions were added for all
+three. Root review also rejected executable clock-skew slack; owner execution
+subtracts the full declared allowance, so skew cannot become work after
+ingress abandonment. The assembled implementation and documentation were
+then frozen as `763c230cc5de98adc7b07f4635016e5d9db06f2a`.
+
+Formal read-only review rejected exact head `763c230c`. The resulting repair
+is frozen in implementation commit `031065ab` and falls into three coordinated
+tracks:
+
+1. **HTTP, routing, and relay.** Owner-bearing VOD status survives every
+   bodyless response; authoritative route reclassification distinguishes
+   absence, terminal state, active local ownership, and active remote
+   ownership. Public DELETE and internal abort transfer exact cleanup to
+   bounded detached settlement owners, preserve the release reason, and fail
+   honestly when remote cleanup cannot be confirmed. Relay preparation keeps
+   the inherited request deadline, while an admitted response body receives a
+   separate 300-second total and 30-second no-progress lifecycle. Rolling
+   upgrades omit unknown optional relay headers; an old peer receives neither
+   `If-Range` nor `Range` when it cannot preserve the condition safely.
+2. **Rolling authority and settlement.** Terminal command deadlines now bound
+   admission, not an already-queued irreversible End. Retirement finds and
+   removes the exact Session `Arc` across durable-ID adoption, releases the
+   global registry before actor or process settlement, and retains child,
+   process admission, and scratch ownership until confirmed reap. A detached
+   retirement owner and separate bounded scratch-cleanup owner survive caller
+   cancellation. Actor authority loss is projected synchronously, and copy or
+   cache failure becomes visible before process kill/reap can race response
+   authorization.
+3. **VOD build and terminal ownership.** Slow rendition preparation moved out
+   of the node-wide rendition map behind a per-key single-flight owner. Missing
+   init regeneration is admitted through four node-wide slots, reads at most
+   8 MiB, has a 15-second budget, and retains the key until its FFmpeg child is
+   confirmed reaped. Dormant purge transfers key, child, accounting, directory,
+   and identity cleanup to a detached exact owner. Terminal cleanup immediately
+   compacts the heavyweight Session graph; a compact exact-owner tombstone
+   retains late `410` replay for 60 seconds and is then evicted only after a
+   bounded, fail-closed durable-route confirmation.
+
+Focused deterministic regressions were added for those ownership and
+cancellation boundaries, but none has run. Validation on the repair candidate
+is limited to `cargo fmt`, static diff inspection, and static ownership
+recounts. Freeze this documentation as the immutable combined head, obtain
+unanimous adversarial approval of that exact hash, and only then open the
+one-full-suite test gate.
+
+A final pre-freeze seam audit found one further P1: public DELETE detached its
+outer settlement owner but still applied the HTTP deadline directly to the
+commit-unknown `end_media_session` future. The repair now elects one exact
+per-capability release owner, synchronously tombstones VOD or actor-fences
+rolling publication, and never cancels an admitted Store mutation. A Store
+error retains a fail-closed publication fence in a 128-entry registry; the
+lifecycle loop retries at fanout four with 1–30-second backoff, caches a
+definitive terminal route or absence before lifting the fence, and detaches
+exact cleanup so lease renewal never waits for reap or peer transport.
+
+The implementation frozen in `031065ab` then closes the replacement,
+durable publication, and response-lifetime seams as one transaction:
+
+- **Replacement is make-before-break.** A replacement first admits and starts
+  a provisional successor. The Store activation CAS then atomically moves the
+  playback pointer and records the exact predecessor as `superseded`; lack of
+  provisional capacity fails the replacement and leaves the current player
+  intact. A replacement successor is committed with an indefinitely blocked
+  `publication_ready_at_ms` sentinel. The first exact post-commit observer
+  arms a fresh 372-second boundary, and request routing/idempotent replay
+  publish only after an explicit Store transition to `0`. Exact predecessor
+  terminal acknowledgement may clear early because it closes future admission
+  under the predecessor's distinct capability; already-admitted bodies may
+  drain under that old URL. If acknowledgement is unavailable, only an exact
+  elapsed-boundary proof can clear the fence. The owner lease loop resumes
+  arming/completion after ingress crash or owner takeover.
+- **Terminal cause and publication are durable.** `terminal_reason` records
+  the first Store terminal decision (`deleted`, `superseded`, `admin_stop`,
+  `revoked`, or `replaced`) and later cleanup paths cannot relabel it. Public
+  release first installs a cause-neutral local publication fence, then awaits
+  the uncancelled Store End, caches the returned exact terminal route or
+  definitive absence, and only then projects that durable winner to the exact
+  local or remote owner. `DurableReleaseProof` is constructible only for an
+  actually ended route or confirmed absence. The shared settlement publishes
+  `204 No Content` only after those facts are replay-visible and owner
+  projection has acknowledged, or after the admitted-body safety boundary;
+  both acknowledgement and boundary completion are exact Store transitions.
+  Ended routes reuse `publication_ready_at_ms`: sentinel means the post-End
+  fallback is unarmed, one finite value is armed from exact observation, and
+  `0` is durable completion. Replays and owner restarts resume that one value
+  instead of restarting 372 seconds. Capacity refusal and commit uncertainty
+  return `503` while reconciliation remains fail-closed.
+- **Response authority is exact.** Body-bearing responses carry the exact
+  engine/incarnation and rolling attempt from classification through
+  publication. Attempt-derived bodyless `404`, `416`, `502`, and `503`
+  outcomes validate the exact status/error owner but deliberately do not renew
+  demand or advance a delivery frontier. Streamed media consumes its move-only
+  authorization only after all advertised bytes are read and accepted by the
+  bounded HTTP-body channel; a fully buffered response commits only after its
+  exact body is prepared and immediately before exposure. Cancellation, short
+  read, storage error, or abandonment before the final chunk is accepted is a
+  non-commit. Independent pumps own local files, relayed network readers, EOF
+  authority, and completion permits even while downstream is backpressured.
+  Every prepared or streamed body has a 300-second absolute post-admission
+  lifetime. Active file/network pumps also have a 30-second upstream/downstream
+  no-progress bound; local streams retain one unacknowledged chunk and account
+  or commit only after public Body acceptance, while relays retain two. Public
+  bodies reject queued bytes after terminal or absolute timeout.
+- **Store parity is explicit.** SQLite and Hiqlite schemas, migrations,
+  activation/End/CAS paths, route rows, replicated dump/import, and old-schema
+  import projections carry `terminal_reason` and
+  `publication_ready_at_ms`. Older imports project `NULL` and `0`
+  respectively. Cluster node-removal settlement first-writes `replaced`
+  through `COALESCE` rather than overwriting an earlier cause.
+
+Formal review of docs-bearing exact head `31e7d5e2` rejected that first freeze:
+
+- fenced activation replay could never pass after the pointer already named
+  the successor, while the replicated UPSERT could shorten a renewed lease and
+  regress progress before its exact read;
+- private remote-start validation admitted only immutable VOD, while takeover
+  then rejected VOD, making the Live rolling takeover path unreachable;
+- the takeover publication runway omitted ordinary lease-loop work, and
+  supervisor cancellation could detach a creation child or stop its worker
+  before the child had finished registration;
+- stale settlement could select an inventory row before expiry and End it
+  after expiry, destroying the active recipe a survivor needed to claim; and
+- takeover commit-unknown, Pending, Lost, pin, runway, and adoption paths had
+  no test that retained and observed the same move-only worker capabilities.
+
+Implementation commit `52678b96` was intended to close that ledger. Both
+Stores added an optimistic exact pointer/immutable-identity replay path that
+returned durable lease, progress, sequence, and publication state when it won
+the pre-transaction read.
+Network worker ingress remains VOD-only, while a separate bounded validator
+admits only persisted Live takeover recipes. `TakeoverCreationOwner` keeps the
+child handle and exact worker owner together through abort and join. At that
+commit, an exact takeover winner was pinned and adopted before its bounded
+renewal to a fresh 24-second wall-and-monotonic lease; ordinary owner renewal
+returned to 12 seconds. Ambiguous
+renewal cleanup retains the settlement through the proposed lease. Stale End
+selection requires fresh runway, an active exact owner/epoch and unchanged
+lease boundary; valid Live/typeless routes are left active for takeover, and
+both Store CAS implementations reject a same-epoch renewal. The production
+reconciliation function now runs behind a small I/O/lifecycle seam, and
+scripted source-level regressions cover repeated Pending through winner
+publication, definitive loss, and runway/pin/adoption failure without a
+second state machine. Three independent moving-tree audits approve these
+repairs. No dynamic test has run.
+
+Formal read-only review of the resulting docs-bearing head `bb69eb7e` rejected
+that freeze too:
+
+- the Hiqlite optimistic pointer read still left a transaction-order race in
+  which an old exact activation replay could overwrite a later renewal and
+  prematurely expire live authority;
+- both expired-route inventories returned only the oldest fixed page, so
+  permanently ineligible legacy or malformed rows could starve every later
+  takeover candidate;
+- copy startup created scratch, and then a child, before any cancellation
+  owner could reap both across capability refusal, origin probe, or aborted
+  registration;
+- the worker was adopted under its durable public ID before bootstrap renewal,
+  and a panic immediately after the registry move could leave cleanup pointing
+  at the now-empty provisional ID; and
+- the lifecycle seam did not exercise claim/replay/read errors and timeouts,
+  renewal ambiguity, cache-generation rejection, supervisor unwind, or exact
+  creation abort/join ordering.
+
+Implementation commit `21ecd47f` closes that third ledger. Hiqlite suppresses
+every exact-current activation write inside the Raft transaction, accepts only
+the fresh-write shape or an all-zero replay, and then proves both immutable
+route identity and the current pointer; a contract-only pause forces the real
+three-voter ordering of stale pre-read, activation, renewal, and stale
+transaction. Both Stores expose an exclusive `(lease_expires_at_ms,
+incarnation_id)` keyset cursor, while the process retains its scan position
+across ticks so skipped rows cannot monopolize the oldest page. Copy startup's
+prepublication guard owns scratch immediately, takes ownership of an
+`AttemptChild` before the origin probe awaits, transfers it into the Session,
+and settles only after manager registration.
+
+Takeover publication now renews the durable route from the provisional
+worker's frontier before the durable capability exists. Registry adoption
+move-owns `TakeoverWorkerGuard` and updates its cleanup identity synchronously
+with the map rename, before any further await or fallible bookkeeping. The
+generic settlement/creation seams cover initial claim, replay, exact read,
+bootstrap renewal, cache rejection, cancellation, panic, and child
+abort-then-join-before-worker-stop. No dynamic test has run.
+
+Formal review of rebased PR head `9809d553` found five additional issues. The
+legacy SQLite importer assumed v34/v35 media-session columns one schema too
+early; `TerminalCommitRetry` shadowed its Arc with a mutex guard and referenced
+a nonexistent guard name; the remote worker's cleanup guard was armed only
+after an unbounded shared-cache pin; the activation comments still described
+ordinary starts as unfenced; and the status files did not distinguish the
+runtime freeze from the exact docs-bearing candidate.
+
+Implementation commit `6f458ea0` closes that ledger. A schema-backed regression
+builds genuine v33, v34, and v35 databases with the real append-only migrations,
+seeds a media-session row, and reads all 19 importer parameters with synthesized
+or preserved fields at the exact boundaries. Terminal retry again retains a
+separate Arc and guard. Remote start arms `StartedSessionGuard` immediately
+after creation, bounds pinning to the inherited start deadline, and transfers
+the armed guard into the confirmation task; error, timeout, cancellation, and
+panic therefore cannot leave an unowned registered worker. The activation
+contract now documents that ordinary starts and handoffs use the same pointer
+CAS. Commit `5bea1ec7` adds append-only mappings for the hashes rewritten by the
+rebase and for this repair after GitHub's automatic static preflight stopped at
+that missing evidence. That automatic run executed no unit, focused, cluster,
+build, or compile lane. No dynamic test has run locally or remotely.
+
+Review of pre-rebase `9121db03` then found that the cleanup task did not own the remaining
+replacement guard, the public local cache pin still lacked its placement
+deadline, and the forced three-voter stale-replay fixture used a blocked
+publication sentinel despite having no predecessor. Rebased commit `611d60cf`
+moves the
+replacement guard into the detached cleanup payload through exact worker and
+request settlement, bounds the local pin with a retryable timeout, adds a
+guard-level hold/release ordering regression, and corrects the fixture to
+publication fence `0`. Rebased `ffd587c9` maps that evidence. The immutable PR #636 tip
+containing this handoff was reviewed before the rebase as `5a9e19ae`: Store and lifecycle
+approved it, while integration found no runtime defect and requested only the
+17 owner-inventory corrections now rebased as `8af50d8d`. The reconciled head,
+now `b1eeba78`, then received unanimous exact-head approval. Its one full unit
+run stopped during compilation before tests; rebased commit `27f88504`
+repaired the 11 Store errors and rebased `53afa68c` received unanimous targeted
+approval. The directly
+affected rerun compiled and executed 641 tests, with 606 passing, 30 sandbox
+bind denials, and five stale assertion failures. Repairs through rebased
+`dad2cd5b` received targeted exact-head approval in `2afa1bba`; all 35 exact failed names
+then passed.
+
+The next activation audit rejected the two-phase response model itself. A
+confirmed route could outlive a cancelled response without durable request
+publication; a finite predecessor handoff could exceed the initial 12-second
+lease; capped owner inventory could misclassify cleanup; direct control and
+takeover could admit a `BLOCKED` route; and resolved replay could return an
+expired or stale owner epoch after waiting for serving authority. Store and
+lifecycle reviews also found backend row-count, NULL-owner, stale-pointer, and
+upgrade-only trigger gaps.
+
+Runtime `6e01bbc3` closes that ledger with three explicit states and two
+mutually exclusive final transactions. Confirm advances `BLOCKED` to `0` or a
+finite boundary while its request stays starting. Publish resolves only the
+exact current live route. Abandon fails and tombstones only a still-starting
+activation, with a cancellation-independent exact reaper. Finite routes enter
+ordinary lease ownership, transfer their starting request on takeover, and
+receive one renewal after becoming ready. SQLite v36 and Hiqlite v18 install
+the same atomic claim trigger for fresh and upgraded databases. In-flight and
+resolved replays re-read current durable ownership and refresh the control
+epoch. Mapping `529144ca` binds this repair to the existing playback recovery
+evidence.
+
+Three independent read-only review lanes challenged Store transaction and
+migration parity, cancellation/guard lifetime, and the full remote
+START→ACTIVATE→handoff→takeover→Publish path. Their final passes unanimously
+approved the committed source with no P0–P3 finding. No unit, focused, or
+cluster test ran during these review rounds; only formatting, diff inspection,
+and `cargo check -p plurxd --locked` ran.
+
+Formal exact-head review then rejected
+`032292a159513e51f13bab5db1d6081c46b0cc5c`: internal remote `START` acquired
+restart admission in the HTTP handler but detached worker creation into a task
+which did not own that guard. Handler cancellation could therefore let restart
+preparation observe zero admissions and snapshot owners while the admitted
+worker was still being created. Repair `07bb95bc` moves the admission into the
+detached task before creation and retains it through pinning and confirmation-
+watcher ownership handoff; mapping `ea36ccd2` records the regression. Store,
+lifecycle, and integration reviewers unanimously approve the repair. No test
+ran during that review.
+
+Merged `main` remains behavior-neutral for recovery. The active cut transfers
+prepublication transcode startup authority to the actor/executor and removes
+the corresponding detached startup fallback. Published-lifetime and copy
+owners remain named compatibility mechanisms until their later bounded cuts.
 
 ## 3. PR #619 — merged delivery
 
@@ -402,27 +912,184 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-PR #624 is merged as `dba35f98`. The current disposable decision-transport
-slice is PR #626 on `codex/playback-control-m4-producer-decision`; its runtime
-is committed through `f463d4d4`, its reviewed implementation/status head is
-`1ead3944`, and local plus hosted gates are green on that head. The worktree
-contains only the final evidence update as tracked changes; the preserved
-untracked vendor build artifacts remain outside the commit. Continue in this
-order:
+PR #626 is merged as `9063bb1e`. The current disposable branch is
+`codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
+runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
+repair head `e40c56d4` are historical commits. Pre-rebase source content now
+mapped to `4d38a084` received unanimous targeted approval after the historical
+fixture, compile/Clippy, assertion/scanner, and runtime rounds. Fresh review of
+rebased candidate `8964e3b1` found the internal remote-start serving-authority
+bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` closed that
+first issue. Subsequent review exposed the provisional activation lifecycle
+gaps described at the top of this handoff. The final three-phase repair is
+frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
+migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
+placeholder-order repair `4da3bbde`. Regression evidence is closed through
+`44947095`; hosted-gate behavior is committed at `600a95aa` and mapped through
+`700bcdd9`. Exact head `993a67a5` was rejected only because synchronized
+candidate and continuation wording still described the prior uncommitted,
+six-case state; the current documentation tip is the corrected immutable
+review candidate.
+Runtime behavior before that repair is frozen in `611d60cf`; regression-history
+evidence is frozen in `ffd587c9`; historical owner-inventory corrections are
+frozen in `8af50d8d` and superseded for the current source by unanimously
+reviewed `c4a1d96d` after hosted run `33226975369` exposed sixteen stale counts;
+both exact failed methods pass 2/2. The compile repair plus mapping are frozen in `27f88504` and
+`03a365ba`; and assertion/scanner repairs plus mappings are frozen through
+`dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
+historical fixture construction and completion assertions are frozen in
+`411bf818` and `4d38a084`.
+Hosted run `33228540108` exposed six exact Rust cases repaired at `c48a9867`.
+Run `33230939191` then passed every selected substantive lane other than fast
+Rust, which exposed
+eight completed failures and one cleanup hang. The integrated repair is
+committed at `600a95aa`, mapped through `700bcdd9`, approved by both adversarial
+lanes, and green for all nine exact names. Package Clippy, formatting, diff,
+catalog, and history gates pass. No broad local suite was rerun.
+Run `33234021296` stopped in preflight on the three structural counts changed
+by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
+`4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
+equality assertions; its exact failed validation method passes. Run
+`33234420211` passed every selected substantive lane other than fast Rust and
+completed its hosted broad suite; the aggregate gate failed as a consequence.
+All seven stale fixture failures are exact-green at reviewed repair
+`4b76a34e`, mapped through `7dc30a42`. No second manual/local broad suite was
+run; the required hosted rerun will execute its normal fast-Rust gate.
+The preserved untracked vendor build artifacts remain outside every commit.
 
-1. Commit and push the adversarially reviewed evidence-only update.
-2. Require every hosted PR #626 check to pass on the resulting final head;
-   repair any failure, re-review changed code, and repeat the affected gates.
-3. Merge PR #626.
-4. Immediately begin the first authoritative vertical cut: actor-owned
-   hardware startup retry plus response admission and cleanup, followed by
-   deletion of the corresponding legacy watcher/action owner.
+Continue in this order:
+
+1. Obtain unanimous exact-head review of the synchronized documentation tip.
+2. Push the reviewed and exact-green candidate, update PR #636's body to pin
+   that full object ID, require every hosted check green, merge, and
+   continue immediately with the published-lifetime watchdog cut.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
-review before local unit tests and full verification before merge.
+review before local unit tests, one full local unit-suite invocation only, and
+full required verification before merge.
 
-## 5. Current M4 decision-transport slice after command sequencing
+The protocol rollout is backward compatible. The server transport and session
+state can deploy before the HLS refactor and before either mobile app changes;
+old clients continue on the existing HLS/status paths. Apple and Android must
+then add one coalescing per-session reporter for position, buffer, delivery
+rate, player state, and track/capability facts. The first client cut accepts
+only the no-action response and leaves every legacy player recovery path in
+place. Later client cuts consume prepared quality, HDR/Dolby Vision, track, and
+node-handoff actions after their server contracts are separately proven.
+
+### Active cut boundaries
+
+The active cut owns transcode prepublication and the response/settlement
+fences needed to keep that ownership exact:
+
+- `RollingControlHandle::spawn_prepublication_transcode` returns a handle and
+  one move-only executor registration; registration must commit before the
+  initial producer policy can arm;
+- hardware startup has a 12-second actor budget and at most one immutable,
+  presentation-compatible retry; software-only startup has a 30-second actor
+  budget and no retry;
+- generation-stable master metadata crosses actor admission without consuming
+  retry; video/subtitle playlists, VTT, init/media objects, ranges, `304`, and
+  other media-bearing attempt responses close retry before exposure, while a
+  bodyless `416` uses exact-attempt status admission and does not claim first
+  media;
+- the executor uses a weak Session reference, confirms predecessor reap before
+  scratch clear, verifies the clear, admits the exact recipe, installs one
+  successor, and acknowledges the immutable decision; failure never recurses;
+- the first actor-authorized attempt-media response ends prepublication
+  ownership and starts the retained published-lifetime watcher exactly once.
+- HTTP and cluster routes must carry exact response ownership through status,
+  range, relay, resurrection, release, and EOF settlement; they may not create
+  a second recovery verdict; and
+- clustered replacement must create the provisional successor before the
+  Store CAS retires its predecessor, persist the successor publication fence,
+  and clear it only after exact predecessor acknowledgement or the admitted-
+  body safety boundary;
+- release must keep cause-neutral local fencing separate from the Store's
+  first terminal cause, publish exact durable terminal/absence proof before a
+  shared `204`, and retain commit-unknown work in bounded reconciliation; and
+- VOD per-key build, head regeneration, dormant purge, and terminal compaction
+  are lifecycle/resource owners. They may bound or clean work but cannot pick
+  a rolling retry or replace a producer.
+
+This cut removes the detached hardware first-segment fallback as a production
+decision owner. It deliberately retains `watch_for_stall*`, `SOFTWARE_GRACE`,
+`PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active`, `child_transition`,
+`replacing_child`, copy fallback/classification, and published-lifetime stall
+handling. Those mechanisms must be listed as retained compatibility owners and
+must not overlap the actor-owned prepublication interval.
+
+It also retains `PREPUBLICATION_REAP_RETRY` and
+`PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` solely as lifecycle cleanup bounds. Each
+termination attempt is bounded and the cleanup owner releases the child
+transition before waiting to retry. Neither timer can select a recipe, publish
+a response, declare playback failure, or replace a producer. Exact-EOF
+settlement and bounded HTTP actor/handoff waits likewise remain response and
+network lifecycle bounds rather than recovery watchdogs. Streamed responses
+reserve one of 256 completion owners before visibility and receive a fresh
+five-second settlement deadline at exact advertised EOF. Buffered response
+admission/commit and playlist actor observation share their existing absolute
+request deadlines; queued commands reject cancellation or expiry before
+mutation.
+
+The candidate adds these named lifecycle bounds. Relay bodies have a
+post-header 300-second total and 30-second upstream/downstream no-progress
+limit, disjoint from request preparation; local file bodies use the same two
+bounds. Independent bounded pumps own the file or network reader even during
+socket backpressure, so the terminal-projection safety window can outlive
+every admitted predecessor response. Public releases and internal remote
+aborts each use 128
+settlement slots with inherited five-second admission/response budgets; public
+remote release attempts are capped at three with 100 ms between attempts.
+Missing-init head regeneration has four process slots, a 15-second limit, and
+an 8 MiB read ceiling; the exact key remains owned through confirmed child
+reap. Compact VOD terminal response owners replay `410` for 60 seconds, after
+which maintenance confirms durable terminal state in bounded three-second,
+16-way batches before eviction. These limits contain resource or network
+failure. None is permitted to select playback recovery.
+
+### Exact retained-owner inventory
+
+| Owner or bound | Current authority | Why it remains | Deletion or replacement milestone |
+|---|---|---|---|
+| actor `ProducerProgressDeadline` | Selects the sole prepublication retry or failure at the 12-second hardware or 30-second software boundary | FFmpeg cannot report every silent wedge | Permanent approved server progress deadline after M4 |
+| `SOFTWARE_GRACE` | Copy-startup compatibility recovery only; the published-lifetime watcher starts with zero added grace | Copy startup has not moved fully into the actor | The later M4 copy cut deletes this startup grace owner |
+| `watch_for_stall*`, `PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active` | Published-lifetime and copy compatibility recovery only | Those two recovery scopes have not moved fully into the actor | Later M4 published-lifetime and copy cuts delete the polling/election owners; the actor deadline retains the required silent-wedge bound |
+| `child_transition`, `replacing_child`, `begin_child_replacement`, `kill_child_for_replacement`, `install_replacement_child` | Serializes compatibility child replacement and exact resource transfer | Published/copy in-place replacement still exists | Later M4 cuts replace it with actor decision plus exact-attempt supervisor settlement and drive legacy catalog counts to zero |
+| `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) and `PREPUBLICATION_REAP_RETRY` (5 s) | Repeatedly requests termination and waits for exact terminal proof while retaining process admission and scratch | A stuck kill/wait must not leak a permit or authorize overlapping children | Remains as bounded process cleanup; later M4 may simplify the compatibility lock, not the confirmed-reap requirement |
+| rolling retirement and scratch settlement | Detached exact owner confirms reap; scratch cleanup uses three 5-second attempts separated by 5 seconds, then leaves recovery to startup/maintenance sweep | Caller cancellation and slow filesystem cleanup cannot strand child or accounting ownership | Remains as lifecycle cleanup; later M4 deletes only compatibility replacement inputs |
+| first-media and response settlement | At most 256 first-media owners and 256 streamed-EOF owners; publication/settlement calls use the five-second response lifecycle | A visible response must finish actor handoff or fail closed after request cancellation | Remains as bounded response ownership after M4 |
+| playlist/segment request chain | One inherited request deadline; segment lifecycle ceiling is 35 seconds | HTTP and storage waits cannot be unbounded | Remains as a network limit, never a producer verdict |
+| local and relay admitted bodies | Every admitted prepared/streamed body receives 300 seconds total; active pumps also enforce 30 seconds without upstream or downstream progress. Independent pumps retain one unacknowledged local chunk or two relay chunks, and public bodies discard queued bytes after terminal/deadline | A dead file, peer, unpolled prepared body, or backpressured receiver needs a finite resource verdict; streamed accounting/EOF cannot precede Body acceptance | The finite body bound remains; M8 may replace the relay transport |
+| make-before-break publication handoff | Persists an indefinitely blocked successor, arms 372 seconds from exact post-commit observation, and requires an explicit proof-bound Store transition to publishable `0` | Exact acknowledgement closes new old-capability admission and permits intentional drain overlap under distinct URLs; without acknowledgement, ingress restart/takeover must preserve the same conservative boundary | M6 prepared handoff may generalize the transaction; the durable publication fence remains |
+| public release and internal abort settlement | Two independent 128-slot pools; five seconds bounds admission/caller wait only. Admitted Store End has no request deadline; commit-unknown results remain in a 128-entry registry and retry at fanout four with 1–30-second backoff. Ended rows durably record unarmed sentinel, one finite fallback, or completed `0`; acknowledgement and elapsed-boundary completion are exact owner/epoch Store transitions. A 372-second terminal-projection boundary covers the 62-second pre-header ceiling, 300-second body lifetime, and margin when the exact peer cannot acknowledge. Public remote cleanup makes at most three attempts with 100 ms retry delay | Capability deletion must outlive caller cancellation, ambiguous Store replies, and process restart while staying fail-closed, replay-visible, and resource-bounded | M8 prepared node handoff may replace retry transport; exact detached settlement remains |
+| VOD segment materialization wait | Bounds demand for an immutable segment that is not yet ready | A client request cannot wait forever for absent bytes | Permanent approved VOD progress deadline |
+| VOD missing-init regeneration | Four process slots, 15-second budget, 8 MiB read ceiling, per-rendition key held through confirmed reap | Older/incomplete cache entries can lack a usable init object | Later VOD/index hardening may precompute every init and delete this fallback; until then it remains lifecycle-only |
+| VOD terminal cleanup and replay | Heavy graph compacts when cleanup completes; compact exact owner replays `410` for 60 seconds; durable confirmation uses a 3-second timeout and 16-way batch/fanout | Late requests need stable terminal truth without retaining process/media graphs | Retention remains bounded; M8 durable ownership may centralize the compact replay record |
+| VOD idle/dormant retention | Session idle TTL 300 seconds; rendition dormant TTL 1,800 seconds; detached purge owns child, key, accounting, directory, and identity cleanup | Immutable materialization needs bounded reuse without permanent memory/disk ownership | Remains as cache lifecycle policy, independent of rolling recovery |
+| cluster lease and takeover timers | 3-second renewal, 12-second lease, bounded route query/renewal/takeover work | Only durable routing can distinguish a live owner from a dead node | M8 replaces compatibility takeover with prepared handoff; lease expiry remains a permanent failure fence |
+| 15-second flow-control repair tick | Refreshes indexes, retention, speed, pacing, and lease projection | Periodic maintenance remains necessary even when recovery decisions are actor-owned | M4 removes recovery authority from the tick; maintenance scheduling remains |
+
+Client startup/stall/reopen timers remain independent owners on web, Apple,
+and Android. M5 replaces each platform's overlapping action paths with one
+client controller; M6 moves automatic quality, codec, HDR/Dolby Vision, audio,
+subtitle, and node changes to prepare/commit/abort; M9 deletes compatibility
+`/status` polling and legacy reopen paths.
+
+The next immutable-head review must specifically challenge exact-deadline
+response ordering; stable-master contract freezing; same-ID Session ABA;
+executor cancellation at every retry transaction step; permit transfer/leak
+behavior; make-before-break activation CAS and durable publication-fence
+replay across ingress restart/failover; predecessor projection before
+successor exposure; first-writer terminal-cause parity across both Stores,
+migrations, old-schema import, dump, and node removal; `204` proof under Store
+uncertainty, cancellation, panic, pool saturation, and the 372-second safety
+boundary; exact status/error/EOF fencing and local/relay body liveness;
+terminal compaction and replay; per-rendition key release; and whether any
+request or watcher can still make a competing recovery verdict.
+
+## 5. Merged M4 decision-transport slice after command sequencing
 
 The current slice extends the merged passive deadline foundation with one
 immutable decision transport and a passive executor scaffold. It preserves the
@@ -638,13 +1305,14 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After the current decision-transport/projection slice, the remaining M4 work
-is:
+After the active prepublication candidate, the remaining work is:
 
-1. Emit production decisions from deadline, exit, and classifier facts and
-   replace the passive executor scaffold with actor-authorized actions.
-2. Move the single allowed pre-publication validated retry behind that owner.
-3. Convert exact exits and copy classification to actor decisions.
+1. Push the locally green production decision, prepublication retry,
+   response-admission, relay/VOD ownership, and confirmed-reap cut; satisfy
+   hosted gates and merge it.
+2. Move published-lifetime stall classification and recovery behind the actor
+   without overlapping the retained compatibility watcher.
+3. Convert copy startup/exit classification and fallback to actor decisions.
 4. Add desired physical hold/resume command/intention barriers to the shared
    actor sequence; retain the successful physical acknowledgements already in
    producer ingress.
@@ -657,7 +1325,8 @@ is:
 8. Extend the shared index with exact intro/credits annotations, subtitle
    windows, force-analysis controls, queue/current-work visibility, and
    instrumentation.
-9. Add clustered rolling/VOD takeover and planned drain.
+9. Complete planned drain, VOD resurrection, rolling-successor failover, and
+   compatibility-takeover retirement.
 10. Complete mixed-fleet cutover and delete compatibility polling paths.
 
 ## 7. Completion definition

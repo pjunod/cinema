@@ -54,6 +54,39 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Keeps the request claim and the route publication fence in one database
+/// write. Hiqlite transactions do not expose an application-level rollback
+/// after affected-row counts are returned, so this trigger is the common
+/// SQLite/Hiqlite atomic boundary for BLOCKED -> finite/ready confirmation.
+const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
+    "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
+    AFTER UPDATE OF publication_ready_at_ms ON media_sessions
+    WHEN NEW.state = 'active' AND (
+      (OLD.publication_ready_at_ms = 9223372036854775807
+        AND NEW.publication_ready_at_ms != 9223372036854775807)
+      OR (OLD.publication_ready_at_ms > 0
+        AND OLD.publication_ready_at_ms < 9223372036854775807
+        AND NEW.publication_ready_at_ms = 0)
+    ) BEGIN
+      UPDATE media_session_requests
+         SET claim_expires_at_ms = CASE
+               WHEN OLD.publication_ready_at_ms = 9223372036854775807
+                    AND NEW.publication_ready_at_ms = 0
+                 THEN NEW.lease_expires_at_ms
+               WHEN OLD.publication_ready_at_ms = 9223372036854775807
+                 THEN MIN(9223372036854775806,
+                   NEW.publication_ready_at_ms
+                     + (NEW.lease_expires_at_ms - OLD.updated_at_ms) + 1)
+               ELSE MIN(9223372036854775806, NEW.lease_expires_at_ms + 1)
+             END,
+             updated_at_ms = NEW.updated_at_ms
+       WHERE incarnation_id = NEW.incarnation_id
+         AND request_fingerprint = NEW.request_fingerprint
+         AND playback_id = NEW.playback_id
+         AND owner_node_id = NEW.owner_node_id
+         AND state = 'starting';
+    END;";
+
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
@@ -86,7 +119,8 @@ use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
     CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
-    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome, MediaSessionRenewal,
+    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
     NewPretranscodeJob, OfflineActivityPackage, OfflineCreateOutcome, OfflineLeaseOutcome,
@@ -2068,6 +2102,71 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         activation: &MediaSessionActivation,
     ) -> Result<Option<MediaSessionActivationOutcome>, StoreError>;
 
+    async fn settle_media_session_activation(
+        &self,
+        activation: &MediaSessionActivation,
+        settlement: MediaSessionActivationSettlement,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Publish an exact prepared activation after its owner has observed the
+    /// serving result. The request remains in-flight until this CAS; replaying
+    /// the same resolved request returns its durable route.
+    async fn publish_media_session_activation(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Replace the durable unobserved sentinel with one full, freshly minted
+    /// not-before boundary. Exact ownership changes and terminal state fail
+    /// closed. A concurrent acknowledgement may return an already-ready row.
+    async fn arm_media_session_handoff(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        publication_ready_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Clear one successor's durable publication fence with an exact
+    /// acknowledgement or exact armed-boundary proof. Ownership changes,
+    /// terminal state, and unrelated incarnations fail closed.
+    async fn complete_media_session_handoff(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        proof: MediaSessionProjectionCompletion,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Arm the replay-visible fallback for an exact terminal owner after a
+    /// definitive post-End observation. Ended routes reuse the publication
+    /// column as terminal-projection state because they can no longer serve.
+    async fn arm_media_session_terminal_projection(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        projection_safe_at_ms: i64,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Persist exact owner acknowledgement or an exact armed-boundary proof
+    /// so a later idempotent release does not restart its safety interval.
+    async fn complete_media_session_terminal_projection(
+        &self,
+        incarnation_id: &str,
+        owner_node_id: &str,
+        owner_epoch: i64,
+        proof: MediaSessionProjectionCompletion,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     async fn fail_media_session_request(
         &self,
         user_id: i64,
@@ -2084,6 +2183,15 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     async fn media_session_route_by_incarnation(
         &self,
         incarnation_id: &str,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Resolve the exact route currently named by one player's durable
+    /// pointer. Activation uses this read as the predecessor half of its CAS
+    /// so commit-unknown reconciliation retains the identity it must fence.
+    async fn media_session_route_for_playback(
+        &self,
+        user_id: i64,
+        playback_id: &str,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
     /// Atomically store the first exact terminal-control acknowledgement and
@@ -2111,10 +2219,14 @@ pub trait MediaSessionStore: Send + Sync + 'static {
     ) -> Result<Vec<String>, StoreError>;
 
     /// Read a bounded, oldest-first inventory of expired active routes that a
-    /// survivor may independently prove it can reproduce.
+    /// survivor may independently prove it can reproduce. `after` is an
+    /// exclusive keyset cursor in `(lease_expires_at_ms, incarnation_id)`
+    /// order, allowing a bounded caller to make progress past routes it must
+    /// refuse without mutating those still-authoritative routes.
     async fn expired_media_sessions(
         &self,
         now_ms: i64,
+        after: Option<crate::domain::MediaSessionTakeoverCursor>,
         limit: usize,
     ) -> Result<Vec<MediaSessionRoute>, StoreError>;
 
@@ -2126,9 +2238,21 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         takeover: &MediaSessionTakeover,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 
+    /// End only the exact incarnation/owner epoch/lease boundary named by
+    /// `end`. A same-epoch renewal after the caller's read defeats the CAS.
+    ///
+    /// This is the lease-loss counterpart to takeover's CAS.  It is
+    /// idempotent for an already-ended matching incarnation and returns
+    /// `None` when ownership advanced before cleanup reached the Store.
+    async fn end_media_session_if_owner(
+        &self,
+        end: &crate::domain::MediaSessionEnd,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
     async fn end_media_session(
         &self,
         session_id: &str,
+        terminal_reason: &str,
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 

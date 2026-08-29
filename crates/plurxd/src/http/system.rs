@@ -2904,17 +2904,24 @@ pub async fn stop_session(
     let session_id = candidates
         .into_iter()
         .find(|session_id| session_id == &id || crate::transcode::session_log_id(session_id) == id);
-    let stopped = match session_id {
-        Some(session_id) => {
-            state
-                .transcode
-                .stop_session(&session_id, "stopped by admin")
-                .await
-        }
-        None => false,
-    };
-    if !stopped {
+    let Some(session_id) = session_id else {
         return Err(ApiError::NotFound("session"));
+    };
+    let status = super::hls::release_with_terminal(
+        state,
+        session_id,
+        crate::vodserve::Terminal::AdminStop,
+        "stopped by admin",
+    )
+    .await;
+    if status != StatusCode::NO_CONTENT {
+        return Err(if status == StatusCode::SERVICE_UNAVAILABLE {
+            ApiError::ServiceUnavailable(
+                "the session stop is still being durably reconciled; retry shortly".to_owned(),
+            )
+        } else {
+            ApiError::Internal(format!("unexpected session release status {status}"))
+        });
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }
@@ -3887,12 +3894,20 @@ mod tests {
                     last_applied_sequence: 17,
                     observation_only: true,
                     action_owner: "legacy_compatibility",
+                    startup_kind: None,
+                    presentation_contract_fingerprint: None,
+                    metadata_response_authorized: false,
+                    producer_media_published: false,
+                    retry_state: "legacy_compatibility",
                     decision_sequence: None,
                     decision_reason: None,
                     executor_state: "registered",
                     executor_pending_decision_age_ms: None,
                     executor_last_observed_sequence: 0,
                     executor_last_action_failure: None,
+                    executor_registered: true,
+                    decision_applied_sequence: None,
+                    decision_installed_attempt: None,
                 },
             ),
             producer_state: "held",

@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["611d60cf"]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci", "resource-bounds"]
+reason = "The retained guard-level regression pauses after exact worker and request cleanup, proves the same-player replacement gate is still unavailable, then proves settlement releases it; local and remote pin deadline cases remain bounded, and the corrected three-voter replay fixture reaches the intended transaction-order contract."

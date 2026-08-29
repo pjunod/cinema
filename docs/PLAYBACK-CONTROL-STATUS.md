@@ -1,11 +1,195 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-27
-**Merged baseline:** `origin/main` at `dba35f98` (PR #624)
-**Current work:** M4 decision transport in
-[PR #626](https://github.com/pjunod/plurx/pull/626) on
-`codex/playback-control-m4-producer-decision` in the disposable clone. Runtime
-commits `c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
+**Updated:** 2026-08-29
+**Merged baseline:** `origin/main` at `253f3200` (through PR #638)
+**Current work:** first actor-owned prepublication recovery cut in
+[#636](https://github.com/pjunod/plurx/pull/636) on branch
+`codex/playback-control-m4-prepublication` in the disposable clone at
+`/private/tmp/plurx-playback-control-clone`. Runtime repair `6e01bbc3`,
+restart-drain repair `07bb95bc`, focused migration/fixture repair `baba7c20`,
+lint repair `355d3309`, and Hiqlite placeholder-order repair `4da3bbde` now
+implement an explicit three-phase activation protocol. Their regression
+evidence is closed through `44947095`; hosted-preflight inventory reconciliation
+`c4a1d96d` updates sixteen reviewed exact-count sentinels changed by those
+repairs, and `c48a9867` carries the first final-Rust reconciliation:
+Prepare commits only a `BLOCKED` route and a starting claim; Confirm atomically
+changes that route to ready or to a finite predecessor boundary while leaving
+the claim starting; Publish resolves the claim only for the exact current,
+live, ready route; and Abandon atomically wins only while the claim is still
+starting. SQLite v36 and Hiqlite v18 install the same claim-transition trigger,
+including upgrades from already-v17 clusters. Finite handoffs remain renewable
+and takeover-safe through the 372-second response-lifetime boundary, then
+retain exactly one ready-retry renewal. Remote `START`/`ACTIVATE`, serving
+authority, detached worker/replacement ownership, takeover request ownership,
+and resolved replay freshness are all explicit. Rejected exact head
+`032292a159513e51f13bab5db1d6081c46b0cc5c` exposed that detached remote
+`START` did not retain restart-drain admission after handler cancellation;
+`07bb95bc` moves that guard into the detached task through worker/watcher
+handoff. Three independent review lanes approve every repaired source delta
+with no remaining P0–P3 finding. All three also approve the exact inventory
+repair with no remaining P0–P3 finding. Local behavior commit `600a95aa` and
+evidence mapping `700bcdd9` repair the nine exact failures from hosted run
+`33230939191`; two independent adversarial lanes approve that integrated diff
+with no remaining P0–P3 finding. Hosted structural-inventory reconciliation
+`c94cdcf3`, mapped through `4ad4a4da`, records only the resulting test shapes.
+The remote PR is at reviewed head `37b8cc43`; the local candidate adds hosted
+lifecycle-fixture repair `4b76a34e`, its evidence mapping `7dc30a42`, and this
+synchronized ledger.
+
+The one allowed full local unit invocation was consumed before tests while
+compiling Store code. The directly affected rerun then executed 641 tests:
+606 passed initially, five deterministic inventory/high-water failures passed
+after exact repairs, and all 30 socket fixtures passed by exact name with
+unrestricted loopback binds. The aggregate cluster gate found two stale
+historical migration fixtures; `411bf818` reconstructs their exact v10-v12
+schemas and `4d38a084` proves the v14 acknowledgement objects and v16/v17
+columns at every completed upgrade. Both failed names pass by exact name.
+The repaired tip then passed the activation Store contract, five exact daemon
+activation/replay tests, two SQLite migration tests, two Hiqlite schema tests,
+and the exact placeholder-order invariant. The first required cluster run
+passed every vendor WAL/Hiqlite probe and 61/67 replicated Store contracts;
+the six failures all identified first-appearance placeholder corruption in
+Hiqlite media-session SQL. `4da3bbde` repaired the four reached statement
+shapes plus one latent Abandon binding, and all six failed three-voter names
+passed on exact rerun. The complete cluster harness, seven real-daemon activation tests,
+and two Activity tests pass. Formatting, workspace Clippy, validation catalog,
+history, 123 operations contracts, 52 benchmark checks, and the web policy
+gate also pass. Every local result is therefore accounted green without a
+second manual/local broad-suite run. Hosted run `33226975369` stopped in fast preflight on
+sixteen stale ownership-inventory counts before every downstream job. After
+unanimous review, the two exact failed methods pass 2/2, `make
+validation-lint` passes, and the complete hosted-equivalent Python validation
+catalog passes 68/68. The PR body pins each immutable review candidate,
+avoiding an impossible self-reference from a commit to its own hash.
+Hosted rerun `33227941555` then stopped solely because the docs-only candidate
+subject matched the corrective-history classifier. Unanimously reviewed mapping
+`9471d129` records that `9ee007a8` changed documentation only; the exact
+`make history-check` rerun passes with 1,100 corrective commits accounted.
+Hosted run `33228540108` then passed validation scope, mobile version, fast
+policy/contract preflight, WAL recovery, daemon contracts, and the complete
+replicated Store/topology lane. Its final fast-Rust job exposed two stale Core
+contracts, two nondeterministic fixture assumptions, and two playlist tests
+whose obsolete barrier wait prevented completion; the job was cancelled at
+its 30-minute bound before libtest could print the latter target's summary.
+The reviewed repair now classifies all 48 SQLite transaction owners, checks
+the actual read-only Hiqlite replay shape, rendezvouses playlist races at the
+actor observation boundary, exercises software admission without a nonexistent
+media source, publishes VOD fixture claims through the complete three-phase
+contract, and isolates fair terminal eviction from paused-time Store probes.
+All six exact affected tests pass. Three independent repair reviews report no
+remaining P0–P3 finding; only immutable-tip review, the hosted rerun, and merge
+remain.
+
+Hosted rerun `33230939191` subsequently passed every selected substantive lane
+other than fast Rust, including the complete replicated Store/topology lane,
+but fast Rust reported
+eight failures and one cleanup hang. Seven failures and the hang were stale
+fixture ownership/timing assumptions: the repair separates scratch from app
+state, drives the real serving authority, observes the correct rolling or VOD
+registry, waits for detached response projection, refreshes frozen subtitle
+metadata, and rendezvouses exact waiters rather than sleeping. The ninth
+failure found a real close-versus-successful-acknowledgement race in delivered
+byte accounting; successful acknowledgements now win simultaneous receiver
+closure in both VOD and rolling pumps, while canceled acknowledgements preserve
+deadline and disconnect classification. All nine names pass by exact rerun.
+Two adversarial lanes approve the complete repair; no second broad local suite
+was run. Formatting, package Clippy, catalog, history, and exact-name gates are
+green. Corrected tip `cdc27aa8` passed two exact-head reviews, was pushed, and
+started the next hosted run.
+
+Hosted run `33234021296` stopped in preflight before broad Rust or cluster jobs
+because three whole-module structural sentinels had not counted the repair's
+test-only synchronization. Independent reviews proved exact net additions of
+one joined waiter task, nine bounded fixture timers, and six Barrier `wait`
+tokens conservatively matched by the process-lifecycle regex. No production
+task, timer, process action, watchdog, or recovery owner changed. Repair
+`c94cdcf3` preserves every regex, whole-module scan, and equality assertion;
+the exact failed validation method passes, and `4ad4a4da` maps the evidence.
+Hosted run `33234420211` then passed validation scope, mobile-version policy,
+contract preflight, WAL recovery, every daemon contract, and the complete
+replicated Store/topology lane. Fast Rust ran its hosted broad suite to
+completion: 1,281 passed, three were ignored, and seven stale fixture
+assumptions failed. Repair `4b76a34e` now compares actor delivery at one fixed
+coordinate, keeps read-only playlist observation separate from response
+publication, commits retention through the exact playlist owner, captures the
+idle baseline before status polling, exercises hardware capacity through the
+actual admission primitive, and tests duplicate-request coalescing through the
+claim state machine. All seven failed names pass by exact rerun. Package
+Clippy, formatting, diff inspection, the exact ownership inventory,
+validation lint, and history pass; `7dc30a42` records the regression evidence.
+Three source reviews and an exact mapped-head review approve the repair with no
+actionable P0–P3 finding. No second manual/local broad unit suite was run.
+The required hosted rerun will execute its normal fast-Rust gate. Documentation
+review, push, one fresh hosted run, and merge remain.
+
+The post-rejection work is assembled in three tracks:
+
+- HTTP/routing/relay now carries exact owner authority through VOD status,
+  durable local/remote/terminal classification, status rerouting, release,
+  remote abort, resurrection, range/`If-Range`, and EOF. Request preparation
+  retains one inherited deadline; an admitted relay body owns a separate
+  bounded streaming lifecycle. DELETE elects one cancellation-safe settlement
+  token, duplicates join its exact result, commit-unknown End retries through a
+  sharded bounded registry, and terminal authority is published before
+  detached process reclamation.
+- Rolling authority/settlement now makes Terminal admission irreversible once
+  queued, finds the exact Session across durable-ID adoption, releases the
+  global registry before actor/process settlement, publishes failure before
+  kill/reap, and retains process admission plus scratch until confirmed reap.
+  Detached retirement and scratch owners survive caller cancellation.
+- VOD uses per-rendition single-flight ownership for slow builds, bounded and
+  confirmed-reap missing-init regeneration, cancellation-safe dormant purge,
+  immediate heavyweight terminal-graph compaction, and bounded compact `410`
+  replay followed by fail-closed durable eviction.
+
+The pre-rebase implementation frozen through rebased commit `611d60cf` joins
+those tracks at their
+shared publication boundary:
+
+- replacement is make-before-break: the provisional successor activates by
+  Store CAS before the authoritative predecessor is projected terminal, while
+  persisted `publication_ready_at_ms` is an explicit three-state fence. Only
+  `0` is publishable; activation writes an indefinitely blocked sentinel, the
+  first exact post-commit observer arms a fresh 372-second not-before value,
+  and exact acknowledgement or an exact elapsed-boundary Store proof clears
+  it. Routing and idempotent replay never infer readiness from wall time;
+- Store rows now retain the first `terminal_reason` across public release,
+  supersession, admin/revoke paths, stale-owner cleanup, and node removal.
+  SQLite and Hiqlite migrations, route queries, replicated dump/import, and
+  old-schema import defaults carry both new fields;
+- release is explicitly two phase: install a cause-neutral local publication
+  fence, await the uncancelled first-writer Store End, cache its exact terminal
+  route or definitive absence, then project that durable cause to the exact
+  owner. A shared `204` is published only after replay-visible proof and owner
+  acknowledgement, or after the finite admitted-body safety boundary. Ended
+  rows reuse `publication_ready_at_ms` as a durable projection ledger:
+  sentinel means the post-End boundary is not armed, finite means the one
+  restart-stable fallback is pending, and `0` means exact acknowledgement or
+  exact boundary proof was persisted. A restart never mints a second window;
+- attempt-derived bodyless status and typed failure validate the exact
+  Session/attachment and rolling attempt without renewing demand or advancing
+  delivery. Streamed body authorization commits only after all advertised
+  bytes have been read and accepted by the bounded HTTP-body channel; a fully
+  buffered body commits only after exact preparation immediately before
+  exposure and is then wrapped by the same absolute body deadline.
+  Cancellation, short read, storage error, and abandonment before the final
+  streamed chunk is accepted are non-commits; and
+- every admitted local or relayed media body has a 300-second absolute
+  lifetime and a 30-second upstream or downstream no-progress bound. Driven
+  local bodies retain at most one unacknowledged chunk and account/commit only
+  after the public Body accepts that chunk; the relay pump retains two and all
+  public bodies discard queued bytes after a terminal or absolute deadline.
+
+The unchanged pre-rebase content was locally validated. Rebased runtime head
+`b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
+`77e292d1`, and historical-schema head `4d38a084` retain those earlier
+adversarial approvals; the current serving-authority source repair is under a
+fresh exact-head review.
+The one allowed full local unit invocation has been consumed; every failed or
+directly affected name now passes, and no second manual/local broad unit target
+will run. Required hosted workflows still execute their normal broad gates.
+PR #626's runtime commits
+`c04898e2`, `732d3442`, `91486148`, `ba3a504d`, and `4d0a0c0f` add a
 behavior-neutral, one-slot immutable actor decision, a non-consuming poll
 command, and one bounded passive executor inbox/task. Root static review
 repaired a mailbox self-retention cycle before the first commit. Adversarial
@@ -31,14 +215,16 @@ The repair received targeted approval, the corrected handoff received final
 static approval, and the final documentation corrections received exact-head
 approval at `1ead3944`. `make check` and `make cluster-check` passed. Hosted
 run `33127652859` then passed every selected job and the aggregate PR
-validation gate on that reviewed implementation/status head.
+validation gate on that reviewed implementation/status head. Final exact head
+`62a4f535` passed hosted run `33129200705`; PR #626 merged as `9063bb1e`.
 PR #624 merged as `dba35f98` after unanimous exact-head review, green local
 `make check` and `make cluster-check`, and hosted run `33118301414`. Its bounded
 shared command/producer sequencing, publication-time ordering, stale-exit
 fencing, observation-only actor projection, and command/deadline metrics are
 now the validated baseline. Legacy watchdogs and recovery actions remain
-active. The current decision transport emits no production decision and owns
-no retry, cleanup, response-admission, or process action.
+active. The merged decision transport emits no production decision and owns no
+retry, cleanup, response-admission, or process action. The active cut is the
+first one authorized to take those duties from the compatibility path.
 The detailed M4 contract is in
 [`PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`](PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md).
 The resumable execution state is in
@@ -59,7 +245,7 @@ not being counted as complete merely because its foundation has landed.
 | M1 — typed control plane | **Complete** | Strict v1 messages, capability route, sequence and owner fencing, bounded cluster relay, default-off advertisement, metrics | Active actions remain deliberately disabled |
 | M2 — passive clients | **Partial** | Web reports demand, playhead, contiguous runway, render state, selections, capabilities, and recovery evidence | Apple and Android reporters; alternate-ingress physical evidence |
 | M3 — actor and explicit lease | **Complete** | Rolling generation has one bounded actor for control fencing, explicit demand/pacing, renewal, expiry claim, typed End/authority-fence ownership, durable terminal replay, response commit ownership, the attempt-fenced delivery ledger, nonblocking progress/exact-exit observations, and exhaustive event-order evidence | M4 now moves recovery decisions through that owner |
-| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, and sequenced actor/producer ordering; reviewed and fully green PR #626 adds the passive decision transport | Merge the transport, then add production decision emission, response admission, retries, cleanup, and process actions behind the actor/executor before deleting detached recovery loops, in-place fallback, and transition locks/atomics |
+| M4 — server watchdog removal | **In progress** | Merged contract, deadline-chain ingress, legacy-owner inventory, sequenced actor/producer ordering, and passive decision transport through PR #626; locally green PR #636 assembles production startup recovery, make-before-break publication fencing, explicit three-phase cluster activation, durable release/terminal truth, exact response settlement, routing/relay, VOD ownership, and exact cluster-takeover settlement | Exact-head review PR #636, satisfy hosted checks, and merge; later cuts remove published-lifetime and copy compatibility owners |
 | M5 — one client action owner | **Not started** | — | Collapse web, Apple, and Android reopen/watchdog paths into one controller per platform |
 | M5.5/M6 — prepared handoff and Auto | **Not started** | — | Staged generations and transactional resolution, bitrate, codec, HDR/Dolby Vision, audio, subtitle, and node changes |
 | M7 — semantic indexes/subtitles | **Partial foundation** | Cluster-shared structural fragment index plus durable force-analysis queue and operator status page | Timeline annotations, exact intro/credits markers, feature sidecar, subtitle windows, seek coalescing, marker prewarm |
@@ -86,6 +272,7 @@ not being counted as complete merely because its foundation has landed.
 | [#619](https://github.com/pjunod/plurx/pull/619) | Constant-space cutoff-safe producer progress coverage plus checked whole-module legacy owner/task/timer/process inventory | Thirteen exact-head reviews; final approval at `11315987`; focused tests, `make check`, `make cluster-check`, and hosted PR gate green; merged as `48ea494c` |
 | [#621](https://github.com/pjunod/plurx/pull/621) | Passive producer deadline, cutoff-safe ingress/fencing, and process-flow barriers | Ten exact-head rounds ended unanimously **APPROVED**; hosted run `33109297301` green; merged as `8e331672` |
 | [#624](https://github.com/pjunod/plurx/pull/624) | Bounded shared actor-command/producer sequencing and observation-only operational projection | Formal runtime round 5 unanimously approved; `make check`, `make cluster-check`, and hosted run `33118301414` green; merged as `dba35f98` |
+| [#626](https://github.com/pjunod/plurx/pull/626) | Immutable actor decision slot, non-consuming poll contract, and bounded passive executor transport | Exact-head adversarial approval; focused Rust 85/85, ownership 7/7, `make check`, `make cluster-check`, and hosted run `33129200705` green; merged as `9063bb1e` |
 
 ## Active slice: M4 watchdog removal
 
@@ -98,11 +285,13 @@ PR #621 merged the passive deadline and cutoff-safe ingress foundation as
 `8e331672`. PR #624 then merged bounded shared command/producer sequencing,
 publication-time ordering, stale-exit fencing, partial observation-only actor
 projection in `SessionInfo` and telemetry, and bounded command/deadline metrics
-as `dba35f98`. The current decision-transport slice adds
-the immutable typed decision contract, non-consuming `PollProducerDecision`, a
-one-slot actor pending value, and one move-only executor inbox/task. It remains
-observation-only: no production decision is emitted, no `DecisionApplied`
-acknowledgement exists, and the legacy watchdogs/action owners remain active.
+as `dba35f98`. PR #626 then merged the immutable typed decision contract,
+non-consuming `PollProducerDecision`, one-slot actor pending value, and one
+move-only executor inbox/task as `9063bb1e`. That merged transport remains
+observation-only. The active branch binds it to production transcode startup:
+the actor emits the first real decision, HTTP admission closes retry before
+attempt bytes escape, and one executor applies the sole validated
+prepublication retry.
 
 M4 makes the same actor the sole recovery decision owner. It replaces hardware
 startup grace, software startup/lifetime polling, and copy-segmenter fallback
@@ -120,13 +309,14 @@ Review and test state for M4:
 | Gate | State |
 |---|---|
 | Implementation contract | **Merged in #618.** It defines deadline policy, contiguous cutoff-safe ingress with command and producer-event barriers, arm/disarm and event ordering, exhaustive action-timeout settlement, the one-retry invariant, hard rolling-process admission, process-executor ownership, publication-aware cleanup, post-publication proposal behavior, instrumentation, source ownership checks, and the race/failure matrix. |
-| Static owner inventory | **Merged in #619 and extended in the active slice.** `tests/playback/rolling-producer-owners.toml` exact-counts the known recovery/election/replacement owners and scans every Rust module under `plurxd/src`; the active branch adds named decision transport, wake, and executor sentinels while leaving every legacy owner count unchanged. |
+| Static owner inventory | **Reconciled through `c4a1d96d` and test-shape update `c94cdcf3`; exact inventory remains green at `7dc30a42`.** `tests/playback/rolling-producer-owners.toml` exact-counts recovery/election/replacement owners and scans every Rust module under `plurxd/src`. It names the candidate's retirement, exact shared release settlement, sharded commit-unknown reconciliation, takeover creation/worker/lease owners, durable handoff/terminal proofs, adoption/terminal gates, release/abort capacity, relay/prepared/local body owners, per-key VOD build, head-reap, purge, compaction, and tombstone owners. Hosted run `33226975369` exposed sixteen stale exact counts after the activation and cleanup repairs; run `33234021296` exposed one joined waiter task, nine bounded fixture timers, and six Barrier waits added by the reviewed hosted-gate tests. Independent reviews recomputed every count and confirmed no new production owner. The exact failed validation methods pass without changing scanner regexes, scan scope, or equality assertions. |
 | Progress ingress | **Merged in #619.** `ProgressCoverageBatch` retains first, covered tail/deadline, first gap, latest progress, and latest telemetry with a persistent exact-attempt watermark and exit barrier. The local actor consumes that proof without flattening away publication time. |
 | Passive deadline/cutoff | **Merged through #624.** The actor folds producer facts under transition plus ingress, uses fenced publication timestamps, classifies non-success exits immediately, preserves progress around bounded sequenced physical-flow barriers, fails closed when the actor/mailbox disappears, serializes actor-task exit fencing with producer transitions, and re-authorizes exact attempts before full-capacity STOP/CONT syscalls. It still emits no recovery action. |
-| Operational projection | **Partial and observation-only.** Merged #624 exposes bounded deadline/due, process-exit, physical-flow, and last-applied-sequence truth. The active slice adds a retained decision sequence/reason and passive executor observation. It does not expose an action, retry, executor application acknowledgement, or response-admission verdict. The decision slot is test-installed only. |
-| Adversarial implementation review | **Approved.** The first four rounds found and repaired liveness, projection, compile/lint, test determinism, actor-loss/terminal races, stale status overwrite, poll-contract, and defensive first-settlement issues. All three reviewers approved exact runtime head `981ebb51`. Every post-test corrective delta was reviewed before its affected gate reran; the final documentation corrections were approved at `1ead3944`. |
-| Unit/focused tests | **Green.** Rust playback control passed 85/85 twice without warnings; after reviewed bookkeeping repairs, the ownership inventory passed 7/7. |
-| Full/cluster/hosted gates | **Green.** `make check` passed catalog/history, Clippy with warnings denied, the full workspace suite, and doc tests. `make cluster-check` passed vendor WAL/recovery, replicated-store, topology, failure-drill, activation, and activity integration contracts. PR #626 hosted run `33127652859` passed every selected job and the aggregate validation gate on reviewed head `1ead3944`. |
+| Operational projection | **Runtime repairs through `4da3bbde`; evidence closed through `44947095`; inventory reconciliation `c4a1d96d`; final-Rust repair `c48a9867`; hosted-gate repair `600a95aa` mapped through `700bcdd9`; test-shape inventory repair `c94cdcf3` mapped through `4ad4a4da`; hosted lifecycle-fixture repair `4b76a34e` mapped through `7dc30a42`; the synchronized documentation tip is the review candidate.** Actor startup policy, contract fingerprint, response/retry cutoff, executor state, immutable decision application, copy/cache publication admission, first-media lifetime ownership, make-before-break replacement, transaction-safe takeover activation replay, paged takeover inventory, renewal-before-adoption publication, move-owned identity handoff, durable terminal/publication fields, two-phase release, exact status/error/EOF fences, bounded local/relay bodies, authoritative routing, and VOD build/cleanup ownership are assembled. Remote cluster activation now uses explicit negotiated ownership plus target serving generation, three-phase Prepare/Confirm/Publish-or-Abandon settlement with atomic claim deadlines on both Store backends, and restart admission owned through detached START completion. |
+| Adversarial implementation review | **Every source, hosted-gate, inventory, and lifecycle-fixture repair through `7dc30a42` is approved.** The final rounds repaired response-publication cleanup, finite handoff renewal/takeover, current-owner replay after takeover, resolved-replay freshness, backend transaction parity, the v17→v18 Hiqlite trigger upgrade, remote START restart-drain ownership, executable trigger syntax, current fixtures, Clippy ownership shape, five Hiqlite placeholder-order defects, final transaction inventory/replay assertions, deterministic admission/terminal fixtures, actor-bound playlist race seams, exact VOD/rolling cleanup observation, successful-ack delivery accounting, and the seven hosted lifecycle fixtures. Exact head `032292a1…` was rejected for detached START ownership; the first cluster gate rejected six SQL bindings; hosted runs `33228540108`, `33230939191`, and `33234420211` exposed six, nine, and seven exact Rust cases respectively. All resulting source and evidence repairs have unanimous approval with no remaining P0–P3 finding. Documentation-only exact-head review remains before push. |
+| Format/static inspection | **Green on mapped repair `7dc30a42`.** `cargo fmt --all -- --check`, `git diff --check`, package Clippy with warnings denied, the exact ownership inventory, validation catalog, and history pass. Earlier required evidence also includes workspace compiler checks, 123 operations contracts, 52 benchmark checks, and the web policy/contrast gate. The hosted-equivalent Python validation catalog passes 68/68 after `c4a1d96d`; exact history policy passes after docs-only mapping `9471d129`. |
+| Unit/focused tests | **Green without a second manual/local broad run.** Hosted run `33234420211` completed its broad suite: 1,281 passed, seven failed, and three were ignored. All seven failures were repaired at `4b76a34e` and now pass by exact name. Historical 641-test accounting, the activation Store contract, five daemon activation/replay tests, two SQLite migrations, two Hiqlite schema contracts, the placeholder-order invariant, all six names from run `33228540108`, and all nine names from run `33230939191` also remain accounted green. The required hosted rerun will execute its normal fast-Rust gate. |
+| Full/cluster/hosted gates | **All required cluster evidence is green; one fresh hosted run remains.** Vendor WAL/Hiqlite probes passed. The replicated Store lane passed 61/67 before six exact placeholder failures; after `4da3bbde`, all six failed three-voter names pass. The complete cluster harness, seven activation tests, and two Activity tests pass. Hosted runs `33226975369` and `33227941555` exposed and closed inventory/history preflight findings. Runs `33228540108` and `33230939191` passed every selected substantive lane other than fast Rust, including the complete replicated Store/topology lane; their aggregate gates failed because fast Rust exposed six and nine exact cases respectively. Run `33234021296` stopped before broad jobs on three reviewed test-only structural counts, now exact-green at `c94cdcf3`. Run `33234420211` passed every selected substantive lane other than fast Rust and the full Store/topology lane; its aggregate gate failed because of the seven fast-Rust failures, now exact-green at reviewed source `4b76a34e`. Merge remains conditional on documentation review, push, and one wholly green hosted rerun. |
 
 ## Watchdog-removal ledger
 
@@ -134,10 +324,36 @@ The target is not zero timers. The target is no overlapping recovery owners.
 The detailed symbol-by-symbol contract is in the plan's
 [deadline inventory](PLAYBACK-CONTROL-PROTOCOL-PLAN.md#7-deadlines-and-watchdog-inventory).
 
-The active decision-transport branch has not reached that target: every legacy
-watchdog, replacement path, action owner, and response-admission compatibility
-path remains active. The new decision path is also observational; it does not
-authorize a retry, kill, replacement, cleanup, or transparent handoff.
+Merged `main` has not reached that target: every legacy watchdog, replacement
+path, action owner, and response-admission compatibility path remains active.
+The active branch is replacing the prepublication transcode-start owner first.
+Published-lifetime and copy recovery remain explicit later cuts and must not
+overlap the actor-owned scope after their respective cutovers.
+
+### Active-candidate watchdog disposition
+
+| Mechanism | Active-candidate disposition | Why it remains, if retained |
+|---|---|---|
+| `FIRST_SEGMENT_GRACE` and the detached startup downgrade loop | **Removed from production.** `FIRST_SEGMENT_GRACE` has zero source owners, and `downgrade_one_step` is no longer a production recovery path. | The actor's one exact `ProducerProgressDeadline` and immutable retry decision replace them. |
+| `SOFTWARE_GRACE` | **Retained only for copy startup.** The first-media transfer starts the compatibility lifetime watcher with zero additional startup grace. | Copy startup still uses the value until that bounded cut moves to the actor; published-lifetime compatibility instead retains `PROGRESS_STALL` and `WATCHDOG_POLL`. |
+| `PROGRESS_STALL` | **Retained in disjoint scopes.** The actor uses the explicit prepublication progress budget; compatibility code still uses the published-lifetime/copy threshold. | A producer cannot self-report a silent wedge. The later published/copy cuts must move the remaining decisions without overlapping prepublication. |
+| `WATCHDOG_POLL`, `watch_for_stall*`, and `watchdog_active` | **Retained only for published-lifetime and copy compatibility.** | They cannot decide actor-owned prepublication recovery after this cut; later M4 cuts replace and delete those decision owners. |
+| `child_transition` and `replacing_child` | **Retained for process/resource serialization and compatibility replacement.** | Exact child ownership, confirmed reap, published-lifetime handling, and copy replacement still require serialization until the later cuts remove in-place replacement. |
+| copy fallback/recovery | **Recovery retained; response authorization actor-fenced in the candidate.** | The candidate orders compatibility failure before kill/reap and admits copy/cache responses through the actor, but copy recovery decisions have not moved into it. |
+| `PREPUBLICATION_REAP_RETRY` (5 s) and `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) | **Retained lifecycle cleanup bounds, not playback watchdogs.** | They retry bounded termination until the exact predecessor is confirmed reaped while retaining process admission and scratch; they cannot choose retry, replacement, playback failure, or response publication. |
+| rolling retirement/scratch settlement | **New bounded lifecycle owners.** | Exact retirement survives caller cancellation and holds process resources through reap. Scratch cleanup makes three 5-second attempts separated by 5 seconds, then leaves the orphan for startup/maintenance cleanup; it makes no recovery decision. |
+| exact-EOF settlement task | **Retained bounded response completion owner, not a watchdog.** | At most 256 visible streams can reserve one owner; each owner gets one fresh five-second deadline at exact advertised EOF, commits only complete delivery, and releases capacity on every terminal path. |
+| first-media settlement | **Retained bounded handoff owner, not a watchdog.** | At most 256 settlements bridge actor authorization to published-lifetime ownership without clearing confirmed-reap state early. |
+| absolute playlist preparation budget | **Retained network lifecycle limit, not a watchdog.** | One deadline covers registry/storage reads, actor observation, catalog projection, and every poll across reclassification; timeout returns retryable `503` and cannot select or replace a producer. |
+| bounded HTTP actor/handoff waits | **Retained network lifecycle limits, not recovery watchdogs.** | One five-second absolute publication deadline covers admission, first-media application, buffered commit, and actor command/reply waits; cancellation is fail-closed before later actor mutation. |
+| admitted local and relay body lifecycle | **New post-admission network/storage owner.** | Preparation uses the inherited request deadline; after admission, every prepared, local-file, and relay body has a 300-second absolute lifetime, while active file/network pumps also enforce 30 seconds without upstream or downstream progress. Independent bounded pumps own file/network readers and EOF authority under socket backpressure: local bodies retain one unacknowledged chunk, relay bodies two, and queued data is rejected after terminal/absolute timeout. The common finite resource lifetime makes the terminal-projection safety bound meaningful; M8 may change transport, but body-liveness bounds remain. |
+| make-before-break successor publication | **New durable handoff fence, not a playback watchdog.** | A provisional successor must exist before the Store pointer CAS can end its predecessor. Activation persists an indefinitely blocked sentinel; the first exact post-commit observation arms a 372-second boundary, and publication requires an explicit Store transition to `0`. Exact predecessor acknowledgement may clear early because it prevents future old-capability admission; already-admitted bodies may drain under the predecessor's distinct never-reused URL. Without acknowledgement, only an exact elapsed-boundary proof clears the fence. M6 generalizes this transaction to quality/HDR/track changes. |
+| public release and internal abort settlement | **New bounded terminal owners.** | Public DELETE elects one exact shared settlement before immediately detaching ownership; duplicates join without another task or permit. Five seconds bounds capacity admission and each caller's wait, never an admitted Store mutation. A commit-unknown End remains fail-closed in a 128-entry, 32-shard registry and retries at fanout four with 1–30-second backoff under panic supervision. The first Store `terminal_reason` wins. Ended rows persist sentinel → finite boundary → `0`, so exact owner acknowledgement and fallback completion survive ingress/owner restart without extending the window. Replay-visible terminal/absence proof plus durable projection completion settles `204`; an unreachable peer may settle only after the 372-second terminal-projection boundary covering the 62-second pre-header ceiling, 300-second body lifetime, and margin. Remote delivery is capped at three attempts with 100 ms delay, while physical reclamation remains independently bounded. M8 prepared handoff may replace the cleanup transport. |
+| VOD missing-init regeneration | **New bounded lifecycle fallback.** | Four node-wide slots, a 15-second deadline, an 8 MiB ceiling, and per-key ownership through confirmed child reap prevent unbounded forks/buffers and same-key overlap. Later VOD/index hardening may delete on-demand regeneration. |
+| VOD terminal cleanup/replay | **New compact lifecycle owner.** | Heavy media/process graphs release immediately after exact cleanup. A compact owner replays `410` for 60 seconds, then a 3-second, 16-way fail-closed durable confirmation permits eviction. M8 may centralize the durable replay record. |
+| VOD idle/dormant retention | **Retained cache lifecycle policy.** | Sessions idle after 300 seconds; renditions become dormant after 1,800 seconds. Detached purge owns the key, child, accounting, directory, and identity cleanup before any await, preventing rebuild overlap. |
+| cluster lease/takeover timers | **Retained failure fencing, not playback-progress watchdogs.** | Three-second renewal and 12-second lease bounds distinguish a live owner from a dead node. M8 replaces compatibility takeover with prepared handoff; lease expiry remains. |
+| 15-second repair/flow-control tick | **Retained maintenance schedule.** | It refreshes indexes, retention, speed, pacing, and lease projection. M4 removes recovery authority from the tick; periodic maintenance remains. |
 
 ### Server mechanisms still present on merged `main`
 
@@ -177,11 +393,20 @@ The 60-second terminal-ack retention window introduced by M3c3 is likewise an
 idempotency bound: it retains one immutable accepted reply and triggers no
 playback, replacement, restart, or failure decision. It is not a watchdog.
 
+Cluster takeover adds one 24-second, one-shot ownership lease. The survivor
+must complete an exact bootstrap renewal from the provisional worker before
+durable-ID adoption and seed/publication; ordinary renewals then return to the
+12-second cluster owner lease. This fixed lease and its four-second Store
+deadline can fence serving authority, but they never infer a playback stall,
+select quality, or restart a producer. They are cluster split-brain bounds,
+not playback watchdogs.
+
 ## Remaining delivery order
 
-1. Adversarially review, test, and merge the active decision-transport slice,
-   then complete M4 and prove the old server watchdog/replacement symbols are
-   gone.
+1. Freeze and review the exact repair tip, push it, make the hosted checks
+   wholly green, merge it, migrate
+   published-lifetime and copy recovery, and prove the old server watchdog/
+   replacement symbols are gone.
 2. Complete Apple and Android M2 reporters and record timer/alternate-ingress
    behavior.
 3. Complete M5/M5.5/M6 so quality, codec, dynamic range, tracks, subtitles, and

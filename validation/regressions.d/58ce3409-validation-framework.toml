@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["58ce3409"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "This validation-only corrective commit records the current Rust and resource-bound evidence for the PR 636 compile/lint corrections; it does not change runtime behavior."

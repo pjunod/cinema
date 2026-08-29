@@ -846,6 +846,20 @@ const MIGRATIONS: &[&str] = &[
     // v33: query indexes for the server-paginated analysis history and the
     // bounded summary projection polled by Activity and Settings.
     crate::store::fragment_index_cluster::ANALYSIS_HISTORY_INDEX_SCHEMA,
+    // v34: retain the first terminal decision with the authoritative route.
+    // Fresh databases also run the append-only v25 -> v36 chain, so the
+    // original v25 table definition deliberately remains unchanged.
+    "ALTER TABLE media_sessions ADD COLUMN terminal_reason TEXT
+        CHECK (terminal_reason IN
+          ('deleted', 'superseded', 'admin_stop', 'revoked', 'replaced'));",
+    // v35: a replacement is active for lease ownership immediately, but its
+    // create replay and media capability stay fenced until the prior owner
+    // acknowledges supersession or all previously admitted bodies expire.
+    "ALTER TABLE media_sessions ADD COLUMN publication_ready_at_ms INTEGER NOT NULL DEFAULT 0
+        CHECK (publication_ready_at_ms >= 0);",
+    // v36: route confirmation and the starting request's retry deadline are
+    // one atomic database mutation on both Store backends.
+    super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1560,6 +1574,27 @@ impl SettingsStore for SqliteStore {
 }
 
 #[cfg(test)]
+#[cfg(feature = "hiqlite-store")]
+impl SqliteStore {
+    pub(crate) fn apply_migrations_for_test(
+        conn: &Connection,
+        through_version: i64,
+    ) -> rusqlite::Result<()> {
+        let through_version = usize::try_from(through_version)
+            .map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?;
+        if through_version > MIGRATIONS.len() {
+            return Err(rusqlite::Error::InvalidParameterName(
+                through_version.to_string(),
+            ));
+        }
+        for sql in MIGRATIONS.iter().take(through_version) {
+            conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))?;
+        }
+        conn.pragma_update(None, "user_version", through_version as i64)
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::domain::{MetadataPatch, ReadingStateWrite};
@@ -1776,7 +1811,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 33,
+            version, 36,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -2427,7 +2462,7 @@ mod tests {
         for (table, columns) in [
             ("media_session_requests", 10),
             ("media_playback_pointers", 4),
-            ("media_sessions", 17),
+            ("media_sessions", 19),
         ] {
             assert_eq!(
                 conn.query_row(
@@ -2897,7 +2932,7 @@ mod tests {
     }
 
     #[test]
-    fn v33_adds_analysis_history_indexes_without_losing_v32_state() {
+    fn v32_upgrades_through_analysis_indexes_terminal_reason_and_publication_fence() {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dir.path().join("plurx.db");
         {
@@ -2915,7 +2950,7 @@ mod tests {
             .expect("seed v32 state");
         }
 
-        SqliteStore::open(&db).expect("migrate v32 to v33");
+        SqliteStore::open(&db).expect("migrate v32 to current");
         let conn = Connection::open(&db).expect("raw reopen");
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
@@ -2980,5 +3015,16 @@ mod tests {
             3,
             "each terminal state must have its own bounded newest-first index walk: {details:?}"
         );
+        let columns = conn
+            .prepare("PRAGMA table_info(media_sessions)")
+            .expect("prepare media-session columns")
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("read media-session columns")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect media-session columns");
+        assert!(columns.iter().any(|column| column == "terminal_reason"));
+        assert!(columns
+            .iter()
+            .any(|column| column == "publication_ready_at_ms"));
     }
 }
