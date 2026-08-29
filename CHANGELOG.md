@@ -8,6 +8,22 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A clustered node no longer refuses requests once every heartbeat.** Both
+  request-gate slots the capacity gate consults — the local maintenance flag
+  and the local serving role — were published closed *before* the database
+  read that computes their real value, and reopened only after it returned.
+  The refreshes run once per ten-second heartbeat, so on a healthy node that
+  nobody had asked to drain there was a window on every beat in which every
+  HTTP request except `/healthz` and `/metrics` answered `503`. Clients saw it
+  as sporadic dropouts on an otherwise idle server. Each slot is now published
+  exactly once, when its value is known, through a guard whose `Drop` closes
+  the gate — so a read error, a panic, or a cancelled heartbeat still fails
+  closed, while success no longer fences anything. Membership changes also now
+  select the replicated Store and topology lane in CI, which they claimed as
+  evidence but did not run.
+
 ### Changed
 
 - **The Cluster tab is laid out around its two components.** The replicated
