@@ -1,7 +1,7 @@
 version = 1
 
 [[coverage]]
-commits = ["600a95aa", "700bcdd9", "c94cdcf3"]
+commits = ["600a95aa", "700bcdd9", "c94cdcf3", "4b76a34e"]
 points = ["playback.pipeline", "cluster.auth", "validation.framework"]
 checks = ["rust-gate", "cluster-auth", "resource-bounds", "history-regressions"]
-reason = "The retained Rust fixtures require a yielded local-media chunk to count only after its exact successful body acknowledgement, preserve body/no-progress timeout classification for canceled acknowledgements, and keep incomplete delivery from renewing the consumed frontier. They also prove detached EOF projection, exact rolling and VOD terminal cleanup, replacement-gate ownership, frozen subtitle generation rebinding, isolated scratch reclamation, and synchronous serving-authority fencing. The cluster and resource gates retain the production ownership and cleanup bounds while the fast Rust gate covers the exact hosted regressions."
+reason = "The retained Rust fixtures require a yielded local-media chunk to count only after its exact successful body acknowledgement, preserve body/no-progress timeout classification for canceled acknowledgements, and keep incomplete delivery from renewing the consumed frontier. Fixed-coordinate actor observation, preparation-versus-response lease publication, pruned-miss non-renewal, held concurrent admission permits, and in-flight request coalescing keep those contracts deterministic under the complete hosted target. The fixtures also prove detached EOF projection, exact rolling and VOD terminal cleanup, replacement-gate ownership, frozen subtitle generation rebinding, isolated scratch reclamation, and synchronous serving-authority fencing. The cluster and resource gates retain the production ownership and cleanup bounds while the fast Rust gate covers the exact hosted regressions."
