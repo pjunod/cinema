@@ -260,6 +260,7 @@ pub(crate) async fn start(
             // Ownership crosses into this cancellation-independent watcher
             // before the start task returns its response.
             let mut guard = guard;
+            let mut confirmed_lease = None;
             let deadline = tokio::time::Instant::now() + REMOTE_ACTIVATION_CONFIRMATION_WINDOW;
             loop {
                 match tokio::time::timeout_at(
@@ -282,17 +283,24 @@ pub(crate) async fn start(
                         if !serving_authority.is_current(admitted_serving_generation) {
                             break;
                         }
-                        confirmation_state
-                            .media_sessions
-                            .seed_owned_lease(&route)
-                            .await;
-                        // The watcher now owns cleanup; activation is the
-                        // only point at which the provisional owner may be
-                        // released.
-                        if let Some(guard) = guard.as_mut() {
-                            guard.disarm();
+                        if confirmed_lease.is_some_and(|lease_expires_at_ms| {
+                            route.lease_expires_at_ms > lease_expires_at_ms
+                        }) {
+                            // Both a finite predecessor handoff and a
+                            // response-published route enter owner inventory.
+                            // A lease advance proves the ordinary lease loop
+                            // accepted durable worker ownership; publication
+                            // remains fenced until the request resolves, but
+                            // the provisional START owner may now retire.
+                            if let Some(guard) = guard.as_mut() {
+                                guard.disarm();
+                            }
+                            return;
                         }
-                        return;
+                        confirmed_lease = Some(route.lease_expires_at_ms);
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        tokio::time::sleep(Duration::from_millis(500).min(remaining)).await;
                     }
                     Ok(Ok(Some(route)))
                         if route.session_id == confirmation_session
@@ -356,6 +364,9 @@ pub(crate) async fn activate(
     else {
         return StatusCode::BAD_REQUEST.into_response();
     };
+    let Some(restart_admission) = state.serving.try_restart_admission().await else {
+        return RemoteStartError::RestartDrain.into_response();
+    };
     let authority = state.serving.authority();
     if authority.admit() != Some(request.target_generation) {
         return RemoteStartError::ServingFence.into_response();
@@ -377,15 +388,19 @@ pub(crate) async fn activate(
         .clone();
     let activation = request.activation.clone();
     let activation_state = state.clone();
-    let mut activation_task = tokio::spawn(super::hls::activate_session_under_authority(
-        activation_state,
-        request.activation,
-        None,
-        predecessor_incarnation,
-        authority,
-        request.target_generation,
-        None,
-    ));
+    let mut activation_task = tokio::spawn(async move {
+        let _restart_admission = restart_admission;
+        super::hls::activate_session_under_authority(
+            activation_state,
+            request.activation,
+            None,
+            predecessor_incarnation,
+            authority,
+            request.target_generation,
+            None,
+        )
+        .await
+    });
     match tokio::time::timeout(
         crate::media_sessions::ACTIVATION_STORE_DEADLINE,
         &mut activation_task,

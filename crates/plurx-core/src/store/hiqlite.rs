@@ -43,7 +43,8 @@ use crate::error::StoreError;
 // v14 adds bounded terminal-control acknowledgement replay; v15 adds the
 // indexes that keep the analysis operations projection cheap under polling;
 // v16 persists the first terminal cause; v17 adds the replacement-publication
-// fence. Every additive
+// fence; v18 installs the atomic request-claim trigger for that fence on
+// clusters which had already reached v17. Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -56,7 +57,8 @@ const TERMINAL_ACK_SCHEMA_VERSION: i64 = 14;
 const ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION: i64 = 15;
 const TERMINAL_REASON_SCHEMA_VERSION: i64 = 16;
 const PUBLICATION_FENCE_SCHEMA_VERSION: i64 = 17;
-pub const AUTH_SCHEMA_VERSION: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
+const PUBLICATION_CLAIM_SCHEMA_VERSION: i64 = 18;
+pub const AUTH_SCHEMA_VERSION: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -71,6 +73,7 @@ const TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_REQUEST_SCHEMA_VERSIO
 const ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_ACK_SCHEMA_VERSION;
 const TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION;
 const PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_REASON_SCHEMA_VERSION;
+const PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1592,6 +1595,10 @@ impl HiqliteAuthStore {
                                 params!(),
                             ),
                             (
+                                super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
+                                params!(),
+                            ),
+                            (
                                 "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
                                  WHERE singleton = 1 AND schema_version = $3",
                                 params!(
@@ -1604,6 +1611,32 @@ impl HiqliteAuthStore {
                         .await;
                     self.settle_migration_attempt(
                         PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    PUBLICATION_CLAIM_SCHEMA_VERSION,
+                                    now,
+                                    PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE,
                         attempt,
                     )
                     .await?;
@@ -2879,7 +2912,8 @@ fn schema_migration_action(
         | TERMINAL_ACK_SCHEMA_MIGRATION_SOURCE
         | ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
         | TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
-        | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE => {
+        | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
+        | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4361,9 +4395,18 @@ mod tests {
             "v16 must advance exactly one step to the publication-fence schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 12,
+            PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE, PUBLICATION_FENCE_SCHEMA_VERSION,
+            "the publication-claim migration must start from the exact v17 shape"
+        );
+        assert_eq!(
+            PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE + 1,
+            PUBLICATION_CLAIM_SCHEMA_VERSION,
+            "v17 must advance exactly one step to the publication-claim schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 13,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v17 step"
+            "this implementation contains every additive v5→v18 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,
@@ -4470,6 +4513,14 @@ mod tests {
             )
             .expect("publication-fence predecessor"),
             SchemaMigrationAction::MigrateFrom(PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE)
+        );
+        assert_eq!(
+            schema_migration_action(
+                &[row(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE)],
+                ClusterCompatibility::CURRENT,
+            )
+            .expect("publication-claim predecessor"),
+            SchemaMigrationAction::MigrateFrom(PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE)
         );
 
         for rows in [Vec::new(), vec![row(4)], vec![row(7), row(7)]] {

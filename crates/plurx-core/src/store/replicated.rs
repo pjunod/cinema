@@ -382,6 +382,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "sessions.rs",
+        method: "publish_media_session_activation",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::ReadBranchWrite,
+    },
+    SqliteTransactionSite {
+        module: "sessions.rs",
         method: "arm_media_session_handoff",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -699,7 +706,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 46);
+        assert_eq!(methods.len(), 47);
     }
 
     #[test]

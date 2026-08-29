@@ -458,6 +458,41 @@ impl Drop for StartedSessionGuard {
     }
 }
 
+/// Owns the gap between durable activation confirmation and publication of
+/// the corresponding create response. Confirmation deliberately leaves the
+/// request claim in `starting`; this guard races final response publication
+/// with atomic abandonment, so a healthy retry can never recover a route whose
+/// worker a delayed cleanup is about to stop.
+struct ActivationPublicationGuard {
+    cleanup: Option<(AppState, MediaSessionActivation)>,
+}
+
+impl ActivationPublicationGuard {
+    fn new(state: AppState, activation: MediaSessionActivation) -> Self {
+        Self {
+            cleanup: Some((state, activation)),
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.cleanup = None;
+    }
+}
+
+impl Drop for ActivationPublicationGuard {
+    fn drop(&mut self) {
+        let Some((state, activation)) = self.cleanup.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        std::mem::drop(runtime.spawn(async move {
+            settle_activation_publication_cleanup(state, activation).await;
+        }));
+    }
+}
+
 /// Everything a client must say to open a stream.
 ///
 /// A body rather than a query string, and a POST rather than a GET, because
@@ -778,6 +813,37 @@ pub async fn create(
             incarnation_id: acquired,
         } => incarnation_id = acquired,
         MediaSessionRequestClaim::Resolved(route) if resolved_replay_is_live(&route, unix_ms()) => {
+            let replay_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+            let _response_publication = ingress_serving_authority
+                .commit_guard_before(ingress_serving_generation, replay_deadline.into_std())
+                .await
+                .ok_or_else(|| {
+                    ApiError::ServiceUnavailable(
+                        "the ingress lost serving authority before resolved replay".to_owned(),
+                    )
+                })?;
+            let route = tokio::time::timeout_at(
+                replay_deadline,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&route.incarnation_id),
+            )
+            .await
+            .map_err(|_| {
+                ApiError::ServiceUnavailable(
+                    "resolved media-session replay freshness check timed out".to_owned(),
+                )
+            })?
+            .map_err(|error| session_store_error("rechecking the resolved replay", error))?
+            .filter(|current| {
+                replay_route_identity_matches(current, &route)
+                    && resolved_replay_is_live(current, unix_ms())
+            })
+            .ok_or_else(|| {
+                ApiError::ServiceUnavailable(
+                    "the resolved media-session replay is no longer current".to_owned(),
+                )
+            })?;
             let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
             // Same-session owner takeover advances only the control epoch.
             // Replaying the persisted create must not hand a restarted client
@@ -804,7 +870,79 @@ pub async fn create(
                 "this idempotent session was already released",
             ));
         }
-        MediaSessionRequestClaim::InFlight { .. } => {
+        MediaSessionRequestClaim::InFlight {
+            incarnation_id: in_flight_incarnation,
+            ..
+        } => {
+            let observed_at_ms = unix_ms();
+            let route = tokio::time::timeout(
+                ACTIVATION_STORE_DEADLINE,
+                state
+                    .store
+                    .media_session_route_by_incarnation(&in_flight_incarnation),
+            )
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .filter(|route| {
+                route.user_id == user.id
+                    && route.playback_id == request.playback_id
+                    && route.request_fingerprint == fingerprint
+                    && route.state == "active"
+                    && route.publication_ready_at_ms == 0
+                    && route.lease_expires_at_ms > observed_at_ms
+            });
+            if let Some(route) = route {
+                let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+                let _response_publication = ingress_serving_authority
+                    .commit_guard_before(
+                        ingress_serving_generation,
+                        publication_deadline.into_std(),
+                    )
+                    .await
+                    .ok_or_else(|| {
+                        ApiError::ServiceUnavailable(
+                            "the ingress lost serving authority before replay publication"
+                                .to_owned(),
+                        )
+                    })?;
+                let route = tokio::time::timeout_at(
+                    publication_deadline,
+                    state.store.publish_media_session_activation(
+                        user.id,
+                        &request_claim_id,
+                        &in_flight_incarnation,
+                        unix_ms(),
+                    ),
+                )
+                .await
+                .map_err(|_| {
+                    ApiError::ServiceUnavailable(
+                        "media-session replay publication exceeded its fixed deadline".to_owned(),
+                    )
+                })?
+                .map_err(|error| session_store_error("publishing the session replay", error))?
+                .filter(|published| replay_publication_matches(published, &route))
+                .ok_or_else(|| {
+                    ApiError::ServiceUnavailable(
+                        "the media-session replay lost its exact activation".to_owned(),
+                    )
+                })?;
+                state.media_sessions.cache_route(route.clone()).await;
+                if route.owner_node_id == state.node_id {
+                    state.media_sessions.seed_owned_lease(&route).await;
+                }
+                let mut response = serde_json::from_str::<StartResponse>(&route.response_json)?;
+                if let Some(control) = response.control.as_ref() {
+                    response.control = control.refreshed(
+                        &route.session_id,
+                        &route.incarnation_id,
+                        route.owner_epoch,
+                    );
+                }
+                return Ok(Json(response));
+            }
             return Err(ApiError::typed(
                 StatusCode::SERVICE_UNAVAILABLE,
                 "media_session_starting",
@@ -1257,6 +1395,9 @@ pub async fn create(
         media_origin_ms: (info.media_origin_seconds * 1_000.0).round() as i64,
         now_ms: activation_now_ms,
     };
+    let publication_activation = activation.clone();
+    let mut publication_guard =
+        ActivationPublicationGuard::new(state.clone(), publication_activation.clone());
     // The detached owner keeps both serving serialization and exact worker
     // cleanup until the route is publishable or its fixed activation lease
     // expires. The Store future itself may outlive its caller, so every first
@@ -1284,7 +1425,6 @@ pub async fn create(
     } else {
         let activation_state = state.clone();
         let activation_owner = owner_node_id.clone();
-        let ingress_authority = ingress_serving_authority.clone();
         tokio::spawn(async move {
             let request = crate::media_sessions::RemoteActivateRequest {
                 target_generation: owner_activation_generation,
@@ -1292,14 +1432,6 @@ pub async fn create(
             };
             let activation_deadline = tokio::time::Instant::now()
                 + Duration::from_millis(u64::try_from(LEASE_TTL_MS).unwrap_or_default());
-            let ingress_transition = ingress_authority
-                .commit_guard_before(ingress_serving_generation, activation_deadline.into_std())
-                .await
-                .ok_or_else(|| {
-                    ApiError::ServiceUnavailable(
-                        "the ingress lost serving authority before remote activation".to_owned(),
-                    )
-                })?;
             activation_state
                 .media_sessions
                 .activate_remote(&activation_owner, &request, activation_deadline)
@@ -1309,39 +1441,75 @@ pub async fn create(
                         "media worker {activation_owner} could not activate the session: {error:?}"
                     ))
                 })?;
-            let Some(route) = wait_for_confirmed_activation(
+            let mut guard = guard;
+            let route = match wait_for_publishable_activation(
                 &activation_state,
                 &request.activation,
                 activation_deadline,
             )
             .await
-            else {
-                return Err(ApiError::ServiceUnavailable(format!(
+            {
+                PublishableActivationWait::Ready(route) => route,
+                PublishableActivationWait::Pending => {
+                    if let Some(guard) = guard.as_mut() {
+                        guard.disarm();
+                    }
+                    return Err(ApiError::typed(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "media_session_handoff_pending",
+                        "the predecessor handoff remains durably owned; retry this request",
+                    ));
+                }
+                PublishableActivationWait::Gone => return Err(ApiError::ServiceUnavailable(format!(
                     "media worker {activation_owner} did not confirm the session before its owner lease"
-                )));
+                ))),
             };
             activation_state.media_sessions.cache_route(route).await;
-            drop(ingress_transition);
-            let mut guard = guard;
             if let Some(guard) = guard.as_mut() {
                 guard.disarm();
             }
             Ok(())
         })
     };
-    match tokio::time::timeout(ACTIVATION_STORE_DEADLINE, &mut activation_task).await {
+    let activation_deadline = activation_lease_deadline(&publication_activation);
+    match tokio::time::timeout_at(activation_deadline, &mut activation_task).await {
         Ok(Ok(Ok(_))) => {}
-        Ok(Ok(Err(error))) => return Err(error),
+        Ok(Ok(Err(error))) => {
+            if matches!(
+                &error,
+                ApiError::Typed {
+                    code: "media_session_handoff_pending",
+                    ..
+                }
+            ) {
+                publication_guard.disarm();
+            }
+            return Err(error);
+        }
         Ok(Err(error)) => {
             return Err(ApiError::Internal(format!(
                 "media activation task failed: {error}"
             )))
         }
         Err(_) => {
-            // The HTTP deadline never cancels the bounded activation owner.
+            // The HTTP deadline never cancels either ownership decision. The
+            // detached activation keeps its worker guard; this publication
+            // guard abandons a completed-but-unpublished route, but disarms
+            // when the durable predecessor handoff is intentionally pending.
             tokio::spawn(async move {
                 match activation_task.await {
                     Ok(Ok(_)) => {}
+                    Ok(Err(error))
+                        if matches!(
+                            &error,
+                            ApiError::Typed {
+                                code: "media_session_handoff_pending",
+                                ..
+                            }
+                        ) =>
+                    {
+                        publication_guard.disarm();
+                    }
                     Ok(Err(error)) => {
                         tracing::warn!(?error, "detached media activation settled unsuccessfully");
                     }
@@ -1355,6 +1523,56 @@ pub async fn create(
             ));
         }
     }
+    // The selected target owns and authority-fences the durable activation.
+    // The ingress needs only to linearize publication of this successful
+    // response against its own loss transition; retaining an ingress read
+    // guard across remote RPC/polling would delay failover for the whole owner
+    // lease. A retry through a healthy ingress can publish the starting claim if
+    // this exact ingress loses authority before response publication.
+    let publication_deadline = tokio::time::Instant::now() + ACTIVATION_STORE_DEADLINE;
+    let _response_publication = ingress_serving_authority
+        .commit_guard_before(ingress_serving_generation, publication_deadline.into_std())
+        .await
+        .ok_or_else(|| {
+            ApiError::ServiceUnavailable(
+                "the ingress lost serving authority before start response publication".to_owned(),
+            )
+        })?;
+    let published_route = tokio::time::timeout_at(
+        publication_deadline,
+        state.store.publish_media_session_activation(
+            user.id,
+            &request_claim_id,
+            &incarnation_id,
+            unix_ms(),
+        ),
+    )
+    .await
+    .map_err(|_| {
+        ApiError::ServiceUnavailable(
+            "media-session response publication exceeded its fixed deadline".to_owned(),
+        )
+    })?
+    .map_err(|error| session_store_error("publishing the media-session response", error))?
+    .filter(|route| {
+        route_matches_activation(route, &publication_activation)
+            && route.publication_ready_at_ms == 0
+    })
+    .ok_or_else(|| {
+        ApiError::ServiceUnavailable(
+            "media-session response publication lost its exact activation".to_owned(),
+        )
+    })?;
+    state
+        .media_sessions
+        .cache_route(published_route.clone())
+        .await;
+    if published_route.owner_node_id == state.node_id {
+        state
+            .media_sessions
+            .seed_owned_lease(&published_route)
+            .await;
+    }
     crate::playstart::note_playback_started(
         &state,
         user.id,
@@ -1363,6 +1581,7 @@ pub async fn create(
         method,
         Some(&request.playback_id),
     );
+    publication_guard.disarm();
     Ok(Json(response))
 }
 
@@ -1389,6 +1608,27 @@ fn route_matches_activation(
         && route.response_json == activation.response_json
 }
 
+fn replay_publication_matches(published: &MediaSessionRoute, observed: &MediaSessionRoute) -> bool {
+    replay_route_identity_matches(published, observed)
+        && published.state == "active"
+        && published.publication_ready_at_ms == 0
+        && published.lease_expires_at_ms > unix_ms()
+}
+
+fn replay_route_identity_matches(
+    current: &MediaSessionRoute,
+    observed: &MediaSessionRoute,
+) -> bool {
+    current.incarnation_id == observed.incarnation_id
+        && current.session_id == observed.session_id
+        && current.user_id == observed.user_id
+        && current.playback_id == observed.playback_id
+        && current.request_fingerprint == observed.request_fingerprint
+        && current.recipe_json == observed.recipe_json
+        && current.response_json == observed.response_json
+        && current.media_origin_ms == observed.media_origin_ms
+}
+
 fn activation_lease_deadline(activation: &MediaSessionActivation) -> tokio::time::Instant {
     let remaining_ms = activation
         .lease_expires_at_ms
@@ -1412,6 +1652,79 @@ fn spawn_activation_abandonment(state: AppState, activation: MediaSessionActivat
             tracing::warn!(%error, "provisional media activation abandonment failed");
         }
     });
+}
+
+async fn settle_activation_publication_cleanup(
+    state: AppState,
+    activation: MediaSessionActivation,
+) {
+    let remaining_ms = activation
+        .lease_expires_at_ms
+        .saturating_sub(unix_ms())
+        .clamp(0, LEASE_TTL_MS);
+    let deadline = tokio::time::Instant::now()
+        + Duration::from_millis(u64::try_from(remaining_ms).unwrap_or_default());
+    let mut settlement_attempt = 0_u64;
+    loop {
+        settlement_attempt = settlement_attempt.saturating_add(1);
+        let now = tokio::time::Instant::now();
+        let attempt_deadline = now + ACTIVATION_STORE_DEADLINE;
+        match tokio::time::timeout_at(
+            attempt_deadline,
+            state.store.settle_media_session_activation(
+                &activation,
+                MediaSessionActivationSettlement::Abandon,
+                unix_ms(),
+            ),
+        )
+        .await
+        {
+            // Atomic response publication won the race. Preserve its worker;
+            // an idempotent retry is now entitled to recover this route.
+            Ok(Ok(Some(route)))
+                if route.state == "active"
+                    && route.publication_ready_at_ms == 0
+                    && route.lease_expires_at_ms > unix_ms() =>
+            {
+                return;
+            }
+            // Abandonment won, the route disappeared, or ownership advanced.
+            // Exact worker cleanup is idempotent in all three cases.
+            Ok(Ok(_)) => {
+                abort_started_session(
+                    &state,
+                    &activation.owner_node_id,
+                    &activation.incarnation_id,
+                    &activation.session_id,
+                )
+                .await;
+                return;
+            }
+            Ok(Err(error)) => {
+                if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
+                    tracing::warn!(
+                        %error,
+                        settlement_attempt,
+                        "activation response reaper is retrying exact settlement"
+                    );
+                }
+            }
+            Err(_) => {
+                if settlement_attempt == 1 || settlement_attempt.is_multiple_of(15) {
+                    tracing::warn!(
+                        settlement_attempt,
+                        "activation response reaper timed out exact settlement"
+                    );
+                }
+            }
+        }
+        let retry_delay = if tokio::time::Instant::now() < deadline {
+            Duration::from_millis(250)
+        } else {
+            Duration::from_secs(1)
+        };
+        tokio::time::sleep(retry_delay).await;
+    }
 }
 
 pub(super) async fn activate_session_under_authority(
@@ -1512,13 +1825,9 @@ pub(super) async fn activate_session_under_authority(
     };
     outcome.route = route.clone();
     // Serving loss needs the write side of this transition, so the atomic
-    // BLOCKED-to-ready/armed plus request-resolution transaction above
-    // linearizes before any loss.
+    // BLOCKED-to-ready/armed confirmation above linearizes before any loss.
     drop(serving_transition);
     state.media_sessions.cache_route(route.clone()).await;
-    if route.owner_node_id == state.node_id {
-        state.media_sessions.seed_owned_lease(&route).await;
-    }
     settle_activation_predecessor(
         &state,
         predecessor_incarnation,
@@ -1598,6 +1907,72 @@ pub(super) async fn wait_for_confirmed_activation(
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         if remaining.is_zero() {
             return None;
+        }
+        tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
+    }
+}
+
+enum PublishableActivationWait {
+    Ready(MediaSessionRoute),
+    Pending,
+    Gone,
+}
+
+async fn wait_for_publishable_activation(
+    state: &AppState,
+    activation: &MediaSessionActivation,
+    deadline: tokio::time::Instant,
+) -> PublishableActivationWait {
+    let mut observed_pending_handoff = false;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return if observed_pending_handoff {
+                PublishableActivationWait::Pending
+            } else {
+                PublishableActivationWait::Gone
+            };
+        }
+        match tokio::time::timeout_at(
+            deadline,
+            state
+                .store
+                .media_session_route_by_incarnation(&activation.incarnation_id),
+        )
+        .await
+        {
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms == 0 =>
+            {
+                return PublishableActivationWait::Ready(route);
+            }
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms != MEDIA_SESSION_PUBLICATION_BLOCKED =>
+            {
+                observed_pending_handoff = true;
+            }
+            Ok(Ok(Some(route)))
+                if route_matches_activation(&route, activation)
+                    && route.publication_ready_at_ms == MEDIA_SESSION_PUBLICATION_BLOCKED => {}
+            Ok(Ok(Some(_))) => return PublishableActivationWait::Gone,
+            Ok(Ok(None)) | Ok(Err(_)) => {}
+            Err(_) => {
+                return if observed_pending_handoff {
+                    PublishableActivationWait::Pending
+                } else {
+                    PublishableActivationWait::Gone
+                };
+            }
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return if observed_pending_handoff {
+                PublishableActivationWait::Pending
+            } else {
+                PublishableActivationWait::Gone
+            };
         }
         tokio::time::sleep(Duration::from_millis(250).min(remaining)).await;
     }
@@ -1694,10 +2069,10 @@ async fn settle_activation_predecessor(
     }
 
     // Keep the activated successor's cleanup guard and replacement permit in
-    // a cancellation-independent owner. The HTTP request fails retryably, but
-    // an idempotent replay cannot expose the successor until either the exact
-    // predecessor acknowledges terminal control or every response admitted by
-    // that generation has crossed the documented safety boundary.
+    // a cancellation-independent owner. The caller gets a typed retry while
+    // this owner continues; publication cannot proceed until either the exact
+    // predecessor acknowledges terminal control or every response admitted
+    // by that generation has crossed the safety boundary.
     let projection_state = state.clone();
     tokio::spawn(async move {
         let settled = settle_armed_activation_handoff(
@@ -1716,8 +2091,10 @@ async fn settle_activation_predecessor(
         // Otherwise the armed guard performs exact worker cleanup. A serving
         // generation which has been lost can never publish the finite route.
     });
-    Err(ApiError::ServiceUnavailable(
-        "the predecessor owner has not acknowledged session handoff yet".to_owned(),
+    Err(ApiError::typed(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "media_session_handoff_pending",
+        "the predecessor handoff remains durably owned; retry this request",
     ))
 }
 
@@ -9078,6 +9455,47 @@ mod tests {
         assert!(
             !route_matches_activation(&route, &activation),
             "a delayed epoch-one confirmation cannot adopt a same-id takeover"
+        );
+    }
+
+    #[test]
+    fn idempotent_publication_replay_accepts_the_current_takeover_epoch() {
+        let now_ms = unix_ms();
+        let observed = MediaSessionRoute {
+            incarnation_id: "00000000-0000-4000-8000-0000000000e3".to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
+            user_id: 7,
+            playback_id: "publication-replay".to_owned(),
+            request_fingerprint: "f".repeat(64),
+            owner_node_id: "departed-owner".to_owned(),
+            owner_epoch: 1,
+            lease_expires_at_ms: now_ms + 30_000,
+            state: "active".to_owned(),
+            terminal_reason: None,
+            publication_ready_at_ms: 0,
+            recipe_json: r#"{"recipe":1}"#.to_owned(),
+            response_json: r#"{"session":"ready"}"#.to_owned(),
+            produced_playable_through_ms: 0,
+            fetched_through_ms: 0,
+            media_origin_ms: 0,
+            media_sequence: 0,
+            discontinuity_sequence: 0,
+            updated_at_ms: now_ms,
+        };
+        let mut published = observed.clone();
+        published.owner_node_id = "surviving-owner".to_owned();
+        published.owner_epoch = 2;
+        published.lease_expires_at_ms = now_ms + 60_000;
+        published.discontinuity_sequence = 1;
+        published.updated_at_ms = now_ms + 1;
+        assert!(
+            replay_publication_matches(&published, &observed),
+            "takeover may advance only mutable ownership/progress coordinates"
+        );
+        published.response_json = r#"{"session":"different"}"#.to_owned();
+        assert!(
+            !replay_publication_matches(&published, &observed),
+            "replay still requires the exact persisted response identity"
         );
     }
 

@@ -54,6 +54,39 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// Keeps the request claim and the route publication fence in one database
+/// write. Hiqlite transactions do not expose an application-level rollback
+/// after affected-row counts are returned, so this trigger is the common
+/// SQLite/Hiqlite atomic boundary for BLOCKED -> finite/ready confirmation.
+const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
+    "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
+    AFTER UPDATE OF publication_ready_at_ms ON media_sessions
+    WHEN NEW.state = 'active' AND (
+      (OLD.publication_ready_at_ms = 9223372036854775807
+        AND NEW.publication_ready_at_ms != 9223372036854775807)
+      OR (OLD.publication_ready_at_ms > 0
+        AND OLD.publication_ready_at_ms < 9223372036854775807
+        AND NEW.publication_ready_at_ms = 0)
+    ) BEGIN
+      UPDATE media_session_requests
+         SET claim_expires_at_ms = CASE
+               WHEN OLD.publication_ready_at_ms = 9223372036854775807
+                    AND NEW.publication_ready_at_ms = 0
+                 THEN NEW.lease_expires_at_ms
+               WHEN OLD.publication_ready_at_ms = 9223372036854775807
+                 THEN MIN(9223372036854775806,
+                   NEW.publication_ready_at_ms
+                     + (NEW.lease_expires_at_ms - OLD.updated_at_ms) + 1)
+               ELSE MIN(9223372036854775806, NEW.lease_expires_at_ms + 1)
+             END,
+             updated_at_ms = NEW.updated_at_ms
+       WHERE incarnation_id = NEW.incarnation_id
+         AND request_fingerprint = NEW.request_fingerprint
+         AND playback_id = NEW.playback_id
+         AND owner_node_id = NEW.owner_node_id
+         AND state = 'starting';
+    END";
+
 #[cfg(feature = "hiqlite-store")]
 pub use self::hiqlite::{
     prometheus_store_operations, ClusterCompatibility, HiqliteAuthStore, AUTH_LEARNER_PROTOCOL,
@@ -2073,6 +2106,17 @@ pub trait MediaSessionStore: Send + Sync + 'static {
         &self,
         activation: &MediaSessionActivation,
         settlement: MediaSessionActivationSettlement,
+        now_ms: i64,
+    ) -> Result<Option<MediaSessionRoute>, StoreError>;
+
+    /// Publish an exact prepared activation after its owner has observed the
+    /// serving result. The request remains in-flight until this CAS; replaying
+    /// the same resolved request returns its durable route.
+    async fn publish_media_session_activation(
+        &self,
+        user_id: i64,
+        request_id: &str,
+        incarnation_id: &str,
         now_ms: i64,
     ) -> Result<Option<MediaSessionRoute>, StoreError>;
 

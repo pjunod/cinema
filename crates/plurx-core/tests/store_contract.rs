@@ -398,6 +398,8 @@ const MEDIA_SESSION_METHODS: &[&str] = &[
     "claim_media_session_request",
     "assign_media_session_request_owner",
     "activate_media_session",
+    "settle_media_session_activation",
+    "publish_media_session_activation",
     "arm_media_session_handoff",
     "complete_media_session_handoff",
     "arm_media_session_terminal_projection",
@@ -615,30 +617,8 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
             .unwrap_or_else(|error| panic!("{backend}: claim blocked takeover: {error}"))
             .is_none());
 
-        assert!(store
-            .settle_media_session_activation(
-                &activation,
-                MediaSessionActivationSettlement::Abandon,
-                110,
-            )
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: abandon prepared route: {error}"))
-            .is_none());
-        let abandoned = store
-            .media_session_route_by_incarnation(incarnation_id)
-            .await
-            .unwrap_or_else(|error| panic!("{backend}: read abandoned route: {error}"))
-            .expect("abandoned route remains durable");
-        assert_eq!(abandoned.state, "ended", "{backend}");
-        assert_eq!(
-            abandoned.terminal_reason.as_deref(),
-            Some("replaced"),
-            "{backend}"
-        );
-        assert_eq!(
-            abandoned.publication_ready_at_ms, MEDIA_SESSION_PUBLICATION_BLOCKED,
-            "{backend}: abandoned route never becomes publishable"
-        );
+        let confirmed = confirm_media_activation(store.as_ref(), &activation, 0, backend).await;
+        assert_eq!(confirmed.publication_ready_at_ms, 0, "{backend}");
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -651,9 +631,528 @@ async fn media_session_activation_prepare_settle_contract_runs_through_dyn_store
                     220,
                 )
                 .await
-                .unwrap_or_else(|error| panic!("{backend}: reclaim abandoned request: {error}")),
+                .unwrap_or_else(|error| panic!("{backend}: in-flight confirmed request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id: current, .. }
+                if current == incarnation_id
+        ));
+        assert!(store
+            .owned_media_sessions(&activation.owner_node_id, 150)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list unpublished confirmed route: {error}"))
+            .is_empty());
+        assert!(store
+            .renew_media_sessions(
+                &activation.owner_node_id,
+                &[MediaSessionRenewal {
+                    incarnation_id: incarnation_id.to_owned(),
+                    owner_epoch: 1,
+                    produced_playable_through_ms: 10,
+                    fetched_through_ms: 10,
+                    media_sequence: 1,
+                }],
+                150,
+                300,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: renew unpublished confirmed route: {error}"))
+            .is_empty());
+        assert!(store
+            .publish_media_session_activation(user.id, request_id, incarnation_id, 151)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish confirmed route: {error}"))
+            .is_some());
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    request_id,
+                    &fingerprint,
+                    &activation.playback_id,
+                    "00000000-0000-4000-8000-0000000000e3",
+                    152,
+                    252,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay published request: {error}")),
+            MediaSessionRequestClaim::Resolved(route) if route.incarnation_id == incarnation_id
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions(&activation.owner_node_id, 152)
+                .await
+                .unwrap_or_else(|error| panic!(
+                    "{backend}: list published confirmed route: {error}"
+                ))
+                .len(),
+            1,
+            "{backend}: published route enters owned inventory"
+        );
+        let taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: incarnation_id.to_owned(),
+                expected_owner_node_id: activation.owner_node_id.clone(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "activation-survivor".to_owned(),
+                now_ms: 250,
+                lease_expires_at_ms: 350,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: take over published route: {error}"))
+            .expect("published route takeover");
+        assert_eq!(taken.owner_node_id, "activation-survivor", "{backend}");
+        let replayed = store
+            .publish_media_session_activation(user.id, request_id, incarnation_id, 251)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: replay published after takeover: {error}"))
+            .expect("resolved publication replay after takeover");
+        assert_eq!(replayed.incarnation_id, incarnation_id, "{backend}");
+        assert_eq!(replayed.owner_node_id, "activation-survivor", "{backend}");
+
+        let race_incarnation = "00000000-0000-4000-8000-0000000000e3";
+        let race_activation = MediaSessionActivation {
+            incarnation_id: race_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e4".to_owned(),
+            user_id: user.id,
+            playback_id: "activation-race-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("activation-race-request".to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: activation.owner_node_id.clone(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"race"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 200,
+            lease_expires_at_ms: 400,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "activation-race-request",
+                    &fingerprint,
+                    &race_activation.playback_id,
+                    race_incarnation,
+                    200,
+                    300,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim activation race: {error}")),
             MediaSessionRequestClaim::Acquired { .. }
         ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "activation-race-request",
+                race_incarnation,
+                &race_activation.owner_node_id,
+                201,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own activation race: {error}")));
+        store
+            .activate_media_session(&race_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare activation race: {error}"))
+            .expect("activation race prepare");
+        confirm_media_activation(store.as_ref(), &race_activation, 0, backend).await;
+        let (abandon_result, publish_result) = tokio::join!(
+            store.settle_media_session_activation(
+                &race_activation,
+                MediaSessionActivationSettlement::Abandon,
+                220,
+            ),
+            store.publish_media_session_activation(
+                user.id,
+                "activation-race-request",
+                race_incarnation,
+                220,
+            )
+        );
+        let abandon_result =
+            abandon_result.unwrap_or_else(|error| panic!("{backend}: race abandon: {error}"));
+        let publish_result =
+            publish_result.unwrap_or_else(|error| panic!("{backend}: race publish: {error}"));
+        let final_route = store
+            .media_session_route_by_incarnation(race_incarnation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read activation race route: {error}"))
+            .expect("activation race route remains durable");
+        let publish_won = final_route.state == "active";
+        let abandon_won = final_route.state == "ended";
+        assert_eq!(
+            publish_won as u8 + abandon_won as u8,
+            1,
+            "{backend}: one race winner"
+        );
+        if publish_won {
+            assert!(
+                publish_result.is_some(),
+                "{backend}: publication winner result"
+            );
+            assert_eq!(final_route.publication_ready_at_ms, 0, "{backend}");
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        user.id,
+                        "activation-race-request",
+                        &fingerprint,
+                        &race_activation.playback_id,
+                        race_incarnation,
+                        221,
+                        321,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: replay race publication: {error}")),
+                MediaSessionRequestClaim::Resolved(_)
+            ));
+        } else {
+            assert!(
+                publish_result.is_none(),
+                "{backend}: abandoned route was published"
+            );
+            assert!(abandon_result.is_none(), "{backend}: abandon winner result");
+            assert_eq!(
+                final_route.publication_ready_at_ms,
+                MEDIA_SESSION_PUBLICATION_BLOCKED
+            );
+            assert!(matches!(
+                store
+                    .claim_media_session_request(
+                        user.id,
+                        "activation-race-request",
+                        &fingerprint,
+                        &race_activation.playback_id,
+                        "00000000-0000-4000-8000-0000000000e5",
+                        221,
+                        321,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{backend}: reclaim abandoned race: {error}")),
+                MediaSessionRequestClaim::Acquired { .. }
+            ));
+        }
+
+        let finite_incarnation = "00000000-0000-4000-8000-0000000000f1";
+        let finite_request_id = "activation-finite-handoff";
+        let finite_activation = MediaSessionActivation {
+            incarnation_id: finite_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000f2".to_owned(),
+            user_id: user.id,
+            playback_id: activation.playback_id.clone(),
+            expected_predecessor_incarnation_id: Some(incarnation_id.to_owned()),
+            fence_predecessor: true,
+            request_id: Some(finite_request_id.to_owned()),
+            request_fingerprint: fingerprint.clone(),
+            owner_node_id: "finite-owner".to_owned(),
+            recipe_json: "{}".to_owned(),
+            response_json: r#"{"session":"finite"}"#.to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 260,
+            lease_expires_at_ms: 360,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    260,
+                    320,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim finite handoff: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                finite_request_id,
+                finite_incarnation,
+                &finite_activation.owner_node_id,
+                261,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own finite handoff: {error}")));
+        store
+            .activate_media_session(&finite_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare finite handoff: {error}"))
+            .expect("finite handoff prepare");
+        let finite_boundary = 261_i64.saturating_add(MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS);
+        let finite_claim_expires_at_ms = finite_boundary.saturating_add(101);
+        confirm_media_activation(store.as_ref(), &finite_activation, finite_boundary, backend)
+            .await;
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    300,
+                    360,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay finite handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                claim_expires_at_ms,
+                ..
+            } if claim_expires_at_ms == finite_claim_expires_at_ms
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("finite-owner", 300)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: own finite route: {error}"))
+                .len(),
+            1,
+            "{backend}: finite starting route is renewable"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "finite-owner",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 1,
+                        produced_playable_through_ms: 1,
+                        fetched_through_ms: 1,
+                        media_sequence: 1,
+                    }],
+                    300,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew finite route: {error}")),
+            vec![finite_incarnation.to_owned()],
+            "{backend}"
+        );
+        assert_eq!(
+            store
+                .expired_media_sessions(401, None, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list finite takeover: {error}"))
+                .iter()
+                .filter(|route| route.incarnation_id == finite_incarnation)
+                .count(),
+            1,
+            "{backend}: finite starting route is failover-eligible"
+        );
+        let finite_taken = store
+            .claim_media_session_takeover(&MediaSessionTakeover {
+                incarnation_id: finite_incarnation.to_owned(),
+                expected_owner_node_id: "finite-owner".to_owned(),
+                expected_owner_epoch: 1,
+                next_owner_node_id: "finite-survivor".to_owned(),
+                now_ms: 401,
+                lease_expires_at_ms: 501,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: take over finite route: {error}"))
+            .expect("finite route takeover");
+        assert_eq!(finite_taken.owner_node_id, "finite-survivor", "{backend}");
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    402,
+                    502,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay taken-over handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                owner_node_id: Some(owner),
+                claim_expires_at_ms,
+                ..
+            } if owner == "finite-survivor"
+                && claim_expires_at_ms == finite_claim_expires_at_ms
+        ));
+        let finite_ready = store
+            .complete_media_session_handoff(
+                finite_incarnation,
+                "finite-survivor",
+                2,
+                MediaSessionProjectionCompletion::PredecessorAcknowledged,
+                402,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: complete finite handoff: {error}"))
+            .expect("finite handoff ready");
+        assert_eq!(finite_ready.publication_ready_at_ms, 0, "{backend}");
+        let ready_claim_expires_at_ms = finite_ready.lease_expires_at_ms.saturating_add(1);
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    finite_request_id,
+                    &fingerprint,
+                    &finite_activation.playback_id,
+                    finite_incarnation,
+                    403,
+                    503,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay ready handoff: {error}")),
+            MediaSessionRequestClaim::InFlight {
+                owner_node_id: Some(owner),
+                claim_expires_at_ms,
+                ..
+            } if owner == "finite-survivor"
+                && claim_expires_at_ms == ready_claim_expires_at_ms
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("finite-survivor", 403)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: own ready retry grace: {error}"))
+                .len(),
+            1,
+            "{backend}: completed handoff retains one retry grace lease"
+        );
+        assert_eq!(
+            store
+                .renew_media_sessions(
+                    "finite-survivor",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 2,
+                        produced_playable_through_ms: 2,
+                        fetched_through_ms: 2,
+                        media_sequence: 2,
+                    }],
+                    403,
+                    550,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: renew ready retry grace: {error}")),
+            vec![finite_incarnation.to_owned()],
+            "{backend}"
+        );
+        assert!(
+            store
+                .owned_media_sessions("finite-survivor", 404)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: close ready retry grace: {error}"))
+                .is_empty(),
+            "{backend}: ready starting route leaves inventory after one grace renewal"
+        );
+        assert!(
+            store
+                .renew_media_sessions(
+                    "finite-survivor",
+                    &[MediaSessionRenewal {
+                        incarnation_id: finite_incarnation.to_owned(),
+                        owner_epoch: 2,
+                        produced_playable_through_ms: 3,
+                        fetched_through_ms: 3,
+                        media_sequence: 3,
+                    }],
+                    404,
+                    600,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reject extra ready renewal: {error}"))
+                .is_empty(),
+            "{backend}: ready retry grace cannot renew twice"
+        );
+        let finite_published = store
+            .publish_media_session_activation(user.id, finite_request_id, finite_incarnation, 405)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish taken-over handoff: {error}"))
+            .expect("taken-over finite publication");
+        assert_eq!(
+            finite_published.owner_node_id, "finite-survivor",
+            "{backend}"
+        );
+
+        let failed_confirm_incarnation = "00000000-0000-4000-8000-0000000000e6";
+        let failed_confirm_activation = MediaSessionActivation {
+            incarnation_id: failed_confirm_incarnation.to_owned(),
+            session_id: "00000000-0000-4000-8000-0000000000e7".to_owned(),
+            user_id: user.id,
+            playback_id: "activation-failed-confirm-playback".to_owned(),
+            expected_predecessor_incarnation_id: None,
+            fence_predecessor: false,
+            request_id: Some("activation-failed-confirm".to_owned()),
+            request_fingerprint: fingerprint,
+            owner_node_id: activation.owner_node_id,
+            recipe_json: "{}".to_owned(),
+            response_json: "{}".to_owned(),
+            publication_ready_at_ms: MEDIA_SESSION_PUBLICATION_BLOCKED,
+            media_origin_ms: 0,
+            now_ms: 300,
+            lease_expires_at_ms: 500,
+        };
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    user.id,
+                    "activation-failed-confirm",
+                    &"e".repeat(64),
+                    &failed_confirm_activation.playback_id,
+                    failed_confirm_incarnation,
+                    300,
+                    400,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: claim failed-confirm request: {error}")),
+            MediaSessionRequestClaim::Acquired { .. }
+        ));
+        assert!(store
+            .assign_media_session_request_owner(
+                user.id,
+                "activation-failed-confirm",
+                failed_confirm_incarnation,
+                &failed_confirm_activation.owner_node_id,
+                301,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: own failed-confirm request: {error}")));
+        store
+            .activate_media_session(&failed_confirm_activation)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: prepare failed-confirm route: {error}"))
+            .expect("failed-confirm route prepare");
+        confirm_media_activation(store.as_ref(), &failed_confirm_activation, 0, backend).await;
+        assert!(store
+            .fail_media_session_request(
+                user.id,
+                "activation-failed-confirm",
+                failed_confirm_incarnation,
+                301,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: fail confirmed request: {error}")));
+        let retried_confirmation = store
+            .settle_media_session_activation(
+                &failed_confirm_activation,
+                MediaSessionActivationSettlement::Confirm {
+                    publication_ready_at_ms: 0,
+                },
+                302,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry failed confirmation: {error}"))
+            .expect("failed request confirmation remains ready");
+        assert_eq!(retried_confirmation.publication_ready_at_ms, 0, "{backend}");
+        store
+            .settle_media_session_activation(
+                &failed_confirm_activation,
+                MediaSessionActivationSettlement::Abandon,
+                303,
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: abandon failed confirmation: {error}"));
     })
     .await;
 }
@@ -1213,6 +1712,45 @@ async fn media_session_contract_runs_through_dyn_store() {
             )
             .await
             .unwrap_or_else(|error| panic!("{backend}: pin predecessor session: {error}")));
+        assert!(matches!(
+            store
+                .claim_media_session_request(
+                    first_user.id,
+                    "attempt-a",
+                    &fingerprint,
+                    "shared-playback",
+                    incarnation_a_retry,
+                    140,
+                    240,
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: in-flight activation request: {error}")),
+            MediaSessionRequestClaim::InFlight { incarnation_id, .. }
+                if incarnation_id == incarnation_a
+        ));
+        assert_eq!(
+            store
+                .owned_media_sessions("node-a", 140)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list unpublished route: {error}"))
+                .len(),
+            0,
+            "{backend}: confirmed but unpublished route remains hidden"
+        );
+        assert!(store
+            .publish_media_session_activation(first_user.id, "attempt-a", incarnation_a, 141)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: publish activation: {error}"))
+            .is_some());
+        assert_eq!(
+            store
+                .owned_media_sessions("node-a", 141)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list published route: {error}"))
+                .len(),
+            1,
+            "{backend}: published route enters owned inventory"
+        );
         assert!(matches!(
             store
                 .claim_media_session_request(
@@ -9846,7 +10384,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 240, "review the Store method count");
+    assert_eq!(declared.len(), 242, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"

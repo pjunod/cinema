@@ -915,8 +915,11 @@ pub struct MediaSessionActivationOutcome {
 }
 
 /// Exact second phase for a BLOCKED media-session activation. Confirmation
-/// makes the route renewable and resolves its request in the same transaction;
-/// abandonment fails the request and tombstones any exact provisional route.
+/// makes the route renewable and atomically advances its starting claim's
+/// publication deadline; [`MediaSessionStore::publish_media_session_activation`](
+/// crate::store::MediaSessionStore::publish_media_session_activation) resolves
+/// the request only when the route is ready. Abandonment fails the request and
+/// tombstones any exact provisional route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaSessionActivationSettlement {
     Confirm { publication_ready_at_ms: i64 },

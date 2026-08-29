@@ -847,7 +847,7 @@ const MIGRATIONS: &[&str] = &[
     // bounded summary projection polled by Activity and Settings.
     crate::store::fragment_index_cluster::ANALYSIS_HISTORY_INDEX_SCHEMA,
     // v34: retain the first terminal decision with the authoritative route.
-    // Fresh databases also run the append-only v25 -> v35 chain, so the
+    // Fresh databases also run the append-only v25 -> v36 chain, so the
     // original v25 table definition deliberately remains unchanged.
     "ALTER TABLE media_sessions ADD COLUMN terminal_reason TEXT
         CHECK (terminal_reason IN
@@ -857,6 +857,9 @@ const MIGRATIONS: &[&str] = &[
     // acknowledges supersession or all previously admitted bodies expire.
     "ALTER TABLE media_sessions ADD COLUMN publication_ready_at_ms INTEGER NOT NULL DEFAULT 0
         CHECK (publication_ready_at_ms >= 0);",
+    // v36: route confirmation and the starting request's retry deadline are
+    // one atomic database mutation on both Store backends.
+    super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1808,7 +1811,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 35,
+            version, 36,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
