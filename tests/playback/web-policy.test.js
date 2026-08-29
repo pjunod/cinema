@@ -1636,6 +1636,16 @@ test("each refusal the server names reaches the overlay as itself", () => {
     [
       502,
       {
+        code: "producer_ended",
+        message:
+          "the server's encoder ended after publishing part of this stream (progress deadline elapsed); media already listed remains available",
+      },
+      "Playback failed to start.",
+      "already listed remains available",
+    ],
+    [
+      502,
+      {
         code: "session_failed",
         message: "the server could not build this stream: the encoder never produced any video",
       },

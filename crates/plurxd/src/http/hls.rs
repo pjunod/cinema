@@ -4388,6 +4388,10 @@ fn response_publication_rejection(
             "response_state_changed",
             "the stream changed state while the response was prepared; retry shortly",
         ),
+        crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason) => {
+            let error = PlaylistError::ProducerEnded(reason);
+            ApiError::typed(StatusCode::BAD_GATEWAY, error.code(), error.message())
+        }
     }
 }
 
@@ -4398,7 +4402,7 @@ async fn response_publication_rejection_before(
     deadline: Instant,
 ) -> ApiError {
     if !matches!(
-        rejection,
+        &rejection,
         crate::transcode::MediaResponsePublicationRejection::OwnerGone
     ) {
         return response_publication_rejection(rejection);
@@ -5003,9 +5007,9 @@ fn playlist_error(session: &str, err: PlaylistError) -> ApiError {
     let status = match &err {
         PlaylistError::SessionGone => StatusCode::NOT_FOUND,
         PlaylistError::StartupTimedOut(_) => StatusCode::SERVICE_UNAVAILABLE,
-        PlaylistError::ProducerExited(_) | PlaylistError::SessionFailed(_) => {
-            StatusCode::BAD_GATEWAY
-        }
+        PlaylistError::ProducerExited(_)
+        | PlaylistError::ProducerEnded(_)
+        | PlaylistError::SessionFailed(_) => StatusCode::BAD_GATEWAY,
     };
     tracing::warn!(
         session = %crate::transcode::session_log_id(session),
@@ -5044,6 +5048,12 @@ async fn admitted_playlist_error(
                     deadline,
                 )
                 .await);
+            }
+            Err(crate::transcode::MediaResponsePublicationRejection::ProducerEnded(reason)) => {
+                return Ok(playlist_error(
+                    session,
+                    PlaylistError::ProducerEnded(reason),
+                ));
             }
         }
     }
@@ -7982,6 +7992,23 @@ mod tests {
                 code: "response_state_changed",
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn beyond_frontier_publication_rejection_is_typed_producer_ended() {
+        let error = response_publication_rejection(
+            crate::transcode::MediaResponsePublicationRejection::ProducerEnded(
+                "process_exit".to_owned(),
+            ),
+        );
+        assert!(matches!(
+            error,
+            ApiError::Typed {
+                status: StatusCode::BAD_GATEWAY,
+                code: "producer_ended",
+                ref message,
+            } if message.contains("process_exit")
         ));
     }
 
@@ -11091,7 +11118,7 @@ mod tests {
 
     /// Every playlist refusal, from the session's verdict to the wire.
     ///
-    /// All four used to be `ApiError::NotFound("transcode session")` — one
+    /// All five used to be `ApiError::NotFound("transcode session")` — one
     /// anonymous 404 that hls.js escalates to a fatal `levelLoadError`
     /// whatever caused it. The status now separates what the client can do
     /// about it, and the typed body carries the sentence a person reads.
@@ -11111,6 +11138,12 @@ mod tests {
                 StatusCode::BAD_GATEWAY,
                 "producer_failed",
                 "exit status: 1",
+            ),
+            (
+                PlaylistError::ProducerEnded("progress deadline elapsed".into()),
+                StatusCode::BAD_GATEWAY,
+                "producer_ended",
+                "already listed remains available",
             ),
             (
                 PlaylistError::SessionFailed("the encoder never produced any video".into()),
@@ -11137,6 +11170,7 @@ mod tests {
             let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
             assert_eq!(json["code"], code);
             let message = json["message"].as_str().expect("message");
+            assert_eq!(err.retryable(), code == "startup_timeout", "{code}");
             assert!(
                 message.to_lowercase().contains(fragment),
                 "{code}: \"{message}\" should contain \"{fragment}\""

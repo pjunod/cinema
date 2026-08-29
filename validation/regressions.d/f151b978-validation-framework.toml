@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["f151b978", "2f34a8ea"]
+points = ["validation.framework"]
+checks = ["history-regressions"]
+reason = "The corrective-history audit keeps the successor-barrier regression and its completed lifetime-ledger mapping attached to runnable evidence without claiming that either validation-only commit changed playback runtime behavior."
