@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["4da3bbde"]
+points = ["core.media", "cluster.auth"]
+checks = ["rust-gate", "rust-gate-ci", "cluster-auth"]
+reason = "The retained placeholder-order invariant scans every production statement in the replicated media-session Store and rejects any first appearance that skips an ordinal. The backend-neutral Store contract then exercises exact Abandon, renewal, owned and expired inventory, takeover, and terminal-ack ownership through both SQLite and three-voter Hiqlite. Reverting this correction either fails the static invariant or reproduces the six exact cluster failures where positional Hiqlite bindings corrupt publication sentinels, cursor limits, lease resources, or route identity."

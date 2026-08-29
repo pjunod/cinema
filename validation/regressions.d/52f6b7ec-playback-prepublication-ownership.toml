@@ -14,7 +14,6 @@ commits = [
   "07bb95bc",
   "baba7c20",
   "355d3309",
-  "4da3bbde",
 ]
 points = ["playback.pipeline"]
 checks = ["rust-gate", "rust-gate-ci", "playback-recovery", "resource-bounds"]
