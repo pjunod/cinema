@@ -22,9 +22,11 @@ every repaired source delta with no remaining P0–P3 finding after exact head
 `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached remote-START
 restart-admission loss and the required cluster gate exposed five Hiqlite
 placeholder-order defects. Two independent adversarial lanes approve the code
-and evidence with no actionable P0–P3 finding. Review of exact head `993a67a5`
-requested only this operational-handoff correction. Immutable review of the
-corrected documentation tip, push, hosted rerun, and merge are next.
+and evidence with no actionable P0–P3 finding. Corrected behavior/docs head
+`cdc27aa8` passed exact review and was pushed; run `33234021296` then exposed
+only the three test-shape inventory counts reconciled at `c94cdcf3` and mapped
+through `4ad4a4da`. Exact review of the inventory-reconciled local tip, push,
+hosted rerun, and merge are next.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
