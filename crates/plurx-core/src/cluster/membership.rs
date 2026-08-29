@@ -186,6 +186,42 @@ impl LocalServingRole {
     }
 }
 
+/// One-shot publication of the local serving role.
+///
+/// `cluster_capacity_gate` loads this slot on every request, so a refresh has
+/// to publish exactly once: any interim value is a live 503 for as long as the
+/// refresh runs. `commit` publishes the computed role. Dropping without a
+/// commit — an early `?`, a panic, or a cancelled future — publishes `Fenced`,
+/// so failing closed survives every failure path without also fencing the
+/// success path.
+struct LocalServingRolePublication<'a> {
+    slot: &'a AtomicU8,
+    committed: bool,
+}
+
+impl<'a> LocalServingRolePublication<'a> {
+    fn new(slot: &'a AtomicU8) -> Self {
+        Self {
+            slot,
+            committed: false,
+        }
+    }
+
+    fn commit(mut self, role: LocalServingRole) {
+        self.slot.store(role.encoded(), Ordering::Release);
+        self.committed = true;
+    }
+}
+
+impl Drop for LocalServingRolePublication<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.slot
+                .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
+        }
+    }
+}
+
 impl ClusterRole {
     #[must_use]
     pub fn as_str(self) -> &'static str {
@@ -3494,11 +3530,18 @@ impl MembershipManager {
         &self,
         inner: &ReplicatedMembership,
     ) -> Result<LocalServingRole, MembershipError> {
-        // Fail closed before touching the database. If the local read fails,
-        // the request path stays fenced until a later heartbeat succeeds.
-        inner
-            .local_serving_role
-            .store(LocalServingRole::Fenced.encoded(), Ordering::Release);
+        // Publish once, at the end. Storing `Fenced` here fenced the request
+        // path for as long as the two reads below took — on every heartbeat,
+        // on a healthy node — because `cluster_capacity_gate` loads this slot
+        // per request and answers 503 for everything but `/healthz` and
+        // `/metrics`. The removal protocol's target-side barrier does not
+        // need that window: a coordinator observes this node's heartbeat
+        // write, which lands after this call returns, so the property it
+        // relies on is that the published role reflects a read taken before
+        // that write. One publication at the end supplies exactly that, and
+        // the guard still fails closed on every error, panic, and
+        // cancellation path.
+        let publication = LocalServingRolePublication::new(&inner.local_serving_role);
         let active = inner
             .client
             .query_map::<CountRow, _>(
@@ -3537,9 +3580,7 @@ impl MembershipManager {
         } else {
             role
         };
-        inner
-            .local_serving_role
-            .store(published_role.encoded(), Ordering::Release);
+        publication.commit(published_role);
         Ok(role)
     }
 
@@ -8563,6 +8604,53 @@ pub(crate) fn system_short_hostname() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The route gate answers 503 for `Fenced`, so the cost of an interim
+    // publication is a real outage window on a healthy node, once per
+    // heartbeat. These three pin the whole contract of the guard that makes
+    // an interim publication unwriteable.
+
+    #[test]
+    fn a_serving_role_publication_does_not_touch_the_slot_before_it_commits() {
+        let slot = AtomicU8::new(LocalServingRole::Voter.encoded());
+        let publication = LocalServingRolePublication::new(&slot);
+        // The reads a refresh performs happen here. A node that is serving
+        // must still be serving.
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Voter,
+        );
+        publication.commit(LocalServingRole::Learner);
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Learner,
+        );
+    }
+
+    #[test]
+    fn an_uncommitted_serving_role_publication_fences_on_drop() {
+        let slot = AtomicU8::new(LocalServingRole::Voter.encoded());
+        {
+            let _publication = LocalServingRolePublication::new(&slot);
+            // An early `?`, a panic, or a cancelled future leaves here.
+        }
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Fenced,
+            "a refresh that did not finish must leave the request path fenced",
+        );
+    }
+
+    #[test]
+    fn a_committed_serving_role_publication_survives_its_own_drop() {
+        let slot = AtomicU8::new(LocalServingRole::Fenced.encoded());
+        LocalServingRolePublication::new(&slot).commit(LocalServingRole::Voter);
+        assert_eq!(
+            LocalServingRole::from_encoded(slot.load(Ordering::Acquire)),
+            LocalServingRole::Voter,
+            "the drop that follows a commit must not re-fence the node",
+        );
+    }
 
     #[test]
     fn maintenance_is_replicated_and_rollout_gated() {
