@@ -1,0 +1,6 @@
+version = 1
+
+[[coverage]]
+commits = ["9ee007a8"]
+reason = "This commit only records the hosted PR #636 preflight inventory reconciliation and current validation status in Markdown and HTML documentation; it changes no runtime or validation behavior."
+ignore = true
