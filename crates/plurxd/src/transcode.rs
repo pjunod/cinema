@@ -15455,7 +15455,7 @@ impl TranscodeManager {
             .await
         {
             return Err(format!(
-                "rolling control actor rejected copy response-publication ownership: {reason:?}"
+                "rolling control actor rejected copy response-publication failure fencing: {reason:?}"
             ));
         }
         let session = Arc::new(Session {

@@ -462,6 +462,19 @@ fn fourcc(ty: &[u8; 4]) -> String {
 
 /// Read a box header at `pos`. `Ok(None)` means "not enough bytes yet".
 fn peek_box(buf: &[u8], pos: usize) -> Result<Option<BoxHeader>, Fmp4Error> {
+    peek_box_before(buf, pos, None)
+}
+
+/// Read a box header whose complete parent boundary is already known.
+///
+/// A nested declaration that exceeds that boundary is malformed even when its
+/// size also exceeds this reader's resource ceiling. Top-level streaming input
+/// has no such proof yet and remains unsupported when it exceeds that ceiling.
+fn peek_box_before(
+    buf: &[u8],
+    pos: usize,
+    parent_end: Option<usize>,
+) -> Result<Option<BoxHeader>, Fmp4Error> {
     if buf.len() < pos + 8 {
         return Ok(None);
     }
@@ -474,13 +487,7 @@ fn peek_box(buf: &[u8], pos: usize) -> Result<Option<BoxHeader>, Fmp4Error> {
                 return Ok(None);
             }
             let large = be_u64(buf, pos + 8);
-            if large > MAX_BOX_BYTES as u64 {
-                return Err(Fmp4Error::Unsupported(format!(
-                    "box {} declares {large} bytes",
-                    fourcc(&ty)
-                )));
-            }
-            (large as usize, 16)
+            (large, 16)
         }
         // "to end of file" is legal in a file and meaningless in a stream that
         // has not ended. ffmpeg never writes it for the boxes on this path.
@@ -490,17 +497,26 @@ fn peek_box(buf: &[u8], pos: usize) -> Result<Option<BoxHeader>, Fmp4Error> {
                 fourcc(&ty)
             )))
         }
-        n => (n, 8),
+        n => (n as u64, 8),
     };
-    if size < header_len {
+    if size < header_len as u64 {
         return malformed(format!("box {} declares size {size}", fourcc(&ty)));
     }
-    if size > MAX_BOX_BYTES {
+    if let Some(parent_end) = parent_end {
+        let Some(parent_remaining) = parent_end.checked_sub(pos) else {
+            return malformed("box starts past its parent");
+        };
+        if size > parent_remaining as u64 {
+            return malformed(format!("box {} runs past its parent", fourcc(&ty)));
+        }
+    }
+    if size > MAX_BOX_BYTES as u64 {
         return Err(Fmp4Error::Unsupported(format!(
             "box {} declares {size} bytes",
             fourcc(&ty)
         )));
     }
+    let size = size as usize;
     Ok(Some(BoxHeader {
         size,
         header_len,
@@ -518,7 +534,7 @@ fn children(payload: &[u8]) -> Result<Vec<Child>, Fmp4Error> {
     let mut out = Vec::new();
     let mut p = 0usize;
     while p + 8 <= payload.len() {
-        let Some(hdr) = peek_box(payload, p)? else {
+        let Some(hdr) = peek_box_before(payload, p, Some(payload.len()))? else {
             break;
         };
         let Some(end) = p.checked_add(hdr.size) else {
@@ -1328,7 +1344,7 @@ fn find_children(
     let mut found = Vec::new();
     let mut pos = range.start;
     while pos + 8 <= range.end {
-        let Some(header) = peek_box(bytes, pos)? else {
+        let Some(header) = peek_box_before(bytes, pos, Some(range.end))? else {
             break;
         };
         let Some(end) = pos.checked_add(header.size) else {

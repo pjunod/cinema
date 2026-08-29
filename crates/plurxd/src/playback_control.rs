@@ -4117,11 +4117,12 @@ struct PrepublicationProducerControl {
     completion: ProducerCompletionState,
 }
 
-/// Immutable response-admission contract for rolling generations whose
-/// producer recovery remains compatibility-owned. Copy and rolling-cache
-/// sessions do not opt into the prepublication executor, but their HTTP
-/// publication still has to linearize through the actor rather than bypassing
-/// it with process-local atomics.
+/// Immutable response-admission contract shared with a process-local session.
+///
+/// For a compatibility-owned producer this supplies both the presentation
+/// identity and the failure fence. For an actor-owned prepublication producer,
+/// `InitialProducerPolicy` remains the sole presentation/retry authority and
+/// this contract supplies only the Acquire half of `Session::fail` ordering.
 struct RollingResponsePublicationContract {
     presentation_contract_fingerprint: String,
     /// Monotone producer-failure publication shared with the compatibility
@@ -4887,6 +4888,19 @@ impl RollingControlActor {
             .prepublication
             .as_ref()
             .ok_or(ProducerAttemptRejection::InvalidPolicy)?;
+        if self
+            .response_publication_contract
+            .as_ref()
+            .is_some_and(|contract| {
+                contract.presentation_contract_fingerprint
+                    != policy.presentation_contract_fingerprint
+            })
+        {
+            return Err(ProducerAttemptRejection::PresentationContractMismatch);
+        }
+        if self.response_failure_fenced() {
+            return Err(ProducerAttemptRejection::SessionEnded);
+        }
         if !control.executor_registered {
             return Err(ProducerAttemptRejection::ExecutorNotRegistered);
         }
@@ -5818,7 +5832,11 @@ impl RollingControlActor {
         if self.retired {
             return Err(ResponsePublicationRejection::SessionEnded);
         }
-        if self.prepublication.is_some() {
+        if self
+            .prepublication
+            .as_ref()
+            .is_some_and(|control| control.initial_policy.is_some())
+        {
             return Err(ResponsePublicationRejection::InvalidBinding);
         }
         match self.response_publication_contract.as_ref() {
@@ -5848,15 +5866,16 @@ impl RollingControlActor {
     }
 
     fn response_presentation_contract_fingerprint(&self) -> Option<&str> {
-        self.prepublication
-            .as_ref()
-            .and_then(|control| control.initial_policy.as_ref())
-            .map(|policy| policy.presentation_contract_fingerprint.as_str())
-            .or_else(|| {
-                self.response_publication_contract
-                    .as_ref()
-                    .map(|contract| contract.presentation_contract_fingerprint.as_str())
-            })
+        match self.prepublication.as_ref() {
+            Some(control) => control
+                .initial_policy
+                .as_ref()
+                .map(|policy| policy.presentation_contract_fingerprint.as_str()),
+            None => self
+                .response_publication_contract
+                .as_ref()
+                .map(|contract| contract.presentation_contract_fingerprint.as_str()),
+        }
     }
 
     fn response_failure_fenced(&self) -> bool {
@@ -7395,11 +7414,11 @@ impl RollingControlHandle {
             .unwrap_or(Err(ProducerAttemptRejection::ControlUnavailable))
     }
 
-    /// Bind immutable response facts for a rolling generation whose producer
-    /// remains compatibility-owned. This runs before registry publication, so
-    /// every later master/media/status response can use the same actor path as
-    /// prepublication producers without opting compatibility copy/cache into
-    /// retry policy.
+    /// Bind immutable response facts before producer-policy admission or
+    /// compatibility registry publication. Compatibility-owned generations
+    /// use both facts; actor-owned prepublication generations take their
+    /// presentation identity from the matching initial policy and use this
+    /// binding only to order `Session::fail` with response authorization.
     pub(crate) async fn bind_response_publication_contract(
         &self,
         presentation_contract_fingerprint: String,
@@ -12515,6 +12534,76 @@ mod tests {
             "copy-contract",
             "failed-copy-master-eof",
         ));
+    }
+
+    #[test]
+    fn prepublication_response_contract_orders_failure_and_policy_binding() {
+        let started = Instant::now();
+        let failed = Arc::new(AtomicBool::new(false));
+        let mut actor = registered_prepublication_actor(started);
+        assert_eq!(
+            actor.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::clone(&failed),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started,
+                RollingResponsePublication::generation_metadata(
+                    RollingResponseObject::MasterPlaylist,
+                    "copy-contract".to_owned(),
+                ),
+            ),
+            Err(ResponsePublicationRejection::ProducerNotAdmitted),
+            "the failure fence cannot stand in for actor-owned producer policy"
+        );
+        assert_eq!(
+            actor.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("copy-contract", "copy-retry"),
+            ),
+            Ok(1)
+        );
+        failed.store(true, Ordering::Release);
+        assert_eq!(
+            actor.authorize_response_publication_at(
+                started + Duration::from_millis(1),
+                RollingResponsePublication::attempt_media(
+                    RollingResponseObject::MediaSegment,
+                    1,
+                    Some(0),
+                ),
+            ),
+            Err(ResponsePublicationRejection::SessionEnded)
+        );
+        let control = actor
+            .prepublication
+            .as_ref()
+            .expect("prepublication control");
+        assert!(!control.producer_media_published);
+        assert!(matches!(
+            &control.retry_state,
+            PrepublicationRetryState::Available(_)
+        ));
+
+        let mut mismatch = registered_prepublication_actor(started);
+        assert_eq!(
+            mismatch.bind_response_publication_contract_at(
+                "copy-contract".to_owned(),
+                Arc::new(AtomicBool::new(false)),
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            mismatch.begin_initial_producer_attempt_at(
+                started,
+                copy_policy("other-contract", "other-retry"),
+            ),
+            Err(ProducerAttemptRejection::PresentationContractMismatch)
+        );
+        assert_eq!(mismatch.delivery.producer_attempt, 0);
     }
 
     #[tokio::test]
