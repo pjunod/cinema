@@ -7,7 +7,8 @@
 **Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
 (PR #626; hosted run `33129200705` green; merge `9063bb1e`)
 **Current review candidate:** the documentation tip above runtime repairs
-through `4da3bbde`, with regression evidence closed through `44947095`.
+through `4da3bbde`, regression evidence closed through `44947095`, and
+hosted-preflight owner-inventory reconciliation `c4a1d96d`.
 That source implements
 three-phase Prepare/Confirm/Publish-or-Abandon activation, atomic claim
 transitions through SQLite v36 and Hiqlite v18, finite-handoff renewal and
@@ -23,7 +24,8 @@ next.
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
 **Validation-evidence freeze:** `ffd587c9` (rebased from `95cd9a2e`)
 for regression-history evidence; owner-inventory reconciliation
-`8af50d8d`; compile repair `27f88504`; its mapping `03a365ba`;
+`8af50d8d`, superseded for the current source by hosted-preflight reconciliation
+`c4a1d96d`; compile repair `27f88504`; its mapping `03a365ba`;
 assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
 cleanup through `77e292d1`; historical-schema fixture and completion proof
 `411bf818` through `4d38a084`; and their append-only mappings on branch
@@ -64,8 +66,12 @@ binding, and every failed three-voter name passes on exact rerun. The complete
 cluster harness, seven activation tests,
 and two Activity tests pass. Formatting, workspace Clippy, validation catalog,
 history, 123 operations contracts, 52 benchmark checks, and web policy pass.
-Only docs-bearing exact-head review, push, hosted CI, and merge remain for PR
-#636.
+Hosted run `33226975369` stopped in fast preflight on sixteen stale exact-count
+sentinels before downstream jobs. Three reviewers independently recomputed and
+approved the inventory-only `c4a1d96d` repair; the two exact failed validation
+methods pass 2/2, catalog lint passes, and the complete hosted-equivalent Python
+validation catalog passes 68/68. Only docs-bearing exact-head review, push, a
+green hosted rerun, and merge remain for PR #636.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -855,8 +861,10 @@ migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
 placeholder-order repair `4da3bbde`. Regression evidence is closed through
 `44947095`; the documentation tip is the immutable review candidate.
 Runtime behavior before that repair is frozen in `611d60cf`; regression-history
-evidence is frozen in `ffd587c9`; owner-inventory corrections are frozen in
-`8af50d8d`; the compile repair plus mapping are frozen in `27f88504` and
+evidence is frozen in `ffd587c9`; historical owner-inventory corrections are
+frozen in `8af50d8d` and superseded for the current source by unanimously
+reviewed `c4a1d96d` after hosted run `33226975369` exposed sixteen stale counts;
+both exact failed methods pass 2/2. The compile repair plus mapping are frozen in `27f88504` and
 `03a365ba`; and assertion/scanner repairs plus mappings are frozen through
 `dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
 historical fixture construction and completion assertions are frozen in
