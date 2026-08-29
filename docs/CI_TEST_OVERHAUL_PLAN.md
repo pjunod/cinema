@@ -1,16 +1,18 @@
 # CI test overhaul — fast failures, selective evidence, safe reuse
 
-**Status:** Milestone 1 implemented in this working tree · review corrections
-applied · Milestones 2–5 ready to build · **Written:** 2026-08-05 · **Reviewed:**
-2026-08-06
+**Status:** Milestone 1 implemented · effort-train lifecycle added 2026-08-29 ·
+Milestones 2–5 remain available optimizations · **Written:** 2026-08-05 ·
+**Reviewed:** 2026-08-29
 
 Companion to [VALIDATION.md](VALIDATION.md) (how changed paths select behavior
-contracts) and [ARCHITECTURE.md](ARCHITECTURE.md) (how the repository fits
-together) — this plan turns the existing functionality-point catalog into a
-faster CI scheduler. Read §2 before changing the order, then execute one
-milestone at a time and keep the acceptance checks green. If a step seems to
-require weakening the single required `PR validation gate`, stop and flag it;
-the goal is less irrelevant work, not less evidence for affected behavior.
+contracts), [DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md) (how large
+projects use a compile-only integration lane), and
+[ARCHITECTURE.md](ARCHITECTURE.md) (how the repository fits together) — this
+plan turns the existing functionality-point catalog into a faster CI
+scheduler. The effort lane sits outside the release profile: it may defer
+tests during task integration, but it must not weaken `Main promotion gate` or
+the final exact-tree qualification. Read §2 before changing the order, then
+execute one milestone at a time and keep the acceptance checks green.
 
 ## 1. Objective — answer the cheapest decisive question first
 
@@ -28,8 +30,9 @@ CI should provide the earliest trustworthy answer to three questions:
    change, toolchain change, or test change must invalidate that result.
 
 The target is a layered gate, not a smaller universal test command. Full
-coverage still belongs on `main`, in the merge queue, and nightly; PR feedback
-should be proportional to the behavior under review.
+coverage still belongs on final effort qualification, `main`, optional future
+merge-queue runs, and nightly; ordinary PR feedback should be proportional to
+the behavior under review.
 
 ## 2. Evidence — the failures cluster before the slow work
 
@@ -94,8 +97,14 @@ build, and container jobs. The missing distinction was between:
 
 ### 3.1 Required behavior
 
-- `PR validation gate` remains the one required branch-protection result. Every
-  PR launches it, even when all executable jobs are inapplicable.
+- `Main promotion gate` remains the single aggregate verdict for main-bound
+  PRs, even when all executable jobs are inapplicable. While repository
+  protections are unavailable, it is enforced by convention; a future branch
+  rule requires this aggregate on `main`.
+- Task PRs into `effort/**` report `Effort development gate` and defer runtime
+  suites. The final `effort/**` to `main` PR forces every main-workflow surface
+  and accepts no skipped job as qualification evidence. A future `effort/**`
+  branch rule requires the development aggregate there.
 - The fast preflight always runs. It fails closed on policy or catalog errors.
 - Scope resolution fails open. A missing base, invalid catalog, or unknown path
   enables more tests rather than suppressing them, emits a typed reason, and is
@@ -143,7 +152,7 @@ the required workflow stays alive and skips jobs internally; workflow-level
  versioning · history · catalog · validation tests · workflow contracts
     │ fail ───────────────────────────────────────────────▶ stop expensive work
     │ pass
-    ├── docs only ─────────▶ docs contracts ──────────────▶ PR gate
+    ├── docs only ─────────▶ docs contracts ──────────────▶ main gate
     │
     ▼
  compute selected suites + content fingerprints
@@ -152,7 +161,7 @@ the required workflow stays alive and skips jobs internally; workflow-level
     │                                                     │
     └── no valid pass ───────▶ run affected suites ───────┤
                                                           ▼
-                                             aggregate PR validation gate
+                                               Main promotion gate
 ```
 
 The first minute decides whether later runner-minutes are justified. Parallel
@@ -220,8 +229,8 @@ make operations-check                             # source-level CI contract
 
 Observable CI acceptance:
 
-- a docs-only PR runs `scope`, `preflight`, the lightweight lint job, and
-  `PR validation gate`; the portable Rust job is skipped;
+- a docs-only main-bound PR runs `scope`, `preflight`, the lightweight lint
+  job, and `Main promotion gate`; the portable Rust job is skipped;
 - an Apple or Android source change with a stale build counter fails the mobile
   version job, still reports the selected native suite, and fails the aggregate
   gate;
@@ -230,7 +239,8 @@ Observable CI acceptance:
   a `validation/regressions.d/**` fragment—does use the lane, while replacing
   the mapping fragment with `validation/points.toml` does not;
 - a mixed docs-and-code PR still selects `docs-contract` for its docs paths;
-- every inapplicable job is `skipped`, while `PR validation gate` is `success`.
+- every inapplicable job is `skipped`, while `Main promotion gate` is
+  `success`.
 
 ## 6. Milestone 2 — split the universal Rust gate into owned suites
 

@@ -3,6 +3,8 @@
 Companion to [FEATURES.md](FEATURES.md) (what plurx does) and
 [ARCHITECTURE.md](ARCHITECTURE.md) (how it is built) — this is how a behavior
 becomes a named contract with an automatic test obligation.
+[DEVELOPMENT_PIPELINE.md](DEVELOPMENT_PIPELINE.md) owns the separate question
+of *when* a large effort pays for those obligations.
 
 A functionality point is not a test file or a coverage percentage. It is one
 user-visible promise, the paths capable of changing that promise, and the
@@ -29,6 +31,12 @@ Use `make validate-staged` during ordinary work. Use `make validate` when the
 working tree is complicated or path selection itself is in doubt. Use
 `make validate-full` before a risky merge or release; it can take longer and
 some checks need browsers, simulators, Docker, or client toolchains.
+
+Task PRs into `effort/**` use `make effort-rust-check` plus affected client and
+web compile/static checks instead of a validation profile. That lane is a
+deliberate integration proof, not release evidence. The final `effort/**` to
+`main` PR runs the full CI fan-out and writes an exact-tree qualification
+record.
 
 `make check` is the mandatory portable repository baseline: catalog lint,
 historical regression coverage, operations source contracts, Rust formatting,
@@ -95,7 +103,7 @@ executed with identical feature resolution.
 | Profile | Intended use | Additional evidence |
 |---|---|---|
 | `commit` | Pre-commit and ordinary local work | Mandatory Rust/catalog baseline; shared API wire check; web syntax, contrast, golden, and accessibility when affected |
-| `ci` | Pull requests, the merge queue, and `main` | PR runs scope to the diff — client suites run only when a diff can reach their compiled sources; `merge_group` and push events enable every surface, so the full cross-surface fan-out always sits between a green PR and `main` |
+| `ci` | Main-bound PRs, optional merge queue, and `main` | Ordinary PRs scope to the diff; `effort/**` qualification PRs, `merge_group`, and push events enable every surface. Task PRs into `effort/**` use the separate compile-only workflow |
 | `full` | Before a risky merge or release | Browser playback; both native-client suites; Android device tests when an explicit disposable device is selected; container startup/restart |
 | `nightly` | Scheduled deep regression search | Exhaustive playback and restart matrix; interrupted-production recovery; resource bounds; all runnable full checks; a gating 15-minute PGS parser fuzz campaign; report-only mutation sampling over Rust files changed in the last seven days |
 
@@ -105,9 +113,12 @@ pass. `--strict` turns missing tools or files into failures for checks selected
 on that platform. A platform mismatch remains a skip because Linux cannot run
 XCTest, regardless of strictness.
 
-CI fetches full Git history and selects from the pull-request base. The
-fast policy preflight runs mobile release hygiene first when applicable, then
-the history audit, catalog and validation unit tests, and operations contracts.
+CI fetches full Git history and selects from the pull-request base. The main
+workflow runs mobile release hygiene when applicable, plus the history audit,
+catalog and validation unit tests, and operations contracts. The effort
+workflow keeps the latter three policy checks but defers mobile release
+versioning until final qualification, so one large client project claims one
+store build rather than a new build number for every internal task.
 
 Mobile release hygiene reads two different refs, and the distinction is
 load-bearing. `PLURX_VALIDATION_BASE` is the recorded pull-request base sha and
@@ -159,17 +170,22 @@ cross-target release builds; image, Compose, runtime configuration, and
 lifecycle files justify the container smoke test. Ordinary `crates/**`
 changes run the fast Rust lane, plus the three cluster lanes when they touch a
 cluster contract. CI routing changes deliberately run those same four Rust
-lanes and the static workflow contracts, not every unrelated platform. The
-merge queue and nightly workflow retain the full fan-out before release.
+lanes and the static workflow contracts, not every unrelated platform. Final
+effort qualification, main pushes, tags, merge-group events when enabled, and
+the nightly workflow retain the full fan-out before release.
 
-`PR validation gate` waits for every selected job and accepts an unselected
-job only when GitHub records it as skipped. Configure that aggregate as the
-required branch-protection check; individual jobs remain visible evidence but
-do not make an unrelated surface part of every merge. Pushes and tags enable
-all surfaces, and an absent or invalid pull-request base also enables all
-jobs. Impact optimization therefore fails open: a bad diff base costs time;
-it never suppresses tests. The scheduled workflow still runs the `nightly`
-profile.
+`Main promotion gate` waits for every selected main-workflow job and accepts an
+unselected job only when GitHub records it as skipped. An effort qualification
+is stricter: scope enables every surface and the qualification writer refuses
+any result other than `success`. `Effort development gate` separately waits
+for policy plus every affected compile/static job. Configure only those two
+aggregates if branch protection becomes available: `Main promotion gate` on
+`main`, and `Effort development gate` on `effort/**`. Individual jobs remain
+visible evidence but do not become permanent branch rules. Pushes and tags
+enable all surfaces, and an absent or invalid
+pull-request base also enables all jobs. Impact optimization therefore fails
+open: a bad diff base costs time; it never suppresses tests. The scheduled
+workflow still runs the `nightly` profile.
 
 ### Runner mode — one repository variable selects the pool
 
@@ -234,25 +250,21 @@ design. `tests/operations/test_contracts.py` enforces the whole arrangement —
 no job may install ffmpeg outside the action, name a major without pinning the
 image or container that supplies it, or drop either major's coverage.
 
-### Base syncs — the gate revalidates, the reviewer does not
+### Base syncs — convention keeps the qualified tree current
 
-`main` is protected with `required_status_checks.strict: true`, so a pull
-request has to be up to date before it merges. Clear that by merging `main`
-**into** the branch. Never rebase a branch that has a recorded approval: a merge
-keeps the approved commit an ancestor, while a rebase rewrites every sha and
-sends the whole reviewed range back through review.
+The private repository's current account plan does not expose branch
+protection or rulesets, so GitHub cannot require an up-to-date head. Before
+final qualification, merge `main` **into** the shared effort branch. Never
+rebase that branch: rewriting every integrated task commit creates avoidable
+review and recovery work.
 
-That base sync is revalidated but not re-reviewed. `PR validation gate` reruns
-at the new head — which is the point of `strict`, and is load-bearing here
-rather than ceremonial, because the required profile is itself versioned in
-`main`: this catalog and `validation/points.toml` can add a check to the `ci`
-profile after a branch was cut, so a byte-identical patch can legitimately face
-a check set that did not exist when it was approved. The independent approval,
-by contrast, is carried forward across a base sync Git proves empty — two
-parents, the second already on `main`, and an automatic merge whose tree is
-exactly what `git merge-tree` computes from the two parents. Anything Git cannot
-prove empty is reviewable content and takes a delta pass. The rule and its
-refusals live in the merge gate itself; see SwarmDeck `docs/OPERATIONS.md`.
+`Main promotion gate` tests GitHub's merge tree at the base current when the
+run starts and records that exact tree. If `main` moves before merge, the
+operator merges it into the effort and qualifies again. This is presently the
+"pretty please" rule: Paul controls every merge and does not merge a pending,
+red, or stale candidate. If strict branch protection becomes available, the
+same aggregate becomes the one required status check without changing the
+workflow contract.
 
 ## Load-sensitive cluster checks — a timeout is not a verdict
 

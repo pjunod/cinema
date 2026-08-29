@@ -2,13 +2,19 @@
 # plurx pre-commit hook — validates the behavior affected by the staged diff.
 # Install with `make hooks`. Bypass a single commit with `git commit --no-verify`.
 #
-# The functionality catalog always runs the baseline Rust gate, then adds
-# surface checks selected by changed paths. Missing optional browser tooling is
-# reported as a skip and CI still runs the required portable profile.
+# The normal path runs the full commit profile. An effort-task commit can opt
+# into policy plus compile-only Rust evidence; its pull request supplies the
+# affected Apple, Android, and web checks, and final qualification supplies the
+# complete release suite.
 set -e
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$ROOT"
 
-echo "pre-commit: validating functionality points selected by the staged diff…"
-scripts/validate run --profile commit --staged
+if [ "${PLURX_EFFORT_COMMIT:-}" = "1" ]; then
+    echo "pre-commit: effort task — policy plus compile-only Rust gate…"
+    make history-check validation-lint operations-check effort-rust-check
+else
+    echo "pre-commit: validating functionality points selected by the staged diff…"
+    scripts/validate run --profile commit --staged
+fi

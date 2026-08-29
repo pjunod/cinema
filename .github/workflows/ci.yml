@@ -4,12 +4,15 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+  # Task pull requests aimed at effort/** use effort-ci.yml's compile-only
+  # development gate. A final effort/** -> main pull request lands here and
+  # deliberately expands to the complete fan-out below.
   pull_request:
-  # The merge queue is the enforcement point of the two-tier design: PR runs
-  # are scoped to the diff for fast iteration, and every merge_group event
-  # fails open into the full cross-surface fan-out before a commit reaches
-  # main. Adding a required check that does not run on merge_group would
-  # deadlock the queue — pr_gate reports on both events.
+    branches: [main]
+  # Queue support remains available for a future plan upgrade. Every
+  # merge_group event fails open into the full cross-surface fan-out, and the
+  # aggregate gate reports on both PR and queue events so enabling a queue
+  # later will not strand its required check.
   merge_group:
 
 env:
@@ -17,7 +20,9 @@ env:
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # A later main push contains every earlier main push, so one exhaustive
+  # post-merge run is enough. Tags and merge groups remain immutable evidence.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
 
 jobs:
   # Resolve the PR diff once. Expensive jobs consume these outputs in parallel;
@@ -38,6 +43,7 @@ jobs:
       hiqlite_spike: ${{ steps.scope.outputs.hiqlite_spike }}
       cluster_auth: ${{ steps.scope.outputs.cluster_auth }}
       docs_only: ${{ steps.scope.outputs.docs_only }}
+      qualification: ${{ steps.scope.outputs.qualification }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -47,9 +53,23 @@ jobs:
         env:
           EVENT_NAME: ${{ github.event_name }}
           VALIDATION_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD_REF: ${{ github.event.pull_request.head.ref }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
+          scope_event="$EVENT_NAME"
+          qualification=false
+          if [ "$EVENT_NAME" = pull_request ] \
+            && [ "$BASE_REF" = main ]; then
+            case "$HEAD_REF" in
+              effort/*)
+                scope_event=effort_qualification
+                qualification=true
+                ;;
+            esac
+          fi
           python3 -m validation.ci_scope \
-            --event "$EVENT_NAME" --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+            --event "$scope_event" --base "$VALIDATION_BASE" >> "$GITHUB_OUTPUT"
+          echo "qualification=$qualification" >> "$GITHUB_OUTPUT"
       - name: Validate the configured runner mode
         env:
           CI_RUNNER_MODE: ${{ vars.CI_RUNNER_MODE || 'self-hosted' }}
@@ -130,7 +150,8 @@ jobs:
     name: fast Rust gate
     needs: [scope, preflight]
     # Kotlin and Swift diffs compile nothing under crates/, so the cargo lane
-    # only runs when the diff can reach it; the merge queue re-runs it always.
+    # only runs when the diff can reach it; qualification and queue runs force
+    # the complete fan-out.
     if: needs.scope.outputs.rust == 'true'
     runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general","high-cpu"]') }}
     timeout-minutes: 30
@@ -640,19 +661,27 @@ jobs:
         env:
           # Linker for the arm64 target (harmlessly unused on x86_64).
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-      # PR and merge-queue jobs validate both release targets, but no downstream
-      # job consumes their binaries. Retain binaries only for push/tag runs so
-      # routine validation does not exhaust the repository artifact quota.
-      - name: Retain release binary for push and tag runs
-        if: github.event_name == 'push'
-        # The build itself is the validation verdict. Artifact retention is
-        # best-effort because repository quota exhaustion must not fail an
-        # otherwise successful release build (or block tag publication).
-        continue-on-error: true
+      - name: Record the release binary digest
+        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
+        run: >-
+          sha256sum target/${{ matrix.target }}/release/plurxd
+          > target/${{ matrix.target }}/release/plurxd.sha256
+      # Ordinary PRs prove both release targets compile but retain no large
+      # artifacts. Push/tag runs and final effort qualifications keep the exact
+      # binary plus digest for one day, long enough to inspect or stage it.
+      - name: Retain release binary for push, tag, and qualification runs
+        if: github.event_name == 'push' || needs.scope.outputs.qualification == 'true'
+        # Qualification promises an inspectable exact-tree candidate, so an
+        # upload failure must fail that run. Push/tag retention remains
+        # best-effort because repository quota exhaustion must not block an
+        # otherwise valid post-merge or tag build.
+        continue-on-error: ${{ needs.scope.outputs.qualification != 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: plurxd-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/plurxd
+          path: |
+            target/${{ matrix.target }}/release/plurxd
+            target/${{ matrix.target }}/release/plurxd.sha256
           retention-days: 1
 
   # CD validates the tag in this workflow, then delegates artifact construction,
@@ -695,12 +724,14 @@ jobs:
       - name: Start, probe, restart, and re-probe the image
         run: scripts/container-smoke plurx/plurxd:ci
 
-  # Configure this as the single required check for PRs AND the merge queue.
+  # Configure this as the single required check for main-bound PRs and the
+  # merge queue when repository protections become available. Until then it is
+  # the documented "pretty please" promotion verdict.
   # A conditional job is valid when it either passed or was skipped because
   # its surface was unaffected; on merge_group events nothing is skipped, so
   # a green queue run is the full cross-surface fan-out.
   pr_gate:
-    name: PR validation gate
+    name: Main promotion gate
     if: always() && (github.event_name == 'pull_request' || github.event_name == 'merge_group')
     needs:
       - scope
@@ -750,3 +781,26 @@ jobs:
               *) echo "A selected validation job ended with: $result"; exit 1 ;;
             esac
           done
+      - uses: actions/checkout@v4
+        if: needs.scope.outputs.qualification == 'true'
+        with:
+          fetch-depth: 0
+      - name: Write the exact-tree effort qualification record
+        if: needs.scope.outputs.qualification == 'true'
+        env:
+          PLURX_PULL_REQUEST: ${{ github.event.pull_request.number }}
+          PLURX_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PLURX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PLURX_QUALIFICATION_RESULTS: >-
+            {"scope":"${{ needs.scope.result }}","mobile_version":"${{ needs.mobile_version.result }}","preflight":"${{ needs.preflight.result }}","rust":"${{ needs.check.result }}","cluster_auth":"${{ needs.cluster_auth.result }}","cluster_wal":"${{ needs.cluster_wal.result }}","cluster_daemon":"${{ needs.cluster_daemon.result }}","web_layout":"${{ needs.web_layout.result }}","vod_web":"${{ needs.vod_web.result }}","android_jvm":"${{ needs.android_jvm.result }}","apple":"${{ needs.apple.result }}","android_device":"${{ needs.android_device.result }}","build":"${{ needs.build.result }}","docker":"${{ needs.docker.result }}"}
+        run: >-
+          python3 -m validation.qualification
+          --output target/validation/qualification-receipt.json
+      - name: Retain the effort qualification record
+        if: needs.scope.outputs.qualification == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: effort-qualification-${{ github.event.pull_request.number }}
+          path: target/validation/qualification-receipt.json
+          if-no-files-found: error
+          retention-days: 14
