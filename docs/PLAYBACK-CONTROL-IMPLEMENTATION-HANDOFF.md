@@ -1,38 +1,17 @@
 # Playback control rewrite — implementation handoff
 
 **Updated:** 2026-08-29
-**Merged baseline:** `origin/main` at `253f3200` (through PR #638)
-**Active PR:** [#636](https://github.com/pjunod/plurx/pull/636)
-**Active branch:** `codex/playback-control-m4-prepublication`
-**Last merged exact head:** `62a4f535756d624f71d295a11f38bd947d85e841`
-(PR #626; hosted run `33129200705` green; merge `9063bb1e`)
-**Current review candidate:** the local committed tip above runtime repairs
-through `4da3bbde`, regression evidence closed through `44947095`,
-hosted-preflight owner-inventory reconciliation `c4a1d96d`, final-Rust repair
-`c48a9867`, hosted-gate repair `600a95aa`, evidence mapping `700bcdd9`, hosted
-structural-inventory reconciliation `c94cdcf3` mapped through `4ad4a4da`, and
-hosted lifecycle-fixture repair `4b76a34e` mapped through `7dc30a42`. The
-remote PR points to reviewed head `37b8cc43`; the local candidate adds the
-seven-test repair, its evidence mapping, and this synchronized ledger. That
-source implements three-phase Prepare/Confirm/Publish-or-Abandon activation,
-atomic claim transitions through SQLite v36 and Hiqlite v18, finite-handoff
-renewal and takeover, current-owner retry publication, and resolved-replay
-freshness. Store, lifecycle, and end-to-end integration reviewers unanimously
-approved every repaired source delta with no remaining P0–P3 finding after
-exact head `032292a159513e51f13bab5db1d6081c46b0cc5c` exposed detached
-remote-START restart-admission loss and the required cluster gate exposed five
-Hiqlite placeholder-order defects. Two independent adversarial lanes approve
-the earlier code and evidence with no actionable P0–P3 finding. Corrected
-behavior/docs head `cdc27aa8` passed exact review and was pushed; run
-`33234021296` then exposed only the three test-shape inventory counts
-reconciled at `c94cdcf3` and mapped through `4ad4a4da`. Run `33234420211`
-passed every selected substantive lane other than fast Rust and completed its
-hosted broad suite with
-1,281 passing, seven failing, and three ignored tests. Repair `4b76a34e`
-closes all seven stale lifecycle fixtures by exact name, and `7dc30a42` maps
-the evidence. Three source reviews and one mapped-tip review approve those
-commits with no actionable P0–P3 finding. Documentation review, push, one
-fresh hosted rerun, and merge are next.
+**Merged baseline:** `origin/main` at
+`a48884906da351ca0c72dc99c227aa169911d089`
+**Last merged PR:** [#636](https://github.com/pjunod/plurx/pull/636)
+**Last merged exact head:**
+`d1b117bf2bddba600c659f2b2354ea50ee10830a`
+(hosted run `33236731526` fully green; merge
+`a48884906da351ca0c72dc99c227aa169911d089`)
+**Active branch:** `codex/playback-control-m4-published-lifetime`
+**Current review candidate:** none. The branch starts at the #636 merge;
+published-lifetime working-tree implementation is in progress but is not
+frozen, reviewed, or gated.
 **Implementation freeze before that repair:** `611d60cf` (rebased from
 `f02bf5b5`)
 in the disposable clone at `/private/tmp/plurx-playback-control-clone`.
@@ -44,9 +23,9 @@ assertion/scanner repairs through `dad2cd5b`; compile/Clippy and obsolete-seam
 cleanup through `77e292d1`; historical-schema fixture and completion proof
 `411bf818` through `4d38a084`; and their append-only mappings on branch
 `codex/playback-control-m4-prepublication`.
-**Current candidate identity:** the local tip containing this handoff; after
-push, PR #636's body pins the exact full object ID because a commit cannot
-contain its own hash.
+**Current candidate identity:** no runtime candidate exists for the active
+cut. Freeze and record one only after the planned source and focused tests are
+complete.
 **Runtime review state before the serving-fence repair:** exact runtime head
 `b1eeba78`, assertion/scanner head `2afa1bba`, compile/Clippy heads through
 `77e292d1`, and historical-schema head `4d38a084` received unanimous read-only
@@ -54,25 +33,19 @@ approval before the rebase. The directly affected rerun
 compiled successfully and ran 641 tests: 606 passed initially, all five
 deterministic failures passed after exact repairs, and all 30 socket fixtures
 passed by exact name with loopback access.
-**Current implementation:** the candidate assembles actor-owned
-prepublication recovery, exact response admission, cancellation-safe process
-and resource settlement, authoritative local/remote routing, bounded relay
-stream ownership, and per-rendition VOD build/cleanup ownership. The newest
-wave makes cluster replacement make-before-break, persists a replay-visible
-successor publication fence and the first durable terminal cause, separates
-durable confirmation from exact response publication, makes
-release a publication-fence/Store-cause/exact-projection transaction, and
-binds bodyless status, typed error, and EOF publication to exact response
-authority. It also actor-fences copy and rolling-cache response publication,
-and gives hard node failure an exact replayable takeover CAS with
-abort/join-before-stop provisional ownership and a confirmed bootstrap renewal
-before durable-ID adoption and seed/publication.
-The legacy published-lifetime and copy recovery decisions still remain
-disjoint compatibility owners; this cut does not claim their deletion.
+**Current implementation:** #636 owns actor-managed transcode prepublication,
+exact response admission, cancellation-safe process/resource settlement,
+authoritative local/remote routing, bounded relay ownership, three-phase
+cluster activation, and VOD lifecycle ownership. The next cut extends only
+actor-managed transcodes across the first-media boundary. It will retain the
+actor deadline, emit one stable postpublication decision, apply
+`CleanupPolicy::RetainPublished`, and surface typed `producer_ended` beyond the
+committed frontier. Copy watchdog and replacement owners remain deliberately
+active until the separate copy cut.
 **Validation state:** `make unit` ran exactly once at the pre-rebase commit now
 mapped to `b1eeba78`; compilation failed before tests on 11 Store errors. After
 approved repairs, all 641 directly affected historical tests are accounted
-green without a second full-suite run. On the current repair, the activation
+green without a second full-suite run. On that repair, the activation
 Store contract, five daemon activation/replay tests, two SQLite migrations,
 two Hiqlite schema tests, and the placeholder-order invariant pass. The first
 required cluster run passed every vendor WAL/Hiqlite probe and 61/67 Store
@@ -135,9 +108,10 @@ all seven pass by exact name. Three source reviews approve the repair with no
 actionable P0–P3 finding; `7dc30a42` maps it and has an independent exact-head
 approval. Package Clippy with warnings denied, formatting, diff inspection,
 the exact ownership inventory, validation lint, and history are green. No
-second manual/local broad unit run occurred. The required hosted rerun will
-execute its normal fast-Rust gate. Documentation review, push, one fresh
-hosted rerun, and merge remain for PR #636.
+second manual/local broad unit run occurred. Final exact head
+`d1b117bf2bddba600c659f2b2354ea50ee10830a` then passed hosted run
+`33236731526` with every required job green. PR #636 merged as
+`a48884906da351ca0c72dc99c227aa169911d089`.
 
 This is the resumable execution ledger for the playback-control rewrite. Read
 it with the detailed
@@ -194,8 +168,13 @@ The rewrite is not starting from scratch:
   passive executor transport, merged as `9063bb1e` after exact-head review,
   focused Rust 85/85, ownership 7/7, local full/cluster gates, and hosted run
   `33129200705`.
+- PR #636: actor-owned prepublication recovery, exact response settlement,
+  three-phase cluster activation, and durable publication/terminal ownership,
+  merged from exact head `d1b117bf2bddba600c659f2b2354ea50ee10830a`
+  after hosted run `33236731526` passed every required job; merge
+  `a48884906da351ca0c72dc99c227aa169911d089`.
 
-The active branch starts from merged #626. Commit `43bd459d` corrected the
+The merged #636 branch started from #626. Commit `43bd459d` corrected the
 response-publication contract before implementation: frozen generation
 metadata leaves retry available, attempt media closes it atomically, current
 attempt-derived bodyless responses carry an explicit exact-attempt status
@@ -205,7 +184,7 @@ the corrected delta is approved. The later full unit invocation at the commit
 now mapped to `b1eeba78`
 stopped during Store compilation before executing any active-branch test.
 
-### Active prepublication review ledger
+### Merged prepublication review ledger
 
 The pre-commit review used three independent scopes and did not build or run
 tests. At that stage, the repaired working tree received targeted approval
@@ -912,57 +891,22 @@ topology, and daemon-integration contracts.
 
 ## 4. Immediate continuation procedure
 
-PR #626 is merged as `9063bb1e`. The current disposable branch is
-`codex/playback-control-m4-prepublication`; contract correction `43bd459d`,
-runtime `0e80c6ba`, rejected documentation/review head `ab3808b1`, and first
-repair head `e40c56d4` are historical commits. Pre-rebase source content now
-mapped to `4d38a084` received unanimous targeted approval after the historical
-fixture, compile/Clippy, assertion/scanner, and runtime rounds. Fresh review of
-rebased candidate `8964e3b1` found the internal remote-start serving-authority
-bypass. Source repair `b8b1dc73` and mapping repair `00f84d1d` closed that
-first issue. Subsequent review exposed the provisional activation lifecycle
-gaps described at the top of this handoff. The final three-phase repair is
-frozen in `6e01bbc3`, with restart-admission repair `07bb95bc`, focused
-migration/fixture repair `baba7c20`, Clippy repair `355d3309`, and Hiqlite
-placeholder-order repair `4da3bbde`. Regression evidence is closed through
-`44947095`; hosted-gate behavior is committed at `600a95aa` and mapped through
-`700bcdd9`. Exact head `993a67a5` was rejected only because synchronized
-candidate and continuation wording still described the prior uncommitted,
-six-case state; the current documentation tip is the corrected immutable
-review candidate.
-Runtime behavior before that repair is frozen in `611d60cf`; regression-history
-evidence is frozen in `ffd587c9`; historical owner-inventory corrections are
-frozen in `8af50d8d` and superseded for the current source by unanimously
-reviewed `c4a1d96d` after hosted run `33226975369` exposed sixteen stale counts;
-both exact failed methods pass 2/2. The compile repair plus mapping are frozen in `27f88504` and
-`03a365ba`; and assertion/scanner repairs plus mappings are frozen through
-`dad2cd5b`. Compile/Clippy cleanup is frozen through `77e292d1`; exact
-historical fixture construction and completion assertions are frozen in
-`411bf818` and `4d38a084`.
-Hosted run `33228540108` exposed six exact Rust cases repaired at `c48a9867`.
-Run `33230939191` then passed every selected substantive lane other than fast
-Rust, which exposed
-eight completed failures and one cleanup hang. The integrated repair is
-committed at `600a95aa`, mapped through `700bcdd9`, approved by both adversarial
-lanes, and green for all nine exact names. Package Clippy, formatting, diff,
-catalog, and history gates pass. No broad local suite was rerun.
-Run `33234021296` stopped in preflight on the three structural counts changed
-by those test-only fixtures. Reconciliation `c94cdcf3`, mapped through
-`4ad4a4da`, preserves the scanner regexes, whole-module scope, and exact
-equality assertions; its exact failed validation method passes. Run
-`33234420211` passed every selected substantive lane other than fast Rust and
-completed its hosted broad suite; the aggregate gate failed as a consequence.
-All seven stale fixture failures are exact-green at reviewed repair
-`4b76a34e`, mapped through `7dc30a42`. No second manual/local broad suite was
-run; the required hosted rerun will execute its normal fast-Rust gate.
-The preserved untracked vendor build artifacts remain outside every commit.
+PR #636 is merged from exact head
+`d1b117bf2bddba600c659f2b2354ea50ee10830a`. Hosted run `33236731526`
+passed every required job, and merge commit
+`a48884906da351ca0c72dc99c227aa169911d089` is the active branch base. The
+preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Obtain unanimous exact-head review of the synchronized documentation tip.
-2. Push the reviewed and exact-green candidate, update PR #636's body to pin
-   that full object ID, require every hosted check green, merge, and
-   continue immediately with the published-lifetime watchdog cut.
+1. Implement the actor/model, executor cleanup, serving semantics,
+   instrumentation, and legacy published-transcode watcher removal described
+   below; do not alter the copy path.
+2. Freeze one immutable runtime head and obtain adversarial approval before
+   any broad unit invocation.
+3. Run the full local unit suite once. Repair only failed or directly affected
+   tests, re-review every behavioral repair, then complete required
+   cluster/static gates, a wholly green hosted run, and merge.
 
 Do not skip the adversarial-review gate because an automatically started
 hosted workflow happened to be green. The user explicitly ordered adversarial
@@ -978,47 +922,32 @@ only the no-action response and leaves every legacy player recovery path in
 place. Later client cuts consume prepared quality, HDR/Dolby Vision, track, and
 node-handoff actions after their server contracts are separately proven.
 
-### Active cut boundaries
+### Active published-lifetime cut boundaries
 
-The active cut owns transcode prepublication and the response/settlement
-fences needed to keep that ownership exact:
+Implementation is in progress but is not yet frozen, reviewed, or gated. The
+cut owns actor-managed live transcodes only, after first media has committed:
 
-- `RollingControlHandle::spawn_prepublication_transcode` returns a handle and
-  one move-only executor registration; registration must commit before the
-  initial producer policy can arm;
-- hardware startup has a 12-second actor budget and at most one immutable,
-  presentation-compatible retry; software-only startup has a 30-second actor
-  budget and no retry;
-- generation-stable master metadata crosses actor admission without consuming
-  retry; video/subtitle playlists, VTT, init/media objects, ranges, `304`, and
-  other media-bearing attempt responses close retry before exposure, while a
-  bodyless `416` uses exact-attempt status admission and does not claim first
-  media;
-- the executor uses a weak Session reference, confirms predecessor reap before
-  scratch clear, verifies the clear, admits the exact recipe, installs one
-  successor, and acknowledges the immutable decision; failure never recurses;
-- the first actor-authorized attempt-media response ends prepublication
-  ownership and starts the retained published-lifetime watcher exactly once.
-- HTTP and cluster routes must carry exact response ownership through status,
-  range, relay, resurrection, release, and EOF settlement; they may not create
-  a second recovery verdict; and
-- clustered replacement must create the provisional successor before the
-  Store CAS retires its predecessor, persist the successor publication fence,
-  and clear it only after exact predecessor acknowledgement or the admitted-
-  body safety boundary;
-- release must keep cause-neutral local fencing separate from the Store's
-  first terminal cause, publish exact durable terminal/absence proof before a
-  shared `204`, and retain commit-unknown work in bounded reconciliation; and
-- VOD per-key build, head regeneration, dormant purge, and terminal compaction
-  are lifecycle/resource owners. They may bound or clean work but cannot pick
-  a rolling retry or replace a producer.
+- first media keeps or rearms the actor's existing
+  `ProducerProgressDeadline`; it must not start a second polling owner;
+- a postpublication stall, non-success exit, or success exit without proven
+  ENDLIST/frontier completion produces one immutable actor `Fail` and one
+  stable internal proposal;
+- the executor stops and reaps the exact failed attempt, releases its process
+  resources, and applies `CleanupPolicy::RetainPublished`; it must not call
+  `Session::fail`, clear the published scratch/catalog, end the actor, or
+  replace the child in place;
+- existing playlist, init, and materialized segments remain readable. A
+  request beyond the committed frontier receives typed `producer_ended`, so a
+  client can distinguish terminal producer loss from a missing object; and
+- actor snapshot, metrics, logs, and events expose the postpublication
+  disposition, proposal identity, completion proof, and cleanup result.
 
-This cut removes the detached hardware first-segment fallback as a production
-decision owner. It deliberately retains `watch_for_stall*`, `SOFTWARE_GRACE`,
-`PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active`, `child_transition`,
-`replacing_child`, copy fallback/classification, and published-lifetime stall
-handling. Those mechanisms must be listed as retained compatibility owners and
-must not overlap the actor-owned prepublication interval.
+Copy is a deliberate non-goal for this cut. `SOFTWARE_GRACE`,
+`PROGRESS_STALL`, `WATCHDOG_POLL`, `watch_for_stall*`, `watchdog_active`,
+`begin_copy_child_replacement`, `replacing_child`, and the copy-relevant
+`child_transition` ownership remain until the later copy cut. Generic copy
+actor observation stays passive because copy has no production decision
+executor yet.
 
 It also retains `PREPUBLICATION_REAP_RETRY` and
 `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` solely as lifecycle cleanup bounds. Each
@@ -1033,7 +962,7 @@ admission/commit and playlist actor observation share their existing absolute
 request deadlines; queued commands reject cancellation or expiry before
 mutation.
 
-The candidate adds these named lifecycle bounds. Relay bodies have a
+Merged #636 adds these named lifecycle bounds. Relay bodies have a
 post-header 300-second total and 30-second upstream/downstream no-progress
 limit, disjoint from request preparation; local file bodies use the same two
 bounds. Independent bounded pumps own the file or network reader even during
@@ -1049,14 +978,14 @@ which maintenance confirms durable terminal state in bounded three-second,
 16-way batches before eviction. These limits contain resource or network
 failure. None is permitted to select playback recovery.
 
-### Exact retained-owner inventory
+### Merged retained-owner inventory and active-cut target
 
 | Owner or bound | Current authority | Why it remains | Deletion or replacement milestone |
 |---|---|---|---|
-| actor `ProducerProgressDeadline` | Selects the sole prepublication retry or failure at the 12-second hardware or 30-second software boundary | FFmpeg cannot report every silent wedge | Permanent approved server progress deadline after M4 |
+| actor `ProducerProgressDeadline` | Selects the sole prepublication retry or failure at the 12-second hardware or 30-second software boundary | FFmpeg cannot report every silent wedge | The active cut retains/rearms it after first media for actor-managed transcodes; it remains the permanent approved server progress deadline |
 | `SOFTWARE_GRACE` | Copy-startup compatibility recovery only; the published-lifetime watcher starts with zero added grace | Copy startup has not moved fully into the actor | The later M4 copy cut deletes this startup grace owner |
-| `watch_for_stall*`, `PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active` | Published-lifetime and copy compatibility recovery only | Those two recovery scopes have not moved fully into the actor | Later M4 published-lifetime and copy cuts delete the polling/election owners; the actor deadline retains the required silent-wedge bound |
-| `child_transition`, `replacing_child`, `begin_child_replacement`, `kill_child_for_replacement`, `install_replacement_child` | Serializes compatibility child replacement and exact resource transfer | Published/copy in-place replacement still exists | Later M4 cuts replace it with actor decision plus exact-attempt supervisor settlement and drive legacy catalog counts to zero |
+| `watch_for_stall*`, `PROGRESS_STALL`, `WATCHDOG_POLL`, `watchdog_active` | Published-lifetime and copy compatibility recovery on merged `main` | Neither scope has moved fully into the actor | The active cut deletes the actor-managed transcode decision owner only; the later copy cut deletes the retained copy polling/election owner |
+| `child_transition`, `replacing_child`, and `begin_copy_child_replacement` | Serializes compatibility child replacement and exact resource transfer | Copy still has no production actor decision executor | Deliberately retained by the active cut; the later copy cut must replace this ownership before deletion |
 | `PREPUBLICATION_REAP_ATTEMPT_TIMEOUT` (2 s) and `PREPUBLICATION_REAP_RETRY` (5 s) | Repeatedly requests termination and waits for exact terminal proof while retaining process admission and scratch | A stuck kill/wait must not leak a permit or authorize overlapping children | Remains as bounded process cleanup; later M4 may simplify the compatibility lock, not the confirmed-reap requirement |
 | rolling retirement and scratch settlement | Detached exact owner confirms reap; scratch cleanup uses three 5-second attempts separated by 5 seconds, then leaves recovery to startup/maintenance sweep | Caller cancellation and slow filesystem cleanup cannot strand child or accounting ownership | Remains as lifecycle cleanup; later M4 deletes only compatibility replacement inputs |
 | first-media and response settlement | At most 256 first-media owners and 256 streamed-EOF owners; publication/settlement calls use the five-second response lifecycle | A visible response must finish actor handoff or fail closed after request cancellation | Remains as bounded response ownership after M4 |
@@ -1077,21 +1006,19 @@ client controller; M6 moves automatic quality, codec, HDR/Dolby Vision, audio,
 subtitle, and node changes to prepare/commit/abort; M9 deletes compatibility
 `/status` polling and legacy reopen paths.
 
-The next immutable-head review must specifically challenge exact-deadline
-response ordering; stable-master contract freezing; same-ID Session ABA;
-executor cancellation at every retry transaction step; permit transfer/leak
-behavior; make-before-break activation CAS and durable publication-fence
-replay across ingress restart/failover; predecessor projection before
-successor exposure; first-writer terminal-cause parity across both Stores,
-migrations, old-schema import, dump, and node removal; `204` proof under Store
-uncertainty, cancellation, panic, pool saturation, and the 372-second safety
-boundary; exact status/error/EOF fencing and local/relay body liveness;
-terminal compaction and replay; per-rendition key release; and whether any
-request or watcher can still make a competing recovery verdict.
+The next immutable-head review must specifically challenge first-media
+deadline rearming and cutoff order; exactly-one stable postpublication failure
+and proposal identity; cancellation at every executor/reap boundary; exact
+attempt and permit release; `RetainPublished` preservation of actor, Session,
+scratch, catalog, and committed objects; typed `producer_ended` only beyond the
+committed frontier; ENDLIST/frontier proof before successful completion; and
+whether any request or retained watcher can still make a competing transcode
+verdict. It must also prove the copy watchdog, copy replacement, and copy
+`child_transition` ownership did not move in this cut.
 
 ## 5. Merged M4 decision-transport slice after command sequencing
 
-The current slice extends the merged passive deadline foundation with one
+That merged slice extended the passive deadline foundation with one
 immutable decision transport and a passive executor scaffold. It preserves the
 earlier shared ordering and observability slice:
 
@@ -1106,7 +1033,7 @@ earlier shared ordering and observability slice:
   `RollingLeaseSnapshot`, `SessionInfo`, and joined telemetry; and
 - bounded command/deadline metrics expose activity without unbounded labels.
 
-The active runtime is committed through `4d0a0c0f`. Root static review found
+That runtime is committed through `4d0a0c0f`. Root static review found
 and removed an initial cycle in which the
 actor retained a transport containing a sender back into its own mailbox.
 Round 1 at exact head `ceb8c74d` returned one approval and two change requests.
@@ -1305,29 +1232,27 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After the active prepublication candidate, the remaining work is:
+After merged PR #636, the remaining work is:
 
-1. Push the locally green production decision, prepublication retry,
-   response-admission, relay/VOD ownership, and confirmed-reap cut; satisfy
-   hosted gates and merge it.
-2. Move published-lifetime stall classification and recovery behind the actor
-   without overlapping the retained compatibility watcher.
-3. Convert copy startup/exit classification and fallback to actor decisions.
-4. Add desired physical hold/resume command/intention barriers to the shared
+1. Implement, review, verify, and merge actor-managed transcode
+   published-lifetime failure with `RetainPublished` cleanup and typed
+   `producer_ended`, without overlapping the retained watcher.
+2. Convert copy startup/exit classification and fallback to actor decisions.
+3. Add desired physical hold/resume command/intention barriers to the shared
    actor sequence; retain the successful physical acknowledgements already in
    producer ingress.
-5. Delete detached recovery loops, request-side exit verdicts, in-place
+4. Delete detached recovery loops, request-side exit verdicts, in-place
    replacement, `child_transition`, `watchdog_active`, and `replacing_child`;
    drive every legacy catalog sentinel to zero.
-6. Complete M5 client action ownership for web, Apple, and Android.
-7. Implement prepared/commit/abort handoff for transparent quality,
+5. Complete M5 client action ownership for web, Apple, and Android.
+6. Implement prepared/commit/abort handoff for transparent quality,
    resolution, codec, HDR/Dolby Vision, audio, subtitle, and node changes.
-8. Extend the shared index with exact intro/credits annotations, subtitle
+7. Extend the shared index with exact intro/credits annotations, subtitle
    windows, force-analysis controls, queue/current-work visibility, and
    instrumentation.
-9. Complete planned drain, VOD resurrection, rolling-successor failover, and
+8. Complete planned drain, VOD resurrection, rolling-successor failover, and
    compatibility-takeover retirement.
-10. Complete mixed-fleet cutover and delete compatibility polling paths.
+9. Complete mixed-fleet cutover and delete compatibility polling paths.
 
 ## 7. Completion definition
 
