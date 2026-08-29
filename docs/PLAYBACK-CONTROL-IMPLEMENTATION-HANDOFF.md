@@ -10,31 +10,30 @@
 `32af5fa997459174e6b0bfe69bddd72473a1d5f6`)
 **Active branch:** `codex/playback-control-m4-copy-lifetime`
 **Active PR:** [#642](https://github.com/pjunod/plurx/pull/642)
-**Implementation checkpoint immediately before this handoff commit:**
-`7bc2e4d67280510928a6f76d6c5f1821ec1252c4` in the disposable clone at
+**Validated implementation checkpoint immediately before this status commit:**
+`0f7a2818b21612a728d4a56bfb68667f6c02529c` in the disposable clone at
 `/private/tmp/plurx-playback-control-clone`.
-**Remote PR head when this checkpoint was authored:**
-`f949c0eebc85b5df4f3c109329a72b1ec2248917`. The three implementation commits
-that were locally ahead at that moment are:
+**Remote PR head when this update was authored:**
+`b97daae5e4205278b68ec3719d7f1937e91b0407`. The two locally committed changes
+to push with this status update are:
 
 ```text
-1aff6a2b fix(playback): repair copy startup fencing
-f94b82da test(playback): cover copy startup repairs
-7bc2e4d6 test(playback): align real copy fixture probe
+e56161b8 test(playback): exercise client fetch response lifecycle
+0f7a2818 chore(validation): map PR 642 playback evidence
 ```
 
-The handoff commit containing this document is intended to be pushed with all
-three. If this document is visible on PR #642, use that branch tip and verify
-its ancestry includes the hashes above.
+The status commit containing this update is intended to be pushed with both.
+If this document is visible on PR #642, use that branch tip and verify its
+ancestry includes the hashes above.
 
-Remote hosted run `33247843017` for `f949c0ee` is red: `fast Rust gate` and the
-aggregate `PR validation gate` failed. The validation-scope, mobile-version,
-policy, WAL, replicated-store/topology, and cluster-daemon jobs are green;
-downstream optional jobs were skipped. No hosted run covers the three local
-commits yet.
+Hosted run `33252387209` for `b97daae5` stopped in `history-check` because
+corrective test commit `f94b82da` lacked its own append-only regression
+mapping. Commit `0f7a2818` adds the reviewed mapping; local
+`make validation-lint` and `make history-check` are green. No hosted run covers
+`e56161b8` or `0f7a2818` yet.
 
-At local head `7bc2e4d6`, the only intentional tracked worktree change is this
-handoff update. The preserved, unrelated build artifacts at
+At local head `0f7a2818`, the only intended tracked worktree change is this
+status update. The preserved, unrelated build artifacts at
 `vendor/hiqlite/target/` and `vendor/hiqlite-wal/target/` remain untracked. Do
 not delete or commit them.
 
@@ -42,8 +41,8 @@ not delete or commit them.
 > `PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`, and `STATUS.html` still
 > say the active cut has not consumed its broad unit run and may instruct a
 > successor to run it. That is false. Treat this handoff as authoritative until
-> those three artifacts are synchronized after the remaining exact fixture is
-> green. Do not repeat the broad suite.
+> those three artifacts are synchronized during the remaining final gates. Do
+> not repeat the broad suite.
 
 ## Opus continuation checkpoint
 
@@ -115,52 +114,19 @@ Exact focused results at the local commits are green for:
 - `fmp4::tests::an_oversized_nested_box_is_malformed_before_the_resource_ceiling`;
 - `copyseg::tests::an_unparseable_moov_is_reader_failure_not_fallback`;
 - `http::tests::unindexed_copy_uses_live_recovery_when_enabled`;
-- `transcode::tests::a_new_session_supersedes_the_same_players_old_one`; and
-- `transcode::tests::manager_reads_prefs_and_runs_session_lifecycle`.
+- `transcode::tests::a_new_session_supersedes_the_same_players_old_one`;
+- `transcode::tests::manager_reads_prefs_and_runs_session_lifecycle`; and
+- `transcode::tests::a_client_fetch_releases_a_held_session_and_restarts_progress`.
 
-The one remaining exact failure is
-`transcode::tests::a_client_fetch_releases_a_held_session_and_restarts_progress`.
-After `7bc2e4d6` it passes real FFmpeg progress, speed, reserve, hold, and segment
-fetch, then fails at `transcode.rs` around line 27654 because
-`actor_delivery.playlist_ready` is false. That false value is correct: the test
-opens a segment, fabricates `MediaResponseOwner`, and calls test-only
-`commit_resolved_media` without ever executing the exact playlist publication
-or first-media transaction. `refresh_segments` and `flow_control` must not
-infer response publication from disk.
+Commit `e56161b8` makes the last fixture follow the production response
+lifecycle: exact advertised playlist owner, authorization and buffered EOF
+commit; first-media handoff proof; exact advertised segment owner;
+authorization before delivery; full advertised-length accounting; and a fresh
+post-EOF completion deadline. Two independent reviewers approved the final
+diff. Its exact rerun passed 1/1 with 1,300 filtered tests. All five failures
+from the consumed broad run are therefore accounted green by exact name.
 
-### Next repair — do this first
-
-Make this test production-faithful; do not change production publication
-semantics and do not weaken the `playlist_ready`, progress, frontier, resume,
-or telemetry assertions.
-
-1. Inside `if burst_honoured`, resolve the exact playlist with
-   `playlist_with_owner(&info.session_id)`.
-2. Select `newest` from the returned advertised playlist rather than directly
-   from `session.segments`.
-3. With a fresh bounded playlist-response deadline, authorize
-   `MediaResponsePublication::attempt_media("playlist", Some("index.m3u8"))`
-   and consume the token with `commit_authorized_media(..., true, deadline)`.
-4. Assert `playlist_ready`, `first_media_handoff_applied == true`, and
-   `actor_prepublication_producer == false` after that transaction.
-5. Apply/observe the hold as the test already does.
-6. Resolve the advertised segment through `segment_for_publication`; require a
-   ready publication and use the opened object's `response_owner()` rather
-   than reconstructing an owner from the current registry.
-7. Authorize
-   `MediaResponsePublication::attempt_media("media-segment", Some(&newest))`.
-   Drive the opened file and `SegmentDelivery` through exact advertised EOF,
-   then consume the authorization through a separate, fresh bounded
-   `commit_authorized_media(..., true, deadline)`.
-8. Keep the existing fetched frontier, resume event, renewed FFmpeg progress,
-   and cleanup assertions unchanged.
-
-Three independent read-only traces agree this is a fixture sequencing defect,
-not product state loss. Review the resulting diff adversarially before the one
-exact rerun of this name. If it passes, commit it; do not rerun any already
-green exact name unless the repair directly touches its contract.
-
-### Gates remaining after that exact test is green
+### Gates remaining
 
 1. Refresh this handoff, `PLAYBACK-CONTROL-STATUS.md`,
    `PLAYBACK-CONTROL-PROTOCOL-M4-WATCHDOG-REMOVAL.md`, and `STATUS.html` with
@@ -176,8 +142,8 @@ green exact name unless the repair directly touches its contract.
    sandbox bind denial is environmental, not product evidence.
 4. Push the final fixture/docs/gate commits to
    `codex/playback-control-m4-copy-lifetime` and verify PR #642 points to the
-   exact local candidate. The three repair commits and this handoff should
-   already be present as its ancestry; do not omit or rewrite them.
+   exact local candidate. All earlier repair, validation, and handoff commits
+   should already be present as its ancestry; do not omit or rewrite them.
 5. Obtain fresh independent exact-head adversarial approval of that pushed PR
    head. Resolve every P0–P3 and repeat exact review after any change.
 6. Require every hosted check green, then merge PR #642. Do not merge a red,
@@ -1048,30 +1014,26 @@ preserved untracked vendor build artifacts remain outside every commit.
 
 Continue in this order:
 
-1. Apply the production-faithful fixture sequence in the Opus checkpoint:
-   exact playlist resolve/authorize/EOF commit, first-media handoff proof,
-   exact segment owner/authorization/EOF commit, then the unchanged
-   flow-control assertions.
-2. Obtain adversarial approval of that diff before rerunning only
-   `transcode::tests::a_client_fetch_releases_a_held_session_and_restarts_progress`.
-3. When the exact name is green, commit the fixture correction, refresh all
-   four status/contract artifacts, and run only the named static/non-unit gates
-   plus one unrestricted `make cluster-check`.
-4. Push the local commits, obtain fresh exact-PR-head approval, require every
-   hosted check green, and merge #642.
+1. Push `e56161b8`, `0f7a2818`, and this status update. Confirm PR #642 points
+   at the exact branch tip and its new hosted run starts.
+2. Refresh the other three status/contract artifacts, then run only the named
+   static/non-unit gates plus one unrestricted `make cluster-check`.
+3. Obtain fresh exact-PR-head adversarial approval. Resolve every P0–P3 before
+   treating the candidate as frozen.
+4. Require every hosted check green, then merge #642.
 
 Do not skip the adversarial-review gate even if a future automatically started
 hosted workflow is green. The user explicitly ordered adversarial
 review before local unit tests, one full local unit-suite invocation only, and
 full required verification before merge. PR #641's broad invocation is already
 consumed. The active copy cut's broad invocation is also consumed: it produced
-the 1,292/5/3 `plurxd` result recorded above and must not be repeated. The six
-green focused names and the one remaining exact lifecycle failure are the only
-current unit evidence. Compile-only
+the 1,292/5/3 `plurxd` result recorded above and must not be repeated. All five
+failed names plus the two directly affected startup contracts are green by
+exact rerun. Compile-only
 `cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeded
 before that run. The ownership ledger now expects 16 `failure_fence` tokens;
-rerun its static validator after the final fixture correction rather than
-assuming the earlier zero-mismatch snapshot still names the current head.
+rerun its static validator during final static validation rather than assuming
+the earlier zero-mismatch snapshot still names the current head.
 
 The protocol rollout is backward compatible. Deploy the compatible server
 transport and actor-owned copy lifetime first; old clients continue on the
@@ -1412,10 +1374,10 @@ delete legacy owners without two concurrent recovery decision makers.
 
 After merged PR #641, the remaining work is:
 
-1. Finish the one remaining production-faithful real-FFmpeg fixture sequence,
-   rerun only its exact name, and complete #642's static, unrestricted cluster,
-   exact-head, and hosted gates. The active cut's one broad unit run is already
-   consumed and must not be repeated.
+1. Complete #642's remaining static, unrestricted cluster, exact-head, and
+   hosted gates. Its production-faithful real-FFmpeg lifecycle fixture is green
+   by exact name; the active cut's one broad unit run is already consumed and
+   must not be repeated.
 2. Merge #642 only from a pushed, unanimously reviewed, wholly green exact
    head. The candidate already removes the legacy copy watchdog,
    request-side exit inference, and in-place copy policy owner while keeping
