@@ -13310,7 +13310,10 @@ mod tests {
         assert_eq!(
             actor.begin_initial_producer_attempt_at(
                 started,
-                hardware_policy("presentation-successor-progress", "recipe-successor-progress"),
+                hardware_policy(
+                    "presentation-successor-progress",
+                    "recipe-successor-progress"
+                ),
             ),
             Ok(1)
         );
@@ -13492,7 +13495,10 @@ mod tests {
             ),
             RollingProducerCompletionDisposition::CompleteUnverifiedDuration
         );
-        assert_eq!(completed.poll_producer_decision_at(0), ProducerDecisionPoll::Idle);
+        assert_eq!(
+            completed.poll_producer_decision_at(0),
+            ProducerDecisionPoll::Idle
+        );
         assert_eq!(
             completed
                 .prepublication
