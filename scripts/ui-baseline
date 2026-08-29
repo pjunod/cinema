@@ -1248,6 +1248,15 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
 
     page.on("console", note_console)
     page.on("pageerror", lambda e: problems.append(f"pageerror: {e}"))
+
+    # A bare status names the endpoint but not the layer that answered it, and
+    # for a 503 that is the whole question: `cluster_capacity_gate` refuses
+    # with `node_maintenance` from one slot and `node_removal_fenced` from the
+    # other, and they mean different bugs. The typed `code` in the body is what
+    # separates them. Bodies are read after the visit settles, never inside the
+    # handler, and any read that fails leaves the status line alone.
+    refusals = []
+    page.on("response", lambda r: refusals.append(r) if r.status >= 400 else None)
     try:
         response = page.goto(base_url + "/" + route["hash"], wait_until="domcontentloaded",
                              timeout=args.timeout)
@@ -1405,6 +1414,18 @@ def capture_route(pw_context, base_url, name, route, args, shot, layout_id):
         settle(page)
         page.screenshot(path=str(shot), full_page=not args.viewport_only)
         stress_classic_header(page, name, layout_id)
+        for refusal in refusals[:5]:
+            detail = ""
+            try:
+                body = json.loads(refusal.text())
+                if isinstance(body, dict) and body.get("code"):
+                    detail = f" code={body['code']}"
+            except Exception:  # noqa: BLE001 - diagnosis must never fail the run
+                detail = ""
+            problems.append(
+                f"http {refusal.status}: "
+                f"{api_path(urlparse(refusal.url).path)}{detail}"
+            )
         if problems:
             raise Fail(f"{name}: " + "; ".join(problems[:5]))
         counted = {}
