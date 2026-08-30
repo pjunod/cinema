@@ -5067,6 +5067,30 @@ function prePlaySelectionQuery(sel){
 function decisionUrl(fileId, force, sel){
   return `/files/${fileId}/decision?${CAPS_Q}&force=${force}${prePlaySelectionQuery(sel)}`;
 }
+// The same question, with the capabilities as a document.
+//
+// POST rather than GET only because the body is JSON; it reads nothing and
+// writes nothing. `force`, `audio` and `subtitle` stay on the query string —
+// they are request-local choices, not capabilities.
+//
+// A server that predates the document answers 404/405, and a server that
+// cannot read this version answers 400. Both fall back to the GET, which is
+// still the exact same decision: the server puts both wire shapes through one
+// translation. So a mixed fleet mid-deploy is a non-event rather than a
+// broken player, which is the only reason it is safe to send this at all
+// while nodes are still rolling.
+async function askDecision(fileId, force, sel){
+  const query=`force=${force}${prePlaySelectionQuery(sel)}`;
+  try{
+    return await api(`/files/${fileId}/decision?${query}`,
+      {method:"POST", body:{caps:capsDocument(PLAY_CAPS, decodeLimits())}});
+  }catch(e){
+    if(e && (e.status===404 || e.status===405 || e.status===400)){
+      return api(decisionUrl(fileId, force, sel));
+    }
+    throw e;
+  }
+}
 // `null` for a field means "no explicit choice" and is NOT the same as picking
 // the track the server would have picked anyway: a request that sends no
 // `audio=` keeps its previous verdict byte-for-byte (docs/PLAYBACK.md), and
@@ -5163,7 +5187,7 @@ async function prePlayPreview(fileId){
   if(!sel){ note.className="ppnote"; note.textContent=PREPLAY_SCOPE_NOTE; return; }
   note.className="ppnote"; note.textContent="Checking what this selection needs…";
   let d;
-  try{ d=await api(decisionUrl(fileId, qualityForce(), sel)); }
+  try{ d=await askDecision(fileId, qualityForce(), sel); }
   catch(e){
     if(prePlaySelection(fileId)!==sel) return;
     note.className="ppnote warn"; note.textContent=e.message||"Couldn’t check that combination"; return;
@@ -6561,6 +6585,78 @@ function capsQuery(c){
     `&hdr10t=${c.hdr10t}`;
 }
 let CAPS_Q=capsQuery(PLAY_CAPS);
+
+// The same claims as a document (docs/PLAYBACK.md, PLAYBACK-CAPS-V2-PLAN 4.1).
+//
+// It exists because the flat query above cannot say several true things at
+// once. `maxheight` is one slot for a decoder whose 8-bit and 10-bit ceilings
+// differ, so this browser sent the minimum of its two rungs and transcoded
+// every 4K 8-bit title it would have direct-played. `hdr` and `hdr10t` are two
+// bits describing one question — can this device PRESENT this curve — asked
+// once globally and once for HEVC. And `dv=1` with no `dvprofile` claimed
+// every Dolby Vision profile, including the dual-layer ones no consumer
+// decoder takes.
+//
+// CAPS_Q is not retired: the progressive `play_url` still carries it, and the
+// server keeps translating it. Both shapes reach one translation on the
+// server, pinned by a test, so this browser cannot get two verdicts for one
+// machine.
+function capsDocument(c, limits){
+  // One entry per (codec, profile-set) with its own ceiling. `hevc10` is this
+  // app's name for the Main10 half of the HEVC answer; on the wire it is the
+  // `main10` profile of `hevc`, because a profile is what it always was.
+  const video=[];
+  const codecs=String(c.vcodec||"").split(",").filter(Boolean);
+  const hevcPresent=["sdr"]; if(c.hdr10t) hevcPresent.push("pq");
+  for(const codec of codecs){
+    if(codec==="hevc10") continue;              // folded into hevc, below
+    const entry={codec, present:codec==="hevc"?hevcPresent:["sdr"]};
+    if(codec==="hevc"){
+      // Two entries when the ceilings differ, one when they do not. This is
+      // the whole point of the document: the old wire had to pick a number.
+      entry.profiles=["main"];
+      if(c.maxheight) entry.max_height=c.maxheight;
+      if(codecs.includes("hevc10")){
+        video.push(entry);
+        video.push({codec:"hevc", profiles:["main10"], present:hevcPresent,
+                    ...(c.maxheight?{max_height:c.maxheight}:{})});
+        continue;
+      }
+    }else if(c.maxheight && codec==="h264"){
+      // `maxheight` was only ever the HEVC ceiling (see buildPlayCaps); it is
+      // carried document-level below rather than pinned onto H.264 here.
+    }
+    video.push(entry);
+  }
+  const dvProfiles=String(c.dvprofile||"").split(",").filter(Boolean).map(Number).filter(n=>n>0);
+  for(const entry of video){ if(entry.codec==="hevc") entry.dv_profiles=dvProfiles; }
+  return {
+    v:2,
+    // The build this page was served by. The web app has no version of its
+    // own — it ships inside the daemon — so the daemon's build IS this
+    // client's build, and it is what the fleet counter on /system needs to
+    // watch stragglers by. Bounded because it is reprinted into a log line.
+    client:{kind:"web", build:String((SERVER&&SERVER.build)||"").slice(0,48),
+            ua:String(navigator.userAgent||"").slice(0,160)},
+    video,
+    audio:String(c.acodec||"").split(",").filter(Boolean),
+    containers:String(c.container||"").split(",").filter(Boolean),
+    transports:["progressive","hls"],
+    // Only when this browser has one; absent is not a claim.
+    ...(c.dv?{dv_transport:"progressive"}:{}),
+    display:{hdr:!!c.hdrDisplay, dolby_vision:dvProfiles.length>0},
+    ...(c.maxheight?{max_height:c.maxheight}:{}),
+    // The identity is the MAP KEY in localStorage, so the entries have to be
+    // rebuilt with it inlined — the obvious `Object.values()` would send a
+    // document whose every limit is anonymous, and an anonymous limit matches
+    // nothing on the server. See `decodeLimits()`.
+    learned_limits:Object.entries(limits||{}).map(([identity, l])=>({
+      identity, label:String(l.label||""),
+      lost:Number(l.lost)||0, secs:Number(l.secs)||0, rate:Number(l.rate)||0,
+      at_ms:Number(l.at)||0,
+    })),
+  };
+}
 // Re-probe through MediaCapabilities and rebuild the wire string. Async because
 // decodingInfo is, and the server only ever hears one answer per session — so
 // boot() awaits this before it can route anything, and every consumer reads
@@ -6719,7 +6815,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
   // play. Asking for the policy default and correcting afterwards is what used
   // to force a remux over a perfectly decodable audio choice.
   let decision;
-  try{ decision=await api(decisionUrl(fileId, qualityForce(), selection));}
+  try{ decision=await askDecision(fileId, qualityForce(), selection);}
   catch(e){ if(!openIsCurrent()) return; setLoading(false); toast(e.message); return closePlayer(); }
   if(!openIsCurrent()) return;
   let retestDecodeLimit=false;
@@ -6754,7 +6850,7 @@ async function play(fileId, title, resumeMs, knownDurMs, meta, reservedOpenAttem
         // would hand the learned-limit transcode the policy default audio and
         // silently discard the viewer's choice on exactly the devices that need
         // the transcode most.
-        const d2=await api(decisionUrl(fileId, "transcode", selection));
+        const d2=await askDecision(fileId, "transcode", selection);
         if(!openIsCurrent()) return;
         learnedLimitView=PlaybackPolicy.learnedDecodeLimitView({
           source:decision.source||{},limit:lim,ordinaryRange,
