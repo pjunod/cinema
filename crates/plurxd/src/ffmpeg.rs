@@ -70,6 +70,8 @@ static DOVI_RESHAPE_HW: std::sync::OnceLock<
 > = std::sync::OnceLock::new();
 static DOVI_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static DOVI_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static HDR10_PASSTHROUGH: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
+static HDR10_PASSTHROUGH_QSV: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 
@@ -686,6 +688,118 @@ pub async fn has_dovi_passthrough() -> bool {
                 stderr.trim()
             );
             false
+        })
+        .await
+}
+
+/// Can this build re-encode an ordinary HDR source without tone-mapping it —
+/// a 10-bit scale straight into HEVC Main10 PQ?
+///
+/// The other passthrough rung, and the one that matters to almost every HDR
+/// title: HDR10, HDR10+, and the HDR10 base of a stripped Dolby Vision file.
+/// Until M4 every one of those tone-mapped to SDR whenever anything forced a
+/// re-encode — a height cap, a bitrate cap, burned subtitles, the quality menu
+/// (PLAYBACK-CAPS-V2-PLAN §2, edge E3).
+///
+/// **Simpler than [`has_dovi_passthrough`], and the simplicity is the point.**
+/// That probe has to accept a documented refusal as a pass, because no
+/// synthetic frame carries a Dolby RPU and the filter is entitled to decline
+/// one. This graph reads no metadata at all — it scales and names a pixel
+/// format — so a `lavfi` frame exercises the whole thing and a clean exit is a
+/// real proof rather than an inference. The encode half is the same libx265
+/// Main10 with the same PQ/BT.2020 flags, taken from the same
+/// [`OutputGrade`], so a pass here is a pass for the bytes a session will
+/// actually emit.
+pub async fn has_hdr10_passthrough() -> bool {
+    *HDR10_PASSTHROUGH
+        .get_or_init(|| async {
+            let Some(filter) = Pipeline::Hdr10Passthrough.filters(Some(64), 64, Some("hdr10"))
+            else {
+                return false;
+            };
+            let mut command = tokio::process::Command::new(ffmpeg_bin());
+            command
+                .kill_on_drop(true)
+                .args(["-hide_banner", "-loglevel", "error"])
+                .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
+                .args(["-frames:v", "1", "-vf"])
+                .arg(&filter)
+                .args(Encoder::Software.encode_args_for(
+                    OutputGrade::Hdr10,
+                    20_000,
+                    EffectiveRateControl::Vbr,
+                    false,
+                    None,
+                ))
+                .args(["-f", "null", "-"]);
+            let output = tokio::time::timeout(Duration::from_secs(20), command.output()).await;
+            let Ok(Ok(output)) = output else {
+                tracing::warn!(
+                    "ffmpeg could not run the HDR10 passthrough encode; every HDR transcode on \
+                     this node will tone-map to SDR"
+                );
+                return false;
+            };
+            if output.status.success() {
+                tracing::info!("ffmpeg proved the HDR10 passthrough encode");
+                return true;
+            }
+            tracing::warn!(
+                status = ?output.status,
+                "ffmpeg could not run the HDR10 passthrough encode; every HDR transcode on this \
+                 node will tone-map to SDR: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            false
+        })
+        .await
+}
+
+/// Can this node run the plain HDR10 rung's QSV half — P010 upload into
+/// `hevc_qsv` Main10 with the PQ/BT.2020 flags?
+///
+/// A separate probe from [`has_dovi_passthrough_with`] even though the graph
+/// is the same shape, because that one short-circuits on `tonemapx` declaring
+/// `apply_dovi` — a jellyfin filter this route neither uses nor needs. Reusing
+/// it would take the 4K HDR10 rung away from every QSV node running stock
+/// ffmpeg, with nothing in the log naming a Dolby Vision filter as the reason.
+pub async fn has_hdr10_passthrough_qsv() -> bool {
+    if !has_hdr10_passthrough().await {
+        return false;
+    }
+    *HDR10_PASSTHROUGH_QSV
+        .get_or_init(|| async {
+            let encoder = Encoder::Qsv;
+            let Some(upload) = encoder.filter_suffix_for(OutputGrade::Hdr10) else {
+                return false;
+            };
+            let mut command = tokio::process::Command::new(ffmpeg_bin());
+            command
+                .kill_on_drop(true)
+                .args(["-hide_banner", "-loglevel", "error"])
+                .args(encoder.init_args())
+                .args(["-f", "lavfi", "-i", "color=size=64x64:rate=1:color=black"])
+                .args(["-frames:v", "1", "-vf", upload])
+                .args(encoder.encode_args_for(
+                    OutputGrade::Hdr10,
+                    20_000,
+                    EffectiveRateControl::Vbr,
+                    false,
+                    None,
+                ))
+                .args(["-f", "null", "-"]);
+            let passed = tokio::time::timeout(Duration::from_secs(20), command.status())
+                .await
+                .is_ok_and(|result| result.is_ok_and(|status| status.success()));
+            if passed {
+                tracing::info!("ffmpeg proved the QSV Main10 encode for a plain HDR source");
+            } else {
+                tracing::warn!(
+                    "ffmpeg could not run the QSV Main10 encode for a plain HDR source; the 4K \
+                     HDR10 rung will be refused on this node"
+                );
+            }
+            passed
         })
         .await
 }

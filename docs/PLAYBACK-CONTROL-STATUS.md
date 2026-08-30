@@ -1,64 +1,69 @@
 # Playback control rewrite — project status
 
-**Updated:** 2026-08-29
+**Updated:** 2026-08-30
 **Merged baseline:** `origin/main` at
-`32af5fa997459174e6b0bfe69bddd72473a1d5f6`
-([#641](https://github.com/pjunod/plurx/pull/641) merged)
-**Last merged exact head:**
-`e64e8c1a32b7bda2b48087ab841a9a7f4590d737` · hosted run `33243486511`
-fully green · merge `32af5fa997459174e6b0bfe69bddd72473a1d5f6`
-**Current work:** the next M4 cut on
-`codex/playback-control-m4-copy-lifetime` in the disposable clone at
-`/private/tmp/plurx-playback-control-clone`, now
-[#642](https://github.com/pjunod/plurx/pull/642), with implementation commit
-checkpoint `73f04d06c2870dabbea5cf5f45d423937ebc8858`. PR #641 completed the actor-managed
-published-transcode lifetime: one `ProducerProgressDeadline` remains
-authoritative across publication, emits one stable postpublication failure
-decision with `RetainPublished`, freezes the committed frontier, returns typed
-`producer_ended` beyond it, and replaces the published-transcode compatibility
-progress watcher. The active candidate cut moves copy producer lifetime into
-that same actor: the copy reader reports typed facts, the actor alone may
-authorize one frozen direct-HLS retry for `Unsupported`, and direct/takeover
-attempts classify process exits immediately. Reader completion and process
-exit rendezvous under one bounded actor classification deadline before
-ENDLIST/frontier proof. The legacy copy watchdog, watchdog election,
-request-side exit inference, and copy-owned replacement policy are removed in
-the candidate. Compile-only
-`cargo check --locked -p plurxd --features live-hls-recovery --tests` succeeds,
-and the static ownership recount has zero mismatches across 32 source symbols
-and seven entrypoints. The first adversarial pass found a P2
-`Unsupported`/EPIPE ordering race; the repair retains `ChildStdout` through
-typed actor classification and adds an actor test for both event orders.
-A second independent review found another P2: `copyseg` used its local
-`SessionDir.started`/playlist view to downgrade structural `Unsupported` to
-`ReaderFailed`, even though only actor-authorized response publication may
-close retry. The current repair always preserves structural `Unsupported`; the
-actor chooses `Retry` before media admission or `Fail` with
-`RetainPublished` afterward. Regression
-`copy_unsupported_retry_closes_only_after_actor_media_admission` covers that
-boundary. A residual EOF form of the same P2 was then found:
-`copyseg::finish` collapsed structural `Segmenter::finish` `Unsupported` to
-`ReaderFailed`. That path now preserves `Unsupported` too. Focused regression
-`an_unsupported_final_tail_stays_typed_after_local_playlist_creation` uses
-`max_seconds=0` with a local playlist already present; the actor publication
-regression remains alongside it. Compile-only cargo check and the ledger
-recount are green, with 15 `RetainPublished` owners. Final reviews remain
-complete for the current working tree: both independent reviews formally
-approve all three runtime repairs with no actionable P0–P3. Policy comments
-in `fmp4`/`copyseg` now say malformed input is a
-reader failure, structural `Unsupported` remains actor/publication-gated, and
-odd-track handling does not imply an unconditional fallback. The one permitted
-broad unit run is consumed; all five failures now pass by exact name. The
-complete static gate set, exact owner inventory, and one unrestricted
-`make cluster-check` passed. Hosted run `33253810937` passed its preflight,
-WAL, daemon, and 67/67 Store contracts, then exposed a loaded-runner false
-classification in the artwork-generation membership harness. Reviewed commit
-`cf3bdcb9` distinguishes an aged post-CAS quorum observation from an actual
-leader/term change; its exact regression passed 1/1 and the complete focused
-cluster harness passed. Only the final pushed-head review, replacement hosted
-run, and merge remain for #642. The prior fast Rust job was cancelled after
-the cluster failure and must complete in that replacement run. Do not repeat
-the broad local suite.
+`5b7ba9c9` (v0.2.8 release [#661](https://github.com/pjunod/plurx/pull/661)),
+carrying [#642](https://github.com/pjunod/plurx/pull/642) (copy lifetime),
+[#656](https://github.com/pjunod/plurx/pull/656) (M4 item 4, merged as
+`53f8dd50`) and [#662](https://github.com/pjunod/plurx/pull/662) (scheduled
+artifact prune).
+**Deployed:** all four nodes — nynuc, m6, nuc4, nuc3 — serve `5b7ba9c9`,
+`readyz` 200, zero restarts.
+**Current work:** [#663](https://github.com/pjunod/plurx/pull/663), which
+carries both the four re-anchored replacement tests and **M4 item 5**.
+
+## M4 is one merge from complete
+
+Item 4 landed with #656. The desire to hold or resume now occupies a place on
+the actor sequence rather than a caller's stack frame (#652), the actor's reply
+is the only licence to make a signal syscall and one outstanding transaction is
+bounded by a typed `flow_stop_deadline` / `flow_resume_deadline` (#654), and a
+module-wide source contract pins the call site against five reintroductions
+(#655).
+
+Item 5 is written and green in #663. Its substance is small because most of it
+was already true: `watch_for_stall`, `watchdog_active`, `SOFTWARE_GRACE`,
+`WATCHDOG_POLL`, `WatchdogClaim` and `playlist_producer_failed` already had
+zero occurrences under `crates/`, surviving only as zero-pinned ledger rows,
+and every remaining `child_transition` lock site serves lifecycle, retirement,
+retention or cleanup rather than replacement. What remained was
+`downgrade_one_step` — the hardware to GPU-tone-map to software ladder — which
+had been `#[cfg(test)]` and test-only since #636. It is now deleted, 173 lines,
+and its ledger row has moved from `[[symbols]]` to the zero-pinned
+`legacy-downgrade-owner` module symbol that guards reintroduction.
+
+Deleting it was safe because it has a production equivalent:
+`PrepublicationTranscodeRetry::build` reproduces its rung selection line for
+line, and the actor consumes that recipe exactly once. Two behaviour deltas do
+exist relative to the old ladder — a stall *after* publication no longer
+downgrades, and a GPU pipeline with no fallback fails at start rather than at
+fallback time — but both landed with #636, not with this deletion.
+
+**The deletion could not be a separate PR.** Re-anchoring the four tests onto
+the production retry path removed `downgrade_one_step`'s last caller, so
+`-D dead-code` rejected the tests-only tree. Tests that stop calling a
+`#[cfg(test)]` helper and the deletion of that helper are one change.
+
+## Two process failures worth keeping
+
+`history-check` rejected two of #663's own commit subjects because they
+contained the words *refuses* and *failure*, which `ISSUE_RE` reads as a
+corrective commit and then requires `regressions.d` evidence for. No defect was
+fixed, so the subjects were reworded rather than given invented evidence. A
+test-only commit that touches `crates/**` is still a runtime commit to the
+classifier, so this will recur for any test-only change whose subject describes
+what the test refuses to allow.
+
+The `deploy.yml` playbook still cannot be driven from an agent shell. It
+authenticates, takes the pre-deploy database snapshot and resets the checkout,
+and then dies mid-rebuild when the shell that launched it goes away; `setsid`
+does not save it. Deployment therefore runs a node-side script mirroring
+`media/tasks/app.yml`, launched on each node. The durable fix is a workflow on
+a self-hosted runner that invokes `deploy.yml`, which would also give the
+deploy a readable log.
+
+## Chronicle
+
 
 PR #641's one permitted broad local `make unit` invocation has already run and
 must not be repeated for that merged cut. The `plurxd` target reported 1,243

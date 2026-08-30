@@ -305,6 +305,38 @@ test("Activity keeps its last successful body on poll failures and never paints 
   assert.deepEqual(phases, [], "logout owns the 401 transition; Activity commits nothing");
 });
 
+test("Activity keeps polling its detail body after the route settles", () => {
+  // The structural golden stops this timer at the settled boundary, because
+  // letting its second read land changes the captured DOM as well as the
+  // request count. That makes the poll invisible to the golden, so it is
+  // asserted here instead: the route arms it, at the interval it ships with,
+  // through the generation-guarded timer that a route change cancels.
+  const view = shippedSource("viewActivity");
+  assert.match(view, /setPageTimer\(\(\)=>renderActivityBody\(generation\),\s*3000,\s*generation\)/);
+  assert.match(shippedSource("renderActivityBody"), /api\("\/activity\/detail"\)/);
+  assert.match(
+    shippedSource("setPageTimer"),
+    /if\(generation!==PAGE_RENDER_GENERATION\)\{ clearInterval\(timer\)/,
+  );
+});
+
+test("Activity keeps polling its detail body after the route settles", () => {
+  // The structural golden cannot assert this. Activity's captured request
+  // inventory alternates between two and three /activity/detail calls
+  // depending on how loaded the runner is, and the second read is not merely
+  // an extra request — the fixture's session table arrives with it, so the
+  // same golden key captures two different pages. Pin the behaviour where it
+  // is deterministic instead: the route arms the poll, at the interval it
+  // ships with, through the generation-guarded timer a route change cancels.
+  const view = shippedSource("viewActivity");
+  assert.match(view, /setPageTimer\(\(\)=>renderActivityBody\(generation\),\s*3000,\s*generation\)/);
+  assert.match(shippedSource("renderActivityBody"), /api\("\/activity\/detail"\)/);
+  assert.match(
+    shippedSource("setPageTimer"),
+    /if\(generation!==PAGE_RENDER_GENERATION\)\{ clearInterval\(timer\)/,
+  );
+});
+
 test("Settings polls only the visible data panel and never overlaps", async () => {
   const tick = shippedSource("settingsTick");
   assert.match(tick, /SETTINGS_TICKING\.generation===generation/);
