@@ -92,6 +92,12 @@ pub struct SystemInfo {
     /// Dolby Vision HDR10 route. Kept separate so a working software rung
     /// never implies a working GPU driver.
     pub dovi_passthrough_qsv: bool,
+    /// Whether this exact ffmpeg can re-encode an ordinary HDR source without
+    /// tone-mapping it — a 10-bit scale straight into HEVC Main10 PQ. The
+    /// route for HDR10, HDR10+ and a stripped Dolby Vision base layer, which
+    /// is nearly every HDR title; separate from `dovi_passthrough` because it
+    /// touches no RPU and needs no Dolby-aware filter.
+    pub hdr10_passthrough: bool,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -502,6 +508,7 @@ impl AppState {
             .with_dovi_reshape(system.dovi_reshape)
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
+            .with_hdr10_passthrough(system.hdr10_passthrough)
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),

@@ -313,11 +313,11 @@ impl Caps {
 
     /// The decision this client should get for `file`.
     ///
-    /// `dv_strippable` is the server's own capability (see
-    /// [`playback::decide`]) — passed in because only the caller holds the
-    /// system info that records which ffmpeg is running.
-    fn decide(&self, file: &MediaFile, dv_strippable: bool) -> Decision {
-        playback::decide_forced(file, &self.profile(), self.force(), dv_strippable)
+    /// `node` carries the server's own capabilities (see [`playback::decide`])
+    /// — passed in because only the caller holds the system info that records
+    /// what this ffmpeg proved at boot.
+    fn decide(&self, file: &MediaFile, node: &playback::RenderCaps) -> Decision {
+        playback::decide_forced(file, &self.profile(), self.force(), node)
     }
 }
 
@@ -581,14 +581,23 @@ pub struct DecisionResponse {
     pub prefer_segmented: Option<String>,
 }
 
-/// Can this server remove a Dolby Vision configuration on the way out?
+/// What this server proved of its own ffmpeg at boot.
 ///
-/// One authority — what the daemon *probed* of its own ffmpeg at boot, not
-/// what it parsed out of a version line — because the answer decides a
-/// verdict now, not just a bitstream-filter argument, and a second copy of it
-/// somewhere else is a second answer waiting to disagree.
-fn dv_strippable(state: &AppState) -> bool {
-    state.system.dovi_rpu
+/// One authority — what the daemon *probed*, not what it parsed out of a
+/// version line — because these answers decide a verdict now, not just a
+/// filter argument, and a second copy of them somewhere else is a second
+/// answer waiting to disagree.
+///
+/// `dovi_passthrough` covers the Profile 5 RPU route; `hdr10_passthrough`
+/// covers every other PQ source. Both are boot probes that run the real graph
+/// into the real encoder, so `false` means this node has not been shown to
+/// produce those bytes — never that it refuses to.
+fn render_caps(state: &AppState) -> playback::RenderCaps {
+    playback::RenderCaps {
+        dv_strippable: state.system.dovi_rpu,
+        dolby_vision_p5_render: state.system.dovi_passthrough,
+        hdr10_passthrough: state.system.hdr10_passthrough,
+    }
 }
 
 fn source_summary(file: &MediaFile) -> SourceSummary {
@@ -1104,7 +1113,7 @@ pub async fn decision(
         subtitle_requires_burn_in(&file, selected_subtitle, state.pgs_overlay_enabled);
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let mut decision = q.decide(&file, dv_strippable(&state));
+    let mut decision = q.decide(&file, &render_caps(&state));
     let subtitle_burn_in_blocked_by_hdr =
         subtitle_burn_would_discard_hdr(&decision, selected_subtitle_requires_burn);
     // Only an explicit subtitle choice may change the delivery verdict. An
@@ -1530,7 +1539,7 @@ pub async fn stream_mp4(
     let prefs = state.transcode.lang_prefs().await;
     let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
     set_selected_audio_default(&mut file.audio_streams, Some(audio));
-    let decision = q.caps().decide(&file, dv_strippable(&state));
+    let decision = q.caps().decide(&file, &render_caps(&state));
     let probe_json = state.store.get_file_probe_json(id).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
@@ -2386,7 +2395,7 @@ mod tests {
         let selected = remux_audio_index(&file.audio_streams, None, &prefs);
         assert_eq!(selected, 3, "English preference selects the TrueHD track");
         set_selected_audio_default(&mut file.audio_streams, Some(selected));
-        let english = caps.decide(&file, true);
+        let english = caps.decide(&file, &playback::RenderCaps::proven(true));
         assert_eq!(english.method, playback::PlaybackMethod::Remux);
         assert!(english.transcode_audio, "TrueHD must become AAC in MP4");
         assert_eq!(english.delivered_dynamic_range, "hdr10");
@@ -2396,7 +2405,7 @@ mod tests {
             .any(|reason| reason.contains("audio codec truehd unsupported")));
 
         set_selected_audio_default(&mut file.audio_streams, Some(0));
-        let french = caps.decide(&file, true);
+        let french = caps.decide(&file, &playback::RenderCaps::proven(true));
         assert!(!french.transcode_audio, "the E-AC-3 alternative can copy");
     }
 
