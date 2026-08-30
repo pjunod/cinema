@@ -368,6 +368,7 @@ web-check: ## Test playback policy, embedded JS, and every shipped theme
 	@node tests/web/page-read-budget.test.js
 	@node tests/web/theme-family.test.js
 	@node tests/web/activity-node-names.test.js
+	@node tests/web/analysis-node-names.test.js
 	@scripts/js-check
 	@scripts/contrast-check --from-index crates/plurxd/src/web/index.html \
 		--foregrounds='--text,--muted,--prose,--accent,--good,--warn,--bad' \
