@@ -26727,17 +26727,16 @@ mod tests {
             "an unclearable predecessor scratch must fail the retry transaction"
         );
         assert!(served_name.join("predecessor-bytes").exists());
-        assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "the slot retains only the deliberately stopped predecessor handle"
-        );
         assert!(session.replacing_child.load(Acquire));
-        assert!(session.coherent_path_producer_attempt().await.is_none());
+        // The retired helper left a stopped predecessor handle in the slot and
+        // this test asserted on it. That was an artifact of the helper's
+        // shape, not a property of the system: the production transaction
+        // fails before it installs anything. "No successor" is what matters
+        // and this is the assertion that says it.
+        assert!(
+            session.coherent_path_producer_attempt().await.is_none(),
+            "a failed retry transaction installs no successor"
+        );
         assert_eq!(
             session.live_bytes.load(Acquire),
             1_024,
