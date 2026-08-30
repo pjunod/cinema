@@ -1,7 +1,7 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** building — M0, M1, M4 merged; M2 and M3a in review; M3b-d, M5,
-M6 not started · **Executes:** fable's rulings of 2026-08-29 on
+**Status:** building — M0, M1, M2, M3a, M4 merged; M3b and M6 in review;
+M5a-0 spike done; M3c-d, M5a, M5b not started · **Executes:** fable's rulings of 2026-08-29 on
 opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
 **Written:** 2026-08-29 · **Updated:** 2026-08-30 · **Builder:** opus
 
@@ -446,25 +446,44 @@ for P7 files and the VOD index keyspace stays honest.
            -tag:v dvh1 -strict unofficial  → the existing HLS/fMP4 segmenter
 ```
 
-The one open mechanical question is the **`dvcC` box**: the P8.1 stream out
-of ffmpeg#2 must carry a Dolby Vision configuration record with
-`dv_profile=8`, `el_present_flag=0`, the source's `dv_bl_signal_compatibility_id`,
-and the master playlist must say `dvh1.08.06` (compat id 6) or `.08.01`.
-**Spike first (M5a-0, one day):** on a node, run `ffmpeg -f hevc -i
-BL_RPU.p81.hevc -c copy -tag:v dvh1 -strict unofficial -f mp4 out.mp4` and
-`xxd out.mp4 | grep -i dvcc`. Two outcomes, choose by result, do not guess:
+The one open mechanical question was the **configuration-record box**: the
+P8.1 stream out of ffmpeg#2 must carry one with `dv_profile=8`,
+`el_present_flag=0` and the source's `dv_bl_signal_compatibility_id`, and the
+master playlist must say `dvh1.08.06` (compat id 6) or `.08.01`.
 
-- ffmpeg derives the record from the RPU on the copy path → nothing more to
-  do; `exact_hls_context` (`hls.rs:2863-2932`) reads the init and advertises
-  `dvh1.08.xx` exactly as it does for a native P8 file today.
-- it does not → plurx inserts the box into the init segment: a 24-byte
-  `dvcC` payload appended inside the `dvh1` sample entry, and the seven
-  enclosing `size` fields (`dvh1`, `stsd`, `stbl`, `minf`, `mdia`, `trak`,
-  `moov`) bumped by 32. `crates/plurx-core/src/fmp4` already parses this
-  tree for the fragment reader; add the writer beside it with a golden test
-  against a real init from a native P8 title. Media segments are untouched
-  either way — the RPU lives in `mdat` sample data, already rewritten
-  upstream.
+**M5a-0 answered it on 2026-08-30** (`docs/PLAYBACK-CAPS-V2-M0.md` §8, measured
+on nuc4 against a real P7 dual-layer source). **ffmpeg does not derive the
+record from the RPU — it copies the one the input container had.** A raw
+Annex B stream has no container and therefore no record, so the pipe below
+produces correct P8.1 RPUs in `mdat` and nothing in the sample entry to say
+so: `dvh1` and `hvcC` are written, the DV record is not.
+
+So plurx inserts it: a 24-byte payload appended inside the `dvh1` sample
+entry, and the seven enclosing `size` fields (`dvh1`, `stsd`, `stbl`, `minf`,
+`mdia`, `trak`, `moov`) bumped by 32. `crates/plurx-core/src/fmp4` already
+parses this tree for the fragment reader; add the writer beside it.
+
+Two corrections the measurement forced:
+
+- **The box is `dvvC`, not `dvcC`.** Same 24-byte payload, different name:
+  `dvcC` is the profile ≤ 7 spelling and `dvvC` the profile ≥ 8 one, and
+  ffmpeg itself writes `dvvC` for a native Profile 8 source. M5a's output is
+  P8.1, so the writer emits `dvvC` and the golden test is taken against a
+  native P8 init.
+- **Today's strip path already lies**, independently of M5a. One ffmpeg with
+  `filter_units=remove_types=63` drops the EL NALs but copies the mkv's
+  record verbatim, so the output still declares `dv_profile=7,
+  el_present_flag=1` over a stream with no enhancement layer. The same writer
+  corrects `el_present_flag` to 0 there, which is a strictly smaller change
+  than the conversion and worth doing whether or not M5a lands.
+
+Media segments are untouched either way — the RPU lives in `mdat` sample
+data, already rewritten upstream.
+
+Throughput is not a concern: step 1 measured **48.5× realtime** on a 4K P7
+remux (2,473 ms for 120 s of video), against a requirement of 1.5×. The RPU
+rewrite between the two ffmpegs is a header edit per frame and cannot
+approach that.
 
 Concurrency: the rewrite is a header edit per frame, sub-millisecond; a 4K
 remux at 60–80 Mb/s is I/O-bound through the two pipes, not CPU-bound.
@@ -702,9 +721,8 @@ transcodes to **hdr10**.
 Paul, 2026-08-29: "do the on the fly first so it can be useable while the
 on disk part is building too."
 
-M5a-0, the spike (§4.8): does this ffmpeg write `dvcC` from a raw P8.1
-Annex B stream on the copy path? Record the answer in the M0 doc; it picks
-the branch. Then: `dolby_vision` crate dependency; `DvConvert` on
+M5a-0, the spike (§4.8), is **done** — the answer is no, the writer is
+required, and the box is `dvvC` (`docs/PLAYBACK-CAPS-V2-M0.md` §8). Then: `dolby_vision` crate dependency; `DvConvert` on
 `CopyVideoOptions` and in the argv fingerprint (M1 indexes the third
 identity); the two-ffmpeg pipe with the in-process RPU rewrite in the copy
 session **and** in the index pipe (`fragindex::build`) so the index
