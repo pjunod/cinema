@@ -1365,6 +1365,13 @@ final class PlayerController: ObservableObject {
     private var recoveryTask: Task<Void, Never>?
     private var playbackNoticeTask: Task<Void, Never>?
     private var started = false
+    /// This player's passive control reporting. Nothing about playback
+    /// depends on it: a server that offers no bootstrap leaves it silent.
+    private let playbackControl = PlaybackControlSession()
+    /// When AVPlayer began waiting for data, or nil while it is not waiting.
+    /// The protocol separates waiting from stalled by how long, and AVPlayer
+    /// reports only that it is waiting.
+    private var controlWaitingSince: Date?
     private var sessionId: String?
     private var activeMediaPath: String?
     private var activeMediaAuthenticated = false
@@ -2151,6 +2158,8 @@ final class PlayerController: ObservableObject {
         recoveryTask = nil
         clearPGSOverlaySelection()
         pgsOverlayItemGeneration &+= 1
+        playbackControl.end()
+        controlWaitingSince = nil
         playbackRecoveryMonitor.reset()
         stallReopenBudget.reset()
         sessionHeight = nil
@@ -2532,6 +2541,7 @@ final class PlayerController: ObservableObject {
                 )
             }
             sessionId = hls.sessionId
+            beginPlaybackControl(hls, origin: model.origin)
             activeMediaPath = clusterRelativeMediaPath(hls.playlistUrl)
             activeMediaAuthenticated = false
             activeNativeSubtitle = nativeSubtitle
@@ -3347,6 +3357,7 @@ final class PlayerController: ObservableObject {
                 if self.seekState.pendingMs == nil && !self.isChangingStream {
                     self.currentMs = self.realPositionMs()
                 }
+                self.playbackControlPlayerChanged()
                 if let overlayPosition = PGSOverlayPolicy.periodicRefreshPosition(
                     currentMs: self.currentMs,
                     overlayIsActive: self.pgsOverlayIsActive
@@ -5157,4 +5168,114 @@ final class PlayerController: ObservableObject {
     #else
     private func updateNowPlaying() {}
     #endif
+}
+
+// MARK: - Passive playback control
+
+extension PlayerController {
+    /// Start reporting for a session the server said is controllable.
+    ///
+    /// A server that sends no bootstrap, or one this client cannot address,
+    /// leaves the reporter silent. That is the passive M2 behaviour: playback
+    /// does not depend on the control plane and never should.
+    func beginPlaybackControl(_ hls: HlsStart, origin: String) {
+        guard let bootstrap = hls.control, bootstrap.isValid else {
+            playbackControl.end()
+            return
+        }
+        playbackControl.begin(
+            bootstrap: bootstrap,
+            transport: PlaybackControlTransport(
+                origin: origin,
+                authorize: { request in Session.shared.authorize(&request) }
+            ),
+            observe: { [weak self] in self?.playbackControlObservation() }
+        )
+    }
+
+    /// Everything the mapping needs, read from the player once.
+    ///
+    /// This is the only place AVFoundation meets the control protocol, and it
+    /// is deliberately all reads: nothing here decides anything, so every rule
+    /// that could be wrong lives in `PlaybackControlMapping`, where it is
+    /// tested.
+    func playbackControlObservation() -> PlayerControlObservation? {
+        guard let item = player.currentItem else { return nil }
+        let position = realPositionMs()
+
+        // Only the runway *ahead* is protocol runway. AVPlayer's loaded ranges
+        // are in item time while the protocol wants title time, so the range
+        // is reported as beginning at the playhead rather than converted with
+        // an offset that a copy session's keyframe start would make wrong.
+        var bufferedFromMs: Int?
+        var bufferedThroughMs: Int?
+        if let runwaySeconds = bufferedRunwaySeconds(), runwaySeconds.isFinite {
+            bufferedFromMs = position
+            bufferedThroughMs = position + Int((runwaySeconds * 1_000).rounded())
+        }
+
+        return PlayerControlObservation(
+            positionMs: position,
+            durationMs: max(0, knownDurationMs),
+            bufferedFromMs: bufferedFromMs,
+            bufferedThroughMs: bufferedThroughMs,
+            rate: Double(player.rate),
+            isPaused: !wantsPlayback,
+            isEnded: finished,
+            isSeeking: seekState.pendingMs != nil,
+            hasStarted: started,
+            waitingForMs: controlWaitingSince.map {
+                max(0, Int(Date().timeIntervalSince($0) * 1_000))
+            },
+            isLikelyToKeepUp: item.isPlaybackLikelyToKeepUp,
+            // AVPlayer's own error object is a generic fallback and its
+            // message can carry a media URL, so only the class travels.
+            errorCode: failed ? .media : nil,
+            errorDetail: failed ? "avplayer_item_failed" : nil,
+            droppedFrames: nil,
+            observedDownloadBps: nil,
+            observationOverride: nil,
+            renderOverride: nil,
+            selection: playbackControlSelection(),
+            capabilities: Caps.controlCapabilities()
+        )
+    }
+
+    /// What the viewer chose, in the protocol's vocabulary.
+    ///
+    /// Codec and dynamic range are `auto` on purpose: after `/decision` this
+    /// client never forces either, and reporting anything else would tell the
+    /// server it had made a choice it has not made.
+    func playbackControlSelection() -> ClientSelection {
+        let mode = playbackControlSubtitleMode()
+        return ClientSelection(
+            quality: selectedHeight.map { .manual(height: $0) } ?? .auto,
+            audioTrack: selectedAudio,
+            subtitle: SubtitleSelection(
+                mode: mode,
+                track: mode == .off ? nil : selectedSubtitle
+            ),
+            audioOffsetMs: 0,
+            codec: .auto,
+            dynamicRange: .auto
+        )
+    }
+
+    func playbackControlSubtitleMode() -> SubtitleMode {
+        if activeBurnedSubtitle != nil { return .burn }
+        if pgsOverlayIsActive { return .overlay }
+        if selectedSubtitle != nil { return .native }
+        return .off
+    }
+
+    /// Called wherever the player's state moves. The reporter coalesces, so
+    /// this is cheap enough for the periodic time observer.
+    func playbackControlPlayerChanged() {
+        if player.timeControlStatus == .waitingToPlayAtSpecifiedRate {
+            if controlWaitingSince == nil { controlWaitingSince = Date() }
+        } else {
+            controlWaitingSince = nil
+        }
+        playbackControl.playerChanged()
+    }
 }
