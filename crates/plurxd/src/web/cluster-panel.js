@@ -450,6 +450,20 @@
       :wal.last_log_index!==wal.last_durable_index?` · ${esc(String(wal.last_log_index))} logged, ${durable} durable`:"";
     return `<span style="color:var(--${healthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · durable ${durable}${fault}`;
   }
+  // The one row whose value moves on its own. Every other reading in the ledger
+  // is a number the server measured; this one is "how long ago", recomputed from
+  // `Date.now()` at render time. It therefore has to be patchable without a
+  // repaint — a freshness row that itself goes stale is worse than none — so it
+  // is a function of its own and the cell it lands in carries an id.
+  function clusterReadingAge(env,cluster,ops){
+    const {esc}=env;
+    const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
+    if(!status) return "unknown";
+    if(!(raft.sample_valid&&raft.watermark_valid))
+      return `<span style="color:var(--bad)">stale or incomplete proof</span>`;
+    return `local ${esc(clusterOperationAge(clusterSampleAge(ops,(raft.sample_age_seconds||0)*1000)))} · `+
+      `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`;
+  }
   function clusterDatabaseRows(env,cluster,replication,ops){
     const {esc,fmtAgo}=env;
     if(replication&&replication.backend==="sqlite")
@@ -483,11 +497,45 @@
         : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
       ["WAL",clusterDatabaseWal(env,status),true],
       ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],
-      ["Reading age",!status?"unknown":raft.sample_valid&&raft.watermark_valid
-        ? `local ${esc(clusterOperationAge(clusterSampleAge(ops,(raft.sample_age_seconds||0)*1000)))} · `+
-          `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`
-        : `<span style="color:var(--bad)">stale or incomplete proof</span>`,false],
+      ["Reading age",clusterReadingAge(env,cluster,ops),false,"cldb-reading-age"],
     ];
+  }
+
+  // ---- what a repaint is actually for --------------------------------------
+  // The panel refetches /cluster/status on a gate of its own, and a fetch is not
+  // a repaint: `renderSettings()` rewrites the whole tab, so painting on every
+  // fetch would take an operator's scroll position, their open drill-downs, and
+  // their text selection away every few seconds for nothing.
+  //
+  // So the tick compares this projection of the payload and paints only when it
+  // moves. The projection is the WHOLE response minus the fields that change by
+  // themselves: the aggregate's and each status's `observed_at_unix_ms`, the
+  // per-node `sample_age_ms`, and the Raft sample and watermark ages. Those are
+  // what the "Reading age" row reports, and it is patched in place instead.
+  // `last_seen_at` on the embedded membership record goes too: the roster owns
+  // that reading and the panel never renders it from here, so a heartbeat is not
+  // a reason to rewrite the screen.
+  //
+  // Everything else stays in, deliberately. The commit watermark advancing IS a
+  // change an operator watches this ledger for, and a projection covering only
+  // the rail's verdicts would leave the database section aging off one fetch —
+  // the defect this workstream exists to fix.
+  function clusterOpsSelfTicking(key){
+    return key==="observed_at_unix_ms"||key==="sample_age_ms"||key==="sample_age_seconds"
+      ||key==="watermark_age_millis"||key==="last_seen_at";
+  }
+  function clusterOpsProjection(ops){
+    const walk=value=>{
+      if(Array.isArray(value)) return value.map(walk);
+      if(!value||typeof value!=="object") return value;
+      const out={};
+      for(const key of Object.keys(value).sort()){
+        if(clusterOpsSelfTicking(key)) continue;
+        out[key]=walk(value[key]);
+      }
+      return out;
+    };
+    return JSON.stringify(walk(ops===undefined?null:ops));
   }
 
   // ---- folding, and remembering it -----------------------------------------
@@ -543,7 +591,9 @@
     clusterDatabaseSummary,
     clusterSampleAge,
     clusterDatabaseWal,
+    clusterReadingAge,
     clusterDatabaseRows,
+    clusterOpsProjection,
     clusterFoldKey,
     clusterFoldRead,
     clusterFoldWrite,

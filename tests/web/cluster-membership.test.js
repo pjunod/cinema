@@ -2253,6 +2253,209 @@ test("the controls the rail routes to actually do something", () => {
   assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
 });
 
+// ---- the direct status keeps itself fresh ----------------------------------
+
+test("the projection ignores what moves on its own and nothing else", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const first = operationStatus(cluster);
+  const later = JSON.parse(JSON.stringify(first));
+  // Everything here is the passage of time, not news.
+  later.observed_at_unix_ms = (first.observed_at_unix_ms || 0) + 60_000;
+  later.nodes.forEach((row) => {
+    row.sample_age_ms = (row.sample_age_ms || 0) + 60_000;
+    if (row.membership) row.membership.last_seen_at = Date.now();
+    if (row.status) {
+      row.status.observed_at_unix_ms = (row.status.observed_at_unix_ms || 0) + 60_000;
+      row.status.raft.sample_age_seconds = (row.status.raft.sample_age_seconds || 0) + 60;
+      row.status.raft.watermark_age_millis = (row.status.raft.watermark_age_millis || 0) + 60_000;
+    }
+  });
+  assert.equal(
+    ui.clusterOpsProjection(later),
+    ui.clusterOpsProjection(first),
+    "an aggregate that only got older must not repaint the panel",
+  );
+
+  // The commit watermark advancing is exactly what an operator leaves this
+  // ledger open to watch, so it is news.
+  const advanced = JSON.parse(JSON.stringify(later));
+  advanced.nodes[0].status.raft.commit_index += 1;
+  assert.notEqual(ui.clusterOpsProjection(advanced), ui.clusterOpsProjection(first));
+  const fenced = JSON.parse(JSON.stringify(later));
+  fenced.verdict.safe_to_restart_one = !fenced.verdict.safe_to_restart_one;
+  assert.notEqual(ui.clusterOpsProjection(fenced), ui.clusterOpsProjection(first));
+  // Key order in the response is not a change either.
+  const shuffled = JSON.parse(JSON.stringify(first));
+  shuffled.nodes = shuffled.nodes.map((row) =>
+    Object.fromEntries(Object.entries(row).reverse()),
+  );
+  assert.equal(ui.clusterOpsProjection(shuffled), ui.clusterOpsProjection(first));
+});
+
+// A settingsTick harness that can actually run the cluster branch: the tick
+// itself is shipped source, everything it reaches for is supplied here.
+function tickHarness({ cluster, ops, now }) {
+  const requests = [];
+  const painted = [];
+  const readingAge = { innerHTML: "local now · watermark now" };
+  const document = {
+    visibilityState: "visible",
+    getElementById: (id) => (id === "cldb-reading-age" ? readingAge : null),
+    querySelectorAll: () => [],
+  };
+  const harness = new Function(
+    "document", "location", "api", "settingsTab", "settingsCurrent", "refreshLogs",
+    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
+       TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
+       SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const cacheTrakt=(value)=>value;
+     const Date={now:clock};
+     ${shippedSource("clusterOpsInterval")}
+     ${shippedSource("clusterOpsStamp")}
+     ${shippedSource("clusterOpsDue")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterOpenDetailNodes")}
+     ${shippedSource("patchClusterReadingAge")}
+     ${shippedSource("clenv")}
+     ${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("settingsTick")}
+     return {settingsTick,stamped:()=>CLUSTER_OPS_FETCHED_AT,ops:()=>SETTINGS_DATA.clusterOps};`,
+  )(
+    document,
+    { hash: "#/settings" },
+    (url) => new Promise((resolve) => requests.push({ url, resolve })),
+    () => "cluster",
+    () => true,
+    async () => {},
+    async () => {},
+    () => {},
+    () => painted.push("render"),
+    PANEL,
+    () => now.value,
+  );
+  return { harness, requests, painted, readingAge };
+}
+
+test("the direct status refreshes on its own gate, and never stacks", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests } = tickHarness({ cluster, ops, now });
+
+  // Nothing is in flight and the clock has never been stamped, so the first
+  // tick collects the status.
+  const first = harness.settingsTick(1, "cluster");
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/status"]);
+  assert.equal(harness.stamped(), now.value, "the clock is stamped before the await");
+  // A probe slower than the gate must not put a second fan-out behind itself.
+  now.value += 20_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 1, "a slow probe is never stacked");
+  requests[0].resolve(ops);
+  await first;
+
+  now.value += 9_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 1, "the 2s tick does not become a 2s fan-out");
+  now.value += 7_000;
+  const due = harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 2, "fifteen seconds later it collects again");
+  requests[1].resolve(ops);
+  await due;
+});
+
+test("a fetch is not a repaint, and the freshness row still ages", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted, readingAge } = tickHarness({ cluster, ops, now });
+
+  const older = JSON.parse(JSON.stringify(ops));
+  older.observed_at_unix_ms = (older.observed_at_unix_ms || 0) + 15_000;
+  older.nodes.forEach((row) => {
+    row.sample_age_ms = (row.sample_age_ms || 0) + 15_000;
+  });
+  readingAge.innerHTML = "stale text";
+  const quiet = harness.settingsTick(1, "cluster");
+  requests[0].resolve(older);
+  await quiet;
+  assert.deepEqual(painted, [], "nothing changed, so nothing was rewritten");
+  assert.notEqual(readingAge.innerHTML, "stale text", "the freshness row was patched in place");
+  assert.equal(harness.ops(), older, "the newer sample is still what the panel reads");
+
+  now.value += 16_000;
+  const changed = JSON.parse(JSON.stringify(older));
+  changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
+  const loud = harness.settingsTick(1, "cluster");
+  requests[1].resolve(changed);
+  await loud;
+  assert.deepEqual(painted, ["render"], "a changed verdict repaints exactly once");
+});
+
+test("every repaint on this tab preserves what the operator was looking at", () => {
+  // Three paths repaint the Cluster tab and all three must behave the same,
+  // because a 15s cadence turns "the scroll jumps" from a papercut into an
+  // unusable panel. Pin the call sites: a helper nothing calls is the failure
+  // mode this suite has already caught once.
+  assert.match(shippedSource("settingsTick"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("refreshClusterOperations"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("pollLocalRestart"), /repaintClusterPreserving\(renderSettings\)/);
+  // …and the restart poll stamps the same clock, so the two never probe at once.
+  assert.match(shippedSource("pollLocalRestart"), /clusterOpsStamp\(\)/);
+
+  const detail = (open) => ({ open });
+  const bodies = [
+    { node: "node-a", detail: detail(true) },
+    { node: "node-b", detail: detail(false) },
+  ].map((entry) => ({
+    getAttribute: () => entry.node,
+    querySelector: () => entry.detail,
+    detail: entry.detail,
+  }));
+  const list = { scrollTop: 420 };
+  const document = {
+    getElementById: (id) => (id === "cluster-node-list" ? list : null),
+    querySelectorAll: () => bodies,
+  };
+  const repaint = new Function(
+    "document",
+    `${shippedSource("clusterOpenDetailNodes")}
+     ${shippedSource("repaintClusterPreserving")}
+     return repaintClusterPreserving;`,
+  )(document);
+
+  repaint(() => {
+    // renderSettings() rewrites the markup: a fresh list at the top, and every
+    // drill-down back to its shipped default.
+    list.scrollTop = 0;
+    bodies.forEach((body) => {
+      body.detail.open = false;
+    });
+  });
+  assert.equal(list.scrollTop, 420, "the roster scroller kept its place");
+  assert.deepEqual(
+    bodies.map((body) => body.detail.open),
+    [true, false],
+    "the open drill-down came back and the closed one stayed closed",
+  );
+});
+
 // ---- the module boundary ---------------------------------------------------
 
 test("the model is a file, and the shell actually mounts it", () => {

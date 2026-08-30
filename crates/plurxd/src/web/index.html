@@ -10778,6 +10778,7 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
+    clusterOpsStamp();
     renderSettings();
   }
 }
@@ -11379,6 +11380,10 @@ function systemPanel(sys,playbackEvents){
 // SQLite box where the endpoint answers `membership_unavailable`; spending an
 // admin request on every Settings visit to learn that would be noise.
 let CLUSTER_LOADED=false;
+// When /cluster/status last left the server, so the Cluster tab can keep it
+// fresh without a timer of its own. Every path that stores a new aggregate
+// stamps this; the tick reads it. See clusterOpsInterval().
+let CLUSTER_OPS_FETCHED_AT=0;
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -11401,6 +11406,55 @@ async function loadCluster(){
 // one escaping contract to review, and the module loads under Node with no
 // setup at all.
 function clenv(){ return {esc,fmtAgo,fmtBytes}; }
+// /cluster/status is a bounded direct fan-out that probes every voter, so it is
+// not a 2s reading. Fifteen seconds is slow enough that the probe cost stays
+// where it was measured and fast enough that a rail row cannot state a verdict
+// off a nine-minute-old sample. The restart flow, which does need 2s freshness,
+// keeps its own poll and stamps this clock as it goes.
+function clusterOpsInterval(){ return 15000; }
+function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
+function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
+// Which node cards have their "WAL, snapshot, and protocol details" open. A
+// drill-down is not layout, so it is never persisted to storage — it just has
+// to survive the repaint happening underneath it.
+function clusterOpenDetailNodes(){
+  const open=[];
+  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
+    const detail=body.querySelector(".clnodedetail");
+    const id=body.getAttribute("data-node");
+    if(detail&&detail.open&&id) open.push(id);
+  });
+  return open;
+}
+// renderSettings() rewrites the whole tab. The folds and the troubleshooting tab
+// already come back (applyClusterFolds restores them from storage) and the join
+// token is module state, but the roster's scroll position and the open
+// drill-downs are in the markup that just got thrown away. Every repaint path on
+// this tab goes through here so all three behave the same way. Text selection
+// cannot be preserved across innerHTML at all — which is exactly why repaints
+// are change-driven rather than periodic.
+function repaintClusterPreserving(paint){
+  const list=document.getElementById("cluster-node-list");
+  const scroll=list?list.scrollTop:0;
+  const open=clusterOpenDetailNodes();
+  paint();
+  const painted=document.getElementById("cluster-node-list");
+  if(painted) painted.scrollTop=scroll;
+  if(!open.length) return;
+  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
+    const detail=body.querySelector(".clnodedetail");
+    if(detail&&open.indexOf(body.getAttribute("data-node"))!==-1) detail.open=true;
+  });
+}
+// The one reading that moves without a new fetch. When the projection has not
+// changed there is no repaint, so this cell is patched on its own; without it
+// the row whose only job is freshness would say "now" indefinitely.
+function patchClusterReadingAge(){
+  const cell=document.getElementById("cldb-reading-age");
+  if(!cell) return;
+  const data=SETTINGS_DATA||{};
+  cell.innerHTML=PlurxClusterPanel.clusterReadingAge(clenv(),data.cluster,data.clusterOps);
+}
 function clusterNodeOperationsBadge(n,ops){
   if(!ops) return `<span class="pill">Collecting status</span>`;
   if(ops.unavailable) return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Status unavailable</span>`;
@@ -11673,7 +11727,8 @@ async function refreshClusterOperations(btn){
     const ops=await loadSettingsKey("clusterOps",generation);
     if(settingsCurrent(generation,"cluster")){
       SETTINGS_DATA.clusterOps=ops;
-      renderSettings();
+      clusterOpsStamp();
+      repaintClusterPreserving(renderSettings);
     }
   }catch(error){
     if(settingsCurrent(generation,"cluster")){
@@ -11710,7 +11765,10 @@ async function pollLocalRestart(nodeId,generation){
       const ops=await api("/cluster/status");
       if(!settingsCurrent(generation,"cluster")) return;
       SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-      renderSettings();
+      // The restart poll owns freshness while it runs, so it stamps the same
+      // clock the tick reads: the two never probe the fan-out at once.
+      clusterOpsStamp();
+      repaintClusterPreserving(renderSettings);
       const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
       const media=local&&local.status&&local.status.media;
       if(!media||!media.new_admissions_blocked||media.drained) return;
@@ -11738,7 +11796,8 @@ function clusterDatabasePanel(cluster,replication,capacity,ops){
   const health=PlurxClusterPanel.clusterDatabaseHealth(replication);
   const cap=PlurxClusterPanel.clusterCapacityText(capacity);
   const rows=PlurxClusterPanel.clusterDatabaseRows(clenv(),cluster,replication,ops)
-    .map(([label,value,numeric])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}>${value}</dd>`).join("");
+    .map(([label,value,numeric,id])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}${
+      id?` id="${esc(id)}"`:""}>${value}</dd>`).join("");
   return `<section class="cluster-card"><div class="clophead"><div><h3>Replicated database</h3>
       <p>${replication&&replication.backend==="sqlite"?"Where watch state is stored on this machine."
         :"Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up."}</p></div>
@@ -12273,7 +12332,24 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         });
         const changed=operational(current)!==operational(snapshot);
         SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
-        if(changed) renderSettings();
+        if(changed) repaintClusterPreserving(renderSettings);
+      }
+      // The direct status ages the same way the roster does, and every rail
+      // verdict, node card, and ledger reading is read off it. It is refreshed
+      // here rather than on a timer of its own because this loop already owns
+      // the cadence, the generation guard, the visibility check, and the
+      // re-entrancy latch, and a second loop would have to reimplement all four.
+      if(clusterOpsDue()){
+        // Stamped BEFORE the await: a probe slower than the gate must not stack
+        // a second fan-out behind itself.
+        clusterOpsStamp();
+        const previous=SETTINGS_DATA.clusterOps;
+        const ops=await api("/cluster/status");
+        if(!settingsCurrent(generation,tab)) return;
+        SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+        if(PlurxClusterPanel.clusterOpsProjection(previous)!==PlurxClusterPanel.clusterOpsProjection(ops))
+          repaintClusterPreserving(renderSettings);
+        else patchClusterReadingAge();
       }
     }
     await Promise.all(secondary);
