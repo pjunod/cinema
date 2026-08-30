@@ -124,7 +124,7 @@ dependencies {
     testImplementation(libs.junit)
     // The reporter's rules are about ordering and backoff, so its tests drive
     // a virtual clock rather than waiting out real seconds.
-    testImplementation(kotlin("test"))
+    testImplementation(libs.kotlin.test.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
