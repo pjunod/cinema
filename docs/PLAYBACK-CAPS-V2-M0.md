@@ -194,3 +194,82 @@ SDR`.
   `vod_index_status` split.
 - `grep -c 'temporary live-HLS recovery'` on the plurxd log, which the plan
   asks for as the in-the-wild count of E1. Not reachable through the API.
+
+---
+
+## 8. M5a-0 — does ffmpeg write the Dolby Vision record on the copy path?
+
+**Measured 2026-08-30 on nuc4**, jellyfin-ffmpeg 7.x in the shipped image,
+against `Nosferatu (2024) Remux-2160p.mkv` — a real Profile 7 dual-layer
+source (`dv_profile=7 · rpu_present=1 · el_present=1 ·
+dv_bl_signal_compatibility_id=6`).
+
+The plan (§4.8) named this the one open mechanical question and said to
+choose by result, not by guess. The result chooses the second branch, and it
+also turned up a bug in the path that ships today.
+
+### The answer: no, and plurx must write the box
+
+| Input to the copy | Configuration record in the output |
+|---|---|
+| Raw Annex B (BL+RPU, EL dropped) — **the M5a pipe** | **none** — neither `dvcC` nor `dvvC` |
+| Native Profile 8 title, from its container | `dvvC` |
+| The Profile 7 title, from its container, EL dropped by `filter_units` | `dvcC` |
+
+ffmpeg does not derive a record from the RPU. It **copies the one the input
+container already had**, and a raw Annex B stream has no container and
+therefore no record. So the two-ffmpeg pipe as drawn in §4.8 produces a
+stream with correct P8.1 RPUs inside `mdat` and nothing in the sample entry
+to say so — `dvh1` and `hvcC` are written, the DV record is not. Branch two
+of §4.8 stands: **plurx inserts the box into the init segment.**
+
+### The box is `dvvC`, not `dvcC`
+
+§4.8 says "a 24-byte `dvcC` payload". The measurement says otherwise: for a
+native Profile 8 source ffmpeg itself writes **`dvvC`**. The two boxes carry
+the same 24-byte payload and differ only in name — `dvcC` is the profile ≤ 7
+spelling, `dvvC` the profile ≥ 8 one. M5a's output is Profile 8.1, so the
+writer emits `dvvC`, and the golden test in `crates/plurx-core/src/fmp4`
+should be taken against a native P8 init (which has one) rather than against
+a P7 init (which has the other).
+
+### The bug this turned up: today's strip path lies about the enhancement layer
+
+Control 2 above is the path plurx runs **today** for a P7 title on a client
+that cannot decode it: one ffmpeg, `filter_units=remove_types=63` to drop the
+EL NALs, `-c copy`. The output's record is copied verbatim from the mkv, so
+it still says:
+
+```
+dv_profile=7 · el_present_flag=1 · dv_bl_signal_compatibility_id=6
+```
+
+over a stream whose enhancement layer has just been removed. The bytes and
+the record disagree: a decoder is told to expect a dual layer that is not
+there. It is a plausible cause of P7 titles that negotiate as Dolby Vision
+and then render wrong, and it is worth fixing whether or not M5a lands —
+the same init-segment writer M5a needs can correct `el_present_flag` to 0 on
+the strip path, which is a strictly smaller change than the conversion.
+
+### Throughput — far above the bar
+
+The plan asks for ≥ 1.5× realtime on a 4K remux. Measured over 120 s of the
+same source:
+
+| Stage | Wall | Rate |
+|---|---|---|
+| Step 1: BL+RPU extract, EL dropped, to Annex B | 2,473 ms | **48.5× realtime** |
+| Today's single-ffmpeg strip straight to fMP4 | 500 ms | 240× realtime |
+
+Step 1 costs about 5 ms of CPU per second of video. The RPU rewrite added
+between the two ffmpegs is a header edit per frame and cannot plausibly
+approach that, so the pipe has roughly 30× headroom against the requirement.
+The gap between the two rows is the `hevc_mp4toannexb` conversion, not the
+EL drop.
+
+### What this fixes in the plan
+
+- §4.8's `dvcC` becomes `dvvC` for the P8.1 output.
+- Branch two is chosen: the init-segment writer is required, not optional.
+- A new, separate finding: the existing strip path's `el_present_flag` is
+  wrong, and the same writer corrects it.
