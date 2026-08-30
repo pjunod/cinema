@@ -39,6 +39,7 @@ NOTES_DIR = "docs/apple-builds"
 NOTES_NON_FRAGMENTS = frozenset({"README.md", "history-through-build-78.md"})
 
 PROJECT = "clients/apple/project.yml"
+CARGO = "Cargo.toml"
 APPLE_README = "clients/apple/README.md"
 PARITY = "docs/APPLE-CLIENT-PARITY.md"
 STATUS = "docs/STATUS.html"
@@ -90,13 +91,31 @@ class Surface:
     label: str
 
 
+def workspace_version(root: Path = REPO_ROOT) -> str:
+    """The one place the release number is declared.
+
+    The status-line patterns below anchor on it, and carrying it as a literal
+    here meant a workspace bump silently stopped them matching — the rewrite
+    then failed closed on "found 0", one release too late to be useful.
+    """
+    contents = (root / CARGO).read_text(encoding="utf-8")
+    matches = re.findall(r'^version = "(\d+\.\d+\.\d+)"$', contents, re.MULTILINE)
+    if len(matches) != 1:
+        raise AppleBuildError(
+            f"{CARGO} must declare exactly one workspace version; found {matches}"
+        )
+    return matches[0]
+
+
+_VERSION = re.escape(workspace_version())
+
 SURFACES: tuple[Surface, ...] = (
     Surface(PROJECT, re.compile(r'(?<=CURRENT_PROJECT_VERSION: ")[1-9]\d*(?=")'),
             "project.yml CURRENT_PROJECT_VERSION"),
-    Surface(APPLE_README, re.compile(r"(?<=^> Status: \*\*v0\.2\.7\*\*, build `)[1-9]\d*(?=`)",
+    Surface(APPLE_README, re.compile(rf"(?<=^> Status: \*\*v{_VERSION}\*\*, build `)[1-9]\d*(?=`)",
                                      re.MULTILINE),
             "Apple README status line"),
-    Surface(PARITY, re.compile(r"(?<=^> Status \(\d{4}-\d{2}-\d{2}\): source is v0\.2\.7, "
+    Surface(PARITY, re.compile(rf"(?<=^> Status \(\d{{4}}-\d{{2}}-\d{{2}}\): source is v{_VERSION}, "
                                r"Apple build )[1-9]\d*(?=\.)", re.MULTILINE),
             "Apple parity status line"),
     Surface(STATUS, re.compile(r"(?<=· Apple build )[1-9]\d*(?= source, not yet uploaded)"),
