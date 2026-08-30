@@ -8,6 +8,8 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-08-30
+
 ### Added
 
 - **The Cluster tab's Maintenance section is an operations rail.** Every action
@@ -936,6 +938,8 @@ bump may break compatibility and a **patch** bump never does.
   ahead of the asynchronous flush it is checking. `pr_gate` reports on both
   `pull_request` and `merge_group`, so it stays the single required check
   when the queue is enabled.
+
+## [0.2.7] — 2026-08-09
 
 ### Added
 
@@ -2582,5 +2586,6 @@ a hundred commits of history.
   binary is stamped with the git commit it was built from, and `/api/v1/server`
   reports both. See [docs/RELEASING.md](docs/RELEASING.md).
 
-[Unreleased]: https://github.com/pjunod/plurx/compare/v0.2.7...HEAD
+[Unreleased]: https://github.com/pjunod/plurx/compare/v0.2.8...HEAD
+[0.2.8]: https://github.com/pjunod/plurx/compare/v0.2.7...v0.2.8
 [0.2.7]: https://github.com/pjunod/plurx/releases/tag/v0.2.7
