@@ -40,16 +40,30 @@ let finished = 0;
 // An async body that never settles prints neither PASS nor FAIL and vanishes
 // from the run, which reads exactly like a clean pass. Count starts against
 // finishes and fail the run on the difference.
-async function test(name, run) {
-  started += 1;
-  try {
-    await run();
-    process.stdout.write(`PASS ${name}\n`);
-  } catch (error) {
-    failures += 1;
-    process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`);
+// Queued and run in order, not fired off as they are declared. A bare
+// `async function test()` called without `await` yields at the first `await`
+// inside the body and lets the next declaration start, so these ran
+// concurrently and in a different order each time. Nothing here shares mutable
+// state today, which is the only reason it was harmless — and it is not a
+// property this file can keep on purpose, because each new test would have to
+// re-establish it.
+const QUEUE = [];
+function test(name, run) {
+  QUEUE.push({ name, run });
+}
+
+async function main() {
+  for (const { name, run } of QUEUE) {
+    started += 1;
+    try {
+      await run();
+      process.stdout.write(`PASS ${name}\n`);
+    } catch (error) {
+      failures += 1;
+      process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`);
+    }
+    finished += 1;
   }
-  finished += 1;
 }
 
 function nextTurn() {
@@ -330,7 +344,7 @@ test("Activity keeps polling its detail body after the route settles", () => {
   );
 });
 
-test("Activity keeps polling its detail body after the route settles", () => {
+test("Activity's detail poll survives what the golden cannot capture", () => {
   // The structural golden cannot assert this. Activity's captured request
   // inventory alternates between two and three /activity/detail calls
   // depending on how loaded the runner is, and the second read is not merely
@@ -1212,6 +1226,11 @@ test("Page phases are generation-fenced, ordered, and wired to measured routes",
   const activity = shippedSource("renderActivityBody");
   assert.match(activity, /setPagePhase\("#\/activity",generation,"content"\)/);
   assert.match(activity, /setPagePhase\("#\/activity",generation,"settled"\)/);
+});
+
+main().catch((error) => {
+  failures += 1;
+  process.stdout.write(`FAIL the suite itself threw\n${error && error.stack}\n`);
 });
 
 let reported = false;
