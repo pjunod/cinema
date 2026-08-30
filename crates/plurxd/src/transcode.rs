@@ -15051,179 +15051,6 @@ impl TranscodeManager {
         })
     }
 
-    /// Downgrade a stalled hardware start by ONE step, taking the cheaper
-    /// step first.
-    ///
-    /// A session running a GPU tone-map graph that stopped producing is
-    /// evidence about the graph — a driver state the boot probe couldn't
-    /// reach, a codec profile its fixture didn't cover, another session
-    /// contending for the same block. None of that is evidence about the
-    /// *encoder*, and swapping to software would trade a stalled hardware
-    /// session for one that is slower still. So the graph goes and the
-    /// hardware stays; only a session already on the CPU chain falls back to
-    /// a software encoder.
-    ///
-    /// One step per session, deliberately: this fires once, and a viewer who
-    /// has waited out the grace window twice has waited too long. If the
-    /// downgraded session also stalls, the actor's software deadline takes it.
-    /// On a spawn failure the session is marked failed; the caller checks.
-    #[allow(clippy::too_many_arguments)] // one fallback's worth of context
-    #[cfg(test)]
-    async fn downgrade_one_step(
-        session: &Session,
-        file: &plurx_core::domain::MediaFile,
-        opts: &TranscodeOptions,
-        encoder: Encoder,
-        software_rate_control: EffectiveRateControl,
-        pacing: Pacing,
-        sw_pool: &crate::admission::SwPool,
-        dir: &std::path::Path,
-        sid: &str,
-        runtime_cache: &std::path::Path,
-    ) -> EffectiveRateControl {
-        let downgrade_pipeline = opts.pipeline.on_gpu();
-        let retry_encoder = if downgrade_pipeline {
-            encoder
-        } else {
-            Encoder::Software
-        };
-        let mut retry_opts = opts.clone();
-        if downgrade_pipeline {
-            let Some(fallback) = opts.pipeline.fallback() else {
-                tracing::error!(
-                    session = %session_log_id(sid),
-                    pipeline = opts.pipeline.name(),
-                    "renderer stalled and has no color-safe fallback; refusing to retry through a different color transform"
-                );
-                session.kill_child().await;
-                session.fail(PlaylistError::SessionFailed(
-                    "the Dolby Vision renderer stopped; no color-safe fallback is available".into(),
-                ));
-                return opts.effective_rate_control;
-            };
-            retry_opts.pipeline = fallback;
-        } else {
-            // A family-tuned default is part of the effective identity. A
-            // VideoToolbox value, for example, is not a valid x264 CRF merely
-            // because both are integers.
-            retry_opts.effective_rate_control = software_rate_control;
-        }
-        tracing::warn!(
-            session = %session_log_id(sid),
-            stalled_s = session.progress.stalled_for().as_secs(),
-            pipeline = opts.pipeline.name(),
-            retry_pipeline = retry_opts.pipeline.name(),
-            retry_encoder = retry_encoder.label(),
-            "no HLS segment from hardware and output has stopped \
-             advancing (GPU contention, or a decode the GPU can't do — e.g. \
-             Dolby Vision); {}",
-            if downgrade_pipeline {
-                "dropping the GPU tone-map and keeping the hardware encoder"
-            } else {
-                "retrying on software"
-            }
-        );
-        let (mut replacement, generation) = match session.kill_child_for_replacement().await {
-            Ok(replacement) => replacement,
-            Err(reason) => {
-                tracing::warn!(
-                    session = %session_log_id(sid),
-                    rejection = ?reason,
-                    "rolling actor rejected fallback before the predecessor was changed"
-                );
-                return opts.effective_rate_control;
-            }
-        };
-        if let Err(error) = clear_session_dir(dir).await {
-            tracing::error!(
-                session = %session_log_id(sid),
-                %error,
-                "fallback refused because predecessor scratch could not be cleared"
-            );
-            session.fail(PlaylistError::SessionFailed(format!(
-                "predecessor scratch could not be cleared: {error}"
-            )));
-            replacement.settle_terminal_rejection();
-            return opts.effective_rate_control;
-        }
-        session.confirm_predecessor_scratch_cleared();
-        if !downgrade_pipeline {
-            // The slot belonged to the encoder that just died, not
-            // to the session: hand it back at the transition so
-            // the next hardware start gets it now, and re-class
-            // the admission record for the software encoder that
-            // is about to be measured. The replacement takes its CPU
-            // pool share by force — a viewer already watching is not
-            // held hostage to the budget — and spends exactly what it
-            // reserved, as an explicit -threads.
-            let work = Workload::of(file, session.target_height);
-            let permit = sw_pool.take_forced(work.software_threads());
-            retry_opts.software_threads = Some(permit.threads() as u32);
-            session.demote_to_software(work, permit);
-        }
-        let sw_args = transcode::hls_args(
-            file,
-            retry_encoder,
-            &retry_opts,
-            pacing,
-            &dir.to_string_lossy(),
-        );
-        // The replacement writes its own timeline from the same
-        // seek point; keeping the dead process's telemetry would
-        // make it look stalled from its first second, and the
-        // generation bump is what stops the dead process's reader
-        // from writing those numbers back after the reset.
-        match spawn_ffmpeg(
-            &sw_args,
-            retry_encoder.label(),
-            sid,
-            FfmpegProgressObserver::rolling(
-                Arc::clone(&session.progress),
-                generation,
-                session.control.clone(),
-            ),
-            runtime_cache,
-            FfmpegDescriptors {
-                subtitle: session
-                    .subtitle_handle
-                    .as_ref()
-                    .map(std::os::fd::AsRawFd::as_raw_fd),
-                ..FfmpegDescriptors::default()
-            },
-        ) {
-            Ok(child) => {
-                if let Err(reason) = session.install_replacement_child(generation, child).await {
-                    replacement.settle_terminal_rejection();
-                    tracing::warn!(
-                        session = %session_log_id(sid),
-                        producer_attempt = generation,
-                        rejection = ?reason,
-                        "rolling actor refused fallback installation after spawn; candidate removed from session ownership"
-                    );
-                    return opts.effective_rate_control;
-                }
-                replacement.complete();
-                // The activity page must stop naming the hardware
-                // encoder the moment it is no longer the one running.
-                *session.encoder_label.lock().await = retry_encoder.label();
-                tracing::info!(
-                    session = %session_log_id(sid),
-                    encoder = retry_encoder.label(),
-                    pipeline = retry_opts.pipeline.name(),
-                    "fallback transcode started"
-                );
-            }
-            Err(e) => {
-                tracing::error!(session = %session_log_id(sid), "fallback transcode failed: {e}");
-                session.fail(PlaylistError::SessionFailed(
-                    "the fallback encoder could not be started".into(),
-                ));
-                replacement.complete();
-            }
-        }
-        retry_opts.effective_rate_control
-    }
-
     /// Start a **copy-video** HLS session: the source video is repackaged into
     /// HLS (fMP4 segments) untouched, and only the audio is transcoded when the
     /// client can't take it. This is the remux path for players whose `<video>`
@@ -23251,25 +23078,35 @@ mod tests {
         opts.pipeline = Pipeline::Cpu;
         opts.effective_rate_control = captured.effective_for(Encoder::VideoToolbox);
         let sw_pool = mgr.admissions.software_pool();
-        let fallback = TranscodeManager::downgrade_one_step(
-            &session,
+        // The rung is chosen when the retry recipe is frozen, at session
+        // start, and that recipe is what the actor later authorizes. So the
+        // generation question is asked of the frozen recipe, not of a
+        // downgrade helper that production no longer runs.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             captured.effective_for(Encoder::Software),
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "generation-test",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
         )
-        .await;
-        session.kill_child().await;
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        drop(session);
 
         assert_eq!(
-            fallback,
-            EffectiveRateControl::Qvbr { quality: 23 },
-            "the production downgrade seam must use the session's captured generation"
+            retry.encoder,
+            Encoder::Software,
+            "a CPU-pipeline hardware attempt steps down to software"
+        );
+        let fallback = EffectiveRateControl::Qvbr { quality: 23 };
+        assert!(
+            retry.args.iter().any(|arg| arg.contains("23")),
+            "the frozen retry must carry the session's captured generation, \
+             not the global setting; args were {:?}",
+            retry.args
         );
         assert_ne!(
             fallback,
@@ -26604,10 +26441,7 @@ mod tests {
     async fn playlist_waits_during_the_production_fallback_replacement() {
         use plurx_core::store::SqliteStore;
 
-        super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
-        let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
         let mgr = Arc::new(mgr);
         let dir = crate::test_tempdir().expect("session dir");
@@ -26617,54 +26451,36 @@ mod tests {
             .await
             .insert("fallback-gap".into(), Arc::clone(&session));
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-
-        let mut opts = mgr.options_for_tone_map(
-            Encoder::VideoToolbox,
-            &file,
-            720,
-            0.0,
-            None,
-            None,
-            None,
-            ToneMap::Zscale,
-            OutputGrade::Sdr,
+        // The gap is the property, and it belongs to begin_child_replacement
+        // — the production primitive the actor's retry executor opens before
+        // it terminates the failed attempt. Holding one open here observes
+        // exactly the window a real retry creates, without going through a
+        // ladder helper production no longer runs.
+        let replacement = session.begin_child_replacement().await;
+        assert!(
+            session.replacing_child.load(Relaxed),
+            "an open replacement marks the session as replacing"
         );
-        opts.pipeline = Pipeline::Cpu;
-        let sw_pool = mgr.admissions.software_pool();
-        let fallback = TranscodeManager::downgrade_one_step(
-            &session,
-            &file,
-            &opts,
-            Encoder::VideoToolbox,
-            EffectiveRateControl::Vbr,
-            Pacing::unpaced(),
-            &sw_pool,
-            dir.path(),
-            "fallback-gap",
-            &mgr.runtime_cache,
-        );
-        let observe_gap = async {
-            pause.wait().await;
-            let waiting =
-                tokio::time::timeout(Duration::from_millis(250), mgr.playlist("fallback-gap"))
-                    .await;
-            assert!(
-                waiting.is_err(),
-                "the production replacement gap keeps the publication window open"
-            );
-            assert!(
-                !session.failed.load(Relaxed),
-                "the production fallback's killed predecessor must not poison its successor"
-            );
-            pause.wait().await;
-        };
 
-        let (_, ()) = tokio::join!(fallback, observe_gap);
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(250), mgr.playlist("fallback-gap")).await;
+        assert!(
+            waiting.is_err(),
+            "the production replacement gap keeps the publication window open"
+        );
+        assert!(
+            !session.failed.load(Relaxed),
+            "the production replacement's killed predecessor must not poison its successor"
+        );
+
+        // Completing rather than dropping mid-admission: a cancelled
+        // admission deliberately fails the session, and that is a different
+        // test's property.
+        replacement.complete();
+        assert!(
+            !session.replacing_child.load(Relaxed),
+            "a completed replacement reopens the publication window"
+        );
         session.kill_child().await;
     }
 
@@ -26701,46 +26517,78 @@ mod tests {
             OutputGrade::Sdr,
         );
         opts.pipeline = Pipeline::Cpu;
-        let original_rate_control = opts.effective_rate_control;
         let sw_pool = mgr.admissions.software_pool();
-        let result = TranscodeManager::downgrade_one_step(
-            &session,
+        // The production retry executor is what clears predecessor scratch,
+        // and its transaction is what has to stay fenced when the clear
+        // fails. Drive that, not the retired ladder helper.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             EffectiveRateControl::Vbr,
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "fallback-clear-failure",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
+        )
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        // The executor terminates the exact failed attempt before it clears
+        // scratch, so the fixture needs a predecessor child bound to that
+        // attempt. Without one the transaction fails at termination and never
+        // reaches the clear this test is about.
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+        ));
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::ProgressDeadline,
+            "fallback-clear-failure",
         )
         .await;
 
-        assert_eq!(result, original_rate_control);
-        assert!(served_name.join("predecessor-bytes").exists());
         assert!(
-            session
-                .child
-                .lock()
-                .await
-                .as_mut()
-                .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_)))),
-            "the slot retains only the deliberately stopped predecessor handle"
+            result.is_err(),
+            "an unclearable predecessor scratch must fail the retry transaction"
         );
+        assert!(served_name.join("predecessor-bytes").exists());
         assert!(session.replacing_child.load(Acquire));
-        assert!(session.coherent_path_producer_attempt().await.is_none());
+        // The retired helper left a stopped predecessor handle in the slot and
+        // this test asserted on it. That was an artifact of the helper's
+        // shape, not a property of the system: the production transaction
+        // fails before it installs anything. "No successor" is what matters
+        // and this is the assertion that says it.
+        assert!(
+            session.coherent_path_producer_attempt().await.is_none(),
+            "a failed retry transaction installs no successor"
+        );
         assert_eq!(
             session.live_bytes.load(Acquire),
             1_024,
             "predecessor bytes remain charged until verified scratch clearing"
         );
-        assert!(matches!(
-            session.failure_reason(),
-            PlaylistError::SessionFailed(reason)
-                if reason.contains("predecessor scratch could not be cleared")
-                    && reason.contains("init.mp4")
-        ));
+        assert!(
+            matches!(
+                session.failure_reason(),
+                PlaylistError::SessionFailed(reason)
+                    if reason.contains("clearing predecessor scratch")
+                        && reason.contains("init.mp4")
+            ),
+            "the failure names the scratch clear and the file that blocked it, \
+             got {:?}",
+            session.failure_reason()
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while !session.control.is_retired() {
                 tokio::task::yield_now().await;
@@ -30599,19 +30447,36 @@ mod tests {
         );
         opts.pipeline = Pipeline::Cpu;
         let sw_pool = mgr.admissions.software_pool();
-        let _ = TranscodeManager::downgrade_one_step(
-            &session,
+        // Retirement has already won. The production retry executor is the
+        // thing that must refuse to resurrect an encoder afterwards, so it is
+        // what this regression drives — the retired ladder helper would prove
+        // nothing about the path production takes.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             EffectiveRateControl::Vbr,
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "retirement-first",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
+        )
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        let refused = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            1,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::ProgressDeadline,
+            "retirement-first",
         )
         .await;
+        assert!(
+            refused.is_err(),
+            "a retired session must refuse the retry rather than install a successor"
+        );
 
         assert!(session.control.is_retired());
         assert!(
