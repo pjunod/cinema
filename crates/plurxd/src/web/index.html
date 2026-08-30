@@ -10780,7 +10780,6 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
-    clusterOpsPainted(SETTINGS_DATA.clusterOps);
     renderSettings();
   }
 }
@@ -11386,10 +11385,6 @@ let CLUSTER_LOADED=false;
 // fresh without a timer of its own. Every path that stores a new aggregate
 // stamps this; the tick reads it. See clusterOpsInterval().
 let CLUSTER_OPS_FETCHED_AT=0;
-// The projection of the aggregate the markup on screen was built from — not the
-// last one fetched. A repaint that had to be deferred is therefore still owed,
-// and the next tick pays it.
-let CLUSTER_OPS_PAINTED=null;
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -11425,12 +11420,15 @@ function clenv(){ return {esc,fmtAgo,fmtBytes}; }
 function clusterOpsInterval(){ return 15000; }
 function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
 function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
-function clusterOpsPainted(ops){ CLUSTER_OPS_PAINTED=PlurxClusterPanel.clusterOpsProjection(ops); }
-function clusterOpsChanged(ops){ return PlurxClusterPanel.clusterOpsProjection(ops)!==CLUSTER_OPS_PAINTED; }
 // A modal is a decision in progress. renderSettings() rewrites the tab, and the
 // force-election dialog lives in that markup, so repainting under it would close
-// it mid-sentence. The repaint is deferred, not dropped: CLUSTER_OPS_PAINTED is
-// left where it was, so the next collection after the dialog closes pays it.
+// it mid-sentence.
+//
+// What the panel holds in SETTINGS_DATA is therefore exactly what it painted: a
+// sample that arrives while a dialog is open is dropped rather than stored, so
+// the next collection sees the same difference and pays the repaint then. One
+// invariant — never store what you did not paint — instead of a second copy of
+// the payload for the screen to drift from.
 function clusterRepaintDeferred(){
   return Boolean(document.querySelector(".clusterwrap dialog[open]"));
 }
@@ -11785,7 +11783,6 @@ async function refreshClusterOperations(btn){
     const ops=await loadSettingsKey("clusterOps",generation);
     if(settingsCurrent(generation,"cluster")){
       SETTINGS_DATA.clusterOps=ops;
-      clusterOpsPainted(ops);
       repaintClusterPreserving(renderSettings);
     }
   }catch(error){
@@ -11822,14 +11819,17 @@ async function pollLocalRestart(nodeId,generation){
     try{
       const ops=await api("/cluster/status");
       if(!settingsCurrent(generation,"cluster")) return;
-      SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
       // The restart poll owns freshness while it runs, so it stamps the same
       // clock the tick reads: the two never probe the fan-out at once. It
       // repaints every two seconds by design — the drain countdown is the point
-      // of the view — but never under an open modal.
+      // of the view — but under an open modal it holds the sample like the tick
+      // does, so what is stored is still what is painted. Its own loop condition
+      // reads the fresh sample either way.
       clusterOpsStamp();
-      clusterOpsPainted(ops);
-      if(!clusterRepaintDeferred()) repaintClusterPreserving(renderSettings);
+      if(!clusterRepaintDeferred()){
+        SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+        repaintClusterPreserving(renderSettings);
+      }
       const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
       const media=local&&local.status&&local.status.media;
       if(!media||!media.new_admissions_blocked||media.drained) return;
@@ -12386,8 +12386,14 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
             ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
         });
         const changed=operational(current)!==operational(snapshot);
-        SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
-        if(changed) repaintClusterPreserving(renderSettings);
+        // This branch runs precisely while a node is fenced or a recovery is
+        // required — which is when the force-election dialog is most likely to
+        // be open. Hold the sample rather than paint over the decision; two
+        // seconds later the same difference is still there.
+        if(!(changed&&clusterRepaintDeferred())){
+          SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+          if(changed) repaintClusterPreserving(renderSettings);
+        }
       }
       // The direct status ages the same way the roster does, and every rail
       // verdict, node card, and ledger reading is read off it. It is refreshed
@@ -12406,13 +12412,21 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
         // age of the reading on screen matters most.
         clusterOpsStamp();
         try{
+          const previous=SETTINGS_DATA.clusterOps;
           const ops=await api("/cluster/status");
           if(!settingsCurrent(generation,tab)) return;
-          SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-          if(clusterOpsChanged(ops)&&!clusterRepaintDeferred()){
-            clusterOpsPainted(ops);
-            repaintClusterPreserving(renderSettings);
-          }else patchClusterReadingAge();
+          const changed=PlurxClusterPanel.clusterOpsProjection(previous)
+            !==PlurxClusterPanel.clusterOpsProjection(ops);
+          if(changed&&clusterRepaintDeferred()){
+            // Held, not stored: the freshness row keeps reporting the age of the
+            // sample actually on screen, which is the only thing it can honestly
+            // describe.
+            patchClusterReadingAge();
+          }else{
+            SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+            if(changed) repaintClusterPreserving(renderSettings);
+            else patchClusterReadingAge();
+          }
         }catch(error){
           if(error&&error.status===401) throw error;
           if(!settingsCurrent(generation,tab)) return;

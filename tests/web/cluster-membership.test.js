@@ -108,11 +108,17 @@ function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] }
 }
 
 let failures = 0;
-// Awaited, and the exit code deferred to beforeExit — an async test whose body
-// is dropped on the floor prints PASS with zero assertions run, which is how
-// four behaviours once shipped with their coverage written and not executing.
-// Same harness as tests/web/page-read-budget.test.js; keep them identical.
+let started = 0;
+let finished = 0;
+// Awaited, counted, and the exit code deferred to beforeExit. Two ways an async
+// test can pass without proving anything, both of which this file has shipped:
+// a body that is never awaited runs zero assertions, and a body that never
+// settles — a harness promise nobody resolves — prints neither PASS nor FAIL and
+// simply disappears from the run. Counting starts against finishes catches the
+// second; the count is asserted below. Keep this identical to the harness in
+// tests/web/page-read-budget.test.js.
 async function test(name, run) {
+  started += 1;
   try {
     await run();
     process.stdout.write(`PASS ${name}\n`);
@@ -120,6 +126,7 @@ async function test(name, run) {
     failures += 1;
     process.stdout.write(`FAIL ${name}\n${error && error.stack}\n`);
   }
+  finished += 1;
 }
 
 // Words that assert redundancy or fault tolerance. Any of these in the
@@ -2387,9 +2394,55 @@ test("both membership rows carry an evaluated precondition", () => {
   assert.equal(lockedHtml.includes('id="clrail-leave"'), false, "a blocked row has no reachable control");
   assert.equal(lockedHtml.includes("leaveCluster(this,"), false);
 
-  // A fenced node is a lifecycle change in flight, and the leave control the
-  // rail mounts still receives that state, so its own button stays disabled if
-  // the row is ever reached.
+  // A blocked row's own control is disabled in the model too, not only absent
+  // from the shell's mount — otherwise a live Leave button ships on a row the
+  // rail has already refused.
+  assert.match(locked.action, /disabled/);
+  assert.doesNotMatch(locked.action, /toggleClusterRailPanel/);
+
+  // Maintenance is a cluster-wide conflict for membership changes, so a fenced
+  // node blocks a leave and the row says which node to resume.
+  const fenced = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { maintenance: true, maintenance_acknowledged: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  const fencedRow = railRows(ui, fenced, operationStatus(fenced)).get("Leave this cluster");
+  assert.equal(fencedRow.blocked, true);
+  assert.match(fencedRow.reason, /Maintenance is active on node-b/);
+
+  // The server refuses a voter self-leave below three voters with the same
+  // arithmetic the Remove row already reports. A removal pending on some OTHER
+  // node is deliberately NOT a blocker — that fence is per-node, and refusing
+  // here would refuse something the server allows.
+  const pair = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const small = railRows(ui, pair, operationStatus(pair)).get("Leave this cluster");
+  assert.equal(small.blocked, true);
+  assert.match(small.reason, /at least three voters remain, and this cluster has 2/);
+
+  const pendingElsewhere = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter", { removal_pending: true }),
+  ]);
+  const stillFree = railRows(ui, pendingElsewhere, operationStatus(pendingElsewhere)).get("Leave this cluster");
+  assert.equal(stillFree.blocked, false, "another node's pending removal does not fence this one");
+
+  // A learner leaving is not held to the voter arithmetic — the server sends it
+  // down the learner path.
+  const learnerLocal = status("high_availability", [
+    node("node-w", 9, "learner", { bounded_read_ready: true, voter_storage_ready: true }),
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const learnerRow = railRows(ui, learnerLocal, operationStatus(learnerLocal)).get("Leave this cluster");
+  assert.equal(learnerRow.blocked, false);
+
+  // And the leave control the rail mounts still receives the lifecycle state, so
+  // its own button stays disabled wherever the row is reachable.
   assert.match(shippedSource("clusterOperationsRail"), /leavePanel\(cluster\.local_node_id,maintenanceActive\)/);
   assert.match(shippedSource("clusterOperationsRail"), /joinPanel\(maintenanceActive\)/);
 });
@@ -2475,16 +2528,11 @@ function tickHarness({ cluster, ops, now }) {
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
-     // What the tab painted when it opened, exactly as patchSettingsSecondary
-     // records it.
-     let CLUSTER_OPS_PAINTED=PlurxClusterPanel.clusterOpsProjection(SETTINGS_DATA.clusterOps);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
      ${shippedSource("clusterOpsDue")}
-     ${shippedSource("clusterOpsPainted")}
-     ${shippedSource("clusterOpsChanged")}
      ${shippedSource("clusterRepaintDeferred")}
      ${shippedSource("repaintClusterPreserving")}
      ${shippedSource("clusterControlValues")}
@@ -2593,6 +2641,27 @@ test("a refused collection still moves the freshness row", async () => {
   assert.notEqual(readingAge.innerHTML, "frozen");
   assert.deepEqual(painted, [], "a refusal does not repaint the tab");
   assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
+
+  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
+  // swallowing it here would leave the tab rendering after auth is gone.
+  now.value += 15_000;
+  const unauthorized = harness.settingsTick(1, "cluster");
+  requests[1].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  await unauthorized;
+  assert.deepEqual(painted, [], "a 401 paints nothing here either");
+  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+});
+
+test("the panel's own controls and dialogs are the only ones it reaches for", () => {
+  // Both new helpers hang off one class emitted 1,700 lines away. If the shell
+  // stops marking the Cluster tab, the control capture silently finds nothing
+  // and a repaint stops deferring — with no other symptom.
+  assert.match(shippedSource("settingsShell"), /clusterwrap/);
+  assert.match(shippedSource("settingsShell"), /tab==="cluster"\?" clusterwrap":""/);
+  // Scoped, so an unrelated modal elsewhere in the app cannot freeze this tab's
+  // refresh, and an unrelated input cannot be captured and put back.
+  assert.match(shippedSource("clusterRepaintDeferred"), /\.clusterwrap dialog\[open\]/);
+  assert.match(shippedSource("clusterControlValues"), /\.clusterwrap select\[id\],\.clusterwrap input\[id\]/);
 });
 
 test("a decision in progress is never repainted out from under the operator", async () => {
@@ -2615,6 +2684,10 @@ test("a decision in progress is never repainted out from under the operator", as
   requests[0].resolve(changed);
   await held;
   assert.deepEqual(painted, [], "the dialog was still open");
+  // Held, not stored. What the panel holds is exactly what it painted, so the
+  // next collection sees the same difference and there is no second copy for
+  // the screen to drift from.
+  assert.deepEqual(harness.ops(), ops, "a sample the panel did not paint was not stored");
 
   // Deferred, not dropped: the next collection after it closes pays the repaint,
   // even though the payload has not changed again since.
@@ -2624,6 +2697,15 @@ test("a decision in progress is never repainted out from under the operator", as
   requests[1].resolve(changed);
   await paid;
   assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
+  assert.deepEqual(harness.ops(), changed);
+
+  // Same discipline on the two-second roster branch, which runs precisely while
+  // a node is fenced or a recovery is required — when that dialog is most
+  // likely to be open.
+  const tick = shippedSource("settingsTick");
+  assert.match(tick, /if\(!\(changed&&clusterRepaintDeferred\(\)\)\)\{/);
+  // …and on the restart poll, which repaints every two seconds by design.
+  assert.match(shippedSource("pollLocalRestart"), /if\(!clusterRepaintDeferred\(\)\)\{/);
 });
 
 test("a fetch is not a repaint, and the freshness row still ages", async () => {
@@ -2746,7 +2828,6 @@ test("the ledger's freshness cell is addressable, and the clock is stamped where
   // let a tab switch every ten seconds starve the refresh indefinitely.
   assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{ clusterOpsStamp\(\); return ops; \}\)/);
   assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
-  assert.match(shippedSource("patchSettingsSecondary"), /clusterOpsPainted\(SETTINGS_DATA\.clusterOps\)/);
 });
 
 test("every path that rewrites this tab goes through the preserving repaint", () => {
@@ -2808,6 +2889,16 @@ test("the model reaches for nothing the shell owns", () => {
   assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
 });
 
+let reported = false;
 process.on("beforeExit", () => {
+  if (reported) return;
+  reported = true;
+  if (started !== finished) {
+    failures += started - finished;
+    process.stdout.write(
+      `FAIL ${started - finished} test(s) never finished — an async body is waiting on ` +
+        `something the test never resolves, so it printed no result at all\n`,
+    );
+  }
   if (failures) process.exitCode = 1;
 });

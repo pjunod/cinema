@@ -347,16 +347,23 @@
         action:""});
     }
 
-    // A graceful leave is a membership change like any other: it has to commit
-    // through the same quorum, and it cannot start while another lifecycle
-    // change is in flight. It is stated with the same two conditions the Add row
-    // uses, rather than being the one row on a card headed "with its
-    // precondition already evaluated" that has none.
-    const leaveBlocked=locked||lifecycle;
+    // A graceful leave is a membership change like any other, and it was the one
+    // row on a card headed "with its precondition already evaluated" that had
+    // none. It states exactly what the server states and nothing more:
+    // `leave_voter` needs a current leader (so a recovery locks it), refuses a
+    // voter self-leave below three voters with the same quorum arithmetic the
+    // Remove row already reports, and a maintenance fence is a cluster-wide
+    // conflict. A removal pending on some OTHER node is deliberately not here —
+    // the server's fence is per-node, so blocking on it would refuse something
+    // that works.
+    const voterLeave=Boolean(local&&local.is_voter);
+    const leaveQuorum=!voterLeave||voters.length>=3;
+    const leaveBlocked=locked||fenced||!leaveQuorum;
     rows.push({title:"Leave this cluster",destructive:true,expand:"leave",
       expanded:showing("leave"),blocked:Boolean(leaveBlocked),
       reason:locked?locked.reason
-        :lifecycle?`A membership change is already in flight on ${name(lifecycle)}. Finish it before this node removes itself.`
+        :fenced?`Maintenance is active on ${name(fenced)}, and membership changes are refused while it is. Resume that node first.`
+        :!leaveQuorum?`A voter can only leave while at least three voters remain, and this cluster has ${voters.length}. Add a node first.`
         :"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
       action:leaveBlocked?`<button class="btn-danger sm" disabled>Leave</button>`
         :disclose("leave","Leave","btn-danger")});
@@ -553,6 +560,13 @@
     return key==="observed_at_unix_ms"||key==="sample_age_ms"||key==="sample_age_seconds"
       ||key==="watermark_age_millis"||key==="last_seen_at"||key==="last_sync_unix_ms";
   }
+  // The aggregate's top-level `membership` is the whole committed roster again.
+  // The panel reads exactly one field from it — `local_node_id` — and renders
+  // every other reading in it from /cluster/nodes instead, so its apply lag and
+  // session counts would trigger repaints that change nothing on screen. It is
+  // dropped at the root only: the per-node `membership` record inside `nodes[]`
+  // carries the identity those rows are matched and labelled by, and a node
+  // joining, leaving or being renamed IS news.
   function clusterOpsProjection(ops){
     const walk=value=>{
       if(Array.isArray(value)) return value.map(walk);
@@ -564,7 +578,16 @@
       }
       return out;
     };
-    return JSON.stringify(walk(ops===undefined?null:ops));
+    if(!ops||typeof ops!=="object"||Array.isArray(ops))
+      return JSON.stringify(walk(ops===undefined?null:ops));
+    const root={};
+    for(const key of Object.keys(ops).sort()){
+      if(clusterOpsSelfTicking(key)) continue;
+      root[key]=key==="membership"
+        ? (ops.membership&&ops.membership.local_node_id)||null
+        : walk(ops[key]);
+    }
+    return JSON.stringify(root);
   }
 
   // ---- folding, and remembering it -----------------------------------------

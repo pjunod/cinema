@@ -357,10 +357,13 @@ and two surfaces that mint one are two surfaces to leak it from. Whether a row
 is expanded is held for as long as the panel is on screen and is never written
 to browser storage, so a fresh page always starts collapsed and a status
 refresh cannot pull the panel shut while you are reading a token. Both rows
-carry a precondition — a recovery that has locked membership, or a lifecycle
-change already in flight, blocks either one — and a blocked row has no
-expansion at all, so the blocked reason is the whole row rather than a disabled
-control you have to open to discover.
+carry a precondition. Adding is blocked by a recovery that has locked
+membership or a lifecycle change already in flight; leaving is blocked by that
+same recovery, by an active maintenance fence anywhere in the cluster, and — for
+a voter — by the three-voter bar the server holds a self-leave to, which is the
+same arithmetic the Remove row reports. A blocked row has no expansion at all,
+so the blocked reason is the whole row rather than a disabled control you have
+to open to discover.
 
 A machine that is not in a cluster gets a shorter version of the same tab:
 the banner, a **Replicated database** section that names the backend and says
@@ -415,8 +418,9 @@ tab will repaint about as often as it collects. That is intended, so a repaint
 has to be survivable: the roster's scroll position, any open **WAL, snapshot,
 and protocol details**, and every control you have touched — the token's
 lifetime and role, the log level, the auto-refresh box — are all put back
-afterwards, and a repaint is deferred entirely while a dialog is open, then
-paid on the next collection after you close it. Between repaints the **Reading
+afterwards, and a repaint is deferred entirely while a dialog is open — the
+sample is held rather than stored, so what the panel holds is always what it
+painted, and the repaint is paid on the next collection after you close it. Between repaints the **Reading
 age** row is updated in place, because the one row whose job is freshness must
 not be the row that goes stale. Text selection is the one thing that cannot
 survive the rewrite, which is why repaints are driven by change and not by the
@@ -424,7 +428,7 @@ clock.
 
 The restart-preparation poll is the exception: while a preparation is active it
 repaints every two seconds regardless, because the drain countdown is the whole
-point of that view.
+point of that view. It defers under a dialog like everything else.
 
 ### Planned node maintenance — fence, drain, update, resume
 
