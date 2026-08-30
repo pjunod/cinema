@@ -267,9 +267,18 @@ impl Caps {
     /// query to the v2 document has to get the same verdict for the same
     /// hardware, and the only way to be sure is for there to be one
     /// translation with one set of absent-means-what rules.
-    fn profile(&self) -> playback::DeviceProfile {
+    /// `now_ms` is the wall clock, and it is a parameter rather than a call
+    /// to `unix_ms()` inside because it decides which of the client's learned
+    /// limits still apply — a decision that reads the clock invisibly is one
+    /// nobody can reproduce from the log line it produced.
+    fn profile(&self, now_ms: i64) -> playback::DeviceProfile {
+        let applicable = |profile: playback::DeviceProfile| {
+            let mut profile = profile;
+            profile.retain_applicable_learned_limits(now_ms);
+            profile
+        };
         if let Some(caps) = self.caps_v2.as_ref().filter(|caps| !caps.is_empty()) {
-            return playback::DeviceProfile::from_caps_v2(caps);
+            return applicable(playback::DeviceProfile::from_caps_v2(caps));
         }
         if self.has_caps() {
             let containers = {
@@ -314,7 +323,9 @@ impl Caps {
                 // proven tone-maps — see the field's doc comment.
                 hdr10t: self.hdr10t == Some(1),
             };
-            playback::DeviceProfile::from_caps_v2(&playback::DeviceCaps::from_legacy_query(&legacy))
+            applicable(playback::DeviceProfile::from_caps_v2(
+                &playback::DeviceCaps::from_legacy_query(&legacy),
+            ))
         } else {
             self.profile
                 .as_deref()
@@ -336,8 +347,8 @@ impl Caps {
     /// `node` carries the server's own capabilities (see [`playback::decide`])
     /// — passed in because only the caller holds the system info that records
     /// what this ffmpeg proved at boot.
-    fn decide(&self, file: &MediaFile, node: &playback::RenderCaps) -> Decision {
-        playback::decide_forced(file, &self.profile(), self.force(), node)
+    fn decide(&self, file: &MediaFile, node: &playback::RenderCaps, now_ms: i64) -> Decision {
+        playback::decide_forced(file, &self.profile(now_ms), self.force(), node)
     }
 }
 
@@ -1205,7 +1216,11 @@ pub async fn decision(
         subtitle_requires_burn_in(&file, selected_subtitle, state.pgs_overlay_enabled);
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let mut decision = q.decide(&file, &render_caps(&state).await);
+    let mut decision = q.decide(
+        &file,
+        &render_caps(&state).await,
+        crate::media_sessions::unix_ms(),
+    );
     let subtitle_burn_in_blocked_by_hdr =
         subtitle_burn_would_discard_hdr(&decision, selected_subtitle_requires_burn);
     // Only an explicit subtitle choice may change the delivery verdict. An
@@ -1632,7 +1647,11 @@ pub async fn stream_mp4(
     let prefs = state.transcode.lang_prefs().await;
     let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
     set_selected_audio_default(&mut file.audio_streams, Some(audio));
-    let decision = q.caps().decide(&file, &render_caps(&state).await);
+    let decision = q.caps().decide(
+        &file,
+        &render_caps(&state).await,
+        crate::media_sessions::unix_ms(),
+    );
     let probe_json = state.store.get_file_probe_json(id).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());
@@ -2279,6 +2298,14 @@ fn is_progress_line(line: &str) -> bool {
 mod tests {
     use super::*;
 
+    /// A fixed clock for every test that builds a device profile.
+    ///
+    /// `Caps::profile` takes the time because it decides which of a client's
+    /// learned limits still apply. A test that read the real clock would pass
+    /// today and fail whenever a fixture's timestamp aged past the browser's
+    /// re-test window.
+    const NOW_MS: i64 = 1_756_400_000_000;
+
     /// PLAYBACK-CAPS-V2-PLAN §4.2: two wire shapes, one translation, one
     /// profile.
     ///
@@ -2296,7 +2323,7 @@ mod tests {
                               &hdr10t=1&maxheight=2160";
 
         let legacy: Caps = serde_urlencoded::from_str(CAPS_Q).expect("CAPS_Q decodes as Caps");
-        let from_query = legacy.profile();
+        let from_query = legacy.profile(NOW_MS);
 
         // The same claims, said the v2 way. `hdr=1` is a *display* fact and
         // `hdr10t=1` is a per-codec presentation fact about HEVC — the legacy
@@ -2369,7 +2396,7 @@ mod tests {
     fn a_presentation_claim_is_not_a_display_claim() {
         let caps: Caps = serde_urlencoded::from_str("vcodec=hevc&hdr10t=1&maxheight=2160")
             .expect("the query decodes");
-        let profile = caps.profile();
+        let profile = caps.profile(NOW_MS);
         assert!(
             !profile.supports_hdr,
             "no hdr=1, so this client has not said it can show HDR"
@@ -2446,7 +2473,7 @@ mod tests {
     fn the_blanket_dolby_vision_claim_survives_translation_and_has_no_v2_spelling() {
         let blanket: Caps =
             serde_urlencoded::from_str("vcodec=hevc&dv=1").expect("the query decodes");
-        let profile = blanket.profile();
+        let profile = blanket.profile(NOW_MS);
         assert!(
             profile.supports_dolby_vision,
             "a client that sent the blanket claim yesterday gets the same answer today"
@@ -2460,7 +2487,7 @@ mod tests {
         // legacy rule at the old `stream.rs:286` did.
         let enumerated: Caps =
             serde_urlencoded::from_str("vcodec=hevc&dv=1&dvprofile=5").expect("the query decodes");
-        let enumerated = enumerated.profile();
+        let enumerated = enumerated.profile(NOW_MS);
         assert!(!enumerated.supports_dolby_vision);
         assert_eq!(enumerated.dolby_vision_profiles, vec![5]);
 
@@ -2686,7 +2713,7 @@ mod tests {
         let selected = remux_audio_index(&file.audio_streams, None, &prefs);
         assert_eq!(selected, 3, "English preference selects the TrueHD track");
         set_selected_audio_default(&mut file.audio_streams, Some(selected));
-        let english = caps.decide(&file, &playback::RenderCaps::proven(true));
+        let english = caps.decide(&file, &playback::RenderCaps::proven(true), NOW_MS);
         assert_eq!(english.method, playback::PlaybackMethod::Remux);
         assert!(english.transcode_audio, "TrueHD must become AAC in MP4");
         assert_eq!(english.delivered_dynamic_range, "hdr10");
@@ -2696,7 +2723,7 @@ mod tests {
             .any(|reason| reason.contains("audio codec truehd unsupported")));
 
         set_selected_audio_default(&mut file.audio_streams, Some(0));
-        let french = caps.decide(&file, &playback::RenderCaps::proven(true));
+        let french = caps.decide(&file, &playback::RenderCaps::proven(true), NOW_MS);
         assert!(!french.transcode_audio, "the E-AC-3 alternative can copy");
     }
 
@@ -2715,7 +2742,7 @@ mod tests {
             ..Default::default()
         };
 
-        let profile = caps.profile();
+        let profile = caps.profile(NOW_MS);
         assert!(!profile.supports_dolby_vision);
         assert_eq!(profile.dolby_vision_profiles, vec![5, 8]);
         assert!(profile.remux_dolby_vision);
@@ -2732,7 +2759,7 @@ mod tests {
             ..Default::default()
         };
 
-        let profile = caps.profile();
+        let profile = caps.profile(NOW_MS);
         assert_eq!(profile.max_height, Some(2160));
         assert_eq!(profile.video_max_heights.get("h264"), Some(&1080));
         assert_eq!(profile.video_max_heights.get("hevc"), Some(&2160));

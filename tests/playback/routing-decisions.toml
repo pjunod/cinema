@@ -3,9 +3,28 @@ version = 1
 [[decisions]]
 id = "server.capability-profile"
 source = "crates/plurxd/src/http/stream.rs"
-source_anchor = "fn profile(&self) -> playback::DeviceProfile"
+source_anchor = "fn profile(&self, now_ms: i64) -> playback::DeviceProfile"
 test = "crates/plurxd/src/http/stream.rs"
 test_anchor = "explicit_dolby_vision_profiles_override_the_legacy_all_profiles_bit"
+
+# A learned client limit changes what is delivered — it turns a direct play
+# into a transcode — so it is a routing decision and belongs in this map, not
+# only in the caps translation above.
+[[decisions]]
+id = "server.learned-decode-limit"
+source = "crates/plurx-core/src/playback/mod.rs"
+source_anchor = "fn matching_learned_limit("
+test = "crates/plurx-core/src/playback/mod.rs"
+test_anchor = "a_learned_client_limit_demotes_the_verdict_in_the_clients_own_words"
+
+# When one applies is the client's policy, not the server's, and the server
+# reproducing it is what keeps the browser's weekly re-test alive.
+[[decisions]]
+id = "server.learned-decode-limit-expiry"
+source = "crates/plurx-core/src/playback/caps.rs"
+source_anchor = "pub fn applies_at("
+test = "crates/plurx-core/src/playback/mod.rs"
+test_anchor = "an_expired_limit_hands_the_decision_back_to_the_client_that_can_retest"
 
 [[decisions]]
 id = "server.verdict"

@@ -791,11 +791,17 @@ pub(crate) fn review_client_plan(
     node: &plurx_core::playback::RenderCaps,
     asked_preserve_dolby_vision: bool,
     asked_hdr10: bool,
+    now_ms: i64,
 ) -> PlanReview {
     use plurx_core::playback::{decide_forced, DeviceProfile, Force};
 
     plan_derivation::count_rederived();
-    let profile = DeviceProfile::from_caps_v2(caps);
+    let mut profile = DeviceProfile::from_caps_v2(caps);
+    // The same clock the decision was taken under. Without this a create
+    // would apply a learned limit that `/decision` had already let expire,
+    // and the two halves of one playback would disagree about the plan for
+    // the reason the re-derivation exists to eliminate.
+    profile.retain_applicable_learned_limits(now_ms);
     let named_force = overrides.and_then(|o| o.force.as_deref());
     let force = named_force.map(Force::parse).unwrap_or(Force::Auto);
     let derived = decide_forced(file, &profile, force, node);
@@ -1027,6 +1033,7 @@ pub async fn create(
                 &super::stream::render_caps(&state).await,
                 req.preserve_dolby_vision == Some(true),
                 req.hdr10 == Some(true),
+                unix_ms(),
             );
             if review.mismatched {
                 tracing::warn!(
@@ -8294,6 +8301,11 @@ fn segment_content_type(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed clock for the plan-review tests. `review_client_plan` reads it
+    /// to decide which of the client's learned limits still apply, so a test
+    /// on the real clock would rot the moment a fixture aged out.
+    const NOW_MS: i64 = 1_756_400_000_000;
     use crate::transcode::HlsDeliveryFixture;
     use http_body_util::BodyExt;
     use std::time::Duration;
@@ -11669,6 +11681,7 @@ mod tests {
             &capable_node(),
             true,  // the body says preserve_dolby_vision
             false, // …and asks for no HDR10 rung
+            NOW_MS,
         );
 
         assert!(
@@ -11702,6 +11715,7 @@ mod tests {
             &capable_node(),
             true,
             true,
+            NOW_MS,
         );
         assert!(review.preserve_dolby_vision);
         assert!(review.hdr10, "the caps present PQ on hevc");
@@ -11731,6 +11745,7 @@ mod tests {
             &capable_node(),
             false, // the retry's body echoes the lowered plan
             true,
+            NOW_MS,
         );
 
         assert!(!review.preserve_dolby_vision);
@@ -11766,6 +11781,7 @@ mod tests {
             &capable_node(),
             false,
             false,
+            NOW_MS,
         );
         assert!(!review.preserve_dolby_vision);
         assert!(!review.mismatched);
@@ -11800,6 +11816,7 @@ mod tests {
             &capable_node(),
             false,
             true,
+            NOW_MS,
         );
         assert!(
             !review.preserve_dolby_vision,
@@ -11823,7 +11840,15 @@ mod tests {
         let file = dolby_vision_p8_file();
         // A node that proved nothing at all: no RPU render, no HDR10 chain.
         let bare = plurx_core::playback::RenderCaps::proven(false);
-        let review = review_client_plan(&dolby_vision_client(), None, &file, &bare, false, true);
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &bare,
+            false,
+            true,
+            NOW_MS,
+        );
         assert!(
             review.hdr10,
             "the document presents PQ on hevc, so the claim stands; whether this \
@@ -11839,6 +11864,7 @@ mod tests {
             &capable_node(),
             false,
             true,
+            NOW_MS,
         );
         assert!(!review.hdr10);
         assert!(review.mismatched);
@@ -11927,6 +11953,7 @@ mod tests {
             &capable_node(),
             false, // "don't preserve Dolby Vision, I just failed on it"
             false,
+            NOW_MS,
         );
         assert!(
             !declined.preserve_dolby_vision,
@@ -11943,6 +11970,7 @@ mod tests {
             &capable_node(),
             true,
             false,
+            NOW_MS,
         );
         assert!(!exceeded.preserve_dolby_vision);
         assert!(exceeded.mismatched);
@@ -11971,6 +11999,7 @@ mod tests {
             &capable_node(),
             false, // the body carries no preserve_dolby_vision…
             false, // …and no hdr10, because there is nothing to ask for
+            NOW_MS,
         );
         assert!(!review.hdr10, "the client asked for no HDR10 rung");
         assert!(!review.preserve_dolby_vision);
@@ -11992,6 +12021,7 @@ mod tests {
             &capable_node(),
             false,
             true,
+            NOW_MS,
         );
         assert!(asked.hdr10);
         assert!(!asked.mismatched);
@@ -12012,6 +12042,7 @@ mod tests {
             &capable_node(),
             true,
             false,
+            NOW_MS,
         );
         review_client_plan(
             &no_dolby_vision_client(),
@@ -12020,6 +12051,7 @@ mod tests {
             &capable_node(),
             true,
             false,
+            NOW_MS,
         );
         review_client_plan(
             &dolby_vision_client(),
@@ -12031,6 +12063,7 @@ mod tests {
             &capable_node(),
             false,
             false,
+            NOW_MS,
         );
 
         let after = plan_derivation::snapshot();

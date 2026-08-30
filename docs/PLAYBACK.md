@@ -85,6 +85,8 @@ one.
 | ID | Fork | Current rule | Regression pin |
 |---|---|---|---|
 | `server.capability-profile` | Reported caps vs named profile | Runtime caps win when any codec/container cap is present; missing fields get conservative browser defaults. Otherwise use the named profile, then `web-h264`. Explicit DV profiles override the legacy all-DV bit. | Rust unit in `http/stream.rs` |
+| `server.learned-decode-limit` | Honour a limit the client learned | An entry the client sent in caps v2 whose identity matches this exact media load routes to a **transcode** — the limit is a statement about the decoder, so the same frames in a different envelope change nothing. Matching is on the whole identity and never a codec-and-height prefix. The reason is the browser's own sentence, verbatim, with its `HDR10 → SDR` clause when the demotion is what costs the grade. | Rust unit in `playback/mod.rs` |
+| `server.learned-decode-limit-expiry` | When one still applies | The **client's** policy, reproduced: applied inside the 7-day re-test window, ignored past it, and ignored outright past the 30-day TTL, with no timestamp, or with a timestamp in the future. Standing aside past re-test is not leniency — the browser only consults its own limits when the server answered direct or remux, so a server that answers transcode first is a server that stops the weekly re-measure from ever running. | Age matrix in `playback/mod.rs` |
 | `server.verdict` | Direct vs remux vs transcode | Video codec, height, bitrate, or HDR failure means transcode. Container, audio, or A/V correction alone means remux. No failures means direct. Unknown container is not permission to direct-play it. | Table-driven Rust unit in `playback/mod.rs` |
 | `server.dolby-vision` | Preserve vs strip vs re-encode DV | A client-approved profile is preserved. An unsupported profile with a compatible base and `dovi_rpu` becomes a strip remux. Without both, re-encode. Apple-supported DV profiles still request a normalized copy-HLS envelope. Profile 5 has no backward-compatible HDR base: its compatibility transcode software-decodes the RPU side data and applies Dolby Vision reshaping through `tonemapx` before any scale or SDR conversion. Boot proves the renderer mechanics, then the first request for each source must prove that enabling RPU application changes sampled pixels; unknown, non-compatible, or unproved routes are refused. | DV profile matrix in `playback/mod.rs`; Profile 5 graph/admission regressions in `transcode/mod.rs` and `plurxd/transcode.rs` |
 | `server.manual-quality` | Auto vs Original vs a rung | Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto. | Force matrix in `playback/mod.rs` |
@@ -1089,6 +1091,28 @@ rate. Two things keep the memory subordinate to the viewer: **Quality →
 Original** bypasses every learned entry, and an explicit-Original session that
 plays **60 s under the same 6-per-minute rate** clears only its exact identity
 and logs `decode_limit_cleared`.
+
+The server sees these too. A client that sends caps v2 includes its learned
+limits verbatim, and `decide()` matches them on the same identity string —
+computed in Rust from the file row rather than in JavaScript from the source
+object, which is why `tests/playback/decode-limit-identity.json` pins both
+implementations to the same output and both test suites read it. A divergence
+there has no symptom worth noticing: nothing errors, no limit ever matches,
+and the viewer simply keeps stuttering through the title they already taught
+their browser to avoid.
+
+When the server matches one, it demotes to a **transcode** — the limit is a
+statement about the decoder, so the same frames in a different envelope change
+nothing — and the reason string is the browser's own sentence, verbatim:
+
+```
+learned client-performance limit for HEVC Main 10 · 3840×2160 · 10-bit · 50–60 Mb/s: lost 41 frames in 60s (41/min)
+```
+
+Verbatim rather than paraphrased because the alternative puts two different
+explanations of one decision in front of the same viewer, in the same UI, and
+leaves the reconciliation to them. The server does not store these; it reports
+them. Per-device storage is a separate decision nobody has needed yet.
 
 When that learned route replaces an ordinary HDR/Dolby Vision delivery with an
 SDR transcode, the Quality menu and Reason row name the consequence, such as
