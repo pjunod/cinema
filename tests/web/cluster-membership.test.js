@@ -2426,6 +2426,11 @@ test("the projection ignores what moves on its own and nothing else", () => {
       row.status.observed_at_unix_ms = (row.status.observed_at_unix_ms || 0) + 60_000;
       row.status.raft.sample_age_seconds = (row.status.raft.sample_age_seconds || 0) + 60;
       row.status.raft.watermark_age_millis = (row.status.raft.watermark_age_millis || 0) + 60_000;
+      // Rendered, but excluded: a WAL fsync alone is not news worth rewriting
+      // the screen for, and the commit watermark beside it is in the projection.
+      if (row.status.wal && row.status.wal.snapshot)
+        row.status.wal.snapshot.last_sync_unix_ms =
+          (row.status.wal.snapshot.last_sync_unix_ms || 0) + 60_000;
     }
   });
   assert.equal(

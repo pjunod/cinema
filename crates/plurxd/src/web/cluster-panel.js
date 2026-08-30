@@ -542,9 +542,16 @@
   // change an operator watches this ledger for, and a projection covering only
   // the rail's verdicts would leave the database section aging off one fetch —
   // the defect this workstream exists to fix.
+  // `last_sync_unix_ms` is the odd one out: it IS rendered, as the node card's
+  // "Last WAL sync … ago". It is excluded anyway, because it advances on every
+  // fsync — so on a cluster doing any work at all it would repaint the tab every
+  // interval on its own. It costs nothing to leave out: a WAL that is syncing is
+  // a cluster that is committing, and the commit watermark beside it is in the
+  // projection, so the screen still moves. On a quiet cluster nothing is syncing
+  // and there is nothing to miss.
   function clusterOpsSelfTicking(key){
     return key==="observed_at_unix_ms"||key==="sample_age_ms"||key==="sample_age_seconds"
-      ||key==="watermark_age_millis"||key==="last_seen_at";
+      ||key==="watermark_age_millis"||key==="last_seen_at"||key==="last_sync_unix_ms";
   }
   function clusterOpsProjection(ops){
     const walk=value=>{
