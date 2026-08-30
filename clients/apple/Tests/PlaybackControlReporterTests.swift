@@ -300,8 +300,10 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertEqual(request.positionMs, 1_000)
         XCTAssertEqual(request.bufferedThroughMs, 11_000)
         XCTAssertEqual(request.capabilities, capabilities())
-        let accepted = await reporter.acceptedSequence
-        XCTAssertEqual(accepted, 1)
+        // The first exchange's own answer, not the reporter's running total:
+        // the pump is free to have completed another exchange between the
+        // gate signalling and this assertion, and on a fast machine it does.
+        XCTAssertEqual(harness.exchanges.first?.response?.acceptedSequence, 1)
     }
 
     func testUnchangedCapabilitiesAreSentOnceAndAChangeResendsThem() async throws {
