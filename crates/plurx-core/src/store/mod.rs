@@ -20,6 +20,7 @@ mod fragment_index_cluster;
 mod renditionplan;
 mod sqlite;
 mod telemetry;
+mod timeline_annotations;
 
 mod publication;
 
@@ -47,6 +48,8 @@ mod hiqlite_reading;
 mod hiqlite_sessions;
 #[cfg(feature = "hiqlite-store")]
 mod hiqlite_shared_cache;
+#[cfg(feature = "hiqlite-store")]
+mod hiqlite_timeline_annotations;
 
 pub mod replicated;
 
@@ -183,6 +186,152 @@ pub struct PrometheusStoreSnapshot {
     pub users: i64,
     pub offline: OfflinePackageStats,
     pub watched_outbox: (i64, i64, i64),
+    pub analysis: AnalysisStoreMetrics,
+}
+
+pub const ANALYSIS_METRIC_COMPONENTS: [&str; 2] = ["fragment_index", "skip_markers"];
+pub const ANALYSIS_METRIC_STATES: [&str; 8] = [
+    "queued",
+    "claimed",
+    "retry_wait",
+    "staged",
+    "published",
+    "failed",
+    "canceled",
+    "stale",
+];
+pub const ANALYSIS_METRIC_PRIORITIES: [&str; 2] = ["normal", "forced"];
+pub const ANALYSIS_MARKER_KINDS: [&str; 4] = ["intro", "recap", "credits", "preview"];
+pub const ANALYSIS_MARKER_PROVENANCE: [&str; 4] = ["estimated", "detected", "authored", "manual"];
+pub const ANALYSIS_MARKER_CONFIDENCE: [&str; 3] = ["low", "medium", "high"];
+pub const ANALYSIS_QUEUE_METRIC_SLOTS: usize = ANALYSIS_METRIC_COMPONENTS.len()
+    * ANALYSIS_METRIC_STATES.len()
+    * ANALYSIS_METRIC_PRIORITIES.len();
+pub const ANALYSIS_MARKER_METRIC_SLOTS: usize = ANALYSIS_MARKER_KINDS.len()
+    * ANALYSIS_MARKER_PROVENANCE.len()
+    * ANALYSIS_MARKER_CONFIDENCE.len();
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AnalysisStoreMetrics {
+    pub queue_depth: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
+    pub queue_oldest_age_seconds: [i64; ANALYSIS_QUEUE_METRIC_SLOTS],
+    pub claims: i64,
+    pub retries: i64,
+    pub cancellations: i64,
+    pub stale_identity: i64,
+    pub terminal_failures: i64,
+    pub publications: i64,
+    pub marker_counts: [i64; ANALYSIS_MARKER_METRIC_SLOTS],
+}
+
+impl Default for AnalysisStoreMetrics {
+    fn default() -> Self {
+        Self {
+            queue_depth: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
+            queue_oldest_age_seconds: [0; ANALYSIS_QUEUE_METRIC_SLOTS],
+            claims: 0,
+            retries: 0,
+            cancellations: 0,
+            stale_identity: 0,
+            terminal_failures: 0,
+            publications: 0,
+            marker_counts: [0; ANALYSIS_MARKER_METRIC_SLOTS],
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AnalysisQueueMetricRow {
+    component: String,
+    state: String,
+    priority: String,
+    count: i64,
+    oldest: i64,
+}
+
+#[derive(serde::Deserialize)]
+struct AnalysisMarkerMetricRow {
+    kind: String,
+    provenance: String,
+    confidence: String,
+    count: i64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct AnalysisLifecycleMetrics {
+    pub claims: i64,
+    pub retries: i64,
+    pub cancellations: i64,
+    pub stale_identity: i64,
+    pub terminal_failures: i64,
+    pub publications: i64,
+}
+
+pub(crate) fn analysis_store_metrics(
+    queue_json: &str,
+    marker_json: &str,
+    lifecycle: AnalysisLifecycleMetrics,
+) -> AnalysisStoreMetrics {
+    let mut metrics = AnalysisStoreMetrics {
+        claims: lifecycle.claims,
+        retries: lifecycle.retries,
+        cancellations: lifecycle.cancellations,
+        stale_identity: lifecycle.stale_identity,
+        terminal_failures: lifecycle.terminal_failures,
+        publications: lifecycle.publications,
+        ..Default::default()
+    };
+    for row in serde_json::from_str::<Vec<AnalysisQueueMetricRow>>(queue_json).unwrap_or_default() {
+        let Some(component) = ANALYSIS_METRIC_COMPONENTS
+            .iter()
+            .position(|value| *value == row.component)
+        else {
+            continue;
+        };
+        let Some(state) = ANALYSIS_METRIC_STATES
+            .iter()
+            .position(|value| *value == row.state)
+        else {
+            continue;
+        };
+        let Some(priority) = ANALYSIS_METRIC_PRIORITIES
+            .iter()
+            .position(|value| *value == row.priority)
+        else {
+            continue;
+        };
+        let slot = (component * ANALYSIS_METRIC_STATES.len() + state)
+            * ANALYSIS_METRIC_PRIORITIES.len()
+            + priority;
+        metrics.queue_depth[slot] = row.count.max(0);
+        metrics.queue_oldest_age_seconds[slot] = row.oldest.max(0);
+    }
+    for row in serde_json::from_str::<Vec<AnalysisMarkerMetricRow>>(marker_json).unwrap_or_default()
+    {
+        let Some(kind) = ANALYSIS_MARKER_KINDS
+            .iter()
+            .position(|value| *value == row.kind)
+        else {
+            continue;
+        };
+        let Some(provenance) = ANALYSIS_MARKER_PROVENANCE
+            .iter()
+            .position(|value| *value == row.provenance)
+        else {
+            continue;
+        };
+        let Some(confidence) = ANALYSIS_MARKER_CONFIDENCE
+            .iter()
+            .position(|value| *value == row.confidence)
+        else {
+            continue;
+        };
+        let slot = (kind * ANALYSIS_MARKER_PROVENANCE.len() + provenance)
+            * ANALYSIS_MARKER_CONFIDENCE.len()
+            + confidence;
+        metrics.marker_counts[slot] = row.count.max(0);
+    }
+    metrics
 }
 
 #[async_trait]
@@ -2416,6 +2565,53 @@ pub trait RenditionPlanStore: Send + Sync + 'static {
     async fn forget_rendition_plans(&self, file_id: i64) -> Result<usize, StoreError>;
 }
 
+/// Replicated semantic timeline annotations.
+///
+/// Unlike [`FragmentIndexStore`], these rows are small, correctable decisions
+/// and therefore belong in the authority store rather than a node sidecar.
+#[async_trait]
+pub trait TimelineAnnotationStore: Send + Sync + 'static {
+    /// Replace the automatic annotation set after validating its complete
+    /// source identity and timeline bounds.
+    async fn put_timeline_annotation_set(
+        &self,
+        file_id: i64,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+    ) -> Result<(), StoreError>;
+
+    /// Return the set only when it describes the caller's current source.
+    async fn timeline_annotation_set(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+    ) -> Result<Option<crate::segplan::TimelineAnnotationSet>, StoreError>;
+
+    async fn forget_timeline_annotation_set(&self, file_id: i64) -> Result<bool, StoreError>;
+
+    /// Set or correct one administrator-owned boundary. The store assigns the
+    /// monotonic revision; the caller-supplied annotation is validated but its
+    /// placeholder revision is not trusted.
+    async fn set_manual_timeline_annotation(
+        &self,
+        file_id: i64,
+        duration_ms: i64,
+        source: &crate::segplan::SourceIdentity,
+        annotation: &crate::segplan::TimelineAnnotation,
+        generation_id: &str,
+    ) -> Result<u64, StoreError>;
+
+    /// Discard exactly the separately confirmed revision. A stale UI cannot
+    /// delete a correction made after it loaded the item.
+    async fn discard_manual_timeline_annotation(
+        &self,
+        file_id: i64,
+        source: &crate::segplan::SourceIdentity,
+        kind: crate::segplan::AnnotationKind,
+        expected_revision: u64,
+    ) -> Result<bool, StoreError>;
+}
+
 /// The full storage boundary — what plurxd holds as `Arc<dyn Store>`.
 pub trait Store:
     SettingsStore
@@ -2437,6 +2633,7 @@ pub trait Store:
     + FragmentIndexStore
     + ClusterFragmentIndexStore
     + RenditionPlanStore
+    + TimelineAnnotationStore
     + CoordinationStore
     + FencedPublicationStore
     + MediaSessionStore
@@ -2466,7 +2663,7 @@ impl<T> Store for T where
         + FragmentIndexStore
         + ClusterFragmentIndexStore
         + RenditionPlanStore
-        + RenditionPlanStore
+        + TimelineAnnotationStore
         + CoordinationStore
         + FencedPublicationStore
         + MediaSessionStore

@@ -347,6 +347,13 @@ pub const SQLITE_TRANSACTION_SITES: &[SqliteTransactionSite] = &[
     },
     SqliteTransactionSite {
         module: "fragment_index_cluster.rs",
+        method: "publish_timeline_annotation_set_for_request",
+        is_async: true,
+        mechanism: TransactionMechanism::RusqliteTransaction,
+        shape: TransactionShape::BranchOnRowsAffected,
+    },
+    SqliteTransactionSite {
+        module: "fragment_index_cluster.rs",
         method: "claim_cluster_fragment_index",
         is_async: true,
         mechanism: TransactionMechanism::RusqliteTransaction,
@@ -610,6 +617,10 @@ mod tests {
         ("sessions.rs", include_str!("sqlite/sessions.rs")),
         ("shared_cache.rs", include_str!("sqlite/shared_cache.rs")),
         ("telemetry.rs", include_str!("sqlite/telemetry.rs")),
+        (
+            "timeline_annotations.rs",
+            include_str!("sqlite/timeline_annotations.rs"),
+        ),
         ("trakt.rs", include_str!("sqlite/trakt.rs")),
         ("users.rs", include_str!("sqlite/users.rs")),
         ("watch.rs", include_str!("sqlite/watch.rs")),
@@ -713,7 +724,7 @@ mod tests {
         methods.sort_unstable();
         methods.dedup();
         assert_eq!(methods.len(), original_len);
-        assert_eq!(methods.len(), 48);
+        assert_eq!(methods.len(), 49);
     }
 
     #[test]

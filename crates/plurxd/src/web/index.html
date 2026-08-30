@@ -5016,7 +5016,7 @@ function analysisFileControl(f){
     :"VOD analysis pending";
   return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
     <div class="analysis-brief-head"><div><h2>Content analysis</h2>
-      <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>
+      <p><b>${esc(state)}</b> · Build and inspect the structural index and exact skip markers for this file.</p></div>
       <div class="analysis-actions">${unsupported?"":`<button class="ghost sm" onclick='requestAnalysis(${esc(JSON.stringify(fileId))},${rebuild?'true':'false'},this)'>${rebuild?'Rebuild analysis':'Analyze now'}</button>`}
       <a class="ghost sm" href="#/analysis">View queue</a></div></div></div>`;
 }
@@ -5024,7 +5024,7 @@ async function requestAnalysis(fileId,force,btn,stay=false){
   const label=btn&&btn.textContent;
   if(btn){ btn.disabled=true; btn.textContent=force?"Queueing rebuild…":"Queueing…"; }
   try{
-    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index"]}});
+    const response=await api(`/files/${fileId}/analysis`,{method:"POST",body:{force:!!force,components:["fragment_index","skip_markers"]}});
     toast(response.joined?"Analysis is already queued":"Analysis queued");
     if(stay&&location.hash==="#/analysis") await renderAnalysis(PAGE_RENDER_GENERATION,true);
     else location.hash="#/analysis";
@@ -10345,9 +10345,11 @@ async function renderAnalysisSummary(generation=PAGE_RENDER_GENERATION){
   }finally{ if(ANALYSIS_SUMMARY_BUSY===run) ANALYSIS_SUMMARY_BUSY=null; }
 }
 function analysisStateLabel(state){
-  return ({queued:"Queued",running:"Running",submitted:"Publishing",ready:"Ready",failed:"Failed",cancelled:"Canceled"})[state]||state;
+  return ({queued:"Queued",claimed:"Claimed",running:"Running",retry_wait:"Retry wait",staged:"Staged",submitted:"Publishing",published:"Ready",ready:"Ready",failed:"Failed",canceled:"Canceled",cancelled:"Canceled",stale:"Stale"})[state]||state;
 }
 function analysisPhase(row){
+  if(row.component==="skip_markers"&&row.request_state==="running") return "Correlating and persisting timeline markers";
+  if(row.component==="skip_markers"&&row.state==="ready") return "Timeline markers verified and published";
   if(row.request_state==="running") return "Hashing and verifying the source file";
   if(row.job_state==="running") return "Building the fragment index";
   if(row.job_state==="queued") return "Waiting for an idle media worker";
@@ -10514,11 +10516,22 @@ async function retryFailedAnalysis(){
   if(!rows.length||!confirm(`Retry ${rows.length} analysis ${rows.length===1?'item':'items'} needing attention on this page?`)) return;
   let queued=0;
   for(const row of rows){
-    try{ await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:["fragment_index"]}}); queued++; }
+    try{
+      if(row.request_id) await api(`/analysis/jobs/${row.request_id}/retry`,{method:"POST",body:{}});
+      else await api(`/files/${row.file_id}/analysis`,{method:"POST",body:{force:true,components:[row.component||"fragment_index"]}});
+      queued++;
+    }
     catch(error){}
   }
   toast(`${queued} of ${rows.length} ${queued===1?'item':'items'} queued`);
   await renderAnalysis(PAGE_RENDER_GENERATION,true);
+}
+async function cancelAnalysisRow(key,btn){
+  const row=ANALYSIS_ROW_LOOKUP.get(key); if(!row||!row.request_id) return;
+  const label=btn&&btn.textContent; if(btn){btn.disabled=true;btn.textContent="Canceling…";}
+  try{ await api(`/analysis/jobs/${row.request_id}`,{method:"DELETE",body:{}}); toast("Analysis canceled"); await renderAnalysis(PAGE_RENDER_GENERATION,true); }
+  catch(error){ toast(error.message||"Couldn’t cancel analysis"); }
+  finally{ if(btn&&document.body.contains(btn)){btn.disabled=false;btn.textContent=label;} }
 }
 function paintAnalysis(snapshot){
   const main=document.getElementById("main"); if(!main) return;
@@ -10536,7 +10549,7 @@ function paintAnalysis(snapshot){
     const owner=row.owner_node_id||row.target_node_id||"";
     const attempt=row.attempts||0, lease=row.lease_expires_ms||0, retryAt=row.not_before_ms||0;
     const pipeline=row.pipeline_version?` · pipeline ${esc(row.pipeline_version)}`:"";
-    const key=analysisRowKey(row), action=analysisAction(row);
+    const key=analysisRowKey(row), action=analysisAction(row), displayState=row.durable_state||row.state;
     const actionLabel={retry:"Retry",rebuild:"Rebuild",analyze_current:"Analyze current file"}[action]||"";
     const title=row.item_id?`<a data-analysis-focus="item:${esc(key)}" href="#/item/${row.item_id}">${esc(row.title||`File ${row.file_id}`)}</a>`:esc(row.title||`File ${row.file_id}`);
     const trigger=row.request_id?(row.force_rebuild?"Operator rebuild":"Operator request"):"Background build";
@@ -10552,13 +10565,13 @@ function paintAnalysis(snapshot){
     const errorHtml=analysisErrors(row).map(error=>analysisErrorHtml(error.code,error.stage)).join("");
     return `<tr>
       <td><span class="analysis-file">${title}</span><div class="analysis-sub">File ${row.file_id} · ${esc(trigger)}${pipeline}</div></td>
-      <td><span class="analysis-state ${esc(row.state)}">${esc(analysisStateLabel(row.state))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
+      <td><span class="analysis-state ${esc(displayState)}">${esc(analysisStateLabel(displayState))}</span><div class="analysis-phase">${esc(analysisPhase(row))}</div>${errorHtml}
         <details class="analysis-diag" data-analysis-key="${esc(key)}"${open.has(key)?" open":""}><summary data-analysis-focus="details:${esc(key)}">Technical details</summary><div class="analysis-diag-grid">
           ${details.map(([label,value])=>`<b>${esc(label)}</b><span>${esc(value)}</span>`).join("")}
           <b>Disposition</b><span>${esc(analysisDisposition(row))}</span><b>Attempts</b><span>${attempt}</span><b>Updated</b><span>${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</span>
         </div></details></td>
       <td>${analysisNodeCell(nodeNames,owner)}<div class="analysis-sub">${row.updated_at_ms?fmtAgo(Math.floor(row.updated_at_ms/1000)):"—"}</div></td>
-      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
+      <td style="text-align:right"><div class="analysis-actions">${actionLabel?`<button class="ghost sm" data-analysis-focus="action:${esc(key)}" onclick='requestAnalysis(${esc(JSON.stringify(String(row.file_id)))},true,this,true)'>${actionLabel}</button>`:""}${row.request_id&&["queued","running","submitted"].includes(row.state)?`<button class="ghost sm" data-analysis-focus="cancel:${esc(key)}" onclick='cancelAnalysisRow(${esc(JSON.stringify(key))},this)'>Cancel</button>`:""}<button class="ghost sm" data-analysis-focus="copy:${esc(key)}" onclick='copyAnalysisDetails(${esc(JSON.stringify(key))},this)'>Copy details</button></div></td></tr>`;
   }).join("");
   const attention=counts.attention||0, working=counts.active||0, expected=counts.expected||0;
   const filterButton=(id,label)=>`<button class="${ANALYSIS_VIEW.filter===id?'on':''}" data-analysis-focus="filter:${id}" aria-pressed="${ANALYSIS_VIEW.filter===id}" onclick="setAnalysisFilter('${id}')">${label}${ANALYSIS_VIEW.filter===id?` <b>${filteredTotal}</b>`:""}</button>`;

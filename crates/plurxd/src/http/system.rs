@@ -3336,6 +3336,72 @@ fn render_store_metrics(view: StoreMetricsView) -> String {
         offline.active_leases,
         offline.pinned_bytes,
     ));
+    let analysis = sample.analysis;
+    out.push_str(
+        "# HELP plurx_analysis_queue_depth Durable admin analysis jobs by state, component, and priority.\n\
+         # TYPE plurx_analysis_queue_depth gauge\n\
+         # HELP plurx_analysis_queue_oldest_age_seconds Age of the oldest durable admin analysis job in each class.\n\
+         # TYPE plurx_analysis_queue_oldest_age_seconds gauge\n",
+    );
+    for (component_index, component) in plurx_core::store::ANALYSIS_METRIC_COMPONENTS
+        .iter()
+        .enumerate()
+    {
+        for (state_index, state) in plurx_core::store::ANALYSIS_METRIC_STATES.iter().enumerate() {
+            for (priority_index, priority) in plurx_core::store::ANALYSIS_METRIC_PRIORITIES
+                .iter()
+                .enumerate()
+            {
+                let slot = (component_index * plurx_core::store::ANALYSIS_METRIC_STATES.len()
+                    + state_index)
+                    * plurx_core::store::ANALYSIS_METRIC_PRIORITIES.len()
+                    + priority_index;
+                out.push_str(&format!(
+                    "plurx_analysis_queue_depth{{state=\"{state}\",component=\"{component}\",priority=\"{priority}\",trigger=\"admin\"}} {}\n\
+                     plurx_analysis_queue_oldest_age_seconds{{state=\"{state}\",component=\"{component}\",priority=\"{priority}\",trigger=\"admin\"}} {}\n",
+                    analysis.queue_depth[slot], analysis.queue_oldest_age_seconds[slot]
+                ));
+            }
+        }
+    }
+    out.push_str(&format!(
+        "# HELP plurx_analysis_lifecycle Retained durable analysis lifecycle counts.\n\
+         # TYPE plurx_analysis_lifecycle gauge\n\
+         plurx_analysis_lifecycle{{event=\"claim\",reason=\"all\"}} {}\n\
+         plurx_analysis_lifecycle{{event=\"retry\",reason=\"all\"}} {}\n\
+         plurx_analysis_lifecycle{{event=\"cancel\",reason=\"admin\"}} {}\n\
+         plurx_analysis_lifecycle{{event=\"stale\",reason=\"source_identity_changed\"}} {}\n\
+         plurx_analysis_lifecycle{{event=\"failure\",reason=\"terminal\"}} {}\n\
+         plurx_analysis_lifecycle{{event=\"publication\",reason=\"validated\"}} {}\n\
+         # HELP plurx_analysis_markers Current persisted marker count by semantic evidence.\n\
+         # TYPE plurx_analysis_markers gauge\n",
+        analysis.claims,
+        analysis.retries,
+        analysis.cancellations,
+        analysis.stale_identity,
+        analysis.terminal_failures,
+        analysis.publications,
+    ));
+    for (kind_index, kind) in plurx_core::store::ANALYSIS_MARKER_KINDS.iter().enumerate() {
+        for (provenance_index, provenance) in plurx_core::store::ANALYSIS_MARKER_PROVENANCE
+            .iter()
+            .enumerate()
+        {
+            for (confidence_index, confidence) in plurx_core::store::ANALYSIS_MARKER_CONFIDENCE
+                .iter()
+                .enumerate()
+            {
+                let slot = (kind_index * plurx_core::store::ANALYSIS_MARKER_PROVENANCE.len()
+                    + provenance_index)
+                    * plurx_core::store::ANALYSIS_MARKER_CONFIDENCE.len()
+                    + confidence_index;
+                out.push_str(&format!(
+                    "plurx_analysis_markers{{kind=\"{kind}\",provenance=\"{provenance}\",confidence=\"{confidence}\"}} {}\n",
+                    analysis.marker_counts[slot]
+                ));
+            }
+        }
+    }
     out
 }
 

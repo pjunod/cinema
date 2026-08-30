@@ -156,6 +156,82 @@ CREATE INDEX IF NOT EXISTS cluster_fragment_index_jobs_status_history
     ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key);
 "#;
 
+/// v41/v22 widens the already-durable request identity to the replicated
+/// semantic component. A table rebuild is required because SQLite cannot
+/// alter a CHECK constraint in place.
+pub const ANALYSIS_COMPONENTS_SCHEMA: &str = r#"
+DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history;
+DROP TRIGGER IF EXISTS analysis_requests_supersede_source;
+DROP TRIGGER IF EXISTS analysis_requests_cancel_source;
+DROP INDEX IF EXISTS analysis_requests_result_history;
+DROP INDEX IF EXISTS analysis_requests_one_active_source;
+DROP INDEX IF EXISTS analysis_requests_status;
+DROP INDEX IF EXISTS analysis_requests_due;
+ALTER TABLE analysis_requests RENAME TO analysis_requests_v40;
+CREATE TABLE analysis_requests (
+    request_id         TEXT PRIMARY KEY,
+    file_id            INTEGER NOT NULL,
+    source_size        INTEGER NOT NULL,
+    source_mtime       INTEGER NOT NULL,
+    component          TEXT NOT NULL CHECK (component IN ('fragment_index','skip_markers')),
+    force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+    target_node_id     TEXT NOT NULL,
+    state              TEXT NOT NULL CHECK (
+        state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+    owner_node_id      TEXT,
+    fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+    lease_expires_ms   INTEGER,
+    attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    not_before_ms      INTEGER NOT NULL,
+    result_cache_key   TEXT,
+    last_error_code    TEXT,
+    created_at_ms      INTEGER NOT NULL,
+    updated_at_ms      INTEGER NOT NULL
+) STRICT;
+INSERT INTO analysis_requests SELECT * FROM analysis_requests_v40;
+DROP TABLE analysis_requests_v40;
+CREATE INDEX analysis_requests_due
+    ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id);
+CREATE INDEX analysis_requests_status
+    ON analysis_requests(state, updated_at_ms DESC, request_id);
+CREATE UNIQUE INDEX analysis_requests_one_active_source
+    ON analysis_requests(file_id, source_size, source_mtime, component, target_node_id)
+    WHERE state IN ('queued', 'running', 'submitted');
+CREATE INDEX analysis_requests_result_history
+    ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+    WHERE result_cache_key IS NOT NULL AND result_cache_key <> '';
+CREATE TRIGGER analysis_requests_cancel_source BEFORE DELETE ON files
+BEGIN
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           last_error_code = 'source_deleted'
+     WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+END;
+CREATE TRIGGER analysis_requests_supersede_source
+AFTER UPDATE OF size, mtime ON files
+WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+BEGIN
+    UPDATE analysis_requests
+       SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+           last_error_code = 'source_superseded'
+     WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+       AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+END;
+CREATE TRIGGER analysis_requests_bound_terminal_history
+AFTER UPDATE OF state ON analysis_requests
+WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+BEGIN
+    DELETE FROM analysis_requests
+     WHERE request_id IN (
+       SELECT request_id FROM analysis_requests
+        WHERE state IN ('ready', 'failed', 'cancelled')
+          AND request_id <> NEW.request_id
+        ORDER BY updated_at_ms, request_id
+        LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                    WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+END;
+"#;
+
 pub const MAX_CLUSTER_FRAGMENT_INDEX_BLOB_BYTES: usize = 32 * 1024 * 1024;
 
 /// Portable SQLite/Postgres projection used by both store backends. Retained
@@ -183,6 +259,8 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          CASE WHEN request.cache_rank = 1 THEN COALESCE(job.state, request.state) ELSE request.state END AS state,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.owner_node_id, '') <> ''
               THEN job.owner_node_id ELSE COALESCE(request.owner_node_id, '') END AS owner_node_id,
+         CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
+              THEN job.fence ELSE request.fence END AS claim_epoch,
          CASE WHEN request.cache_rank = 1 AND COALESCE(job.lease_expires_ms, 0) > 0
               THEN job.lease_expires_ms ELSE COALESCE(request.lease_expires_ms, 0) END AS lease_expires_ms,
          CASE WHEN request.cache_rank = 1 AND job.cache_key IS NOT NULL
@@ -211,6 +289,7 @@ pub(super) const ANALYSIS_CANONICAL_CTE: &str = r#"WITH request_ranked AS (
          'fragment_index' AS component, 0 AS force_rebuild,
          '' AS target_node_id, '' AS request_state, job.state AS job_state,
          job.state AS state, COALESCE(job.owner_node_id, '') AS owner_node_id,
+         job.fence AS claim_epoch,
          COALESCE(job.lease_expires_ms, 0) AS lease_expires_ms,
          job.attempts AS attempts, job.not_before_ms AS not_before_ms,
          '' AS request_error_code, COALESCE(job.last_error_code, '') AS job_error_code,
@@ -432,6 +511,11 @@ pub struct AnalysisHistoryQuery {
     pub cursor: Option<AnalysisHistoryCursor>,
     pub filter: AnalysisHistoryFilter,
     pub search: String,
+    /// Canonical durable states (`queued`, `claimed`, `retry_wait`, ...).
+    /// Empty means all states. Values are validated at the HTTP boundary.
+    pub states: Vec<String>,
+    /// Server-stamped time used to distinguish queued work from retry wait.
+    pub now_ms: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -451,6 +535,7 @@ pub struct AnalysisHistoryRow {
     pub disposition: String,
     pub action: String,
     pub owner_node_id: String,
+    pub claim_epoch: i64,
     pub lease_expires_ms: i64,
     pub attempts: i64,
     pub not_before_ms: i64,
@@ -571,6 +656,46 @@ pub trait ClusterFragmentIndexStore: Send + Sync + 'static {
     ) -> Result<u64, StoreError>;
 
     async fn analysis_requests(&self, limit: i64) -> Result<Vec<AnalysisRequest>, StoreError>;
+
+    async fn analysis_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Explicit administrator retry. This is the only way a deterministic
+    /// terminal failure becomes eligible without a source/version change.
+    async fn retry_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Cancel an operator request and revoke any live request fence. A shared
+    /// fragment artifact already published by another identity is untouched.
+    async fn cancel_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError>;
+
+    /// Publish a non-fragment component directly under the exact live request
+    /// fence after its replicated payload has been validated.
+    async fn complete_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        result_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
+
+    /// Atomically publish a validated semantic set and consume the exact live
+    /// request fence. A stale worker can do neither half.
+    async fn publish_timeline_annotation_set_for_request(
+        &self,
+        request: &AnalysisRequest,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+        now_ms: i64,
+    ) -> Result<bool, StoreError>;
 
     /// Stable keyset page over operator requests plus background-only jobs.
     /// A worker job is attached only to the newest request that references its

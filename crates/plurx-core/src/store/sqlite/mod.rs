@@ -23,6 +23,7 @@ mod reading;
 mod sessions;
 mod shared_cache;
 mod telemetry;
+mod timeline_annotations;
 mod trakt;
 mod users;
 mod watch;
@@ -876,6 +877,14 @@ const MIGRATIONS: &[&str] = &[
     // that genuinely reported zero must stay distinguishable, or the fallback
     // to the label can never know when to stop.
     super::FILES_DOLBY_VISION_COLUMNS_BATCH,
+    // v39: replicated, source-versioned semantic markers. These remain
+    // separate from the node-local packed fragment index by design.
+    crate::store::timeline_annotations::TIMELINE_ANNOTATIONS_SCHEMA,
+    // v40: separately fenced administrator corrections. Automatic set
+    // replacement never writes this table, so rebuilds cannot erase them.
+    crate::store::timeline_annotations::TIMELINE_MANUAL_OVERRIDES_SCHEMA,
+    // v41: make semantic skip-marker work a first-class request component.
+    crate::store::fragment_index_cluster::ANALYSIS_COMPONENTS_SCHEMA,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1366,7 +1375,58 @@ impl MetricsStore for SqliteStore {
                        )),
                     (SELECT COALESCE(SUM(status = 'pending'), 0) FROM watched_outbox),
                     (SELECT COALESCE(SUM(status = 'ok'), 0) FROM watched_outbox),
-                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox)
+                    (SELECT COALESCE(SUM(status = 'failed'), 0) FROM watched_outbox),
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'component', grouped.component, 'state', grouped.durable_state,
+                        'priority', grouped.priority, 'count', grouped.depth,
+                        'oldest', grouped.oldest_age_seconds)), '[]')
+                       FROM (SELECT component,
+                              CASE
+                                WHEN last_error_code = 'source_superseded' THEN 'stale'
+                                WHEN state = 'queued' AND not_before_ms > ?2 THEN 'retry_wait'
+                                WHEN state = 'running' THEN 'claimed'
+                                WHEN state = 'submitted' THEN 'staged'
+                                WHEN state = 'ready' THEN 'published'
+                                WHEN state = 'cancelled' THEN 'canceled'
+                                ELSE state END AS durable_state,
+                              CASE force_rebuild WHEN 1 THEN 'forced' ELSE 'normal' END AS priority,
+                              COUNT(*) AS depth,
+                              CASE WHEN ?2 > MIN(created_at_ms)
+                                THEN (?2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds
+                         FROM analysis_requests
+                        GROUP BY component, durable_state, priority) grouped),
+                    (SELECT COALESCE(json_group_array(json_object(
+                        'kind', grouped.kind, 'provenance', grouped.provenance,
+                        'confidence', grouped.confidence, 'count', grouped.count)), '[]')
+                       FROM (SELECT kind, provenance, confidence, COUNT(*) AS count
+                               FROM (SELECT json_extract(marker.value, '$.kind') AS kind,
+                                            json_extract(marker.value, '$.provenance') AS provenance,
+                                            CASE
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 500 THEN 'low'
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 900 THEN 'medium'
+                                              ELSE 'high' END AS confidence
+                                       FROM timeline_annotation_sets annotation_set,
+                                            json_each(annotation_set.annotations_json) marker
+                                      WHERE NOT EXISTS (
+                                        SELECT 1 FROM timeline_manual_overrides manual
+                                         WHERE manual.file_id = annotation_set.file_id
+                                           AND manual.kind = json_extract(marker.value, '$.kind')
+                                           AND manual.source_size = annotation_set.source_size
+                                           AND manual.source_mtime = annotation_set.source_mtime
+                                           AND manual.argv_fingerprint = annotation_set.argv_fingerprint)
+                                      UNION ALL
+                                     SELECT kind, 'manual', 'high'
+                                       FROM timeline_manual_overrides)
+                              GROUP BY kind, provenance, confidence) grouped),
+                    (SELECT COALESCE(SUM(attempts), 0) FROM analysis_requests),
+                    (SELECT COALESCE(SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END), 0)
+                       FROM analysis_requests),
+                    (SELECT COALESCE(SUM(last_error_code = 'admin_cancelled'), 0)
+                       FROM analysis_requests),
+                    (SELECT COALESCE(SUM(last_error_code = 'source_superseded'), 0)
+                       FROM analysis_requests),
+                    (SELECT COALESCE(SUM(state = 'failed'), 0) FROM analysis_requests),
+                    (SELECT COALESCE(SUM(state = 'ready'), 0) FROM analysis_requests)
                  FROM offline_packages WHERE node_id = ?1",
                 params![node_id, now],
                 |row| {
@@ -1386,6 +1446,18 @@ impl MetricsStore for SqliteStore {
                             pinned_bytes: row.get(11)?,
                         },
                         watched_outbox: (row.get(12)?, row.get(13)?, row.get(14)?),
+                        analysis: super::analysis_store_metrics(
+                            &row.get::<_, String>(15)?,
+                            &row.get::<_, String>(16)?,
+                            super::AnalysisLifecycleMetrics {
+                                claims: row.get(17)?,
+                                retries: row.get(18)?,
+                                cancellations: row.get(19)?,
+                                stale_identity: row.get(20)?,
+                                terminal_failures: row.get(21)?,
+                                publications: row.get(22)?,
+                            },
+                        ),
                     })
                 },
             )
@@ -1835,7 +1907,7 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 38,
+            version, 41,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
         );
@@ -3001,6 +3073,70 @@ mod tests {
                 .expect("schema object"),
                 1,
                 "missing v32 schema object {object}"
+            );
+        }
+    }
+
+    #[test]
+    fn v39_to_v41_add_annotations_and_widen_analysis_without_losing_requests() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dir.path().join("plurx.db");
+        {
+            let conn = Connection::open(&db).expect("raw open");
+            for (index, sql) in MIGRATIONS.iter().enumerate().take(38) {
+                conn.execute_batch(&format!("BEGIN;\n{sql}\nCOMMIT;"))
+                    .unwrap_or_else(|error| panic!("v{}: {error}", index + 1));
+            }
+            conn.pragma_update(None, "user_version", 38)
+                .expect("v38 marker");
+            conn.execute(
+                "INSERT INTO analysis_requests
+                    (request_id, file_id, source_size, source_mtime, component,
+                     force_rebuild, target_node_id, state, not_before_ms,
+                     created_at_ms, updated_at_ms)
+                 VALUES ('preserved-v38', 7, 100, 10, 'fragment_index', 0,
+                         'node-a', 'queued', 20, 20, 20)",
+                [],
+            )
+            .expect("seed v38 analysis request");
+        }
+
+        SqliteStore::open(&db).expect("migrate v38 through annotations and component widening");
+        let conn = Connection::open(&db).expect("raw reopen");
+        assert_eq!(
+            conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .expect("version"),
+            SQLITE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT component FROM analysis_requests WHERE request_id = 'preserved-v38'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("preserved request"),
+            "fragment_index"
+        );
+        conn.execute(
+            "INSERT INTO analysis_requests
+                (request_id, file_id, source_size, source_mtime, component,
+                 force_rebuild, target_node_id, state, not_before_ms,
+                 created_at_ms, updated_at_ms)
+             VALUES ('semantic-v41', 8, 100, 10, 'skip_markers', 0,
+                     'node-a', 'queued', 21, 21, 21)",
+            [],
+        )
+        .expect("widened component accepts semantic work");
+        for table in ["timeline_annotation_sets", "timeline_manual_overrides"] {
+            assert_eq!(
+                conn.query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("timeline table"),
+                1,
+                "missing {table}"
             );
         }
     }

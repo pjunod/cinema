@@ -132,7 +132,6 @@ pub struct Dirs {
 
 const STORE_METRICS_FRESHNESS_SECS: u64 = 120;
 
-#[derive(Default)]
 struct StoreMetricsAtomics {
     sequence: AtomicU64,
     published: AtomicBool,
@@ -153,6 +152,50 @@ struct StoreMetricsAtomics {
     outbox_pending: AtomicI64,
     outbox_ok: AtomicI64,
     outbox_failed: AtomicI64,
+    analysis_queue_depth: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+    analysis_queue_oldest_age_seconds: [AtomicI64; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+    analysis_claims: AtomicI64,
+    analysis_retries: AtomicI64,
+    analysis_cancellations: AtomicI64,
+    analysis_stale_identity: AtomicI64,
+    analysis_terminal_failures: AtomicI64,
+    analysis_publications: AtomicI64,
+    analysis_marker_counts: [AtomicI64; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+}
+
+impl Default for StoreMetricsAtomics {
+    fn default() -> Self {
+        Self {
+            sequence: AtomicU64::new(0),
+            published: AtomicBool::new(false),
+            sampled_elapsed: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            libraries: AtomicI64::new(0),
+            users: AtomicI64::new(0),
+            queued: AtomicI64::new(0),
+            preparing: AtomicI64::new(0),
+            ready: AtomicI64::new(0),
+            failed: AtomicI64::new(0),
+            queued_bytes: AtomicI64::new(0),
+            preparing_bytes: AtomicI64::new(0),
+            ready_bytes: AtomicI64::new(0),
+            failed_bytes: AtomicI64::new(0),
+            active_leases: AtomicI64::new(0),
+            pinned_bytes: AtomicI64::new(0),
+            outbox_pending: AtomicI64::new(0),
+            outbox_ok: AtomicI64::new(0),
+            outbox_failed: AtomicI64::new(0),
+            analysis_queue_depth: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_queue_oldest_age_seconds: std::array::from_fn(|_| AtomicI64::new(0)),
+            analysis_claims: AtomicI64::new(0),
+            analysis_retries: AtomicI64::new(0),
+            analysis_cancellations: AtomicI64::new(0),
+            analysis_stale_identity: AtomicI64::new(0),
+            analysis_terminal_failures: AtomicI64::new(0),
+            analysis_publications: AtomicI64::new(0),
+            analysis_marker_counts: std::array::from_fn(|_| AtomicI64::new(0)),
+        }
+    }
 }
 
 /// Lock-free view consumed by the Prometheus handler.
@@ -220,6 +263,26 @@ impl StoreMetricsCache {
                     self.inner.outbox_ok.load(Ordering::Relaxed),
                     self.inner.outbox_failed.load(Ordering::Relaxed),
                 ),
+                analysis: plurx_core::store::AnalysisStoreMetrics {
+                    queue_depth: std::array::from_fn(|slot| {
+                        self.inner.analysis_queue_depth[slot].load(Ordering::Relaxed)
+                    }),
+                    queue_oldest_age_seconds: std::array::from_fn(|slot| {
+                        self.inner.analysis_queue_oldest_age_seconds[slot].load(Ordering::Relaxed)
+                    }),
+                    claims: self.inner.analysis_claims.load(Ordering::Relaxed),
+                    retries: self.inner.analysis_retries.load(Ordering::Relaxed),
+                    cancellations: self.inner.analysis_cancellations.load(Ordering::Relaxed),
+                    stale_identity: self.inner.analysis_stale_identity.load(Ordering::Relaxed),
+                    terminal_failures: self
+                        .inner
+                        .analysis_terminal_failures
+                        .load(Ordering::Relaxed),
+                    publications: self.inner.analysis_publications.load(Ordering::Relaxed),
+                    marker_counts: std::array::from_fn(|slot| {
+                        self.inner.analysis_marker_counts[slot].load(Ordering::Relaxed)
+                    }),
+                },
             };
             let after = self.inner.sequence.load(Ordering::Acquire);
             if before == after {
@@ -300,6 +363,48 @@ impl StoreMetricsCache {
         self.inner
             .outbox_failed
             .store(sample.watched_outbox.2, Ordering::Relaxed);
+        for (target, value) in self
+            .inner
+            .analysis_queue_depth
+            .iter()
+            .zip(sample.analysis.queue_depth)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        for (target, value) in self
+            .inner
+            .analysis_queue_oldest_age_seconds
+            .iter()
+            .zip(sample.analysis.queue_oldest_age_seconds)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
+        self.inner
+            .analysis_claims
+            .store(sample.analysis.claims, Ordering::Relaxed);
+        self.inner
+            .analysis_retries
+            .store(sample.analysis.retries, Ordering::Relaxed);
+        self.inner
+            .analysis_cancellations
+            .store(sample.analysis.cancellations, Ordering::Relaxed);
+        self.inner
+            .analysis_stale_identity
+            .store(sample.analysis.stale_identity, Ordering::Relaxed);
+        self.inner
+            .analysis_terminal_failures
+            .store(sample.analysis.terminal_failures, Ordering::Relaxed);
+        self.inner
+            .analysis_publications
+            .store(sample.analysis.publications, Ordering::Relaxed);
+        for (target, value) in self
+            .inner
+            .analysis_marker_counts
+            .iter()
+            .zip(sample.analysis.marker_counts)
+        {
+            target.store(value, Ordering::Relaxed);
+        }
         self.inner.sampled_elapsed.store(elapsed, Ordering::Relaxed);
         self.inner.published.store(true, Ordering::Relaxed);
         self.inner
@@ -1500,7 +1605,13 @@ impl JobManager {
         &self,
         file_id: i64,
         force_rebuild: bool,
+        component: &str,
     ) -> Result<(AnalysisRequest, bool), StoreError> {
+        if !matches!(component, "fragment_index" | "skip_markers") {
+            return Err(StoreError::Task(
+                "unsupported analysis component".to_owned(),
+            ));
+        }
         let file = self
             .store
             .get_file(file_id)
@@ -1515,9 +1626,13 @@ impl JobManager {
                 file_id: file.id,
                 source_size: file.size,
                 source_mtime: file.mtime,
-                component: "fragment_index".to_owned(),
+                component: component.to_owned(),
                 force_rebuild,
-                target_node_id: self.coordinator.node_id().to_owned(),
+                target_node_id: if component == "skip_markers" {
+                    String::new()
+                } else {
+                    self.coordinator.node_id().to_owned()
+                },
                 not_before_ms: now,
                 created_at_ms: now,
             })
@@ -4032,11 +4147,10 @@ impl JobManager {
             return;
         }
         let _guard = ClusterIndexWorkingGuard(Arc::clone(&self));
-        if !self.may_run_cluster_jobs().await
-            || !crate::ffmpeg::fragment_index_engine_is_current().await
-        {
+        if !self.may_run_cluster_jobs().await {
             return;
         }
+        let fragment_engine_current = crate::ffmpeg::fragment_index_engine_is_current().await;
 
         let now = clock_ms();
         if let Err(error) = self.store.settle_analysis_requests(now).await {
@@ -4067,6 +4181,10 @@ impl JobManager {
             }
         }
         self.resolve_analysis_requests(Arc::clone(&transcode)).await;
+
+        if !fragment_engine_current {
+            return;
+        }
 
         let mut slots = tokio::task::JoinSet::new();
         for slot in 0..GLOBAL_SLOTS {
@@ -4262,6 +4380,70 @@ impl JobManager {
                 })
             }
         };
+        if request.component == "skip_markers" {
+            let stored = self.store.get_file_probe_json(file.id).await.map_err(|_| {
+                AnalysisResolutionError::Retry {
+                    code: "source_catalog_read_failed",
+                    delay_ms: 10_000,
+                    charge_attempt: true,
+                }
+            })?;
+            let stored_chapters = stored
+                .as_deref()
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+                .and_then(|probe| {
+                    probe
+                        .get("chapters")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                });
+            let chapters = match stored_chapters {
+                Some(chapters) => chapters,
+                None => {
+                    let chapters = crate::http::stream::probe_chapters(&file.path)
+                        .await
+                        .ok_or(AnalysisResolutionError::Retry {
+                            code: "source_unavailable",
+                            delay_ms: 30_000,
+                            charge_attempt: true,
+                        })?;
+                    if let Ok(json) = serde_json::to_string(&chapters) {
+                        let _ = self.store.merge_file_probe_chapters(file.id, &json).await;
+                    }
+                    chapters
+                }
+            };
+            if lost.is_cancelled() {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            let duration_ms = file
+                .duration_ms
+                .filter(|duration| *duration > 0)
+                .ok_or(AnalysisResolutionError::Terminal("source_duration_missing"))?;
+            let source = crate::http::stream::annotation_source_identity(&file);
+            let markers = crate::http::stream::markers_from_chapters(&chapters, Some(duration_ms));
+            let set = crate::http::stream::annotation_set_from_markers(source, &markers);
+            let published = self
+                .store
+                .publish_timeline_annotation_set_for_request(request, duration_ms, &set, clock_ms())
+                .await
+                .map_err(|_| AnalysisResolutionError::Retry {
+                    code: "queue_write_failed",
+                    delay_ms: 10_000,
+                    charge_attempt: true,
+                })?;
+            if !published {
+                return Err(AnalysisResolutionError::ClaimLost);
+            }
+            return Ok(());
+        }
+        if !crate::ffmpeg::fragment_index_engine_is_current().await {
+            return Err(AnalysisResolutionError::Retry {
+                code: "pipeline_version_unavailable",
+                delay_ms: 30_000,
+                charge_attempt: false,
+            });
+        }
         let video = fragment_index_requested_video_options(self.store.as_ref(), &file, have_dovi)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
@@ -5537,6 +5719,17 @@ mod tests {
                 pinned_bytes: value,
             },
             watched_outbox: (value, value, value),
+            analysis: plurx_core::store::AnalysisStoreMetrics {
+                queue_depth: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+                queue_oldest_age_seconds: [value; plurx_core::store::ANALYSIS_QUEUE_METRIC_SLOTS],
+                claims: value,
+                retries: value,
+                cancellations: value,
+                stale_identity: value,
+                terminal_failures: value,
+                publications: value,
+                marker_counts: [value; plurx_core::store::ANALYSIS_MARKER_METRIC_SLOTS],
+            },
         }
     }
 

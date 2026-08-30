@@ -792,6 +792,47 @@ const TABLES: &[TablePlan] = &[
         parent_first: false,
     },
     TablePlan {
+        name: "timeline_annotation_sets",
+        columns: &[
+            "file_id",
+            "source_size",
+            "source_mtime",
+            "argv_fingerprint",
+            "generation_id",
+            "version",
+            "annotations_json",
+            "updated_at_ms",
+        ],
+        order_by: "file_id",
+        minimum_schema: 39,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
+        name: "timeline_manual_overrides",
+        columns: &[
+            "file_id",
+            "kind",
+            "source_size",
+            "source_mtime",
+            "argv_fingerprint",
+            "start_ticks",
+            "end_ticks",
+            "timescale",
+            "start_ms",
+            "end_ms",
+            "revision",
+            "generation_id",
+            "updated_at_ms",
+        ],
+        order_by: "file_id, kind",
+        minimum_schema: 40,
+        import_filter: None,
+        sealed_columns: &[],
+        parent_first: false,
+    },
+    TablePlan {
         name: "transcode_cache_recipes",
         columns: &["recipe_hash", "file_id", "recipe_version", "created_at"],
         order_by: "recipe_hash",
@@ -2162,7 +2203,9 @@ mod tests {
         assert!(names.contains(&"cluster_fragment_index_jobs"));
         assert!(names.contains(&"cluster_fragment_index_artifacts"));
         assert!(names.contains(&"cluster_fragment_index_locations"));
-        assert_eq!(names.len(), 30, "review every imported durable table");
+        assert!(names.contains(&"timeline_annotation_sets"));
+        assert!(names.contains(&"timeline_manual_overrides"));
+        assert_eq!(names.len(), 32, "review every imported durable table");
     }
 
     #[test]

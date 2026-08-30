@@ -49,7 +49,8 @@ use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
 use plurx_core::secrets::CredentialKey;
 use plurx_core::segplan::{
-    FragmentIndex, IndexRow, PlanCut, PlanEntry, PlanEntryKind, SegmentPlan, SourceIdentity,
+    AnnotationKind, AnnotationProvenance, FragmentIndex, IndexRow, PlanCut, PlanEntry,
+    PlanEntryKind, SegmentPlan, SourceIdentity, TimelineAnnotation, TimelineAnnotationSet,
     SEGPLAN_VERSION,
 };
 use plurx_core::store::{
@@ -62,8 +63,8 @@ use plurx_core::store::{
 use plurx_core::store::{
     ApiKeyStore, ClusterFragmentIndexStore, CoordinationStore, FencedPublicationStore,
     HiqliteAuthStore, MediaSessionStore, OfflinePackageStore, PlaybackTelemetryStore,
-    PretranscodeJobStore, ReadingStore, SettingsStore, TraktStore, TranscodeCacheStore, UserStore,
-    WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
+    PretranscodeJobStore, ReadingStore, SettingsStore, TimelineAnnotationStore, TraktStore,
+    TranscodeCacheStore, UserStore, WatchStore, AUTH_SCHEMA_MIGRATION_SOURCE, AUTH_SCHEMA_VERSION,
 };
 #[cfg(feature = "cluster-read-cost-validation")]
 use plurx_core::store::{CatalogueReader, MetricsStore};
@@ -389,6 +390,13 @@ const RENDITION_PLAN_METHODS: &[&str] = &[
     "put_rendition_plan",
     "rendition_plan",
     "forget_rendition_plans",
+];
+const TIMELINE_ANNOTATION_METHODS: &[&str] = &[
+    "put_timeline_annotation_set",
+    "timeline_annotation_set",
+    "forget_timeline_annotation_set",
+    "set_manual_timeline_annotation",
+    "discard_manual_timeline_annotation",
 ];
 const NETWORK_PRIOR_METHODS: &[&str] = &[
     "observe_network_prior",
@@ -8762,6 +8770,20 @@ fn populated_current_import_fixture(data_dir: &std::path::Path) -> PathBuf {
                   audio_streams, subtitle_streams, scanned_at, audio_offset_ms)
                  VALUES (30, 10, '/fixture/shows/season-1.mkv', 4096, 115, 3600000,
                          'matroska', 'h264', '[]', '[]', 116, 25);
+             INSERT INTO timeline_annotation_sets
+                 (file_id, source_size, source_mtime, argv_fingerprint,
+                  generation_id, version, annotations_json, updated_at_ms)
+                 VALUES (30, 4096, 115, 'fixture-timeline-v1',
+                         'fixture-automatic-generation', 1,
+                         '[{\"kind\":\"intro\",\"start_ticks\":0,\"end_ticks\":90000,\"timescale\":1000,\"start_ms\":0,\"end_ms\":90000,\"provenance\":\"authored\",\"confidence_millis\":1000,\"detector_version\":\"chapters-v1\",\"manual_override_revision\":null}]',
+                         116);
+             INSERT INTO timeline_manual_overrides
+                 (file_id, kind, source_size, source_mtime, argv_fingerprint,
+                  start_ticks, end_ticks, timescale, start_ms, end_ms,
+                  revision, generation_id, updated_at_ms)
+                 VALUES (30, 'credits', 4096, 115, 'fixture-timeline-v1',
+                         3500000, 3600000, 1000, 3500000, 3600000,
+                         3, 'fixture-manual-generation', 117);
              INSERT INTO watch_state
                  (user_id, item_id, position_ms, duration_ms, watched, updated_at)
                  VALUES (7, 10, 120000, 3600000, 0, 117);
@@ -9076,6 +9098,8 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
              -- back to 14 without removing them is not a v14 database: the
              -- ordinary startup migration would re-run its own ALTER TABLE ADD
              -- COLUMN against a table that already has them.
+             DROP TABLE timeline_manual_overrides;
+             DROP TABLE timeline_annotation_sets;
              ALTER TABLE files DROP COLUMN dv_rpu_present;
              ALTER TABLE files DROP COLUMN dv_el_present;
              ALTER TABLE files DROP COLUMN dv_bl_compat_id;
@@ -9172,7 +9196,7 @@ async fn populated_v14_sqlite_import_has_exact_three_voter_parity() {
         .expect("import populated v14 backup");
     assert_eq!(report.source_schema_version, 14);
     assert_eq!(report.backup_sha256, prepared.backup_sha256);
-    assert_eq!(report.tables.len(), 30);
+    assert_eq!(report.tables.len(), 32);
     assert_eq!(report.search_rows, 2);
     assert_eq!(
         report
@@ -9327,6 +9351,17 @@ async fn populated_current_sqlite_import_preserves_new_durable_rows_only() {
     assert_eq!(reading.progression_millis, 250_000);
     assert_eq!(reading.file_size, 4_096);
     assert_eq!(reading.file_mtime, 115);
+    let imported_annotations = store
+        .timeline_annotation_set(30, &SourceIdentity::new(4_096, 115, "fixture-timeline-v1"))
+        .await
+        .expect("read imported timeline annotations")
+        .expect("imported timeline annotations");
+    assert_eq!(imported_annotations.annotations.len(), 2);
+    assert!(imported_annotations.annotations.iter().any(|annotation| {
+        annotation.kind == AnnotationKind::Credits
+            && annotation.provenance == AnnotationProvenance::Manual
+            && annotation.manual_override_revision == Some(3)
+    }));
     assert_eq!(
         report
             .tables
@@ -10577,6 +10612,7 @@ fn contract_inventory_matches_every_store_method() {
         NETWORK_PRIOR_METHODS,
         FRAGMENT_INDEX_METHODS,
         RENDITION_PLAN_METHODS,
+        TIMELINE_ANNOTATION_METHODS,
         COORDINATION_METHODS,
         MEDIA_SESSION_METHODS,
         FENCED_PUBLICATION_METHODS,
@@ -10587,7 +10623,7 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 244, "review the Store method count");
+    assert_eq!(declared.len(), 249, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
@@ -11073,6 +11109,8 @@ async fn analysis_history_contract_runs_through_dyn_store() {
                 cursor: None,
                 filter: AnalysisHistoryFilter::All,
                 search: String::new(),
+                states: Vec::new(),
+                now_ms: 0,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: read canonical history: {error}"));
@@ -11094,6 +11132,20 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         assert_eq!(new.state, "queued", "backend {backend}");
         assert_eq!(new.action, "none", "backend {backend}");
 
+        let published = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: None,
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+                states: vec!["published".to_owned()],
+                now_ms: 22,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: filter published history: {error}"));
+        assert_eq!(published.filtered_total, 1, "backend {backend}");
+        assert_eq!(published.rows[0].request_id, "analysis-history-old");
+
         let past_end = store
             .analysis_history(&AnalysisHistoryQuery {
                 limit: 10,
@@ -11104,6 +11156,8 @@ async fn analysis_history_contract_runs_through_dyn_store() {
                 }),
                 filter: AnalysisHistoryFilter::All,
                 search: String::new(),
+                states: Vec::new(),
+                now_ms: 0,
             })
             .await
             .unwrap_or_else(|error| panic!("{backend}: read valid empty tail page: {error}"));
@@ -11117,6 +11171,338 @@ async fn analysis_history_contract_runs_through_dyn_store() {
         assert_eq!(summary.total, 2, "backend {backend}");
         assert_eq!(summary.working, 1, "backend {backend}");
         assert_eq!(summary.ready, 1, "backend {backend}");
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn timeline_annotation_contract_runs_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "timeline-annotations").await;
+        let identity = SourceIdentity::new(10_000, 1, "chapters-v1");
+        let authored = TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: 540_000,
+            end_ticks: 600_000,
+            timescale: 1_000,
+            start_ms: 540_000,
+            end_ms: 600_000,
+            provenance: AnnotationProvenance::Authored,
+            confidence_millis: 1_000,
+            detector_version: "chapters-v1".to_owned(),
+            manual_override_revision: None,
+        };
+        let set = TimelineAnnotationSet {
+            source_identity: identity.clone(),
+            generation_id: "generation-1".to_owned(),
+            version: 1,
+            annotations: vec![authored],
+        };
+        store
+            .put_timeline_annotation_set(file_id, 600_000, &set)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: persist annotation set: {error}"));
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read annotation set: {error}")),
+            Some(set.clone()),
+            "backend {backend}"
+        );
+
+        let changed = SourceIdentity::new(10_000, 2, "chapters-v1");
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &changed)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read stale annotation set: {error}")),
+            None,
+            "backend {backend}: source identity is the invalidation fence"
+        );
+
+        let mut invalid = set.clone();
+        invalid.annotations[0].confidence_millis = 1_001;
+        assert!(
+            store
+                .put_timeline_annotation_set(file_id, 600_000, &invalid)
+                .await
+                .is_err(),
+            "backend {backend}: invalid confidence must be refused at the store boundary"
+        );
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: old set after invalid write: {error}")),
+            Some(set.clone()),
+            "backend {backend}: a refused successor leaves the published set serving"
+        );
+
+        let manual = TimelineAnnotation {
+            kind: AnnotationKind::Credits,
+            start_ticks: 525_000,
+            end_ticks: 600_000,
+            timescale: 1_000,
+            start_ms: 525_000,
+            end_ms: 600_000,
+            provenance: AnnotationProvenance::Manual,
+            confidence_millis: 1_000,
+            detector_version: "manual-v1".to_owned(),
+            manual_override_revision: Some(1),
+        };
+        assert_eq!(
+            store
+                .set_manual_timeline_annotation(
+                    file_id,
+                    600_000,
+                    &identity,
+                    &manual,
+                    "manual-generation-1",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: set manual annotation: {error}")),
+            1,
+            "backend {backend}"
+        );
+
+        // This is the forced-rebuild shape: replace the automatic generation.
+        // The manual row is separate and must still win when the set is read.
+        let mut rebuilt = set.clone();
+        rebuilt.generation_id = "forced-generation-2".to_owned();
+        rebuilt.annotations[0].start_ticks = 550_000;
+        rebuilt.annotations[0].start_ms = 550_000;
+        store
+            .put_timeline_annotation_set(file_id, 600_000, &rebuilt)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: forced automatic rebuild: {error}"));
+        let composed = store
+            .timeline_annotation_set(file_id, &identity)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read manual-over-rebuild set: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: composed annotation set"));
+        assert_eq!(composed.generation_id, "manual-generation-1", "{backend}");
+        assert_eq!(composed.annotations, vec![manual.clone()], "{backend}");
+
+        assert_eq!(
+            store
+                .set_manual_timeline_annotation(
+                    file_id,
+                    600_000,
+                    &identity,
+                    &manual,
+                    "manual-generation-2",
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: correct manual annotation: {error}")),
+            2,
+            "backend {backend}"
+        );
+        assert!(
+            !store
+                .discard_manual_timeline_annotation(file_id, &identity, AnnotationKind::Credits, 1,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale discard: {error}")),
+            "backend {backend}: stale confirmation must not discard a newer correction"
+        );
+        assert!(
+            store
+                .discard_manual_timeline_annotation(file_id, &identity, AnnotationKind::Credits, 2,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: confirmed discard: {error}")),
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: automatic set after discard: {error}")),
+            Some(rebuilt),
+            "backend {backend}: discarding manual reveals the automatic generation"
+        );
+        assert!(
+            store
+                .forget_timeline_annotation_set(file_id)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: forget annotation set: {error}")),
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read forgotten annotation set: {error}"))
+                .is_none(),
+            "backend {backend}"
+        );
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn analysis_admin_control_and_publish_fence_run_through_dyn_store() {
+    for_each_backend(|store, backend| async move {
+        let (_, file_id) = seed_file(&store, "analysis-admin-control").await;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        store
+            .enqueue_analysis_request(&NewAnalysisRequest {
+                request_id: request_id.clone(),
+                file_id,
+                source_size: 10_000,
+                source_mtime: 1,
+                component: "fragment_index".to_owned(),
+                force_rebuild: false,
+                target_node_id: "analysis-node".to_owned(),
+                not_before_ms: 10,
+                created_at_ms: 10,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue analysis request: {error}"));
+        let stale = store
+            .claim_analysis_request("analysis-node", 10, 20)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim analysis request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first analysis claim"));
+        let canceled = store
+            .cancel_analysis_request_admin(&request_id, 11)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel running analysis: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: canceled request remains visible"));
+        assert_eq!(canceled.state, "cancelled", "backend {backend}");
+        assert!(
+            !store
+                .complete_analysis_request(&stale, "generation-stale", 12)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale publication attempt: {error}")),
+            "backend {backend}: cancellation must revoke the old publish fence"
+        );
+
+        let retried = store
+            .retry_analysis_request_admin(&request_id, 12)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: retry canceled analysis: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: retried request remains visible"));
+        assert_eq!(retried.state, "queued", "backend {backend}");
+        let current = store
+            .claim_analysis_request("analysis-node", 12, 30)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim analysis request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: replacement analysis claim"));
+        assert!(current.fence > stale.fence, "backend {backend}");
+        assert!(
+            !store
+                .complete_analysis_request(&stale, "generation-stale", 13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: replay old publication: {error}")),
+            "backend {backend}: a reclaimed request must refuse its old worker"
+        );
+        assert!(
+            store
+                .complete_analysis_request(&current, "generation-current", 13)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: publish current generation: {error}")),
+            "backend {backend}"
+        );
+        let ready = store
+            .analysis_request(&request_id)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read published request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: published request"));
+        assert_eq!(ready.state, "ready", "backend {backend}");
+        assert_eq!(
+            ready.result_cache_key, "generation-current",
+            "backend {backend}"
+        );
+        let still_ready = store
+            .cancel_analysis_request_admin(&request_id, 14)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: cancel published request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: published request remains visible"));
+        assert_eq!(still_ready.state, "ready", "backend {backend}");
+        assert_eq!(
+            still_ready.result_cache_key, "generation-current",
+            "backend {backend}: cancellation never deletes a published artifact"
+        );
+
+        let semantic_request_id = uuid::Uuid::new_v4().to_string();
+        let semantic_request = NewAnalysisRequest {
+            request_id: semantic_request_id.clone(),
+            file_id,
+            source_size: 10_000,
+            source_mtime: 1,
+            component: "skip_markers".to_owned(),
+            force_rebuild: false,
+            // Empty means cluster-owned semantic work. It is intentionally not
+            // pinned to whichever ingress accepted the request.
+            target_node_id: String::new(),
+            not_before_ms: 20,
+            created_at_ms: 20,
+        };
+        store
+            .enqueue_analysis_request(&semantic_request)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: enqueue semantic request: {error}"));
+        let mut duplicate = semantic_request.clone();
+        duplicate.request_id = uuid::Uuid::new_v4().to_string();
+        let joined = store
+            .enqueue_analysis_request(&duplicate)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: join semantic request: {error}"));
+        assert_eq!(
+            joined.request_id, semantic_request_id,
+            "backend {backend}: semantic work is cluster-owned once"
+        );
+        let expired = store
+            .claim_analysis_request("analysis-node-a", 20, 30)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: claim semantic request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: first semantic claim"));
+        let successor = store
+            .claim_analysis_request("analysis-node-b", 30, 50)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reclaim semantic request: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: successor semantic claim"));
+        assert!(successor.fence > expired.fence, "backend {backend}");
+        let identity = SourceIdentity::new(10_000, 1, "chapter-classifier-v1");
+        let set = TimelineAnnotationSet {
+            source_identity: identity.clone(),
+            generation_id: "semantic-generation".to_owned(),
+            version: 1,
+            annotations: vec![TimelineAnnotation {
+                kind: AnnotationKind::Intro,
+                start_ticks: 0,
+                end_ticks: 90_000,
+                timescale: 1_000,
+                start_ms: 0,
+                end_ms: 90_000,
+                provenance: AnnotationProvenance::Authored,
+                confidence_millis: 1_000,
+                detector_version: "chapter-classifier-v1".to_owned(),
+                manual_override_revision: None,
+            }],
+        };
+        assert!(
+            !store
+                .publish_timeline_annotation_set_for_request(&expired, 7_200_000, &set, 31,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: stale semantic publish: {error}")),
+            "backend {backend}: an expired semantic owner cannot publish"
+        );
+        assert!(
+            store
+                .publish_timeline_annotation_set_for_request(&successor, 7_200_000, &set, 31,)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: current semantic publish: {error}")),
+            "backend {backend}: current semantic owner publishes"
+        );
+        assert_eq!(
+            store
+                .timeline_annotation_set(file_id, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: published semantic set: {error}")),
+            Some(set),
+            "backend {backend}"
+        );
     })
     .await;
 }

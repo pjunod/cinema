@@ -66,6 +66,136 @@ pub struct AnalysisRequestResponse {
     state: String,
     force: bool,
     joined: bool,
+    jobs: Vec<AnalysisRequestJobResponse>,
+}
+
+#[derive(Clone, Serialize)]
+pub struct AnalysisRequestJobResponse {
+    job_id: String,
+    component: String,
+    state: String,
+    joined: bool,
+}
+
+#[derive(Deserialize)]
+pub struct ManualAnnotationBody {
+    start_ticks: i64,
+    end_ticks: i64,
+    timescale: u32,
+    start_ms: i64,
+    end_ms: i64,
+}
+
+#[derive(Deserialize)]
+pub struct DiscardManualAnnotationBody {
+    revision: u64,
+    confirm_discard_manual_override: bool,
+}
+
+fn annotation_kind(value: &str) -> Result<plurx_core::segplan::AnnotationKind, ApiError> {
+    plurx_core::segplan::AnnotationKind::parse(value).ok_or_else(|| {
+        ApiError::BadRequest("annotation kind must be intro, recap, credits, or preview".to_owned())
+    })
+}
+
+/// PUT /api/v1/files/{file}/timeline-annotations/{kind} — create or correct a
+/// durable administrator boundary. Automatic rebuilds never write its row.
+pub async fn set_manual_annotation(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path((file_id, kind)): Path<(i64, String)>,
+    Json(body): Json<ManualAnnotationBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    use plurx_core::segplan::{AnnotationProvenance, TimelineAnnotation};
+
+    let kind = annotation_kind(&kind)?;
+    let file = state
+        .store
+        .get_file(file_id)
+        .await?
+        .ok_or(ApiError::NotFound("file"))?;
+    let duration_ms = file
+        .duration_ms
+        .filter(|duration| *duration > 0)
+        .ok_or_else(|| ApiError::Conflict("file has no measured duration".to_owned()))?;
+    let source = super::stream::annotation_source_identity(&file);
+    let generation_id = uuid::Uuid::new_v4().to_string();
+    let annotation = TimelineAnnotation {
+        kind,
+        start_ticks: body.start_ticks,
+        end_ticks: body.end_ticks,
+        timescale: body.timescale,
+        start_ms: body.start_ms,
+        end_ms: body.end_ms,
+        provenance: AnnotationProvenance::Manual,
+        confidence_millis: 1_000,
+        detector_version: "manual-v1".to_owned(),
+        // The store assigns the real monotonic value after validating the
+        // shape, so this is only the required positive validation placeholder.
+        manual_override_revision: Some(1),
+    };
+    let revision = state
+        .store
+        .set_manual_timeline_annotation(file_id, duration_ms, &source, &annotation, &generation_id)
+        .await?;
+    tracing::info!(
+        file_id,
+        kind = kind.as_str(),
+        revision,
+        "manual timeline annotation stored"
+    );
+    Ok(Json(serde_json::json!({
+        "file_id": file_id.to_string(),
+        "kind": kind.as_str(),
+        "generation": generation_id,
+        "revision": revision,
+        "provenance": "manual",
+        "confidence": 1000,
+        "start_ms": body.start_ms,
+        "end_ms": body.end_ms,
+    })))
+}
+
+/// DELETE /api/v1/files/{file}/timeline-annotations/{kind} — the separate,
+/// explicit confirmation required before a manual correction can disappear.
+pub async fn discard_manual_annotation(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path((file_id, kind)): Path<(i64, String)>,
+    Json(body): Json<DiscardManualAnnotationBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    if !body.confirm_discard_manual_override {
+        return Err(ApiError::BadRequest(
+            "discarding a manual override requires explicit confirmation".to_owned(),
+        ));
+    }
+    let kind = annotation_kind(&kind)?;
+    let file = state
+        .store
+        .get_file(file_id)
+        .await?
+        .ok_or(ApiError::NotFound("file"))?;
+    let source = super::stream::annotation_source_identity(&file);
+    if !state
+        .store
+        .discard_manual_timeline_annotation(file_id, &source, kind, body.revision)
+        .await?
+    {
+        return Err(ApiError::Conflict(
+            "manual override changed or no longer matches this source".to_owned(),
+        ));
+    }
+    tracing::info!(
+        file_id,
+        kind = kind.as_str(),
+        revision = body.revision,
+        "manual timeline annotation discarded"
+    );
+    Ok(Json(serde_json::json!({
+        "file_id": file_id.to_string(),
+        "kind": kind.as_str(),
+        "discarded_revision": body.revision,
+    })))
 }
 
 /// POST /api/v1/files/{file}/analysis — durably request analysis before any
@@ -76,16 +206,22 @@ pub async fn request(
     Path(file_id): Path<i64>,
     Json(body): Json<AnalysisRequestBody>,
 ) -> Result<(StatusCode, Json<AnalysisRequestResponse>), ApiError> {
-    if !body.components.is_empty()
-        && body
-            .components
-            .iter()
-            .any(|component| component != "fragment_index")
+    let components = if body.components.is_empty() {
+        vec!["fragment_index".to_owned()]
+    } else {
+        body.components
+    };
+    if components
+        .iter()
+        .any(|component| !matches!(component.as_str(), "fragment_index" | "skip_markers"))
     {
         return Err(ApiError::BadRequest(
-            "only fragment_index analysis is available in this milestone".to_owned(),
+            "analysis component must be fragment_index or skip_markers".to_owned(),
         ));
     }
+    let components = components
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
     if !state.jobs.analysis_queue_enabled().await {
         return Err(ApiError::Conflict(
             "analysis queue is paused; enable it in Analysis settings".to_owned(),
@@ -95,27 +231,41 @@ pub async fn request(
         return Err(ApiError::NotFound("file"));
     }
 
-    let (request, joined) = state
-        .jobs
-        .request_file_analysis(file_id, body.force)
-        .await?;
-    if body.force && joined && !request.force_rebuild {
-        return Err(ApiError::Conflict(
-            "analysis is already in progress; request a rebuild after it finishes".to_owned(),
-        ));
+    let mut requested = Vec::with_capacity(components.len());
+    let mut primary = None;
+    for component in components {
+        let (request, joined) = state
+            .jobs
+            .request_file_analysis(file_id, body.force, &component)
+            .await?;
+        if body.force && joined && !request.force_rebuild {
+            return Err(ApiError::Conflict(format!(
+                "{component} analysis is already in progress; request a rebuild after it finishes"
+            )));
+        }
+        tracing::info!(
+            file_id,
+            request_id = %request.request_id,
+            component,
+            force = body.force,
+            joined,
+            "analysis requested"
+        );
+        let entry = AnalysisRequestJobResponse {
+            job_id: request.request_id.clone(),
+            component: request.component.clone(),
+            state: request.state.clone(),
+            joined,
+        };
+        primary.get_or_insert((request, joined));
+        requested.push(entry);
     }
     let jobs = state.jobs.clone();
     let transcode = state.transcode.clone();
     tokio::spawn(async move {
         jobs.work_cluster_fragment_index_queue(transcode).await;
     });
-    tracing::info!(
-        file_id,
-        request_id = %request.request_id,
-        force = body.force,
-        joined,
-        "analysis requested"
-    );
+    let (request, joined) = primary.expect("at least one validated analysis component");
     Ok((
         StatusCode::ACCEPTED,
         Json(AnalysisRequestResponse {
@@ -124,6 +274,7 @@ pub async fn request(
             state: request.state,
             force: request.force_rebuild,
             joined,
+            jobs: requested,
         }),
     ))
 }
@@ -134,6 +285,22 @@ pub struct AnalysisHistoryParams {
     cursor: Option<String>,
     filter: Option<String>,
     q: Option<String>,
+    state: Option<String>,
+}
+
+fn durable_state(storage_state: &str, not_before_ms: i64, error_code: &str, now_ms: i64) -> String {
+    if error_code == "source_superseded" {
+        return "stale".to_owned();
+    }
+    match storage_state {
+        "queued" if not_before_ms > now_ms => "retry_wait",
+        "running" => "claimed",
+        "submitted" => "staged",
+        "ready" => "published",
+        "cancelled" => "canceled",
+        state => state,
+    }
+    .to_owned()
 }
 
 fn decode_cursor(value: &str) -> Result<plurx_core::store::AnalysisHistoryCursor, ApiError> {
@@ -182,6 +349,12 @@ fn history_filter(
 }
 
 fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::Value {
+    let durable_state = durable_state(
+        &row.state,
+        row.not_before_ms,
+        &row.request_error_code,
+        crate::state::clock_ms(),
+    );
     serde_json::json!({
         "row_key": row.row_key,
         "request_id": row.request_id,
@@ -207,6 +380,43 @@ fn history_row_value(row: plurx_core::store::AnalysisHistoryRow) -> serde_json::
         "updated_at_ms": row.updated_at_ms,
         "pipeline_version": row.pipeline_version,
         "source_size": row.source_size,
+        "durable_state": durable_state,
+        "claim_epoch": row.claim_epoch,
+        "phase": match row.state.as_str() {
+            "queued" => "probing",
+            "running" => "probing",
+            "submitted" => "fragment_index",
+            "ready" => "verifying",
+            _ => "",
+        },
+    })
+}
+
+fn request_value(request: plurx_core::store::AnalysisRequest, now_ms: i64) -> serde_json::Value {
+    let durable_state = durable_state(
+        &request.state,
+        request.not_before_ms,
+        &request.last_error_code,
+        now_ms,
+    );
+    serde_json::json!({
+        "job_id": request.request_id,
+        "file_id": request.file_id.to_string(),
+        "component": request.component,
+        "target_node_id": request.target_node_id,
+        "state": durable_state,
+        "storage_state": request.state,
+        "attempt": request.attempts,
+        "claim_epoch": request.fence,
+        "claim_node_id": request.owner_node_id,
+        "claim_expires_at_ms": request.lease_expires_ms,
+        "not_before_ms": request.not_before_ms,
+        "cancel_requested": durable_state == "canceled",
+        "force": request.force_rebuild,
+        "generation": request.result_cache_key,
+        "last_error_code": request.last_error_code,
+        "created_at_ms": request.created_at_ms,
+        "updated_at_ms": request.updated_at_ms,
     })
 }
 
@@ -231,11 +441,52 @@ pub async fn jobs(
             "analysis search is limited to 120 characters".to_owned(),
         ));
     }
+    let states = params
+        .state
+        .as_deref()
+        .map(|states| {
+            let requested = states
+                .split(',')
+                .filter(|value| !value.is_empty())
+                .collect::<std::collections::BTreeSet<_>>();
+            const ALLOWED: &[&str] = &[
+                "queued",
+                "claimed",
+                "running",
+                "staged",
+                "published",
+                "ready",
+                "retry_wait",
+                "failed",
+                "canceled",
+                "cancelled",
+                "stale",
+            ];
+            if requested.is_empty() || requested.iter().any(|value| !ALLOWED.contains(value)) {
+                return Err(ApiError::BadRequest(
+                    "invalid analysis state filter".to_owned(),
+                ));
+            }
+            Ok(requested
+                .into_iter()
+                .map(|state| match state {
+                    "running" => "claimed",
+                    "ready" => "published",
+                    "cancelled" => "canceled",
+                    state => state,
+                })
+                .map(str::to_owned)
+                .collect())
+        })
+        .transpose()?
+        .unwrap_or_default();
     let query = plurx_core::store::AnalysisHistoryQuery {
         limit: params.limit.unwrap_or(25),
         cursor: params.cursor.as_deref().map(decode_cursor).transpose()?,
         filter: history_filter(params.filter.as_deref())?,
         search,
+        states,
+        now_ms,
     };
     let page = state.store.analysis_history(&query).await?;
     let enabled = state.jobs.analysis_queue_enabled().await;
@@ -253,6 +504,81 @@ pub async fn jobs(
         "next_cursor": page.next_cursor.map(encode_cursor),
         "rows": page.rows.into_iter().map(history_row_value).collect::<Vec<_>>(),
     })))
+}
+
+/// GET /api/v1/analysis/jobs/{job} — exact durable job state.
+pub async fn job(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let request = state
+        .store
+        .analysis_request(&job_id)
+        .await?
+        .ok_or(ApiError::NotFound("analysis job"))?;
+    Ok(Json(request_value(request, crate::state::clock_ms())))
+}
+
+/// POST /api/v1/analysis/jobs/{job}/retry — explicit operator override for a
+/// terminal failure or cancellation.
+pub async fn retry_job(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let current = state
+        .store
+        .analysis_request(&job_id)
+        .await?
+        .ok_or(ApiError::NotFound("analysis job"))?;
+    if !matches!(current.state.as_str(), "failed" | "cancelled") {
+        return Err(ApiError::Conflict(
+            "only a failed or canceled analysis job can be retried".to_owned(),
+        ));
+    }
+    let now_ms = crate::state::clock_ms();
+    let retried = state
+        .store
+        .retry_analysis_request_admin(&job_id, now_ms)
+        .await?
+        .ok_or(ApiError::NotFound("analysis job"))?;
+    if retried.state != "queued" {
+        return Err(ApiError::Conflict(
+            "analysis source changed; request a new generation from the file".to_owned(),
+        ));
+    }
+    let jobs = state.jobs.clone();
+    let transcode = state.transcode.clone();
+    tokio::spawn(async move {
+        jobs.work_cluster_fragment_index_queue(transcode).await;
+    });
+    tracing::info!(job_id, "analysis job explicitly retried");
+    Ok(Json(request_value(retried, now_ms)))
+}
+
+/// DELETE /api/v1/analysis/jobs/{job} — durable cooperative cancellation.
+pub async fn cancel_job(
+    _admin: AdminUser,
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let current = state
+        .store
+        .analysis_request(&job_id)
+        .await?
+        .ok_or(ApiError::NotFound("analysis job"))?;
+    if matches!(current.state.as_str(), "ready" | "failed" | "cancelled") {
+        return Ok(Json(request_value(current, crate::state::clock_ms())));
+    }
+    let now_ms = crate::state::clock_ms();
+    let canceled = state
+        .store
+        .cancel_analysis_request_admin(&job_id, now_ms)
+        .await?
+        .ok_or(ApiError::NotFound("analysis job"))?;
+    tracing::info!(job_id, "analysis job cancellation requested");
+    Ok(Json(request_value(canceled, now_ms)))
 }
 
 #[cfg(test)]

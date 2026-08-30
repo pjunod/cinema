@@ -165,6 +165,79 @@ const ANALYSIS_HISTORY_INDEX_STATEMENTS: &[&str] = &[
         ON cluster_fragment_index_jobs(state, updated_at_ms DESC, cache_key)"#,
 ];
 
+const ANALYSIS_COMPONENT_STATEMENTS: &[&str] = &[
+    "DROP TRIGGER IF EXISTS analysis_requests_bound_terminal_history",
+    "DROP TRIGGER IF EXISTS analysis_requests_supersede_source",
+    "DROP TRIGGER IF EXISTS analysis_requests_cancel_source",
+    "DROP INDEX IF EXISTS analysis_requests_result_history",
+    "DROP INDEX IF EXISTS analysis_requests_one_active_source",
+    "DROP INDEX IF EXISTS analysis_requests_status",
+    "DROP INDEX IF EXISTS analysis_requests_due",
+    "ALTER TABLE analysis_requests RENAME TO analysis_requests_v21",
+    r#"CREATE TABLE analysis_requests (
+        request_id         TEXT PRIMARY KEY,
+        file_id            INTEGER NOT NULL,
+        source_size        INTEGER NOT NULL,
+        source_mtime       INTEGER NOT NULL,
+        component          TEXT NOT NULL CHECK (component IN ('fragment_index','skip_markers')),
+        force_rebuild      INTEGER NOT NULL CHECK (force_rebuild IN (0, 1)),
+        target_node_id     TEXT NOT NULL,
+        state              TEXT NOT NULL CHECK (
+            state IN ('queued', 'running', 'submitted', 'ready', 'failed', 'cancelled')),
+        owner_node_id      TEXT,
+        fence              INTEGER NOT NULL DEFAULT 0 CHECK (fence >= 0),
+        lease_expires_ms   INTEGER,
+        attempts           INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+        not_before_ms      INTEGER NOT NULL,
+        result_cache_key   TEXT,
+        last_error_code    TEXT,
+        created_at_ms      INTEGER NOT NULL,
+        updated_at_ms      INTEGER NOT NULL
+    ) STRICT"#,
+    "INSERT INTO analysis_requests SELECT * FROM analysis_requests_v21",
+    "DROP TABLE analysis_requests_v21",
+    r#"CREATE INDEX analysis_requests_due
+        ON analysis_requests(target_node_id, state, not_before_ms, created_at_ms, request_id)"#,
+    r#"CREATE INDEX analysis_requests_status
+        ON analysis_requests(state, updated_at_ms DESC, request_id)"#,
+    r#"CREATE UNIQUE INDEX analysis_requests_one_active_source
+        ON analysis_requests(file_id, source_size, source_mtime, component, target_node_id)
+        WHERE state IN ('queued', 'running', 'submitted')"#,
+    r#"CREATE INDEX analysis_requests_result_history
+        ON analysis_requests(result_cache_key, updated_at_ms DESC, request_id DESC)
+        WHERE result_cache_key IS NOT NULL AND result_cache_key <> ''"#,
+    r#"CREATE TRIGGER analysis_requests_cancel_source BEFORE DELETE ON files
+    BEGIN
+        UPDATE analysis_requests
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_deleted'
+         WHERE file_id = OLD.id AND state IN ('queued', 'running', 'submitted');
+    END"#,
+    r#"CREATE TRIGGER analysis_requests_supersede_source
+    AFTER UPDATE OF size, mtime ON files
+    WHEN OLD.size <> NEW.size OR OLD.mtime <> NEW.mtime
+    BEGIN
+        UPDATE analysis_requests
+           SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+               last_error_code = 'source_superseded'
+         WHERE file_id = NEW.id AND state IN ('queued', 'running', 'submitted')
+           AND (source_size <> NEW.size OR source_mtime <> NEW.mtime);
+    END"#,
+    r#"CREATE TRIGGER analysis_requests_bound_terminal_history
+    AFTER UPDATE OF state ON analysis_requests
+    WHEN NEW.state IN ('ready', 'failed', 'cancelled')
+    BEGIN
+        DELETE FROM analysis_requests
+         WHERE request_id IN (
+           SELECT request_id FROM analysis_requests
+            WHERE state IN ('ready', 'failed', 'cancelled')
+              AND request_id <> NEW.request_id
+            ORDER BY updated_at_ms, request_id
+            LIMIT MAX((SELECT COUNT(*) FROM analysis_requests
+                        WHERE state IN ('ready', 'failed', 'cancelled')) - 8192, 0));
+    END"#,
+];
+
 fn migration_statements(
     statements: &'static [&'static str],
 ) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
@@ -192,10 +265,16 @@ pub(super) fn analysis_history_index_migration_statements(
     migration_statements(ANALYSIS_HISTORY_INDEX_STATEMENTS)
 }
 
+pub(super) fn analysis_component_migration_statements(
+) -> Result<Vec<(String, hiqlite::Params)>, StoreError> {
+    migration_statements(ANALYSIS_COMPONENT_STATEMENTS)
+}
+
 pub(super) async fn install_schema(client: &hiqlite::Client) -> Result<(), StoreError> {
     let mut statements = fragment_index_schema_migration_statements()?;
     statements.extend(analysis_request_schema_migration_statements()?);
     statements.extend(analysis_history_index_migration_statements()?);
+    statements.extend(analysis_component_migration_statements()?);
     client
         .txn(statements)
         .await
@@ -281,7 +360,7 @@ impl From<&mut Row<'_>> for LabelRow {
 
 const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
-    action, owner_node_id, lease_expires_ms, attempts, not_before_ms, request_error_code,
+    action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
@@ -294,6 +373,7 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.job_state, '') AS job_state, COALESCE(page.state, '') AS state,
     COALESCE(page.disposition, '') AS disposition, COALESCE(page.action, 'none') AS action,
     COALESCE(page.owner_node_id, '') AS owner_node_id,
+    COALESCE(page.claim_epoch, 0) AS claim_epoch,
     COALESCE(page.lease_expires_ms, 0) AS lease_expires_ms,
     COALESCE(page.attempts, 0) AS attempts, COALESCE(page.not_before_ms, 0) AS not_before_ms,
     COALESCE(page.request_error_code, '') AS request_error_code,
@@ -323,6 +403,7 @@ impl From<&mut Row<'_>> for HistoryRow {
             disposition: row.get("disposition"),
             action: row.get("action"),
             owner_node_id: row.get("owner_node_id"),
+            claim_epoch: row.get("claim_epoch"),
             lease_expires_ms: row.get("lease_expires_ms"),
             attempts: row.get("attempts"),
             not_before_ms: row.get("not_before_ms"),
@@ -383,6 +464,14 @@ fn analysis_search_pattern(search: &str) -> String {
         String::new()
     } else {
         format!("%{escaped}%")
+    }
+}
+
+fn analysis_state_pattern(states: &[String]) -> String {
+    if states.is_empty() {
+        String::new()
+    } else {
+        format!(",{},", states.join(","))
     }
 }
 
@@ -461,9 +550,13 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
         && request.request_id.len() <= 64
         && request.file_id > 0
         && request.source_size >= 0
-        && request.component == "fragment_index"
-        && !request.target_node_id.is_empty()
+        && matches!(
+            request.component.as_str(),
+            "fragment_index" | "skip_markers"
+        )
         && request.target_node_id.len() <= 128
+        && ((request.component == "skip_markers" && request.target_node_id.is_empty())
+            || (request.component == "fragment_index" && !request.target_node_id.is_empty()))
 }
 
 #[async_trait]
@@ -557,7 +650,9 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 .query_consistent_map::<RequestRow, _>(
                     format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE target_node_id = $1 AND attempts < $2
+                          WHERE (target_node_id = $1
+                              OR (component = 'skip_markers' AND target_node_id = ''))
+                            AND attempts < $2
                             AND ((state = 'queued' AND not_before_ms <= $3)
                               OR (state = 'running' AND lease_expires_ms <= $3))
                           ORDER BY created_at_ms, request_id LIMIT 1"
@@ -912,6 +1007,194 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
             .collect())
     }
 
+    async fn analysis_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        Ok(self
+            .client()
+            .query_consistent_map::<RequestRow, _>(
+                format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = $1"),
+                params!(request_id),
+            )
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| row.0))
+    }
+
+    async fn retry_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.execute(
+            "UPDATE analysis_requests
+                SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                    result_cache_key = NULL, last_error_code = NULL,
+                    not_before_ms = $1, updated_at_ms = $1
+              WHERE request_id = $2 AND state IN ('failed', 'cancelled')
+                AND EXISTS (SELECT 1 FROM files
+                      WHERE id = analysis_requests.file_id
+                        AND size = analysis_requests.source_size
+                        AND mtime = analysis_requests.source_mtime)",
+            params!(now_ms, request_id),
+        )
+        .await?;
+        self.analysis_request(request_id).await
+    }
+
+    async fn cancel_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        self.execute(
+            "UPDATE analysis_requests
+                SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                    fence = fence + 1, last_error_code = 'admin_cancelled',
+                    updated_at_ms = $1
+              WHERE request_id = $2 AND state IN ('queued', 'running', 'submitted')",
+            params!(now_ms, request_id),
+        )
+        .await?;
+        self.analysis_request(request_id).await
+    }
+
+    async fn complete_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        result_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if request.state != "running"
+            || request.owner_node_id.is_empty()
+            || result_key.is_empty()
+            || result_key.len() > 160
+        {
+            return Err(StoreError::Task(
+                "invalid direct analysis completion".to_owned(),
+            ));
+        }
+        Ok(self
+            .execute(
+                "UPDATE analysis_requests
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        result_cache_key = $1, last_error_code = NULL, updated_at_ms = $2
+                  WHERE request_id = $3 AND state = 'running' AND owner_node_id = $4
+                    AND fence = $5 AND lease_expires_ms > $2
+                    AND file_id = $6 AND source_size = $7 AND source_mtime = $8
+                    AND EXISTS (SELECT 1 FROM files
+                          WHERE id = $6 AND size = $7 AND mtime = $8)",
+                params!(
+                    result_key,
+                    now_ms,
+                    &request.request_id,
+                    &request.owner_node_id,
+                    request.fence,
+                    request.file_id,
+                    request.source_size,
+                    request.source_mtime
+                ),
+            )
+            .await?
+            == 1)
+    }
+
+    async fn publish_timeline_annotation_set_for_request(
+        &self,
+        request: &AnalysisRequest,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if request.state != "running" || request.owner_node_id.is_empty() {
+            return Err(StoreError::Task(
+                "invalid timeline analysis publication".to_owned(),
+            ));
+        }
+        let set = crate::store::timeline_annotations::validated(set, duration_ms)?;
+        if set.source_identity.size != u64::try_from(request.source_size).unwrap_or(u64::MAX)
+            || set.source_identity.mtime_ms != request.source_mtime
+        {
+            return Err(StoreError::Task(
+                "timeline analysis source identity does not match its request".to_owned(),
+            ));
+        }
+        let annotations_json = serde_json::to_string(&set.annotations).map_err(|error| {
+            StoreError::Database(format!("encode timeline annotations: {error}"))
+        })?;
+        let results = self
+            .client()
+            .txn(vec![
+                (
+                    "UPDATE analysis_requests
+                        SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                            result_cache_key = $1, last_error_code = NULL, updated_at_ms = $2
+                      WHERE request_id = $3 AND component = 'skip_markers'
+                        AND state = 'running' AND owner_node_id = $4
+                        AND fence = $5 AND lease_expires_ms > $2
+                        AND file_id = $6 AND source_size = $7 AND source_mtime = $8
+                        AND EXISTS (SELECT 1 FROM files
+                              WHERE id = $6 AND size = $7 AND mtime = $8)"
+                        .to_owned(),
+                    params!(
+                        &set.generation_id,
+                        now_ms,
+                        &request.request_id,
+                        &request.owner_node_id,
+                        request.fence,
+                        request.file_id,
+                        request.source_size,
+                        request.source_mtime
+                    ),
+                ),
+                (
+                    "INSERT INTO timeline_annotation_sets
+                        (file_id, source_size, source_mtime, argv_fingerprint,
+                         generation_id, version, annotations_json, updated_at_ms)
+                     SELECT $1, $2, $3, $4, $5, $6, $7, $8
+                      WHERE EXISTS (SELECT 1 FROM analysis_requests
+                        WHERE request_id = $9 AND component = 'skip_markers'
+                          AND state = 'ready' AND fence = $10
+                          AND file_id = $1 AND source_size = $2 AND source_mtime = $3
+                          AND result_cache_key = $5 AND updated_at_ms = $8)
+                     ON CONFLICT(file_id) DO UPDATE SET
+                        source_size = excluded.source_size,
+                        source_mtime = excluded.source_mtime,
+                        argv_fingerprint = excluded.argv_fingerprint,
+                        generation_id = excluded.generation_id,
+                        version = excluded.version,
+                        annotations_json = excluded.annotations_json,
+                        updated_at_ms = excluded.updated_at_ms"
+                        .to_owned(),
+                    params!(
+                        request.file_id,
+                        request.source_size,
+                        set.source_identity.mtime_ms,
+                        &set.source_identity.argv_fingerprint,
+                        &set.generation_id,
+                        i64::from(set.version),
+                        annotations_json,
+                        now_ms,
+                        &request.request_id,
+                        request.fence
+                    ),
+                ),
+            ])
+            .await?
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(database_error)?;
+        match (results.first().copied(), results.get(1).copied()) {
+            (Some(1), Some(1)) => Ok(true),
+            (Some(0), Some(0)) => Ok(false),
+            _ => Err(StoreError::Task(
+                "timeline analysis publication was not atomic".to_owned(),
+            )),
+        }
+    }
+
     async fn analysis_history(
         &self,
         query: &AnalysisHistoryQuery,
@@ -919,6 +1202,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
         let limit = query.limit.clamp(10, 100);
         let filter = analysis_filter_code(query.filter);
         let search = analysis_search_pattern(&query.search);
+        let states = analysis_state_pattern(&query.states);
+        let now_ms = query.now_ms;
         let cursor = query.cursor.clone().unwrap_or(AnalysisHistoryCursor {
             sort_rank: -1,
             updated_at_ms: 0,
@@ -940,13 +1225,22 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                     OR LOWER(request_error_code) LIKE $2 ESCAPE '\\'
                     OR LOWER(job_error_code) LIKE $2 ESCAPE '\\'
                     OR LOWER(state) LIKE $2 ESCAPE '\\')
+                  AND ($3 = '' OR INSTR($3, ',' || CASE
+                    WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'source_superseded'
+                      THEN 'stale'
+                    WHEN state = 'queued' AND not_before_ms > $4 THEN 'retry_wait'
+                    WHEN state = 'running' THEN 'claimed'
+                    WHEN state = 'submitted' THEN 'staged'
+                    WHEN state = 'ready' THEN 'published'
+                    WHEN state = 'cancelled' THEN 'canceled'
+                    ELSE state END || ',') > 0)
              ), page AS (
                SELECT {HISTORY_COLS}, sort_rank FROM matching
-                WHERE $3 < 0 OR sort_rank > $3
-                   OR (sort_rank = $3 AND updated_at_ms < $4)
-                   OR (sort_rank = $3 AND updated_at_ms = $4 AND row_key > $5)
+                WHERE $5 < 0 OR sort_rank > $5
+                   OR (sort_rank = $5 AND updated_at_ms < $6)
+                   OR (sort_rank = $5 AND updated_at_ms = $6 AND row_key > $7)
                 ORDER BY sort_rank, updated_at_ms DESC, row_key
-                LIMIT $6
+                LIMIT $8
              ), totals AS (
                SELECT COUNT(*) AS filtered_total FROM matching
              )
@@ -962,6 +1256,8 @@ impl ClusterFragmentIndexStore for HiqliteAuthStore {
                 params!(
                     filter,
                     search,
+                    states,
+                    now_ms,
                     cursor.sort_rank,
                     cursor.updated_at_ms,
                     cursor.row_key,

@@ -54,7 +54,7 @@ const REQUEST_COLS: &str = "request_id, file_id, source_size, source_mtime, comp
 
 const HISTORY_COLS: &str = "row_key, request_id, job_id, file_id, item_id, title,
     component, force_rebuild, target_node_id, request_state, job_state, state, disposition,
-    action, owner_node_id, lease_expires_ms, attempts, not_before_ms, request_error_code,
+    action, owner_node_id, claim_epoch, lease_expires_ms, attempts, not_before_ms, request_error_code,
     job_error_code, created_at_ms, updated_at_ms, pipeline_version, source_size";
 
 const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
@@ -67,6 +67,7 @@ const HISTORY_PAGE_COLS: &str = "COALESCE(page.row_key, '') AS row_key,
     COALESCE(page.job_state, '') AS job_state, COALESCE(page.state, '') AS state,
     COALESCE(page.disposition, '') AS disposition, COALESCE(page.action, 'none') AS action,
     COALESCE(page.owner_node_id, '') AS owner_node_id,
+    COALESCE(page.claim_epoch, 0) AS claim_epoch,
     COALESCE(page.lease_expires_ms, 0) AS lease_expires_ms,
     COALESCE(page.attempts, 0) AS attempts, COALESCE(page.not_before_ms, 0) AS not_before_ms,
     COALESCE(page.request_error_code, '') AS request_error_code,
@@ -117,22 +118,23 @@ fn history_from_row(
         disposition: row.get(12)?,
         action: row.get(13)?,
         owner_node_id: row.get(14)?,
-        lease_expires_ms: row.get(15)?,
-        attempts: row.get(16)?,
-        not_before_ms: row.get(17)?,
-        request_error_code: row.get(18)?,
-        job_error_code: row.get(19)?,
-        created_at_ms: row.get(20)?,
-        updated_at_ms: row.get(21)?,
-        pipeline_version: row.get(22)?,
-        source_size: row.get(23)?,
+        claim_epoch: row.get(15)?,
+        lease_expires_ms: row.get(16)?,
+        attempts: row.get(17)?,
+        not_before_ms: row.get(18)?,
+        request_error_code: row.get(19)?,
+        job_error_code: row.get(20)?,
+        created_at_ms: row.get(21)?,
+        updated_at_ms: row.get(22)?,
+        pipeline_version: row.get(23)?,
+        source_size: row.get(24)?,
     };
     let cursor = AnalysisHistoryCursor {
-        sort_rank: row.get(24)?,
+        sort_rank: row.get(25)?,
         updated_at_ms: history.updated_at_ms,
         row_key: history.row_key.clone(),
     };
-    Ok((history, cursor, row.get(25)?))
+    Ok((history, cursor, row.get(26)?))
 }
 
 fn analysis_filter_code(filter: AnalysisHistoryFilter) -> i64 {
@@ -156,6 +158,14 @@ fn analysis_search_pattern(search: &str) -> String {
         String::new()
     } else {
         format!("%{escaped}%")
+    }
+}
+
+fn analysis_state_pattern(states: &[String]) -> String {
+    if states.is_empty() {
+        String::new()
+    } else {
+        format!(",{},", states.join(","))
     }
 }
 
@@ -192,9 +202,13 @@ fn valid_request(request: &NewAnalysisRequest) -> bool {
         && request.request_id.len() <= 64
         && request.file_id > 0
         && request.source_size >= 0
-        && request.component == "fragment_index"
-        && !request.target_node_id.is_empty()
+        && matches!(
+            request.component.as_str(),
+            "fragment_index" | "skip_markers"
+        )
         && request.target_node_id.len() <= 128
+        && ((request.component == "skip_markers" && request.target_node_id.is_empty())
+            || (request.component == "fragment_index" && !request.target_node_id.is_empty()))
 }
 
 #[async_trait]
@@ -289,7 +303,9 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 .query_row(
                     &format!(
                         "SELECT {REQUEST_COLS} FROM analysis_requests
-                          WHERE target_node_id = ?1 AND attempts < ?2
+                          WHERE (target_node_id = ?1
+                              OR (component = 'skip_markers' AND target_node_id = ''))
+                            AND attempts < ?2
                             AND ((state = 'queued' AND not_before_ms <= ?3)
                               OR (state = 'running' AND lease_expires_ms <= ?3))
                           ORDER BY created_at_ms, request_id LIMIT 1"
@@ -633,6 +649,201 @@ impl ClusterFragmentIndexStore for SqliteStore {
         .await
     }
 
+    async fn analysis_request(
+        &self,
+        request_id: &str,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        let request_id = request_id.to_owned();
+        self.with_read(move |conn| {
+            conn.query_row(
+                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                params![request_id],
+                request_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn retry_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        let request_id = request_id.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE analysis_requests
+                    SET state = 'queued', owner_node_id = NULL, lease_expires_ms = NULL,
+                        result_cache_key = NULL, last_error_code = NULL,
+                        not_before_ms = ?1, updated_at_ms = ?1
+                  WHERE request_id = ?2 AND state IN ('failed', 'cancelled')
+                    AND EXISTS (SELECT 1 FROM files
+                          WHERE id = analysis_requests.file_id
+                            AND size = analysis_requests.source_size
+                            AND mtime = analysis_requests.source_mtime)",
+                params![now_ms, request_id],
+            )?;
+            conn.query_row(
+                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                params![request_id],
+                request_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn cancel_analysis_request_admin(
+        &self,
+        request_id: &str,
+        now_ms: i64,
+    ) -> Result<Option<AnalysisRequest>, StoreError> {
+        let request_id = request_id.to_owned();
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE analysis_requests
+                    SET state = 'cancelled', owner_node_id = NULL, lease_expires_ms = NULL,
+                        fence = fence + 1, last_error_code = 'admin_cancelled',
+                        updated_at_ms = ?1
+                  WHERE request_id = ?2 AND state IN ('queued', 'running', 'submitted')",
+                params![now_ms, request_id],
+            )?;
+            conn.query_row(
+                &format!("SELECT {REQUEST_COLS} FROM analysis_requests WHERE request_id = ?1"),
+                params![request_id],
+                request_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+        })
+        .await
+    }
+
+    async fn complete_analysis_request(
+        &self,
+        request: &AnalysisRequest,
+        result_key: &str,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if request.state != "running"
+            || request.owner_node_id.is_empty()
+            || result_key.is_empty()
+            || result_key.len() > 160
+        {
+            return Err(StoreError::Task(
+                "invalid direct analysis completion".to_owned(),
+            ));
+        }
+        let request = request.clone();
+        let result_key = result_key.to_owned();
+        self.with_conn(move |conn| {
+            Ok(conn.execute(
+                "UPDATE analysis_requests
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        result_cache_key = ?1, last_error_code = NULL, updated_at_ms = ?2
+                  WHERE request_id = ?3 AND state = 'running' AND owner_node_id = ?4
+                    AND fence = ?5 AND lease_expires_ms > ?2
+                    AND file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
+                    AND EXISTS (SELECT 1 FROM files
+                          WHERE id = ?6 AND size = ?7 AND mtime = ?8)",
+                params![
+                    result_key,
+                    now_ms,
+                    request.request_id,
+                    request.owner_node_id,
+                    request.fence,
+                    request.file_id,
+                    request.source_size,
+                    request.source_mtime,
+                ],
+            )? == 1)
+        })
+        .await
+    }
+
+    async fn publish_timeline_annotation_set_for_request(
+        &self,
+        request: &AnalysisRequest,
+        duration_ms: i64,
+        set: &crate::segplan::TimelineAnnotationSet,
+        now_ms: i64,
+    ) -> Result<bool, StoreError> {
+        if request.state != "running" || request.owner_node_id.is_empty() {
+            return Err(StoreError::Task(
+                "invalid timeline analysis publication".to_owned(),
+            ));
+        }
+        let set = crate::store::timeline_annotations::validated(set, duration_ms)?;
+        if set.source_identity.size != u64::try_from(request.source_size).unwrap_or(u64::MAX)
+            || set.source_identity.mtime_ms != request.source_mtime
+        {
+            return Err(StoreError::Task(
+                "timeline analysis source identity does not match its request".to_owned(),
+            ));
+        }
+        let annotations_json = serde_json::to_string(&set.annotations).map_err(|error| {
+            StoreError::Database(format!("encode timeline annotations: {error}"))
+        })?;
+        let request = request.clone();
+        self.with_conn(move |conn| {
+            let transaction = conn.unchecked_transaction()?;
+            let changed = transaction.execute(
+                "UPDATE analysis_requests
+                    SET state = 'ready', owner_node_id = NULL, lease_expires_ms = NULL,
+                        result_cache_key = ?1, last_error_code = NULL, updated_at_ms = ?2
+                  WHERE request_id = ?3 AND component = 'skip_markers'
+                    AND state = 'running' AND owner_node_id = ?4
+                    AND fence = ?5 AND lease_expires_ms > ?2
+                    AND file_id = ?6 AND source_size = ?7 AND source_mtime = ?8
+                    AND EXISTS (SELECT 1 FROM files
+                          WHERE id = ?6 AND size = ?7 AND mtime = ?8)",
+                params![
+                    set.generation_id,
+                    now_ms,
+                    request.request_id,
+                    request.owner_node_id,
+                    request.fence,
+                    request.file_id,
+                    request.source_size,
+                    request.source_mtime,
+                ],
+            )?;
+            if changed == 0 {
+                return Ok(false);
+            }
+            transaction.execute(
+                "INSERT INTO timeline_annotation_sets
+                    (file_id, source_size, source_mtime, argv_fingerprint,
+                     generation_id, version, annotations_json, updated_at_ms)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+                 ON CONFLICT(file_id) DO UPDATE SET
+                    source_size = excluded.source_size,
+                    source_mtime = excluded.source_mtime,
+                    argv_fingerprint = excluded.argv_fingerprint,
+                    generation_id = excluded.generation_id,
+                    version = excluded.version,
+                    annotations_json = excluded.annotations_json,
+                    updated_at_ms = excluded.updated_at_ms",
+                params![
+                    request.file_id,
+                    request.source_size,
+                    set.source_identity.mtime_ms,
+                    set.source_identity.argv_fingerprint,
+                    set.generation_id,
+                    i64::from(set.version),
+                    annotations_json,
+                    now_ms,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(true)
+        })
+        .await
+    }
+
     async fn analysis_history(
         &self,
         query: &AnalysisHistoryQuery,
@@ -640,6 +851,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
         let limit = query.limit.clamp(10, 100);
         let filter = analysis_filter_code(query.filter);
         let search = analysis_search_pattern(&query.search);
+        let states = analysis_state_pattern(&query.states);
+        let now_ms = query.now_ms;
         let cursor = query.cursor.clone().unwrap_or(AnalysisHistoryCursor {
             sort_rank: -1,
             updated_at_ms: 0,
@@ -662,13 +875,22 @@ impl ClusterFragmentIndexStore for SqliteStore {
                         OR LOWER(request_error_code) LIKE ?2 ESCAPE '\\'
                         OR LOWER(job_error_code) LIKE ?2 ESCAPE '\\'
                         OR LOWER(state) LIKE ?2 ESCAPE '\\')
+                      AND (?3 = '' OR INSTR(?3, ',' || CASE
+                        WHEN COALESCE(NULLIF(job_error_code, ''), request_error_code) = 'source_superseded'
+                          THEN 'stale'
+                        WHEN state = 'queued' AND not_before_ms > ?4 THEN 'retry_wait'
+                        WHEN state = 'running' THEN 'claimed'
+                        WHEN state = 'submitted' THEN 'staged'
+                        WHEN state = 'ready' THEN 'published'
+                        WHEN state = 'cancelled' THEN 'canceled'
+                        ELSE state END || ',') > 0)
                  ), page AS (
                    SELECT {HISTORY_COLS}, sort_rank FROM matching
-                    WHERE ?3 < 0 OR sort_rank > ?3
-                       OR (sort_rank = ?3 AND updated_at_ms < ?4)
-                       OR (sort_rank = ?3 AND updated_at_ms = ?4 AND row_key > ?5)
+                    WHERE ?5 < 0 OR sort_rank > ?5
+                       OR (sort_rank = ?5 AND updated_at_ms < ?6)
+                       OR (sort_rank = ?5 AND updated_at_ms = ?6 AND row_key > ?7)
                     ORDER BY sort_rank, updated_at_ms DESC, row_key
-                    LIMIT ?6
+                    LIMIT ?8
                  ), totals AS (
                    SELECT COUNT(*) AS filtered_total FROM matching
                  )
@@ -682,6 +904,8 @@ impl ClusterFragmentIndexStore for SqliteStore {
                 params![
                     filter,
                     search,
+                    states,
+                    now_ms,
                     cursor.sort_rank,
                     cursor.updated_at_ms,
                     cursor.row_key,
@@ -1617,6 +1841,8 @@ mod tests {
                     cursor,
                     filter: AnalysisHistoryFilter::All,
                     search: String::new(),
+                    states: Vec::new(),
+                    now_ms: 0,
                 })
                 .await
                 .expect("history page");
@@ -1665,6 +1891,8 @@ mod tests {
                 cursor: None,
                 filter: AnalysisHistoryFilter::Expected,
                 search: String::new(),
+                states: Vec::new(),
+                now_ms: 0,
             })
             .await
             .expect("expected outcomes");
@@ -1673,6 +1901,20 @@ mod tests {
             .rows
             .iter()
             .all(|row| matches!(row.disposition.as_str(), "expected" | "unsupported")));
+
+        let stale = store
+            .analysis_history(&AnalysisHistoryQuery {
+                limit: 10,
+                cursor: None,
+                filter: AnalysisHistoryFilter::All,
+                search: String::new(),
+                states: vec!["stale".to_owned()],
+                now_ms: 1_000,
+            })
+            .await
+            .expect("stale durable state");
+        assert_eq!(stale.filtered_total, 1);
+        assert_eq!(stale.rows[0].request_id, "superseded");
 
         let summary = store.analysis_status_summary().await.expect("summary");
         assert_eq!(summary.total, 31);
@@ -1691,6 +1933,8 @@ mod tests {
                 }),
                 filter: AnalysisHistoryFilter::All,
                 search: String::new(),
+                states: Vec::new(),
+                now_ms: 0,
             })
             .await
             .expect("valid cursor past retained tail");

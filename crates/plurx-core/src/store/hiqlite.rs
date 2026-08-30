@@ -44,7 +44,9 @@ use crate::error::StoreError;
 // indexes that keep the analysis operations projection cheap under polling;
 // v16 persists the first terminal cause; v17 adds the replacement-publication
 // fence; v18 installs the atomic request-claim trigger for that fence on
-// clusters which had already reached v17. Every additive
+// clusters which had already reached v17; v20 adds replicated semantic
+// timeline annotations; v21 adds separately fenced manual overrides; v22
+// admits semantic marker jobs to the analysis queue. Every additive
 // step is applied through Raft before the daemon opens the store. v5 remains a
 // supported direct-upgrade source so an offline node is
 // not forced to install every intermediate Cinema release; older or future
@@ -59,7 +61,10 @@ const TERMINAL_REASON_SCHEMA_VERSION: i64 = 16;
 const PUBLICATION_FENCE_SCHEMA_VERSION: i64 = 17;
 const PUBLICATION_CLAIM_SCHEMA_VERSION: i64 = 18;
 const DOLBY_VISION_COLUMNS_SCHEMA_VERSION: i64 = 19;
-pub const AUTH_SCHEMA_VERSION: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
+const TIMELINE_ANNOTATIONS_SCHEMA_VERSION: i64 = 20;
+const TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION: i64 = 21;
+const ANALYSIS_COMPONENT_SCHEMA_VERSION: i64 = 22;
+pub const AUTH_SCHEMA_VERSION: i64 = ANALYSIS_COMPONENT_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -76,6 +81,9 @@ const TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_HISTORY_INDEX_SCHE
 const PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_REASON_SCHEMA_VERSION;
 const PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
 const DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
+const TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
+const TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_ANNOTATIONS_SCHEMA_VERSION;
+const ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE: i64 = TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1206,6 +1214,7 @@ impl HiqliteAuthStore {
         super::hiqlite_sessions::install_schema(&client).await?;
         super::hiqlite_shared_cache::install_schema(&client).await?;
         super::hiqlite_fragment_index_cluster::install_schema(&client).await?;
+        super::hiqlite_timeline_annotations::install_schema(&client).await?;
 
         let store = Self::with_clock(client, clock, NodeLocalTelemetry::open(telemetry_path)?);
         let now = store.now()?;
@@ -1667,6 +1676,80 @@ impl HiqliteAuthStore {
                     let attempt = self.client().txn(statements).await;
                     self.settle_migration_attempt(
                         DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (super::hiqlite_timeline_annotations::SCHEMA, params!()),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    TIMELINE_ANNOTATIONS_SCHEMA_VERSION,
+                                    now,
+                                    TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(
+                    TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    let attempt = self
+                        .client()
+                        .txn([
+                            (
+                                super::hiqlite_timeline_annotations::MANUAL_SCHEMA,
+                                params!(),
+                            ),
+                            (
+                                "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                                 WHERE singleton = 1 AND schema_version = $3",
+                                params!(
+                                    TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION,
+                                    now,
+                                    TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE
+                                ),
+                            ),
+                        ])
+                        .await;
+                    self.settle_migration_attempt(
+                        TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
+                SchemaMigrationAction::MigrateFrom(ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE) => {
+                    let now = self.now()?;
+                    let mut statements = super::hiqlite_fragment_index_cluster::
+                        analysis_component_migration_statements()?;
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3"
+                            .to_owned(),
+                        params!(
+                            ANALYSIS_COMPONENT_SCHEMA_VERSION,
+                            now,
+                            ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE,
                         attempt,
                     )
                     .await?;
@@ -2330,7 +2413,60 @@ impl MetricsStore for HiqliteAuthStore {
                     (SELECT COALESCE(SUM(status = 'ok'), 0) \
                      FROM watched_outbox) AS outbox_ok, \
                     (SELECT COALESCE(SUM(status = 'failed'), 0) \
-                     FROM watched_outbox) AS outbox_failed \
+                     FROM watched_outbox) AS outbox_failed, \
+                    (SELECT COALESCE(json_group_array(json_object( \
+                        'component', grouped.component, 'state', grouped.durable_state, \
+                        'priority', grouped.priority, 'count', grouped.depth, \
+                        'oldest', grouped.oldest_age_seconds)), '[]') \
+                       FROM (SELECT component, \
+                              CASE \
+                                WHEN last_error_code = 'source_superseded' THEN 'stale' \
+                                WHEN state = 'queued' AND not_before_ms > $2 THEN 'retry_wait' \
+                                WHEN state = 'running' THEN 'claimed' \
+                                WHEN state = 'submitted' THEN 'staged' \
+                                WHEN state = 'ready' THEN 'published' \
+                                WHEN state = 'cancelled' THEN 'canceled' \
+                                ELSE state END AS durable_state, \
+                              CASE force_rebuild WHEN 1 THEN 'forced' ELSE 'normal' END AS priority, \
+                              COUNT(*) AS depth, \
+                              CASE WHEN $2 > MIN(created_at_ms) \
+                                THEN ($2 - MIN(created_at_ms)) / 1000 ELSE 0 END AS oldest_age_seconds \
+                         FROM analysis_requests \
+                        GROUP BY component, durable_state, priority) grouped) AS analysis_queue_json, \
+                    (SELECT COALESCE(json_group_array(json_object( \
+                        'kind', grouped.kind, 'provenance', grouped.provenance, \
+                        'confidence', grouped.confidence, 'count', grouped.count)), '[]') \
+                       FROM (SELECT kind, provenance, confidence, COUNT(*) AS count \
+                               FROM (SELECT json_extract(marker.value, '$.kind') AS kind, \
+                                            json_extract(marker.value, '$.provenance') AS provenance, \
+                                            CASE \
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 500 THEN 'low' \
+                                              WHEN CAST(COALESCE(json_extract(marker.value, '$.confidence_millis'), 0) AS INTEGER) < 900 THEN 'medium' \
+                                              ELSE 'high' END AS confidence \
+                                       FROM timeline_annotation_sets annotation_set, \
+                                            json_each(annotation_set.annotations_json) marker \
+                                      WHERE NOT EXISTS ( \
+                                        SELECT 1 FROM timeline_manual_overrides manual \
+                                         WHERE manual.file_id = annotation_set.file_id \
+                                           AND manual.kind = json_extract(marker.value, '$.kind') \
+                                           AND manual.source_size = annotation_set.source_size \
+                                           AND manual.source_mtime = annotation_set.source_mtime \
+                                           AND manual.argv_fingerprint = annotation_set.argv_fingerprint) \
+                                      UNION ALL \
+                                     SELECT kind, 'manual', 'high' \
+                                       FROM timeline_manual_overrides) \
+                              GROUP BY kind, provenance, confidence) grouped) AS analysis_marker_json, \
+                    (SELECT COALESCE(SUM(attempts), 0) FROM analysis_requests) AS analysis_claims, \
+                    (SELECT COALESCE(SUM(CASE WHEN attempts > 1 THEN attempts - 1 ELSE 0 END), 0) \
+                       FROM analysis_requests) AS analysis_retries, \
+                    (SELECT COALESCE(SUM(last_error_code = 'admin_cancelled'), 0) \
+                       FROM analysis_requests) AS analysis_cancellations, \
+                    (SELECT COALESCE(SUM(last_error_code = 'source_superseded'), 0) \
+                       FROM analysis_requests) AS analysis_stale_identity, \
+                    (SELECT COALESCE(SUM(state = 'failed'), 0) \
+                       FROM analysis_requests) AS analysis_terminal_failures, \
+                    (SELECT COALESCE(SUM(state = 'ready'), 0) \
+                       FROM analysis_requests) AS analysis_publications \
                  FROM offline_packages WHERE node_id = $1",
                 params!(node_id, now),
             )
@@ -2944,7 +3080,10 @@ fn schema_migration_action(
         | TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
         | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
         | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE
-        | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE => {
+        | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE
+        | TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE
+        | TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE
+        | ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -3056,6 +3195,14 @@ struct PrometheusStoreRow {
     outbox_pending: i64,
     outbox_ok: i64,
     outbox_failed: i64,
+    analysis_queue_json: String,
+    analysis_marker_json: String,
+    analysis_claims: i64,
+    analysis_retries: i64,
+    analysis_cancellations: i64,
+    analysis_stale_identity: i64,
+    analysis_terminal_failures: i64,
+    analysis_publications: i64,
 }
 
 impl From<&mut Row<'_>> for PrometheusStoreRow {
@@ -3076,6 +3223,14 @@ impl From<&mut Row<'_>> for PrometheusStoreRow {
             outbox_pending: row.get("outbox_pending"),
             outbox_ok: row.get("outbox_ok"),
             outbox_failed: row.get("outbox_failed"),
+            analysis_queue_json: row.get("analysis_queue_json"),
+            analysis_marker_json: row.get("analysis_marker_json"),
+            analysis_claims: row.get("analysis_claims"),
+            analysis_retries: row.get("analysis_retries"),
+            analysis_cancellations: row.get("analysis_cancellations"),
+            analysis_stale_identity: row.get("analysis_stale_identity"),
+            analysis_terminal_failures: row.get("analysis_terminal_failures"),
+            analysis_publications: row.get("analysis_publications"),
         }
     }
 }
@@ -3098,6 +3253,18 @@ impl From<PrometheusStoreRow> for PrometheusStoreSnapshot {
                 pinned_bytes: row.pinned_bytes,
             },
             watched_outbox: (row.outbox_pending, row.outbox_ok, row.outbox_failed),
+            analysis: super::analysis_store_metrics(
+                &row.analysis_queue_json,
+                &row.analysis_marker_json,
+                super::AnalysisLifecycleMetrics {
+                    claims: row.analysis_claims,
+                    retries: row.analysis_retries,
+                    cancellations: row.analysis_cancellations,
+                    stale_identity: row.analysis_stale_identity,
+                    terminal_failures: row.analysis_terminal_failures,
+                    publications: row.analysis_publications,
+                },
+            ),
         }
     }
 }
@@ -4444,9 +4611,36 @@ mod tests {
             "v18 must advance exactly one step to the Dolby Vision column schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 14,
+            TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE, DOLBY_VISION_COLUMNS_SCHEMA_VERSION,
+            "the timeline-annotation migration must start from the exact v19 shape"
+        );
+        assert_eq!(
+            TIMELINE_ANNOTATIONS_SCHEMA_MIGRATION_SOURCE + 1,
+            TIMELINE_ANNOTATIONS_SCHEMA_VERSION,
+            "v19 must advance exactly one step to the timeline-annotation schema"
+        );
+        assert_eq!(
+            TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE, TIMELINE_ANNOTATIONS_SCHEMA_VERSION,
+            "the manual-override migration must start from the exact v20 shape"
+        );
+        assert_eq!(
+            TIMELINE_MANUAL_OVERRIDES_SCHEMA_MIGRATION_SOURCE + 1,
+            TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION,
+            "v20 must advance exactly one step to the manual-override schema"
+        );
+        assert_eq!(
+            ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE, TIMELINE_MANUAL_OVERRIDES_SCHEMA_VERSION,
+            "the analysis-component migration must start from the exact v21 shape"
+        );
+        assert_eq!(
+            ANALYSIS_COMPONENT_SCHEMA_MIGRATION_SOURCE + 1,
+            ANALYSIS_COMPONENT_SCHEMA_VERSION,
+            "v21 must advance exactly one step to the analysis-component schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 17,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v19 step"
+            "this implementation contains every additive v5→v22 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

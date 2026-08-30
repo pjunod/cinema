@@ -456,6 +456,16 @@ pub struct Marker {
     /// credits window, boundary-derived or duration-derived (so the UI can
     /// hedge the wording). The wire shape is fixed — three clients decode it.
     pub chapter: bool,
+    /// Additive semantic metadata. Optional until every shipped client has
+    /// migrated; the five fields above remain the compatibility contract.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detector_version: Option<String>,
 }
 
 /// The server-owned execution plan for a verdict.
@@ -952,7 +962,10 @@ struct ChapterSpan {
 /// Turn an ffprobe `chapters` array into skippable intro/credits markers.
 /// Pure, so the classification and the bounds checks are testable without a
 /// file or a subprocess.
-fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64>) -> Vec<Marker> {
+pub(crate) fn markers_from_chapters(
+    chapters: &[serde_json::Value],
+    duration_ms: Option<i64>,
+) -> Vec<Marker> {
     let at = |ch: &serde_json::Value, key: &str| -> Option<i64> {
         ch.get(key)
             .and_then(|s| s.as_str())
@@ -1012,6 +1025,10 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
             start_ms,
             end_ms,
             chapter: true,
+            provenance: None,
+            confidence: None,
+            generation: None,
+            detector_version: None,
         });
     }
 
@@ -1042,6 +1059,10 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
                 start_ms: boundary.unwrap_or(dur - tail),
                 end_ms: dur,
                 chapter: false,
+                provenance: None,
+                confidence: None,
+                generation: None,
+                detector_version: None,
             });
         }
     }
@@ -1064,21 +1085,128 @@ fn markers_from_chapters(chapters: &[serde_json::Value], duration_ms: Option<i64
 /// any other. A file whose probe never succeeded has no document to graft
 /// onto and simply keeps probing live; it has larger problems, and the
 /// reanalyze button is the fix for them.
-async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
-    if let Some(chapters) = stored_chapters(state, file.id).await {
-        return markers_from_chapters(&chapters, file.duration_ms);
+const CHAPTER_ANNOTATION_VERSION: &str = "chapter-classifier-v1";
+
+pub(crate) fn annotation_source_identity(file: &MediaFile) -> plurx_core::segplan::SourceIdentity {
+    plurx_core::segplan::SourceIdentity::new(
+        u64::try_from(file.size).unwrap_or_default(),
+        file.mtime,
+        plurx_core::segplan::argv_fingerprint(&[
+            "timeline-annotations".to_owned(),
+            CHAPTER_ANNOTATION_VERSION.to_owned(),
+        ]),
+    )
+}
+
+pub(crate) fn annotation_set_from_markers(
+    source_identity: plurx_core::segplan::SourceIdentity,
+    markers: &[Marker],
+) -> plurx_core::segplan::TimelineAnnotationSet {
+    use plurx_core::segplan::{
+        AnnotationKind, AnnotationProvenance, TimelineAnnotation, TimelineAnnotationSet,
+    };
+
+    TimelineAnnotationSet {
+        source_identity,
+        generation_id: uuid::Uuid::new_v4().to_string(),
+        version: 1,
+        annotations: markers
+            .iter()
+            .filter_map(|marker| {
+                let kind = match marker.kind.as_str() {
+                    "intro" => AnnotationKind::Intro,
+                    "recap" => AnnotationKind::Recap,
+                    "credits" => AnnotationKind::Credits,
+                    "preview" => AnnotationKind::Preview,
+                    _ => return None,
+                };
+                let provenance = if marker.chapter {
+                    AnnotationProvenance::Authored
+                } else {
+                    AnnotationProvenance::Estimated
+                };
+                Some(TimelineAnnotation {
+                    kind,
+                    start_ticks: marker.start_ms,
+                    end_ticks: marker.end_ms,
+                    timescale: 1_000,
+                    start_ms: marker.start_ms,
+                    end_ms: marker.end_ms,
+                    provenance,
+                    confidence_millis: if marker.chapter { 1_000 } else { 250 },
+                    detector_version: CHAPTER_ANNOTATION_VERSION.to_owned(),
+                    manual_override_revision: None,
+                })
+            })
+            .collect(),
     }
-    let probed = probe_chapters(&file.path).await;
-    if let Some(chapters) = &probed {
-        // Best-effort backfill: a failure here costs one more probe next time,
-        // not correctness.
-        if let Ok(json) = serde_json::to_string(chapters) {
-            if let Err(e) = state.store.merge_file_probe_chapters(file.id, &json).await {
-                tracing::warn!(file_id = file.id, error = %e, "could not cache file chapters");
-            }
+}
+
+fn markers_from_annotation_set(set: plurx_core::segplan::TimelineAnnotationSet) -> Vec<Marker> {
+    use plurx_core::segplan::AnnotationProvenance;
+
+    let generation = set.generation_id;
+    set.annotations
+        .into_iter()
+        .map(|annotation| Marker {
+            kind: annotation.kind.as_str().to_owned(),
+            label: annotation.kind.label().to_owned(),
+            start_ms: annotation.start_ms,
+            end_ms: annotation.end_ms,
+            chapter: annotation.provenance == AnnotationProvenance::Authored,
+            provenance: Some(annotation.provenance.as_str().to_owned()),
+            confidence: Some(annotation.confidence_millis),
+            generation: Some(generation.clone()),
+            detector_version: Some(annotation.detector_version),
+        })
+        .collect()
+}
+
+async fn markers_for(state: &AppState, file: &MediaFile) -> Vec<Marker> {
+    let source_identity = annotation_source_identity(file);
+    match state
+        .store
+        .timeline_annotation_set(file.id, &source_identity)
+        .await
+    {
+        Ok(Some(set)) => return markers_from_annotation_set(set),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "could not read timeline annotations");
         }
     }
-    markers_from_chapters(&probed.unwrap_or_default(), file.duration_ms)
+
+    let markers = if let Some(chapters) = stored_chapters(state, file.id).await {
+        markers_from_chapters(&chapters, file.duration_ms)
+    } else {
+        let probed = probe_chapters(&file.path).await;
+        if let Some(chapters) = &probed {
+            // Best-effort backfill: a failure here costs one more probe next time,
+            // not correctness.
+            if let Ok(json) = serde_json::to_string(chapters) {
+                if let Err(e) = state.store.merge_file_probe_chapters(file.id, &json).await {
+                    tracing::warn!(file_id = file.id, error = %e, "could not cache file chapters");
+                }
+            }
+        }
+        markers_from_chapters(&probed.unwrap_or_default(), file.duration_ms)
+    };
+
+    let Some(duration_ms) = file.duration_ms.filter(|duration| *duration > 0) else {
+        return markers;
+    };
+    let set = annotation_set_from_markers(source_identity, &markers);
+    match state
+        .store
+        .put_timeline_annotation_set(file.id, duration_ms, &set)
+        .await
+    {
+        Ok(()) => markers_from_annotation_set(set),
+        Err(error) => {
+            tracing::warn!(file_id = file.id, %error, "could not persist timeline annotations");
+            markers
+        }
+    }
 }
 
 /// Chapters from the stored scan probe. `None` means "this probe predates
@@ -1097,7 +1225,7 @@ async fn stored_chapters(state: &AppState, file_id: i64) -> Option<Vec<serde_jso
 
 /// One live `ffprobe -show_chapters`. `None` when ffprobe failed, so the caller
 /// can tell "no chapters" from "could not ask" and decline to cache the latter.
-async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
+pub(crate) async fn probe_chapters(path: &Path) -> Option<Vec<serde_json::Value>> {
     let out = tokio::process::Command::new(ffprobe_bin())
         .args([
             "-v",
@@ -2997,6 +3125,42 @@ mod tests {
             serde_json::json!({ "tags": { "title": "Intro" } }),
         ];
         assert!(markers_from_chapters(&junk, None).is_empty());
+    }
+
+    #[test]
+    fn marker_wire_keeps_its_five_fields_and_adds_optional_annotation_evidence() {
+        let derived = markers_from_chapters(&[chapter("Opening", "0", "90")], Some(600_000));
+        let legacy = serde_json::to_value(&derived[0]).expect("serialize derived marker");
+        let fields = legacy
+            .as_object()
+            .expect("marker object")
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            fields,
+            ["chapter", "end_ms", "kind", "label", "start_ms"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+
+        let set = annotation_set_from_markers(
+            plurx_core::segplan::SourceIdentity::new(10, 20, "timeline-v1"),
+            &derived,
+        );
+        let persisted = serde_json::to_value(&markers_from_annotation_set(set)[0])
+            .expect("serialize persisted marker");
+        for field in ["kind", "label", "start_ms", "end_ms", "chapter"] {
+            assert_eq!(
+                persisted[field], legacy[field],
+                "compatibility field {field}"
+            );
+        }
+        assert_eq!(persisted["provenance"], "authored");
+        assert_eq!(persisted["confidence"], 1_000);
+        assert!(persisted["generation"].is_string());
+        assert_eq!(persisted["detector_version"], CHAPTER_ANNOTATION_VERSION);
     }
 
     /// A chaptered file whose chapter titles never say "credits" still carries
