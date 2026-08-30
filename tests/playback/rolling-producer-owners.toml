@@ -17,7 +17,7 @@ replacement = "the sole actor-owned rolling producer progress budget before and 
 [[symbols]]
 id = "replacement-mask-flag"
 pattern = "replacing_child"
-expected_occurrences = 27
+expected_occurrences = 29
 kind = "recovery_election"
 replacement = "retained process-replacement serialization projection; actor decisions and exact attempts own transcode prepublication"
 
@@ -31,7 +31,7 @@ replacement = "specific attempt, response-admission, copy replacement, published
 [[symbols]]
 id = "replacement-transaction"
 pattern = "begin_child_replacement"
-expected_occurrences = 5
+expected_occurrences = 7
 kind = "replacement_owner"
 replacement = "one actor-authorized prepublication retry action"
 
@@ -52,7 +52,7 @@ replacement = "the session executor installing one actor-authorized attempt"
 [[symbols]]
 id = "hardware-downgrade"
 pattern = "downgrade_one_step"
-expected_occurrences = 5
+expected_occurrences = 1
 kind = "replacement_policy"
 replacement = "test-only legacy helper; production uses one immutable ValidatedRetryRecipe consumed once by the actor"
 
@@ -66,7 +66,7 @@ replacement = "typed producer facts entering the actor; only prepublication and 
 [[symbols]]
 id = "supervisor-registration"
 pattern = "AttemptChild::new\\("
-expected_occurrences = 19
+expected_occurrences = 20
 kind = "process_owner"
 replacement = "retained as the sole OS-child supervisor, registered before publication"
 
@@ -270,12 +270,12 @@ expected_occurrences = 0
 [[module_symbols]]
 id = "legacy-replacement-mask"
 pattern = "replacing_child"
-expected_occurrences = 27
+expected_occurrences = 29
 
 [[module_symbols]]
 id = "legacy-downgrade-owner"
 pattern = "downgrade_one_step"
-expected_occurrences = 5
+expected_occurrences = 1
 
 [[module_symbols]]
 id = "legacy-stall-watch-owner"
@@ -1022,7 +1022,7 @@ expected_occurrences = 0
 [[module_structures]]
 id = "process-lifecycle-method"
 pattern = "\\.(?:kill|start_kill|wait|try_wait|exec)\\s*\\("
-expected_occurrences = 296
+expected_occurrences = 293
 
 [[module_structures]]
 id = "free-or-ufcs-process-lifecycle"
@@ -1037,7 +1037,7 @@ expected_occurrences = 30
 [[module_structures]]
 id = "rolling-supervisor-construction"
 pattern = "AttemptChild::new\\s*\\("
-expected_occurrences = 19
+expected_occurrences = 20
 
 [[module_structures]]
 id = "forbidden-timer-or-task-alias"
