@@ -38,17 +38,38 @@ jobs:
           version: "1.62.0"
       - name: Run every scheduled validation
         run: make validate-nightly
+      # Split, because the two halves have wildly different value per byte.
+      #
+      # The JSON under target/validation is what anyone actually reads weeks
+      # later — which points ran, what they measured, which regressed. It is a
+      # few megabytes and keeps its fortnight.
+      #
+      # target/playback-lab and target/ui-baseline are captures: video frames
+      # and screenshots. Together they are ~200 MB *per night*, which at a
+      # fortnight's retention is a standing 2.8 GB from this job alone — more
+      # than the whole account's artifact allowance, and the actual reason
+      # every upload in every repository has been refused since 2026-08-25.
+      # They are worth looking at when something failed or in the days right
+      # after a change; nobody opens a green night's screenshots from twelve
+      # days ago.
       - name: Upload deep-validation evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: nightly-deep-validation-evidence
+          path: target/validation
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Upload deep-validation captures
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-deep-validation-captures
           path: |
-            target/validation
             target/playback-lab
             target/ui-baseline
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 3
 
   pgs-fuzz:
     name: bounded PGS parser fuzz campaign
