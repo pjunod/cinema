@@ -3487,7 +3487,7 @@ fn local_control_response(
     server_time_unix_ms: i64,
 ) -> crate::playback_control::ControlResponseV1 {
     let owner_epoch = u64::try_from(route.owner_epoch).unwrap_or_default();
-    crate::playback_control::ControlResponseV1 {
+    let response = crate::playback_control::ControlResponseV1 {
         protocol: crate::playback_control::PROTOCOL_V1.to_owned(),
         generation: route.incarnation_id.clone(),
         control_epoch: owner_epoch,
@@ -3514,8 +3514,15 @@ fn local_control_response(
             start.height,
             start.delivered_dynamic_range.clone(),
         ),
-        action: result.action.clone(),
-    }
+        action: crate::playback_control::ControlAction::None,
+    };
+    // The advisory hold is derived from the delivery this response is already
+    // carrying, so the two can never disagree. Building the response first and
+    // resolving after is what makes that guarantee structural rather than a
+    // rule two call sites have to remember.
+    let action =
+        crate::playback_control::resolve_action(&result.action, &response.delivery, request);
+    crate::playback_control::ControlResponseV1 { action, ..response }
 }
 
 struct DurableTerminalCommitter {
@@ -8617,6 +8624,7 @@ mod tests {
             }),
             observation: None,
             acknowledgement: None,
+            supported_actions: None,
         };
 
         let response = control_local(&fixture.state, &route, request, i64::MAX).await;
@@ -9233,6 +9241,7 @@ mod tests {
             }),
             observation: None,
             acknowledgement: None,
+            supported_actions: None,
         };
 
         // A future discarded before owner-local admission must not enqueue or
@@ -9457,6 +9466,7 @@ mod tests {
                 capabilities: None,
                 observation: None,
                 acknowledgement: None,
+                supported_actions: None,
             };
             let terminal_time_ms = unix_ms();
             let terminal = crate::playback_control::ControlResponseV1 {

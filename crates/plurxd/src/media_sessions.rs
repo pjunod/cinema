@@ -5383,6 +5383,7 @@ mod tests {
                 }),
                 observation: None,
                 acknowledgement: None,
+                supported_actions: None,
             },
         }
     }
