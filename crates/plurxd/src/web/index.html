@@ -856,8 +856,11 @@
   .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
   /* The same idea one table row deep: the machine name leads, the id keeps its
-     own treatment underneath instead of disappearing into a tooltip. */
-  .clnode{font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+     own treatment underneath instead of disappearing into a tooltip.
+     NOT `.clnode` — that is the cluster page's node *card* further down this
+     sheet, and at equal specificity the later rule wins, so a label wearing
+     that name renders as a bordered, panel-tinted box inside a table cell. */
+  .nodename{font-weight:600;line-height:1.3;overflow-wrap:anywhere}
   .clleader{color:var(--accent);border-color:var(--accent)}
   .clopshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
   .clopsfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 14px;margin:12px 0 4px}
@@ -10427,14 +10430,14 @@ function analysisNodeCell(names,nodeId){
   const name=nodeLabel(names,nodeId);
   return name===nodeId
     ? `<span class="clid">${esc(nodeId)}</span>`
-    : `<span class="clnode">${esc(name)}</span>`;
+    : `<span class="nodename">${esc(name)}</span>`;
 }
 // Both, for the places an operator reads the row rather than scans it. A named
 // node still shows its id, because the id is what a support question quotes.
 function analysisNodeDetail(names,nodeId){
   if(!nodeId) return null;
   const name=nodeLabel(names,nodeId);
-  return name===nodeId?nodeId:`${name} · ${nodeId}`;
+  return name===nodeId?nodeId:`${name} (${nodeId})`;
 }
 function analysisRowKey(row){
   return row.row_key;
@@ -10540,7 +10543,7 @@ function paintAnalysis(snapshot){
     const details=[
       ["Request",row.request_id],["Worker job",row.job_id],
       ["Target node",analysisNodeDetail(nodeNames,row.target_node_id)],
-      ["Owner",analysisNodeDetail(nodeNames,owner)],
+      ["Owner",analysisNodeDetail(nodeNames,row.owner_node_id)],
       ["Lease",lease?(lease>snapshot.now_ms?`expires in ${Math.ceil((lease-snapshot.now_ms)/1000)}s`:"expired"):null],
       ["Retry",row.state==="queued"&&retryAt>snapshot.now_ms?`in ${Math.ceil((retryAt-snapshot.now_ms)/1000)}s`:null],
       ["Source size",row.source_size!=null?fmtBytes(row.source_size):null],
@@ -10568,7 +10571,7 @@ function paintAnalysis(snapshot){
     ${!snapshot.enabled?`<div class="clrefusal"><b>New analysis is paused.</b> Existing VOD HLS indexes still serve. Open <button class="ghost sm" data-analysis-focus="paused-settings" onclick="openAnalysisSettings()">Analysis settings</button> to enable the queue.</div>`:""}
     <div class="analysis-metrics"><div class="analysis-metric ${working?'warn':''}"><span class="n">${working}</span><span class="k">Working now</span></div><div class="analysis-metric ${attention?'bad':''}"><span class="n">${attention}</span><span class="k">Recent attention</span></div><div class="analysis-metric"><span class="n">${expected}</span><span class="k">Recent expected</span></div><div class="analysis-metric good"><span class="n">${counts.ready||0}</span><span class="k">Recent ready</span></div><div class="analysis-metric"><span class="n">${counts.total||0}</span><span class="k">Summary window</span></div></div>
     <div class="analysis-sub">Summary metrics include all active work and up to ${counts.terminal_window||8192} recent terminal worker results. The selected filter count below is exact across retained history.</div>
-    <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
+    <div class="analysis-controls"><div class="analysis-search"><input id="analysis-search" data-analysis-focus="search" aria-label="Search analysis work" placeholder="Search title, file, node id, or error…" value="${esc(ANALYSIS_VIEW.query)}" oninput="setAnalysisQuery(this.value)"></div>
       <div class="analysis-filters">${filterButton("all","All")}${filterButton("working","Working")}${filterButton("attention","Attention")}${filterButton("expected","Expected")}${filterButton("ready","Ready")}</div>
       ${ANALYSIS_VIEW.filter==="attention"&&pageRows.some(analysisCanRetry)?`<button class="ghost sm" data-analysis-focus="retry-page" onclick="retryFailedAnalysis()">Retry this page</button>`:`<span></span>`}</div>
     ${rows?`<div class="analysis-table-wrap"><table class="analysis-table"><thead><tr><th scope="col">File</th><th scope="col">Analysis</th><th scope="col">Node / updated</th><th scope="col">Actions</th></tr></thead><tbody>${rows}</tbody></table></div>`
@@ -10610,7 +10613,7 @@ function activityNodeCell(names,nodeId){
   const name=nodeLabel(names,nodeId);
   return name===nodeId
     ? `<span class="clid">${esc(nodeId)}</span>`
-    : `<div class="clnode">${esc(name)}</div><div class="clid">${esc(nodeId)}</div>`;
+    : `<div class="nodename">${esc(name)}</div><div class="clid">${esc(nodeId)}</div>`;
 }
 function activityNodeFailureText(node,names){
   const name=node.node_id?`Node ${nodeLabel(names,node.node_id)}`:"The cluster peer directory";

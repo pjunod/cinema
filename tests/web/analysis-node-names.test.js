@@ -165,7 +165,7 @@ async function main() {
 
 test("the Node column names the machine that owns the row", () => {
   const html = paint(snapshot({ node_hostnames: { [OWNER]: "nuc3" } }));
-  assert.match(html, /<span class="clnode">nuc3<\/span>/);
+  assert.match(html, /<span class="nodename">nuc3<\/span>/);
   // The defect: the id must not be what the column shows.
   assert.doesNotMatch(html, /<span class="clid">298849e0/);
 });
@@ -176,11 +176,11 @@ test("the id keeps a labelled line in Technical details, name beside it", () => 
   );
   assert.match(
     html,
-    /<b>Owner<\/b><span>nuc3 · 298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/,
+    /<b>Owner<\/b><span>nuc3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)<\/span>/,
   );
   assert.match(
     html,
-    /<b>Target node<\/b><span>m6 · 75813686-9927-41d0-97e0-18d152f9efa2<\/span>/,
+    /<b>Target node<\/b><span>m6 \(75813686-9927-41d0-97e0-18d152f9efa2\)<\/span>/,
   );
 });
 
@@ -188,7 +188,7 @@ test("an unnamed node keeps the id it always showed, in both places", () => {
   const html = paint(snapshot());
   assert.match(html, /<span class="clid">298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/);
   assert.match(html, /<b>Owner<\/b><span>298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/);
-  assert.doesNotMatch(html, / · 298849e0/);
+  assert.doesNotMatch(html, /\(298849e0/);
   assert.doesNotMatch(html, /undefined/);
   assert.doesNotMatch(html, /null/);
 });
@@ -215,14 +215,14 @@ test("the column falls back to the target when no owner has claimed the row", ()
       node_hostnames: { [TARGET]: "m6" },
     }),
   );
-  assert.match(html, /<span class="clnode">m6<\/span>/);
+  assert.match(html, /<span class="nodename">m6<\/span>/);
 });
 
 test("Copy details carries the name and the id an operator will quote", async () => {
   paint(snapshot({ node_hostnames: { [OWNER]: "nuc3", [TARGET]: "m6" } }));
   const text = await copyText("job:job-1");
-  assert.match(text, /Owner: nuc3 · 298849e0-92fa-4c36-9186-da8b0c1dc01d/);
-  assert.match(text, /Target: m6 · 75813686-9927-41d0-97e0-18d152f9efa2/);
+  assert.match(text, /Owner: nuc3 \(298849e0-92fa-4c36-9186-da8b0c1dc01d\)/);
+  assert.match(text, /Target: m6 \(75813686-9927-41d0-97e0-18d152f9efa2\)/);
 });
 
 test("Copy details still carries a bare id when the roster named nobody", async () => {
@@ -230,7 +230,7 @@ test("Copy details still carries a bare id when the roster named nobody", async 
   const text = await copyText("job:job-1");
   assert.match(text, /Owner: 298849e0-92fa-4c36-9186-da8b0c1dc01d/);
   assert.doesNotMatch(text, /Owner: undefined/);
-  assert.doesNotMatch(text, / · /);
+  assert.doesNotMatch(text, /Owner: \S+ \(/);
 });
 
 test("a hostile hostname and a hostile id are both escaped", () => {
@@ -243,7 +243,7 @@ test("a hostile hostname and a hostile id are both escaped", () => {
   );
   assert.doesNotMatch(html, /<img src=x/);
   assert.doesNotMatch(html, /<script>alert\(2\)/);
-  assert.match(html, /<span class="clnode">&lt;script&gt;alert\(2\)&lt;\/script&gt;<\/span>/);
+  assert.match(html, /<span class="nodename">&lt;script&gt;alert\(2\)&lt;\/script&gt;<\/span>/);
   assert.match(html, /&quot;&gt;&lt;img src=x/);
 });
 
@@ -270,6 +270,31 @@ test("names never survive into a snapshot that did not carry them", () => {
   const html = paint(snapshot());
   assert.doesNotMatch(html, /nuc3/);
   assert.match(html, /<span class="clid">298849e0-92fa-4c36-9186-da8b0c1dc01d<\/span>/);
+});
+
+test("the node label wears a class nothing else in the sheet styles", () => {
+  // The first draft called it `.clnode`, which is also the cluster page's node
+  // *card* — border, radius, panel background — defined later in the same
+  // stylesheet at equal specificity. The later rule wins, so the label
+  // rendered as a bordered box inside a table cell, on two pages.
+  const rule = /\.([a-z][\w-]*)(?![\w-])\s*(?=[,{])/g;
+  const defined = new Map();
+  const sheet = SHIPPED_UI.slice(0, SHIPPED_UI.indexOf("</style>"));
+  for (const match of sheet.matchAll(rule)) {
+    defined.set(match[1], (defined.get(match[1]) || 0) + 1);
+  }
+  for (const used of ["nodename"]) {
+    assert.equal(
+      defined.get(used),
+      1,
+      `.${used} is defined ${defined.get(used)} times; a label class must be its own`,
+    );
+  }
+  // …and the cell must not reach for the multiply-defined one again.
+  for (const cell of ["analysisNodeCell", "activityNodeCell"]) {
+    assert.doesNotMatch(shippedSource(cell), /class="clnode"/);
+    assert.match(shippedSource(cell), /class="nodename"/);
+  }
 });
 
 test("the workspace and the Now playing table share one naming helper", () => {

@@ -125,7 +125,7 @@ test("the Node cell leads with the machine name and keeps the id under it", () =
   const html = paint(snapshot({ node_hostnames: { [NODE_A]: "nuc3" } }));
   assert.match(
     html,
-    /<td><div class="clnode">nuc3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
+    /<td><div class="nodename">nuc3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
   );
   // The defect this file exists for: the id must not be the whole answer.
   assert.doesNotMatch(html, /<td><span class="clid">5deeeebc/);
@@ -146,7 +146,7 @@ test("a node the roster could not name keeps its id while its neighbours are nam
     Object.assign({}, d.deliveries[0], { node_id: NODE_B, file_id: 2, user: "guest" }),
   );
   const html = paint(d);
-  assert.match(html, /<div class="clnode">nuc3<\/div>/);
+  assert.match(html, /<div class="nodename">nuc3<\/div>/);
   assert.match(html, /<td><span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span><\/td>/);
 });
 
