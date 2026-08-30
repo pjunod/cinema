@@ -122,6 +122,8 @@ SURFACES: tuple[Surface, ...] = (
             "STATUS.html viewers tile"),
     Surface(STATUS, re.compile(r"(?<=upload Apple build )[1-9]\d*(?= \(release notes:)"),
             "STATUS.html TestFlight upload item"),
+    Surface(STATUS, re.compile(r"(?<=Install Apple build )[1-9]\d*(?= and Android versionCode)"),
+            "STATUS.html physical install item"),
 )
 
 
