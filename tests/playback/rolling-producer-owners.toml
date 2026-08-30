@@ -956,11 +956,15 @@ expected_occurrences = 3
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-# 502 since request_producer_flow_before: one tokio::time::timeout_at bounding
-# the caller's wait for the actor's reply, the same shape and budget as its
-# sibling classify_producer_exit_before. It bounds a mailbox round trip, not a
-# producer; it selects no recipe, publishes no response and starts no process.
-expected_occurrences = 502
+# 503 since settle_producer_flow_signal_before joined
+# request_producer_flow_before: two tokio::time::timeout_at calls, each
+# bounding the caller's wait for one actor reply, the same shape and budget as
+# their sibling classify_producer_exit_before. Both bound a mailbox round trip,
+# not a producer; neither selects a recipe, publishes a response or starts a
+# process. The transaction bound that CAN end a producer is the actor-owned
+# PRODUCER_FLOW_ACTION_BUDGET, which is not a time constructor and is named in
+# the lifecycle allowlist instead.
+expected_occurrences = 503
 
 [[module_structures]]
 id = "bare-time-constructor"
