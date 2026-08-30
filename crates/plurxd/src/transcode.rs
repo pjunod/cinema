@@ -26690,23 +26690,42 @@ mod tests {
             OutputGrade::Sdr,
         );
         opts.pipeline = Pipeline::Cpu;
-        let original_rate_control = opts.effective_rate_control;
         let sw_pool = mgr.admissions.software_pool();
-        let result = TranscodeManager::downgrade_one_step(
-            &session,
+        // The production retry executor is what clears predecessor scratch,
+        // and its transaction is what has to stay fenced when the clear
+        // fails. Drive that, not the retired ladder helper.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             EffectiveRateControl::Vbr,
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "fallback-clear-failure",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
+        )
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        let failed_attempt = session
+            .control
+            .begin_producer_attempt()
+            .await
+            .expect("admit the predecessor attempt");
+        let result = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            failed_attempt,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::ProgressDeadline,
+            "fallback-clear-failure",
         )
         .await;
 
-        assert_eq!(result, original_rate_control);
+        assert!(
+            result.is_err(),
+            "an unclearable predecessor scratch must fail the retry transaction"
+        );
         assert!(served_name.join("predecessor-bytes").exists());
         assert!(
             session
@@ -26724,12 +26743,17 @@ mod tests {
             1_024,
             "predecessor bytes remain charged until verified scratch clearing"
         );
-        assert!(matches!(
-            session.failure_reason(),
-            PlaylistError::SessionFailed(reason)
-                if reason.contains("predecessor scratch could not be cleared")
-                    && reason.contains("init.mp4")
-        ));
+        assert!(
+            matches!(
+                session.failure_reason(),
+                PlaylistError::SessionFailed(reason)
+                    if reason.contains("clearing predecessor scratch")
+                        && reason.contains("init.mp4")
+            ),
+            "the failure names the scratch clear and the file that blocked it, \
+             got {:?}",
+            session.failure_reason()
+        );
         tokio::time::timeout(Duration::from_secs(1), async {
             while !session.control.is_retired() {
                 tokio::task::yield_now().await;
