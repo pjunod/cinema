@@ -77,6 +77,27 @@ pub enum Pipeline {
     /// daemon gates on a *proved* RPU (`dovi_reshape_changes_pixels`) rather
     /// than on the library row alone.
     DoviPassthrough,
+    /// PQ in, PQ out, with no tone-map and no RPU: a 10-bit scale straight
+    /// into HEVC Main10. The rung for every ordinary HDR source — HDR10,
+    /// HDR10+, and the HDR10 base layer of a Dolby Vision title whose
+    /// enhancement layer has been stripped — on a client that presents Main10
+    /// PQ.
+    ///
+    /// **Deliberately not [`Pipeline::DoviPassthrough`] with the input
+    /// widened.** That graph runs `tonemapx` with `apply_dovi=1`, which is
+    /// Dolby-Vision-input-only and, handed a plain HDR10 frame, emits crushed
+    /// shadows and clipping above roughly 70% at exit 0 with correct-looking
+    /// tags — the worst kind of failure, because it plays. This one touches no
+    /// pixel values at all: it scales, and it names the output format. Every
+    /// colour term is signalled by the encoder flags
+    /// (`-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc`),
+    /// which is what a PQ source's frames already carry.
+    ///
+    /// Software decode is NOT required here, unlike the two Dolby graphs:
+    /// there is no RPU side data for a hardware decode to drop, and
+    /// `decode_setup` already brings QSV/VA-API surfaces down as `p010le`,
+    /// which this chain takes as-is.
+    Hdr10Passthrough,
     /// hwdownload → CPU float tone-map → the encoder's own hwupload. Always
     /// available, always correct, and slow in exactly the case that matters.
     Cpu,
@@ -101,6 +122,7 @@ impl Pipeline {
             Pipeline::TonemapOpencl => "tonemap_opencl",
             Pipeline::DoviTonemapx => "dovi_tonemapx",
             Pipeline::DoviPassthrough => "dovi_passthrough",
+            Pipeline::Hdr10Passthrough => "hdr10_passthrough",
             Pipeline::Cpu => "cpu",
         }
     }
@@ -109,7 +131,11 @@ impl Pipeline {
         CANDIDATES
             .iter()
             .copied()
-            .chain([Pipeline::DoviTonemapx, Pipeline::DoviPassthrough])
+            .chain([
+                Pipeline::DoviTonemapx,
+                Pipeline::DoviPassthrough,
+                Pipeline::Hdr10Passthrough,
+            ])
             .find(|p| p.name() == s)
     }
 
@@ -122,6 +148,7 @@ impl Pipeline {
             Pipeline::TonemapOpencl => "GPU tone-map (OpenCL)",
             Pipeline::DoviTonemapx => "Dolby Vision reshape (tonemapx)",
             Pipeline::DoviPassthrough => "Dolby Vision → HDR10 (tonemapx passthrough)",
+            Pipeline::Hdr10Passthrough => "HDR10 passthrough (no tone-map)",
             Pipeline::Cpu => "CPU tone-map",
         }
     }
@@ -130,7 +157,10 @@ impl Pipeline {
     pub fn on_gpu(self) -> bool {
         !matches!(
             self,
-            Pipeline::Cpu | Pipeline::DoviTonemapx | Pipeline::DoviPassthrough
+            Pipeline::Cpu
+                | Pipeline::DoviTonemapx
+                | Pipeline::DoviPassthrough
+                | Pipeline::Hdr10Passthrough
         )
     }
 
@@ -166,6 +196,9 @@ impl Pipeline {
             Pipeline::DoviPassthrough => {
                 matches!(encoder, Encoder::Software | Encoder::Qsv)
             }
+            // The same two measured Main10 encode routes. Other families stay
+            // refused until somebody measures them.
+            Pipeline::Hdr10Passthrough => matches!(encoder, Encoder::Software | Encoder::Qsv),
             Pipeline::Cpu => true,
         }
     }
@@ -189,6 +222,15 @@ impl Pipeline {
             // is a broken picture at exit 0 — see the variant's doc comment.
             (Pipeline::DoviPassthrough, Some("dolby_vision")) => true,
             (Pipeline::DoviPassthrough, _) => false,
+            // The mirror image of the guard above. PQ only: an HLG source
+            // through this chain would be re-tagged as PQ by the encoder
+            // flags, which is a grade change rather than a passthrough, and
+            // Dolby Vision belongs to the graph that reads its RPU. A DV
+            // source whose base layer is HDR10-compatible arrives here as
+            // `hdr10` — see `transcode::routing_hdr` — which is correct: its
+            // base decodes to ordinary PQ frames.
+            (Pipeline::Hdr10Passthrough, Some("hdr10" | "hdr10plus")) => true,
+            (Pipeline::Hdr10Passthrough, _) => false,
             // Nothing to map. The graph is still allowed — its scaler is the
             // reason — and the tone-map step simply drops out.
             (_, None) => true,
@@ -222,6 +264,7 @@ impl Pipeline {
             | Pipeline::TonemapOpencl
             | Pipeline::DoviTonemapx
             | Pipeline::DoviPassthrough
+            | Pipeline::Hdr10Passthrough
             | Pipeline::Cpu => Vec::new(),
         }
     }
@@ -356,6 +399,17 @@ impl Pipeline {
                      scale={w}:{h},format={format}"
                 )
             }
+            // No filter reads or rewrites a pixel value: the frames are
+            // already PQ/BT.2020 and stay that way. Scale, then name the
+            // 10-bit format the Main10 encoder needs. The `format=` comes from
+            // the same `OutputGrade` as the encoder's transfer, which is what
+            // makes the PQ-at-8-bit pairing that `abort()`s ffmpeg
+            // unspellable here.
+            Pipeline::Hdr10Passthrough => {
+                let h = height.max(2);
+                let format = OutputGrade::Hdr10.pixel_format();
+                format!("scale={w}:{h},format={format}")
+            }
         })
     }
 
@@ -375,7 +429,7 @@ impl Pipeline {
     /// [`Pipeline::DoviPassthrough`] ends in BT.709 8-bit.
     pub fn output_grade(self) -> OutputGrade {
         match self {
-            Pipeline::DoviPassthrough => OutputGrade::Hdr10,
+            Pipeline::DoviPassthrough | Pipeline::Hdr10Passthrough => OutputGrade::Hdr10,
             Pipeline::VppQsv
             | Pipeline::TonemapVaapi
             | Pipeline::Libplacebo
@@ -486,7 +540,14 @@ impl Pipeline {
             // non-Dolby-aware CPU zscale graph would render Profile 5 as
             // garbage rather than failing, and for the passthrough rung it
             // would additionally swap the grade the client was promised.
-            Pipeline::Cpu | Pipeline::DoviTonemapx | Pipeline::DoviPassthrough => None,
+            // A grade-preserving renderer has nothing below it. Falling back
+            // to the CPU zscale graph would render Profile 5 as garbage and,
+            // for either passthrough rung, swap the grade the client was
+            // promised for the one it was not.
+            Pipeline::Cpu
+            | Pipeline::DoviTonemapx
+            | Pipeline::DoviPassthrough
+            | Pipeline::Hdr10Passthrough => None,
             _ => Some(Pipeline::Cpu),
         }
     }
