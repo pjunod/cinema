@@ -349,9 +349,16 @@ every binary understands the current membership fences. Those are still
 answered by the server when you act, and the answer lands in
 **Troubleshooting → Refusals**.
 
-Adding a node and leaving the cluster route to the Danger zone rather than
-acting from the rail. A join token is shown exactly once, and two surfaces that
-mint one are two surfaces to leak it from.
+**Add a node** and **Leave this cluster** carry their own controls, as an
+expansion of the row that states the precondition. Opening Add reveals the
+token lifetime, the role, and the mint button; the credential then appears in
+that same place and nowhere else, because a join token is shown exactly once
+and two surfaces that mint one are two surfaces to leak it from. Whether a row
+is expanded is held for as long as the panel is on screen and is never written
+to browser storage, so a fresh page always starts collapsed and a status
+refresh cannot pull the panel shut while you are reading a token. A blocked
+row has no expansion at all — the blocked reason is the whole row, rather than
+a disabled control you have to open to discover.
 
 A machine that is not in a cluster gets a shorter version of the same tab:
 the banner, a **Replicated database** section that names the backend and says
@@ -382,6 +389,28 @@ a node drain.
 The cluster-wide operational verdict and its quorum/build/sample facts sit in
 **Maintenance** rather than beside the roster, because they authorize one
 cluster action, not one machine in isolation.
+
+#### What the tab refreshes, and when
+
+The committed roster and the direct all-voter status are two different reads
+with two different costs, and the tab treats them that way. The roster is
+refetched every two seconds only while something is in flight — a node in
+maintenance, or a recovery in progress. The direct status behind every rail
+verdict, every node card's Operations group, and the ledger's Raft, WAL,
+snapshot and protocol readings is collected at most every fifteen seconds for
+as long as the tab is visible: it probes every voter, so it is not a
+two-second reading, and the restart-preparation flow that does need one keeps
+its own poll. Nothing is collected while the tab is hidden, and a probe slower
+than the interval is never stacked behind itself.
+
+A collection is not a redraw. The panel repaints only when something it
+actually shows has changed — the ages in the payload are excluded from that
+comparison, so time passing on its own never rewrites the screen. When it does
+repaint, the roster's scroll position and any open **WAL, snapshot, and
+protocol details** come back with it. Between repaints the **Reading age** row
+is updated in place, because the one row whose job is freshness must not be
+the row that goes stale. Text selection cannot survive a repaint at all, which
+is the reason repaints are driven by change rather than by the clock.
 
 ### Planned node maintenance — fence, drain, update, resume
 
@@ -538,9 +567,9 @@ in its own 2,000-line process-local ring. Those events do not consume the
 general Settings → System log ring; cluster warnings and errors still reach
 stdout/journald so a startup failure remains visible without the web UI.
 
-**Add a node** mints one token through the role's distinct endpoint: voters use
-`POST /api/v1/cluster/join-tokens`, while read workers use
-`POST /api/v1/cluster/learner-join-tokens`. The panel displays it exactly once,
+**Add a node** — the rail row, expanded — mints one token through the role's
+distinct endpoint: voters use `POST /api/v1/cluster/join-tokens`, while read
+workers use `POST /api/v1/cluster/learner-join-tokens`. It is displayed exactly once,
 with a lifetime you pick between 10 minutes and 1 hour. plurx keeps only its
 digest, so the browser is the only copy: the panel never writes it to browser
 storage, a URL, or a log, and it is dropped when you leave the tab. Everything
