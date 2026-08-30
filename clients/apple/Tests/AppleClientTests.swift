@@ -4546,6 +4546,86 @@ final class AppleClientTests: XCTestCase {
         }
     }
 
+    func testAppleCapsDocumentCoversTheProbeMatrixWithoutInventingAHeight() throws {
+        for hevc in [false, true] {
+            for displayHDR in [false, true] {
+                for dolbyVision in [false, true] {
+                    let document = Caps.capsDocument(
+                        hevc: hevc,
+                        av1: true,
+                        displayHDR: displayHDR,
+                        dolbyVision: dolbyVision
+                    )
+                    let expectedPresent = displayHDR ? ["sdr", "pq", "hlg"] : ["sdr"]
+                    let entries = Dictionary(uniqueKeysWithValues: document.video.map {
+                        ($0.codec, $0)
+                    })
+
+                    XCTAssertEqual(document.v, 2)
+                    XCTAssertEqual(entries.keys.sorted(), hevc ? ["av1", "h264", "hevc"] : ["av1", "h264"])
+                    XCTAssertTrue(document.video.allSatisfy { $0.maxHeight == nil })
+                    XCTAssertTrue(document.video.allSatisfy { $0.present == expectedPresent })
+                    XCTAssertEqual(document.display.hdr, displayHDR)
+                    XCTAssertEqual(document.dvTransport, "hls")
+                    XCTAssertEqual(document.transports, ["progressive", "hls"])
+                    XCTAssertEqual(document.learnedLimits, [])
+
+                    let supportsDolbyVision = hevc && displayHDR && dolbyVision
+                    XCTAssertEqual(document.display.dolbyVision, supportsDolbyVision)
+                    XCTAssertEqual(entries["hevc"]?.dvProfiles, supportsDolbyVision ? [5, 8] : nil)
+                    XCTAssertTrue(document.video.allSatisfy { !($0.dvProfiles ?? []).contains(7) })
+                    XCTAssertNil(entries["h264"]?.dvProfiles)
+                    XCTAssertNil(entries["av1"]?.dvProfiles)
+                }
+            }
+        }
+
+        let document = Caps.capsDocument(
+            hevc: true,
+            av1: true,
+            displayHDR: true,
+            dolbyVision: true
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(document)) as? [String: Any]
+        )
+        XCTAssertEqual(json["v"] as? Int, 2)
+        XCTAssertEqual(json["dv_transport"] as? String, "hls")
+        XCTAssertEqual((json["learned_limits"] as? [Any])?.count, 0)
+        XCTAssertNil(json["max_height"])
+    }
+
+    func testDecisionPostFallsBackOnlyForTheMixedFleetStatuses() {
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(400)))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(404)))
+        XCTAssertTrue(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(405)))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(401)))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.http(500)))
+        XCTAssertFalse(PlurxAPI.shouldFallBackToLegacyDecision(after: APIError.transport("offline")))
+    }
+
+    func testSessionCreateCarriesTheCapabilitiesDocument() throws {
+        let request = CreateSessionRequest(
+            playbackId: "player-caps-v2",
+            caps: Caps.capsDocument(
+                hevc: true,
+                av1: false,
+                displayHDR: true,
+                dolbyVision: false
+            )
+        )
+        let encoder = JSONEncoder()
+        encoder.keyEncodingStrategy = .convertToSnakeCase
+        let json = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoder.encode(request)) as? [String: Any]
+        )
+        let caps = try XCTUnwrap(json["caps"] as? [String: Any])
+        XCTAssertEqual(caps["v"] as? Int, 2)
+        XCTAssertEqual((caps["display"] as? [String: Any])?["dolby_vision"] as? Bool, false)
+    }
+
     func testPictureInPictureCommandStartsStopsAndWaitsForAvailability() {
         XCTAssertEqual(
             PictureInPictureController.command(isActive: false, isPossible: true),
