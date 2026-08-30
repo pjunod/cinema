@@ -136,7 +136,7 @@ one.
 | `apple.subtitle-route` | Media selection vs reopen | Native rendition switches stay inside AVPlayer once the session exists. A recognized PGS overlay stays on the current item. Entering from direct, selecting/leaving a burn, or changing a burn reopens; other bitmap/styled tracks still burn. | XCTest route matrix |
 | `apple.hdr-subtitle-guard` | Burn-only subtitle on HDR | A recognized PGS overlay is allowed because it does not change video. Unknown overlay versions, VobSub, and styled tracks are refused while the current delivery is DV, HDR10, or HLG. Native text still selects, and SDR playback may still burn. | XCTest subtitle/dynamic-range matrix |
 | `apple.pgs-overlay` | PGS application overlay vs video mutation | Only `overlay: "pgs-v1"` selects the authenticated manifest/PNG renderer. It schedules complete compositions against the current `AVPlayerItem`, maps authored coordinates into `videoRect`, and never sends subtitle/burn session fields or reopens video. PiP and external playback are blocked while active rather than falling back to an SDR burn. | XCTest manifest, timeline, layout, item-replacement, and no-reopen policy suite |
-| `android.capability-profile` | Decoder/display/sink claims | Claim DV only when both decoder profile and display agree, never claim dual-layer P7, apply each video decoder's own 30 fps height ceiling, and claim passthrough audio when either the decoder or active sink can take it. | JVM capability matrix + Rust per-codec decision regressions |
+| `android.capability-profile` | Decoder/display/sink claims | Probe decoders, display, and active audio sink for every decision; POST the v2 document and repeat that snapshot on session create. A 400/404/405 falls back to the unchanged legacy query. Apply each video decoder's own 30 fps height ceiling and claim passthrough audio when either the decoder or active sink can take it. Claim DV only when decoder and display agree; P7 is allowed only from the platform's exact `DvheDtb` enumeration and is never inferred from generic HDR or a device name. | JVM document, codec-height, DV-enumeration, fallback-status, and create-body matrix + Rust per-codec decision regressions |
 | `android.compatibility-fallback` | Media3 startup decode recovery | Before a frame renders, failed preserving direct DV first gets a normalized remux; any remaining direct/remux failure gets one compatibility transcode; a failed transcode is terminal. | JVM fallback matrix |
 | `android.established-hdr-recovery` | Interruption after HDR rendered | Once Media3 renders a frame, a later HDR error retries the same delivery once. A repeat is terminal instead of silently becoming the SDR compatibility stream. | JVM established-delivery matrix |
 | `android.manual-quality` | Auto/Original/rung force | Auto asks for the normal verdict, Original forbids video re-encode, and every server-advertised rung requests a transcode. The menu never invents a rung above the source. | JVM force and ladder matrix |
@@ -168,8 +168,13 @@ genuinely can't play it — not because a fixed profile guessed conservatively.
 | `acodec` | `canPlayType` | `aac`,`mp3` always; `ac3`/`eac3` where supported (Safari), `opus`/`flac` per browser. |
 | `container` | fixed | `mp4,webm,mov` — what a browser `<video>` accepts as a file. Notably **not** `mkv`. |
 | `hdr` | `matchMedia("(dynamic-range: high)")` | `1` only on an HDR display *and* an HDR-capable codec — else the server tone-maps, because HDR on an SDR screen looks washed-out. |
-| `dvprofile` | platform codec APIs | Exact Dolby Vision profiles the decoder and current display both accept. Apple and Android advertise single-layer delivery profiles, never infer P7 from generic HDR. |
+| `dvprofile` | platform codec APIs | Exact Dolby Vision profiles the decoder and current display both accept. Apple advertises Profiles 5 and 8. Android may advertise P7 only when `MediaCodec` enumerates `DvheDtb`; neither client infers it from generic HDR. |
 | `dvhls` | platform policy | Apple sends `1`: an approved DV stream still needs normalized copy HLS rather than a raw progressive file. Browser/Android omit it unless they need the same envelope. |
+
+Android re-runs these probes for every decision because its passthrough audio
+answer belongs to the active HDMI route. It posts the v2 document, repeats the
+same snapshot on session create, and uses the legacy query only when the POST
+returns 400, 404, or 405 during a mixed-fleet rollout.
 
 The native clients use platform codec/display APIs instead of browser probes.
 Android also includes audio support exposed by the active HDMI/audio sink,
