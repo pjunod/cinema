@@ -20,6 +20,12 @@ const path = require("node:path");
 const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
 const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
 
+// The model has a file boundary now, so it is required rather than sliced out
+// of the shell. Everything still declared inline — the templates, the fold DOM
+// glue — keeps the extraction harness below; that harness shrinks as the
+// boundary grows, which is the point of moving it.
+const PANEL = require("../../crates/plurxd/src/web/cluster-panel.js");
+
 // Same extraction contract as tests/playback/web-policy.test.js: every function
 // borrowed here is declared at column zero in one inline <script>, so the next
 // top-level declaration terminates it and no brace parsing is needed. A rename
@@ -43,56 +49,34 @@ function shippedSource(name) {
 // formatting under test too.
 const BORROWED = [
   "esc",
+  "clenv",
   "fmtAgo",
   "fmtBytes",
   "replicationText",
-  "clusterQuorum",
-  "clusterStateView",
-  "membershipRefusalText",
-  "clusterDirectOperationRow",
-  "clusterDirectMaintenanceStatus",
-  "clusterMaintenanceEntryVerdict",
-  "clusterMaintenanceReady",
-  "clusterMaintenanceResumeReady",
   "clusterNodeOperationsBadge",
   "clusterNodeOperationsHtml",
   "clusterNodeRow",
-  "clusterOperationAge",
-  "clusterOperationReason",
   "clusterOperationsUnavailable",
   "clusterRestartPreparationHtml",
   "clusterOperationsCard",
-  "clusterRecoveryState",
   "clusterRecoveryPanel",
   "clusterMaintenanceProgress",
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
-  "clusterRailBlocker",
-  "clusterRailRow",
-  "clusterOperationRows",
   "clusterOperationsRail",
-  "clusterSqliteReplication",
-  "clusterSampleAge",
-  "clusterDatabaseWal",
-  "clusterDatabaseStatus",
-  "clusterCapacityText",
-  "clusterDatabaseHealth",
-  "clusterHealthPill",
-  "clusterDatabaseSummary",
-  "clusterDatabaseRows",
   "clusterDatabasePanel",
   "clusterTabButton",
   "clusterDiagnosticsFacts",
   "clusterTroubleshootingPanel",
   "showClusterTab",
   "selectClusterTab",
-  "clusterFoldKey",
-  "clusterFoldRead",
-  "clusterFoldWrite",
   "clusterNodeFoldId",
   "clusterNodeFoldLater",
   "clusterNodeFoldSave",
+  "clusterStorage",
+  "clusterFoldState",
+  "clusterFoldSave",
   "applyClusterFolds",
   "setClusterDatabaseFold",
   "toggleClusterDatabase",
@@ -114,9 +98,12 @@ function sandbox({ isAdmin = true, refusal = null, token = null } = {}) {
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
     let CLUSTER_LEAVING = false;
     ${BORROWED.map(shippedSource).join("\n")}
-    return { ${BORROWED.join(", ")} };
+    // The shell's own esc/fmtAgo/fmtBytes, handed to the model exactly the way
+    // the browser hands them over. Borrowing the real ones rather than stubbing
+    // keeps the escaping and the "3m ago" formatting under test too.
+    return Object.assign({}, PlurxClusterPanel, { ${BORROWED.join(", ")} }, { env: clenv() });
   `;
-  return new Function(source)();
+  return new Function("PlurxClusterPanel", source)(PANEL);
 }
 
 let failures = 0;
@@ -1434,7 +1421,7 @@ test("the database section is foldable and keeps its verdict folded", () => {
   assert.match(html, /id="cluster-database-summary" hidden/);
   // Folding hides the detail, never the verdict: the pill stays in the header
   // and the summary keeps the readings somebody checks before expanding again.
-  const summary = ui.clusterDatabaseSummary(cluster, REPLICATION, ops);
+  const summary = ui.clusterDatabaseSummary(ui.env, cluster, REPLICATION, ops);
   assert.match(summary, /leader <b>node-a<\/b>/);
   assert.match(summary, /term <b>81<\/b>/);
   assert.match(summary, /commit <b>482191<\/b>/);
@@ -1460,7 +1447,7 @@ test("the quorum watermark is the quorum's, not this node's applied index", () =
   local.status.raft.applied_index = 482191;
   local.status.raft.apply_lag_entries = 4;
   const rows = new Map(
-    ui.clusterDatabaseRows(cluster, { ...REPLICATION, last_applied_index: 482191, behind_by: 4 }, behind)
+    ui.clusterDatabaseRows(ui.env, cluster, { ...REPLICATION, last_applied_index: 482191, behind_by: 4 }, behind)
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(rows.get("Quorum commit"), "482195");
@@ -1490,7 +1477,7 @@ test("the database reports this machine's store, not the leader's", () => {
     row.status.raft.apply_lag_entries = local ? 91 : 0;
     row.status.protocol_max = local ? 6 : 9;
   });
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.equal(rows.get("Applied here"), "482100");
   assert.equal(rows.get("Apply lag"), "91 entries");
   assert.equal(rows.get("Protocol"), "5–6");
@@ -1502,7 +1489,7 @@ test("the database reports this machine's store, not the leader's", () => {
 test("database readings say unknown instead of inventing a number", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
   assert.equal(rows.get("Term"), "unknown");
   assert.equal(rows.get("Quorum commit"), "unknown");
   assert.equal(rows.get("Apply lag"), "unknown");
@@ -1516,7 +1503,7 @@ test("database readings say unknown instead of inventing a number", () => {
   assert.equal(rows.get("Snapshots"), "unknown");
   assert.equal(rows.get("WAL"), "unknown");
   const degraded = new Map(
-    ui.clusterDatabaseRows(cluster, { backend: "hiqlite", health: "degraded", clustered: true }, null)
+    ui.clusterDatabaseRows(ui.env, cluster, { backend: "hiqlite", health: "degraded", clustered: true }, null)
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(degraded.get("Behind by"), "unknown");
@@ -1532,7 +1519,7 @@ test("a proven-unavailable store reads as broken, not as unobserved", () => {
   const local = ops.nodes[0];
   local.status.snapshot = { available: false, build_ok_count: 0, build_error_count: 0, install_ok_count: 0, install_error_count: 0 };
   local.status.wal = { available: false, reason: "lock_contended" };
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.match(rows.get("Snapshots"), /unavailable/);
   assert.match(rows.get("WAL"), /unavailable/);
   assert.match(rows.get("WAL"), /lock contended/);
@@ -1543,7 +1530,7 @@ test("a proven-unavailable store reads as broken, not as unobserved", () => {
   // uses rather than printing a neutral "open".
   const faulted = operationStatus(cluster);
   faulted.nodes[0].status.wal.snapshot.last_log_index = 482195;
-  const walRow = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, faulted).map((row) => [row[0], row[1]])).get("WAL");
+  const walRow = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, faulted).map((row) => [row[0], row[1]])).get("WAL");
   assert.match(walRow, /var\(--bad\)/);
   assert.match(walRow, /482195 logged, 482191 durable/);
 });
@@ -1560,7 +1547,7 @@ test("the freshness row ages while the tab stays open", () => {
   ]);
   const ops = operationStatus(cluster);
   ops.observed_at_unix_ms = Date.now() - 600_000;
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.match(rows.get("Reading age"), /local 10m ago/);
   assert.match(rows.get("Reading age"), /watermark 10m ago/);
   assert.equal(ui.clusterSampleAge(ops, null), null);
@@ -1707,7 +1694,7 @@ test("a browser that refuses storage still gets the shipped defaults", () => {
     // markup's own defaults on the way past.
     ui.applyClusterFolds();
     ui.clusterNodeFoldSave();
-    assert.equal(ui.clusterFoldRead(), null);
+    assert.equal(ui.clusterFoldState(), null);
   });
   assert.deepEqual(
     cards.map((card) => card.open),
@@ -1771,7 +1758,7 @@ test("the fold is restored where the panel is written, and saved by every contro
   // these tests green.
   assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
   assert.match(shippedSource("toggleClusterNodes"), /clusterNodeFoldSave\(\);/);
-  assert.match(shippedSource("selectClusterTab"), /clusterFoldWrite\(\{tab:id\}\)/);
+  assert.match(shippedSource("selectClusterTab"), /clusterFoldSave\(\{tab:id\}\)/);
 });
 
 test("the troubleshooting tab is a fold like any other", () => {
@@ -1815,23 +1802,26 @@ test("the troubleshooting tab is a fold like any other", () => {
 test("the fold never carries anything but the fold", () => {
   // The panel holds a live join credential in memory. The fold is the one thing
   // on this screen that is allowed to reach browser storage, so pin its shape.
-  const write = shippedSource("clusterFoldWrite");
-  assert.match(write, /localStorage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
+  const write = PANEL.clusterFoldWrite.toString();
+  assert.match(write, /storage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
   assert.match(shippedSource("clusterNodeFoldSave"), /nodes_closed/);
-  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldWrite\(\{database:open\}\)/);
+  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldSave\(\{database:open\}\)/);
   assert.doesNotMatch(shippedSource("clusterDatabasePanel"), /localStorage/);
+  // Only the shell may hold the storage handle: the model takes it as an
+  // argument, so a test never stubs a global to exercise it.
+  assert.doesNotMatch(PANEL.clusterFoldRead.toString(), /localStorage/);
 });
 
 test("a stored fold that is not a fold is ignored, not carried forward", () => {
   const ui = sandbox();
   const junk = fakeStorage({ "plurx.cluster.fold": JSON.stringify([1, 2, 3]) });
-  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldRead(), null));
+  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldState(), null));
   const stray = fakeStorage({
     "plurx.cluster.fold": JSON.stringify({ database: false, nodes_closed: ["a", 7], tab: "log", stowaway: "x" }),
   });
   withDom(foldDom(), stray, () => {
-    assert.deepEqual(ui.clusterFoldRead(), { database: false, nodes_closed: ["a"], tab: "log" });
-    ui.clusterFoldWrite({ database: true });
+    assert.deepEqual(ui.clusterFoldState(), { database: false, nodes_closed: ["a"], tab: "log" });
+    ui.clusterFoldSave({ database: true });
   });
   assert.deepEqual(JSON.parse(stray.read("plurx.cluster.fold")), {
     database: true, nodes_closed: ["a"], tab: "log",
@@ -1888,7 +1878,7 @@ test("a refusal is kept in troubleshooting, not spent on a toast", () => {
 
 function railRows(ui, cluster, ops) {
   return new Map(
-    ui.clusterOperationRows(cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
+    ui.clusterOperationRows(ui.env, cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
   );
 }
 
@@ -1993,7 +1983,7 @@ test("the rail routes to the credential rather than minting a second one", () =>
   assert.match(rows.get("Add a node").action, /openClusterDanger\(\)/);
   assert.match(rows.get("Leave this cluster").action, /openClusterDanger\(\)/);
   assert.doesNotMatch(ui.clusterOperationsRail(cluster, operationStatus(cluster)), /mintJoinToken|leaveCluster\(/);
-  assert.doesNotMatch(shippedSource("clusterOperationRows"), /localStorage/);
+  assert.doesNotMatch(PANEL.clusterOperationRows.toString(), /localStorage/);
 });
 
 test("a stale roster cannot make the rail claim a verdict", () => {
@@ -2261,6 +2251,41 @@ test("the controls the rail routes to actually do something", () => {
   assert.match(shippedSource("openClusterDanger"), /querySelector\("\.cldanger"\)/);
   assert.match(shippedSource("openClusterDanger"), /zone\.open=true/);
   assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
+});
+
+// ---- the module boundary ---------------------------------------------------
+
+test("the model is a file, and the shell actually mounts it", () => {
+  // A module nobody calls is the dead-feature failure mode this suite already
+  // paid for once, so the boundary is pinned from both sides: the shell loads
+  // the served file before its own inline script, and the call sites that read
+  // the model name it.
+  const tag = SHIPPED_UI.indexOf('<script src="/assets/cluster-panel.js">');
+  assert.notEqual(tag, -1, "index.html does not load the served model");
+  assert.ok(tag < SHIPPED_UI.indexOf("\nfunction clusterPanel("));
+  assert.match(shippedSource("clusterOperationsRail"), /PlurxClusterPanel\.clusterOperationRows\(clenv\(\),/);
+  assert.match(shippedSource("clusterDatabasePanel"), /PlurxClusterPanel\.clusterDatabaseRows\(clenv\(\),/);
+  assert.match(shippedSource("clusterPanel"), /PlurxClusterPanel\.clusterStateView\(/);
+  assert.match(shippedSource("clusterRefusalHtml"), /PlurxClusterPanel\.membershipRefusalText\(/);
+});
+
+test("the model reaches for nothing the shell owns", () => {
+  // The whole value of the boundary is that these decisions load under Node
+  // with no setup: no document, no localStorage, no SETTINGS_DATA, no ME, no
+  // CLUSTER_* state. A helper it needs arrives as an argument.
+  // Comments discuss the DOM the module deliberately does not touch, so the
+  // check reads the code and not the prose around it.
+  const source = fs
+    .readFileSync(path.join(__dirname, "../../crates/plurxd/src/web/cluster-panel.js"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+  for (const forbidden of [/\bdocument\b/, /\blocalStorage\b/, /\bSETTINGS_[A-Z]/, /\bCLUSTER_[A-Z]/, /\bME\b/]) {
+    assert.doesNotMatch(source, forbidden, `cluster-panel.js reaches for ${forbidden}`);
+  }
+  // One esc, one escaping contract to review.
+  assert.doesNotMatch(source, /function esc\(/);
+  assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
 });
 
 process.exit(failures ? 1 : 0);
