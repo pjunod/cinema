@@ -3458,14 +3458,19 @@ impl JobManager {
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
                 continue;
             }
-            let videos =
-                match fragment_index_video_identities(self.store.as_ref(), &file, have_dovi).await {
-                    Ok(videos) => videos,
-                    Err(error) => {
-                        tracing::warn!(file_id, %error, "reading probe for fragment index");
-                        continue;
-                    }
-                };
+            let videos = match fragment_index_video_identities(
+                self.store.as_ref(),
+                &file,
+                have_dovi,
+            )
+            .await
+            {
+                Ok(videos) => videos,
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "reading probe for fragment index");
+                    continue;
+                }
+            };
             // One file, one index per pipeline a client can request.
             //
             // No pass bound is re-checked in here, and that is the whole
@@ -3675,14 +3680,19 @@ impl JobManager {
             if !crate::copyseg::supports(file.video_codec.as_deref()) {
                 continue;
             }
-            let videos =
-                match fragment_index_video_identities(self.store.as_ref(), &file, have_dovi).await {
-                    Ok(videos) => videos,
-                    Err(error) => {
-                        tracing::warn!(file_id, %error, "reading probe for cluster fragment index");
-                        continue;
-                    }
-                };
+            let videos = match fragment_index_video_identities(
+                self.store.as_ref(),
+                &file,
+                have_dovi,
+            )
+            .await
+            {
+                Ok(videos) => videos,
+                Err(error) => {
+                    tracing::warn!(file_id, %error, "reading probe for cluster fragment index");
+                    continue;
+                }
+            };
             // Counted per file rather than per identity, unlike the
             // single-node pass: what this loop actually spends is the source
             // attestation below, which hashes the file once however many
@@ -3787,8 +3797,7 @@ impl JobManager {
                             // is file keyed, so bind only this local copy to
                             // the consuming file.
                             index.source = crate::fragindex::identity_for(&file, video);
-                            if let Err(error) =
-                                self.store.put_fragment_index(file_id, &index).await
+                            if let Err(error) = self.store.put_fragment_index(file_id, &index).await
                             {
                                 tracing::warn!(
                                     file_id,

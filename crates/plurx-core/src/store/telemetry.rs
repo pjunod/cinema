@@ -1169,9 +1169,8 @@ mod tests {
         let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v7");
         let held: Vec<String> = upgraded
             .with_conn(|conn| {
-                let mut statement = conn.prepare(
-                    "SELECT argv_fingerprint FROM fragment_indexes WHERE file_id = 42",
-                )?;
+                let mut statement = conn
+                    .prepare("SELECT argv_fingerprint FROM fragment_indexes WHERE file_id = 42")?;
                 let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
                 Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
             })

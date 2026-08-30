@@ -554,13 +554,31 @@ mod tests {
     #[test]
     fn a_replaced_file_takes_its_whole_identity_set_with_it() {
         let conn = conn();
-        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
-        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("stripped", 4_096, 1_700_000_000_000),
+            1,
+        )
+        .expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("preserved", 4_096, 1_700_000_000_000),
+            2,
+        )
+        .expect("put");
 
         // A re-encode changes the bytes but not the pipelines, so the
         // fingerprints survive and only the source identity moves. Without the
         // prune the old rows would sit there forever, matching nothing.
-        put(&conn, 7, &index_with("stripped", 9_000, 1_700_000_500_000), 3).expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("stripped", 9_000, 1_700_000_500_000),
+            3,
+        )
+        .expect("put");
 
         assert_eq!(fingerprints(&conn, 7), vec!["stripped"]);
         assert_eq!(
@@ -619,9 +637,7 @@ mod tests {
         put(&conn, 7, &newcomer, 1).expect("put with a clock that went backwards");
 
         assert!(
-            get(&conn, 7, &newcomer.source)
-                .expect("get")
-                .is_some(),
+            get(&conn, 7, &newcomer.source).expect("get").is_some(),
             "the row a caller was told was stored must be there to read"
         );
         assert_eq!(fingerprints(&conn, 7).len(), full);
@@ -630,9 +646,27 @@ mod tests {
     #[test]
     fn forgetting_takes_every_pipeline_for_the_file() {
         let conn = conn();
-        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
-        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
-        put(&conn, 8, &index_with("stripped", 4_096, 1_700_000_000_000), 3).expect("put other");
+        put(
+            &conn,
+            7,
+            &index_with("stripped", 4_096, 1_700_000_000_000),
+            1,
+        )
+        .expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("preserved", 4_096, 1_700_000_000_000),
+            2,
+        )
+        .expect("put");
+        put(
+            &conn,
+            8,
+            &index_with("stripped", 4_096, 1_700_000_000_000),
+            3,
+        )
+        .expect("put other");
 
         assert!(forget(&conn, 7).expect("forget"));
         assert!(fingerprints(&conn, 7).is_empty());
@@ -644,8 +678,20 @@ mod tests {
         let conn = conn();
         conn.execute_batch(crate::store::renditionplan::RENDITION_PLANS_SCHEMA)
             .expect("plans schema");
-        put(&conn, 7, &index_with("stripped", 4_096, 1_700_000_000_000), 1).expect("put");
-        put(&conn, 7, &index_with("preserved", 4_096, 1_700_000_000_000), 2).expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("stripped", 4_096, 1_700_000_000_000),
+            1,
+        )
+        .expect("put");
+        put(
+            &conn,
+            7,
+            &index_with("preserved", 4_096, 1_700_000_000_000),
+            2,
+        )
+        .expect("put");
 
         assert_eq!(
             vod_row_file_ids(&conn, 512).expect("ids"),
