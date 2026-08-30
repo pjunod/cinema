@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["7e417145"]
+points = ["web.experience"]
+checks = ["web-membership", "web-static"]
+reason = "Both halves are pinned by retained assertions in tests/web/cluster-membership.test.js. The layout: the node list carries the capped class only from three nodes up, its height is the list's own collapsed height rather than a maximum that would shrink again, the declaration that stops a definite-height flex column from compressing every expanded card into a clipped stub is asserted directly, and the two components are asserted to sit in sibling columns with the restart verdict beside the machines it names. The rail: every precondition is exercised in both directions — promotion against catch-up and the storage reserve separately, maintenance against the blocker the preflight returned, restart preparation against the named candidate, elections against quorum and against a caught-up follower, voter removal against the three-voter bar with a learner removal proven still allowed, and recovery locking membership — and the rendered chip is asserted as well as the model behind it, so a rail that painted every row green would fail."

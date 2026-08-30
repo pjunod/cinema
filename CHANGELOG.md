@@ -8,23 +8,34 @@ bump may break compatibility and a **patch** bump never does.
 
 ## [Unreleased]
 
-### Fixed
+### Added
 
-- **A clustered node no longer refuses requests once every heartbeat.** Both
-  request-gate slots the capacity gate consults — the local maintenance flag
-  and the local serving role — were published closed *before* the database
-  read that computes their real value, and reopened only after it returned.
-  The refreshes run once per ten-second heartbeat, so on a healthy node that
-  nobody had asked to drain there was a window on every beat in which every
-  HTTP request except `/healthz` and `/metrics` answered `503`. Clients saw it
-  as sporadic dropouts on an otherwise idle server. Each slot is now published
-  exactly once, when its value is known, through a guard whose `Drop` closes
-  the gate — so a read error, a panic, or a cancelled heartbeat still fails
-  closed, while success no longer fences anything. Membership changes also now
-  select the replicated Store and topology lane in CI, which they claimed as
-  evidence but did not run.
+- **The Cluster tab's Maintenance section is an operations rail.** Every action
+  the screen can take is listed with its precondition already evaluated and
+  marked Ready, Blocked or Permanent, so a refusal is readable while deciding
+  instead of arriving as a paragraph after the click. A blocked row names the
+  preflight that failed — a learner caught up but short of the voter storage
+  reserve, an election with no caught-up follower, a voter removal below the
+  three voters the server requires, a lifecycle change already in flight on a
+  named node, a recovery that has locked membership. A blocked maintenance row
+  reports the blocker the preflight returned rather than a plausible one. The rail reports the conditions the endpoints already enforce and
+  widens none of them; the two it cannot see from the roster, offline work
+  owned by a node and a mid-upgrade fence, are still answered by the server and
+  land in Troubleshooting. Adding a node and leaving the cluster route to the
+  Danger zone rather than minting a second path to a credential that is shown
+  once.
 
 ### Changed
+
+- **The Cluster tab stops moving while you use it.** Opening a node card moved
+  every section below it by as much as 1259px on a four-node cluster, and the
+  store's column ran that much shorter than the machines'. The node list is now
+  a fixed-height scroller on windows with room for one, so expanding and
+  collapsing changes what is inside the list and nothing else on the page. Its
+  height is the list's own collapsed height capped by the window, so a
+  collapsed roster is not left sitting above an empty box; below three nodes it
+  keeps its natural height. The restart-readiness verdict moved
+  under the roster, because it names one of those machines.
 
 - **The Cluster tab is laid out around its two components.** The replicated
   database had no section of its own: watch state was one run-on sentence

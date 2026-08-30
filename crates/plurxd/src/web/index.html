@@ -887,7 +887,31 @@
      exactly one of them. */
   .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
   .cluster-board.clsolo{grid-template-columns:1fr}
-  .clcolumn{min-width:0}
+  .clcolumn{min-width:0;display:grid;gap:16px;align-content:start}
+  /* The roster is the one part of this screen that changes size while you use
+     it: opening a node card used to move every section below it by as much as
+     1259px, and left the store's column 1259px shorter than the machines'.
+     Capping the list turns it into a scroller whose height no longer depends
+     on what is expanded, so the page stops moving and the two columns end up
+     the same length. Narrow or short windows keep the ordinary page scroll —
+     a phone has no room to give a nested one. */
+  @media(min-width:1100px) and (min-height:720px){
+    /* Fixed, not capped: a maximum still shrinks when every card is closed,
+       which moves whatever sits below the taller column. Only applied from
+       three nodes up, where the list fills it — a two-node cluster would just
+       get an empty box. */
+    /* Flex, not the grid the unbounded list uses: auto grid rows inside a
+       definite height are compressed to fit, and .clnode hides its overflow,
+       so every expanded card silently lost its body. */
+    .clnodes.clnodes-capped{display:flex;flex-direction:column;
+      height:min(var(--clnodes-h,570px),max(360px,calc(100vh - 330px)));overflow-y:auto;
+      overscroll-behavior:contain;scrollbar-width:thin;padding-right:3px;
+      scroll-padding-block-end:34px;
+      -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent);
+      mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
+    .clnodes.clnodes-capped>.clnode{flex:0 0 auto}
+    .clnode{scroll-margin:6px 0 34px}
+  }
   /* What a folded database section still says. Collapsing hides the detail,
      never the verdict: the health pill stays in the header and this line keeps
      the readings somebody checks before expanding it again. */
@@ -915,6 +939,19 @@
   .clcontextfact>span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:4px}
   .clcontextfact>b{display:block;font-size:12.5px;line-height:1.45;color:var(--text)}
   .clcontextfact>small{display:block;margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.4}
+  .clrail{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:10px;overflow:hidden;margin-top:12px}
+  .clrailrow{background:var(--panel);padding:11px 13px;display:flex;align-items:flex-start;
+    justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clrailtext{min-width:180px;flex:1 1 240px}
+  .clrailrow .t{font-size:13px;font-weight:650;line-height:1.35}
+  .clrailrow .r{font-size:11.5px;color:var(--muted);line-height:1.5;margin-top:3px}
+  .clrailside{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .clrailrow.blocked .t{color:var(--muted)}
+  .clrailrow.destructive{background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
+  .clrailrow.destructive .t{color:var(--bad)}
+  .btn-danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
+  .btn-danger:hover{background:color-mix(in srgb,var(--bad) 12%,transparent)}
   .clopssummary{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
   .clopssummary .clstate{margin:10px 0 0}
   .clopssummary h4{margin:0 0 3px;font-size:13.5px}
@@ -11611,7 +11648,7 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
     : "Maintenance is reversible and does not remove this node from membership.";
-  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater()">
+  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater(this)">
     <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
     <div class="clnodebody" data-node="${esc(n.node_id)}"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
@@ -11675,6 +11712,174 @@ function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
     <div class="claction"><b>${directReady?"Ready to update, reboot, or resume":resumeReady&&active.is_leader?"Ready to hand off leadership and resume":recovering?"Restore this fenced node":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only from the target node after direct process evidence is current; if it became leader during recovery, resume first hands leadership to a caught-up voter.</p>
       <div class="row"><button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Direct drain proof is required.':'Open the maintenance target directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>`;
 }
+// ---- the operations rail -------------------------------------------------
+// Every action this screen can take, with its precondition evaluated before
+// the click rather than after it. The server still refuses what it refuses —
+// these rows never widen what is allowed — but a refusal you can read while
+// deciding is worth more than the same paragraph arriving as a failure.
+//
+// Rows only claim what the roster and the direct status can prove. Offline
+// work owned by a node, for instance, is not in either, so "Remove" says what
+// it does know (quorum, leadership, pending changes) and leaves the rest to
+// the server's own answer.
+function clusterRailRow(row){
+  const state=row.blocked?"blocked":row.destructive?"destructive":"ready";
+  const chip=row.blocked
+    ? `<span class="pill" style="color:var(--muted)">Blocked</span>`
+    : row.destructive
+      ? `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Permanent</span>`
+      : `<span class="pill" style="color:var(--good);border-color:var(--good)">Ready</span>`;
+  const action=row.action||"";
+  return `<div class="clrailrow ${state}"><div class="clrailtext"><div class="t">${row.title}</div>
+      <div class="r">${row.reason}</div></div>
+    <div class="clrailside">${chip}${action}</div></div>`;
+}
+// A server verdict ships the condition it actually hit. Naming it is the
+// whole point of stating a precondition, so a row reports the blocker rather
+// than a plausible one.
+function clusterRailBlocker(blockers,fallback){
+  const first=(blockers||[])[0];
+  if(!first) return fallback;
+  return `${esc(clusterOperationReason(first.code))}${first.node_id?` on ${esc(first.node_id)}`:""}${
+    (blockers||[]).length>1?`, and ${blockers.length-1} more`:""}.`;
+}
+function clusterOperationRows(cluster,ops){
+  const nodes=cluster.nodes||[];
+  const name=n=>esc(n.hostname||n.node_id);
+  const arg=n=>esc(JSON.stringify(n.node_id));
+  const local=nodes.find(n=>n.node_id===cluster.local_node_id);
+  const voters=nodes.filter(n=>n.is_voter);
+  const q=clusterQuorum(voters.length);
+  const pending=nodes.find(n=>n.removal_pending);
+  const fenced=nodes.find(n=>n.maintenance);
+  const lifecycle=fenced||pending;
+  const recovery=clusterRecoveryState(cluster);
+  const rows=[];
+
+  // Adding a node mints a credential, so the row routes to the panel that
+  // shows it once rather than minting from here.
+  // Recovery locks every membership change: issuing a token and removing a
+  // member both need a leader and a committed quorum read.
+  const locked=recovery.required?{reason:"The cluster cannot prove both an elected leader and a reachable voter majority, so a membership change cannot commit."}:null;
+  rows.push(locked
+    ? {title:"Add a node",blocked:true,reason:locked.reason,
+       action:`<button class="ghost sm" disabled>Add</button>`}
+    : lifecycle
+    ? {title:"Add a node",blocked:true,
+       reason:`A membership change is already in flight on ${name(lifecycle)}. Finish it before admitting another node.`,
+       action:`<button class="ghost sm" disabled>Add</button>`}
+    : {title:"Add a node",
+       reason:"Mints one single-use join token, shown once, for a machine with a fresh data directory.",
+       action:`<button class="ghost sm" onclick="openClusterDanger()">Add</button>`});
+
+  // Promotion is refused until the learner has published a fresh zero-lag
+  // apply proof and its filesystem has proved the voter reserve. Both are on
+  // the roster, so both can be said here instead of after the attempt.
+  nodes.filter(n=>!n.is_voter&&n.role==="learner").forEach(n=>{
+    const ready=n.bounded_read_ready&&n.voter_storage_ready&&!lifecycle;
+    const why=lifecycle?`A membership change is in flight on ${name(lifecycle)}.`
+      :!n.bounded_read_ready?"It has not published a fresh zero-lag apply proof yet — leave it running until its read-worker badge says ready."
+      :`Its data root has not proved the durable free-space reserve a voter must hold${
+          n.storage_headroom_bytes!=null?` (${esc(fmtBytes(n.storage_headroom_bytes)||"0 B")} free)`:""}. Free space or move the data root.`;
+    rows.push({title:`Promote ${name(n)} to voter`,blocked:!ready,
+      reason:ready?"Catch-up and the storage preflight both pass; this adds one vote to quorum.":why,
+      action:`<button class="ghost sm" ${ready?"":"disabled"} onclick='promoteNode(${arg(n)})'>Promote</button>`});
+  });
+
+  // Maintenance is a local action by design: the fence has to be acknowledged
+  // by the process being fenced.
+  if(fenced){
+    const resume=clusterMaintenanceResumeReady(fenced,ops);
+    const here=fenced.node_id===cluster.local_node_id;
+    rows.push({title:`Resume service on ${name(fenced)}`,blocked:!(here&&resume),
+      reason:here?(resume?"Fenced, caught up, and directly observed with no local work left."
+        :"Still draining: waiting for direct acknowledgement, leader handoff, catch-up, or drain proof.")
+        :`Open ${name(fenced)} directly to resume it — a node lifts its own fence.`,
+      action:`<button class="sm" ${here&&resume?"":"disabled"} onclick='setNodeMaintenance(${arg(fenced)},false)'>Resume</button>`});
+  }else if(local){
+    const verdict=clusterMaintenanceEntryVerdict(ops,local.node_id);
+    const safe=Boolean(verdict&&verdict.safe_to_enter);
+    const ready=safe&&local.reachable&&!local.removal_pending&&!pending;
+    const why=!local.reachable?"This node's own heartbeat is not fresh."
+      :pending?`A removal is pending on ${name(pending)}.`
+      :verdict?clusterRailBlocker(verdict.blockers,"The direct maintenance preflight has not approved this node.")
+      :ops&&ops.unavailable?"The direct status could not be collected, and a heartbeat is not a substitute for it."
+      :"The direct maintenance preflight has not answered yet.";
+    rows.push({title:`Enter maintenance on ${name(local)}`,blocked:!ready,
+      reason:ready?"Fences new work, hands off leadership, and drains existing streams. Reversible; membership is unchanged."
+        :why,
+      action:`<button class="ghost sm" ${ready?"":"disabled"} onclick='setNodeMaintenance(${arg(local)},true)'>Fence</button>`});
+  }
+
+  // Election and restart preparation are cluster-wide and already carry a
+  // server-side verdict; the rail just stops hiding it behind the button.
+  if(voters.length>1){
+    const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
+    const ready=candidate&&!lifecycle&&recovery.quorum_available;
+    const why=!recovery.quorum_available?"A voter majority cannot be proved, and an election cannot bypass quorum."
+      :lifecycle?`A membership change is in flight on ${name(lifecycle)}.`
+      :"No reachable, fully caught-up follower is available to campaign.";
+    rows.push({title:"Force a leader election",blocked:!ready,
+      reason:ready?"Asks a caught-up follower to campaign. Raft still chooses the winner; writes pause briefly."
+        :why,
+      action:`<button class="ghost sm" ${ready?"":"disabled"} onclick="openElectionDialog()">Elect</button>`});
+  }
+
+  const verdict=ops&&!ops.unavailable&&ops.verdict;
+  if(verdict){
+    const candidateHere=verdict.candidate_node_id&&local&&verdict.candidate_node_id===local.node_id;
+    const ready=Boolean(verdict.safe_to_restart_one&&candidateHere);
+    const blockers=(verdict.blockers||[]);
+    const why=!verdict.safe_to_restart_one
+      ? (blockers.length?`${esc(clusterOperationReason(blockers[0].code))}${blockers[0].node_id?` on ${esc(blockers[0].node_id)}`:""}${blockers.length>1?`, and ${blockers.length-1} more`:""}.`
+         :"At least one direct safety condition is missing.")
+      : `The safe candidate is ${esc(verdict.candidate_node_id)} — open that node directly to prepare it.`;
+    rows.push({title:"Prepare this voter for restart",blocked:!ready,
+      reason:ready?"Blocks new admissions here and drains owned sessions, leaving the majority intact."
+        :why,
+      action:`<button class="ghost sm" ${ready?"":"disabled"} ${ready?`onclick='prepareLocalRestart(this,${arg(local)})'`:""}>Prepare</button>`});
+  }
+
+  // Removal is the one action whose commonest refusal — offline work owned by
+  // the node — is not in any payload this page reads. The row says what it can
+  // prove and routes to the card that carries the per-node control.
+  const removable=nodes.filter(n=>n.node_id!==cluster.local_node_id);
+  if(removable.length){
+    // A learner leaves by a different path and is not held to the voter
+    // arithmetic, so the quorum bar only applies while a voter is removable.
+    const voterRemovable=removable.some(n=>n.is_voter);
+    const quorumHolds=voters.length>=3||!voterRemovable;
+    const ready=quorumHolds&&!lifecycle&&!recovery.required;
+    const leader=removable.find(n=>n.is_leader);
+    rows.push({title:"Remove a node permanently",blocked:!ready,
+      reason:ready
+        ? `Use Remove permanently on that node's card. At least three voters must remain a voter removal, `+
+          `${leader?`${name(leader)} is the current leader and can only leave from its own screen, `:""}`+
+          `and a node still holding offline work is refused until that work is resolved.`
+        : recovery.required
+          ? locked.reason
+          : !quorumHolds
+            ? `A voter removal needs at least three voters and this cluster has ${voters.length}. Add a node first.`
+            : `A membership change is in flight on ${name(lifecycle)}.`,
+      action:""});
+  }
+
+  rows.push({title:"Leave this cluster",destructive:true,
+    reason:"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
+    action:`<button class="btn-danger sm" onclick="openClusterDanger()">Leave</button>`});
+  return rows;
+}
+function clusterOperationsRail(cluster,ops){
+  return `<div class="clrail">${clusterOperationRows(cluster,ops).map(clusterRailRow).join("")}</div>`;
+}
+// The join credential and the graceful leave keep their fenced panel; the rail
+// routes here rather than duplicating either control.
+function openClusterDanger(){
+  const zone=document.querySelector(".cldanger");
+  if(!zone) return;
+  zone.open=true;
+  zone.scrollIntoView({block:"nearest"});
+}
 function clusterOperationsPanel(cluster,ops){
   const recovery=clusterRecoveryState(cluster);
   const active=(cluster.nodes||[]).find(n=>n.maintenance);
@@ -11684,16 +11889,9 @@ function clusterOperationsPanel(cluster,ops){
       ${clusterMaintenanceProgress(active,ops,cluster.local_node_id)}
     </section>`;
   }
-  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
-  const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
-  const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
-  const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
-  return `<section class="cluster-card"><div class="clophead"><div><h3>Planned work</h3><p>Maintenance and leader elections, without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
-    <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
-      <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
-        <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
-    ${forceElectionDialog(electionReady)}
-  </section>`;
+  // Planned work is now the operations rail, which states these same two
+  // actions with their preconditions already evaluated.
+  return "";
 }
 function forceElectionDialog(enabled){
   return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
@@ -11979,7 +12177,7 @@ function clusterDatabasePanel(cluster,replication,capacity,ops){
   const cap=clusterCapacityText(capacity);
   const rows=clusterDatabaseRows(cluster,replication,ops)
     .map(([label,value,numeric])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}>${value}</dd>`).join("");
-  return `<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Replicated database</h3>
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Replicated database</h3>
       <p>${replication&&replication.backend==="sqlite"?"Where watch state is stored on this machine."
         :"Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up."}</p></div>
       <div class="row">${clusterHealthPill(health.tone,health.label)}<button class="ghost sm" id="cldb-toggle"
@@ -12046,8 +12244,13 @@ function clusterNodeFoldId(card){
 // persisting from `ontoggle` would overwrite the stored set with "everything
 // open" on every visit — measured, not assumed. A click is a real gesture, and
 // the card's open state has flipped by the time the task runs.
-function clusterNodeFoldLater(){
-  setTimeout(clusterNodeFoldSave,0);
+function clusterNodeFoldLater(card){
+  setTimeout(()=>{
+    clusterNodeFoldSave();
+    // Opening a card inside a scrolling column can leave its own body below
+    // the fold. `nearest` scrolls the column, never the page.
+    if(card&&card.open&&card.scrollIntoView) card.scrollIntoView({block:"nearest"});
+  },0);
 }
 function clusterNodeFoldSave(){
   try{
@@ -12159,7 +12362,8 @@ function clusterPanel(d){
   const maintenanceActive=nodes.some(node=>node.maintenance);
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<div class="clnodes" id="cluster-node-list">${nodes.map(node=>{
+    ? `<div class="clnodes${nodes.length>=3?" clnodes-capped":""}" id="cluster-node-list"${
+        nodes.length>=3?` style="--clnodes-h:${nodes.length*104}px"`:""}>${nodes.map(node=>{
         const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
         return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
       }).join("")}</div>`
@@ -12181,16 +12385,18 @@ function clusterPanel(d){
     <div class="clmetric"><strong>${reachable} / ${nodes.length}</strong><span>Fresh heartbeats</span></div>
     <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div>`:""}</div>
     ${recoveryRequired?operations:""}
-    <div class="cluster-board${roomForRoster?"":" clsolo"}">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
-      ${roomForRoster?`<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+    <div class="cluster-board${roomForRoster?"":" clsolo"}"><div class="clcolumn">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
+      ${clustered?`<section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
+        <p>Every action this screen can take, with its precondition already evaluated.</p></div></div>
+        ${recoveryRequired?"":operations}
+        ${clusterOperationsRail(cluster,d.clusterOps)}
+        ${recoveryRequired?"":forceElectionDialog(true)}
+        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section>`:""}</div>
+      ${roomForRoster?`<div class="clcolumn"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
         <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
-        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>`:""}</div>
-    ${clustered?`<div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
-        <p>Restart readiness, planned work, and the membership changes that need a credential.</p></div></div>
-        <div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>
-        ${recoveryRequired?"":operations}
-        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section></div>`:""}
+        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>
+        ${clustered?`<section class="cluster-card"><div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div></section>`:""}</div>`:""}</div>
     ${clusterTroubleshootingPanel(cluster,d.clusterOps)}</div>`;
 }
 function toggleClusterNodes(btn){

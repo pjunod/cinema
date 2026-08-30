@@ -323,10 +323,35 @@ quorum-confirmed commit watermark against this node's applied index, apply lag,
 how far behind the projection says this node is, when convergence was last
 positively observed, snapshot and WAL health, the active protocol range, and
 how old the readings themselves are. **Cluster nodes** is the machines carrying
-it. **Maintenance** holds the restart-readiness verdict, planned work, and the
-Danger zone that mints join tokens and removes members. **Troubleshooting**
-holds the cluster log, the quorum and sample readings, and the last refusal,
-one tab at a time.
+it, with the restart-readiness verdict beneath them because it names one of
+them. **Maintenance** is the operations rail. **Troubleshooting** holds the
+cluster log, the quorum and sample readings, and the last refusal, one tab at
+a time.
+
+#### The operations rail
+
+**Maintenance** lists every action this screen can take with its precondition
+already evaluated, so a refusal is something you read while deciding rather
+than a paragraph that arrives after the click. Each row is marked **Ready**,
+**Blocked** or **Permanent**, and a blocked row says which preflight failed:
+a learner that is caught up but whose data root has not proved the voter
+reserve, an election with no caught-up follower to campaign, a voter removal
+below the three voters the server requires, a lifecycle change already in
+flight on a named node, or a recovery that has locked membership entirely. A
+blocked maintenance row names the blocker the preflight actually returned
+rather than a plausible one — that verdict fails for a dozen different reasons
+and only two of them are about quorum.
+
+The rail never widens what the server allows — it reports the same conditions
+the endpoints enforce, from the roster and the direct status. Two of them it
+cannot see: whether a node still owns unresolved offline work, and whether
+every binary understands the current membership fences. Those are still
+answered by the server when you act, and the answer lands in
+**Troubleshooting → Refusals**.
+
+Adding a node and leaving the cluster route to the Danger zone rather than
+acting from the rail. A join token is shown exactly once, and two surfaces that
+mint one are two surfaces to leak it from.
 
 A machine that is not in a cluster gets a shorter version of the same tab:
 the banner, a **Replicated database** section that names the backend and says
@@ -334,6 +359,14 @@ there are no peers, and **Troubleshooting**. There is no roster, no
 restart-readiness verdict and no maintenance section, because none of them
 describe a single machine — and eleven `unknown` rows would read as a failed
 read rather than as an install with no Raft in it.
+
+The node list is a fixed-height scroller on a window with room for one, so
+opening and closing cards changes what is in the list and nothing else on the
+page. Before that it moved every section below it by as much as 1259px on a
+four-node cluster, and left the store's column that much shorter than the
+machines'. Its height is the height of the list with every card closed, capped
+by the window, so a collapsed roster does not sit above a box of nothing.
+Below three nodes it keeps its natural height instead.
 
 Both **Replicated database** and the node cards fold. The database section
 keeps its health pill and a one-line summary — leader, term, commit, applied,
