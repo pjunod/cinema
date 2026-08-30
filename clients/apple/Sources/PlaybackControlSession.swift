@@ -110,6 +110,10 @@ final class PlaybackControlSession {
     private var reporter: PlaybackControlReporter?
     private var observe: (() -> PlayerControlObservation?)?
 
+    /// What the reporter reads. See `PlaybackControlLatestSnapshot`: the
+    /// player pushes here, the reporter never pulls from the player.
+    private let latest = PlaybackControlLatestSnapshot()
+
     /// One identity per player instance, not per session: a reopen is the same
     /// viewer on the same device continuing, and the server reads a new
     /// `client_instance_id` as a different client.
@@ -127,21 +131,23 @@ final class PlaybackControlSession {
     ) {
         end()
         self.observe = observe
-        let snapshot: @Sendable () -> PlaybackControlSnapshot? = { [weak self] in
-            guard let observation = self?.currentObservation() else { return nil }
-            return PlaybackControlMapping.snapshot(from: observation)
-        }
+        // The reporter takes its first snapshot the moment it starts, so the
+        // first one has to be there before it does.
+        publish()
         reporter = PlaybackControlReporter(
             bootstrap: bootstrap,
             clientInstanceId: clientInstanceId,
-            snapshot: snapshot,
+            snapshot: { [latest] in latest.load() },
             send: { path, request in try await transport.send(path, request) },
             sleep: { milliseconds, _ in
                 try await Task.sleep(nanoseconds: UInt64(max(0, milliseconds)) * 1_000_000)
             },
             now: { Int(Date().timeIntervalSince1970 * 1_000) }
         )
-        guard let reporter else { return }
+        guard let reporter else {
+            latest.store(nil)
+            return
+        }
         Task { await reporter.start() }
     }
 
@@ -149,18 +155,59 @@ final class PlaybackControlSession {
     /// reporter coalesces, so a notification between exchanges costs nothing
     /// but replaces what the next exchange will carry.
     func playerChanged() {
+        publish()
         guard let reporter else { return }
         Task { await reporter.notify() }
     }
 
     func end() {
+        latest.store(nil)
         guard let reporter else { return }
         self.reporter = nil
         observe = nil
         Task { await reporter.stop() }
     }
 
-    private nonisolated func currentObservation() -> PlayerControlObservation? {
-        MainActor.assumeIsolated { observe?() }
+    /// Read the player once, on the actor that owns it, and publish what the
+    /// reporter will read. The mapping runs here rather than in the reporter's
+    /// closure for the same reason: everything that touches the player belongs
+    /// on the player's actor.
+    private func publish() {
+        guard let observation = observe?() else {
+            latest.store(nil)
+            return
+        }
+        latest.store(PlaybackControlMapping.snapshot(from: observation))
+    }
+}
+
+/// The newest snapshot the player has produced, written by the main actor and
+/// read by the reporter's.
+///
+/// `PlaybackControlReporter` is an actor and pulls its snapshot synchronously
+/// from inside itself, so the closure it holds runs on the reporter's
+/// executor — never the main actor's. A closure cannot *assume* main-actor
+/// isolation there: `MainActor.assumeIsolated` traps rather than falling back,
+/// and doing it here crashed the app on the first exchange of every session
+/// the server considered controllable (build 90). Sending the snapshot the
+/// other way removes the assumption instead of checking it.
+///
+/// The staleness this admits is bounded by how often the player reports that
+/// it changed — once a second from the periodic time observer, plus every
+/// rate change — against an exchange cadence the server never sets faster.
+private final class PlaybackControlLatestSnapshot: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value: PlaybackControlSnapshot?
+
+    func store(_ snapshot: PlaybackControlSnapshot?) {
+        lock.lock()
+        defer { lock.unlock() }
+        value = snapshot
+    }
+
+    func load() -> PlaybackControlSnapshot? {
+        lock.lock()
+        defer { lock.unlock() }
+        return value
     }
 }
