@@ -32,6 +32,18 @@
 //!  ffmpeg#2  -f hevc -i -  -c copy  -tag:v hvc1 → the HLS segmenter
 //! ```
 //!
+//! **Nothing runs this pipe yet.** `convert_annex_b` and
+//! [`whole_units_prefix`] have no callers outside these tests, and what
+//! [`super::copy_video_args`] renders today for a converting source is the
+//! ordinary single-ffmpeg copy — fragmented MP4, which this stage cannot read
+//! — plus the marker that reserves its fragment-index identity. Wiring the
+//! stage up therefore has to change that argv (Annex B out of ffmpeg#1, and
+//! `remove_types=63` to drop the enhancement layer, which is not dropped
+//! today), and changing the argv changes the fingerprint. That is the intended
+//! order: the marker exists so a converted stream never shares an index with
+//! an unconverted one, and re-indexing at the moment the pipe becomes real is
+//! correct, not a cost to design around.
+//!
 //! ffmpeg#2 writes no Dolby Vision configuration record — it copies the one
 //! its input container had, and a raw Annex B stream has no container
 //! (measured: `docs/PLAYBACK-CAPS-V2-M0.md` §8). The record is written
@@ -40,15 +52,22 @@
 //! Three names for the output get confused with each other, so all three at
 //! once. The **sample entry** is `hvc1`, not `dvh1`: Profile 8.1 is a
 //! backward-compatible enhancement of HDR10, and Apple's ISOBMFF contract
-//! requires a compatible stream to keep the base entry — which is also what
-//! [`super::hevc_copy_tag_for_format`] independently answers for any source
-//! with a compatible base, so the conversion needs no special case there. The
+//! requires a compatible stream to keep the base entry — which is what
+//! [`super::hevc_copy_tag_for_source`] already answers for any source with a
+//! compatible base, so the conversion needs no special case. The
 //! **configuration record** is `dvvC`, the profile ≥ 8 spelling, and not the
-//! `dvcC` the Profile 7 source arrived with (plan §4.8). The **playlist**
-//! still advertises `dvh1.08.06`, because `SUPPLEMENTAL-CODECS` is where the
-//! Dolby Vision profile is declared and it is a codec string, not a box name.
-//! Earlier drafts of the plan say `dvh1`/`dvcC` throughout; §4.8 is the
-//! correction, and this is what the code does.
+//! `dvcC` the Profile 7 source arrived with. The **playlist** still advertises
+//! `dvh1.08.06`, because `SUPPLEMENTAL-CODECS` is a codec string, not a box
+//! name.
+//!
+//! Note that the plan disagrees about the first of those: §4.8 writes
+//! `-tag:v dvh1` and describes the record as living "inside the `dvh1` sample
+//! entry", and the string `hvc1` appears nowhere in the plan document. §4.8's
+//! only stated correction is `dvcC` → `dvvC`. The code is right and the plan
+//! is stale — `hevc_copy_tag_for_source` has answered `hvc1` for any
+//! compatible base since long before this milestone, and a converted 8.1
+//! stream is exactly that — but the plan says otherwise, so this says so
+//! rather than citing it for a claim it does not make.
 
 use dolby_vision::rpu::dovi_rpu::DoviRpu;
 use dolby_vision::rpu::rpu_data_nlq::DoviELType;
@@ -115,10 +134,12 @@ impl Default for Converted {
 
 /// Why a conversion could not be completed.
 ///
-/// Every variant carries the byte offset of the offending NAL unit inside the
-/// buffer it was handed as well as the RPU ordinal, because the ordinal alone
-/// cannot be turned back into bytes on disk and a refusal that cannot be
-/// reproduced cannot be diagnosed.
+/// Every variant carries two locators. `frame` is how many RPUs were rewritten
+/// before this one — so it is the zero-based index of the failing RPU among
+/// the units this pass accepted, not a picture's frame number in the source.
+/// `offset` is the byte the failing unit's start code sits at inside the
+/// buffer this pass was handed, because an ordinal cannot be turned back into
+/// bytes on disk and a refusal that cannot be reproduced cannot be diagnosed.
 #[derive(Debug, thiserror::Error)]
 pub enum DvConvertError {
     #[error("the Dolby Vision RPU at frame {frame} (byte {offset}) could not be read: {detail}")]
@@ -135,13 +156,26 @@ pub enum DvConvertError {
     },
     /// The RPU declared a profile this conversion has no correct answer for.
     ///
-    /// [`ConversionMode::To81`] converts whatever it is given. Handed a
-    /// Profile 5 RPU it calls `p5_to_p81`, which produces an RPU *labelled*
-    /// 8.1 over a base layer that is IPT-PQ-C2, not HDR10 — every frame the
-    /// wrong colour, and nothing downstream able to tell, because the label
-    /// says the conversion succeeded. Profiles 7 and 8 are the only inputs
-    /// whose base layer is already the BT.2020/PQ one 8.1 promises.
-    #[error("the Dolby Vision RPU at frame {frame} (byte {offset}) declares profile {profile}; only profiles 7 and 8 have the HDR10 base layer profile 8.1 describes")]
+    /// [`ConversionMode::To81`] converts whatever it is given, and none of its
+    /// answers fail loudly:
+    ///
+    /// - **Profile 5** goes through `p5_to_p81`, which yields a well-formed
+    ///   RPU *labelled* 8.1 over an IPT-PQ-C2 base layer. Every frame is the
+    ///   wrong colour and nothing downstream can tell, because the conversion
+    ///   reported success.
+    /// - **Profile 8** is passed through essentially unchanged — and that is
+    ///   the subtler trap, because profile 8 covers both 8.1 (HDR10 base) and
+    ///   8.4 (HLG base) and *the RPU does not say which*. The distinction
+    ///   lives in the container's `dv_bl_signal_compatibility_id`, which this
+    ///   stage never sees. An 8.4 RPU accepted here comes out byte-identical
+    ///   with `rpus: 1`, and the caller then writes a `dvvC` with
+    ///   compatibility id 1 and advertises `dvh1.08.06` over an HLG base:
+    ///   every frame decoded through PQ where ARIB STD-B67 was meant.
+    ///
+    /// So Profile 7 is the only accepted input. Nothing is given up by
+    /// refusing 8: an already-8.1 RPU converts to itself byte for byte, so
+    /// there is no input for which accepting 8 is both necessary and safe.
+    #[error("the Dolby Vision RPU at frame {frame} (byte {offset}) declares profile {profile}; this converts profile 7 only, because the RPU alone cannot tell an HDR10 base from an HLG one")]
     UnsupportedProfile {
         frame: u64,
         offset: usize,
@@ -160,9 +194,10 @@ pub enum DvConvertError {
 /// nothing else — a NAL unit split across two calls would be handed to the
 /// RPU parser in halves and refused. A caller reading from a pipe must cut its
 /// buffer at a unit boundary and carry the remainder into the next read;
-/// [`whole_units_prefix`] is that cut, and it is what bounds a streaming
-/// caller's memory to one NAL unit rather than to the file (a two-hour 4K
-/// remux is ~72 GB, so "buffer the stream" is not an option that exists).
+/// [`whole_units_prefix`] is that cut. What it bounds is the *carried tail* —
+/// one NAL unit, never the file, which for a two-hour 4K remux is ~72 GB. The
+/// rest of a call's memory is the caller's read buffer and two `Vec`s
+/// proportional to it, so the read size is the caller's to choose.
 ///
 /// **A stream with no RPUs converts to itself**, and answers `rpus: 0`. That
 /// is not an error: the caller decides whether a source it believed was
@@ -191,10 +226,9 @@ pub fn convert_annex_b(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvC
                 detail: error.to_string(),
             })?;
         // Refuse before converting, not after. `To81` has an answer for every
-        // profile it is handed and none of them fail loudly: a Profile 5 RPU
-        // becomes a well-formed 8.1-labelled RPU over an IPT base layer, which
-        // is a wrong-colour stream nothing downstream can detect.
-        if !matches!(rpu.dovi_profile, 7 | 8) {
+        // profile it is handed and none of them fail loudly; the error's own
+        // documentation says what each wrong answer looks like on screen.
+        if rpu.dovi_profile != 7 {
             return Err(DvConvertError::UnsupportedProfile {
                 frame: report.rpus,
                 offset,
@@ -352,7 +386,7 @@ fn annex_b_units(input: &[u8]) -> Vec<AnnexBUnit<'_>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dolby_vision::rpu::generate::GenerateConfig;
+    use dolby_vision::rpu::generate::{GenerateConfig, GenerateProfile};
 
     /// One real Profile 7 RPU, captured 2026-08-30 from
     /// `Nosferatu (2024) Remux-2160p.mkv` on nuc4 through the pipe's own first
@@ -554,44 +588,71 @@ mod tests {
         );
     }
 
-    /// A profile this conversion has no correct answer for is refused, not
-    /// converted.
+    /// Profile 7 is the only accepted input, and both refusals matter.
     ///
-    /// `To81` converts whatever it is handed. Given a Profile 5 RPU it calls
-    /// `p5_to_p81` and produces a well-formed RPU *labelled* 8.1 sitting over
-    /// an IPT-PQ-C2 base layer — every frame the wrong colour, with no error
-    /// anywhere and nothing downstream able to notice. The guard is the only
-    /// thing between a mis-routed source and that stream.
+    /// `To81` converts whatever it is handed and never fails loudly, so each
+    /// refusal here is the only thing standing between a mis-routed source and
+    /// a stream that decodes to the wrong colours while reporting success:
+    ///
+    /// - **Profile 5** goes through `p5_to_p81` and comes out labelled 8.1
+    ///   over an IPT-PQ-C2 base layer.
+    /// - **Profile 8** comes out byte-identical — which is fine for 8.1 and
+    ///   catastrophic for 8.4, and the RPU carries nothing that separates
+    ///   them. That fact is demonstrated below rather than asserted.
     #[test]
-    fn an_rpu_from_a_profile_without_an_hdr10_base_is_refused() {
-        // A genuine Profile 5 RPU from the library's own generator, so the
-        // guard is tested against what a P5 source really carries rather than
-        // against a hand-edited header.
-        let rpu = DoviRpu::profile5_config(&GenerateConfig::default()).expect("generate");
-        assert_eq!(rpu.dovi_profile, 5, "the fixture for this test is a P5 RPU");
-        let p5 = rpu.write_hevc_unspec62_nalu().expect("write");
+    fn every_profile_but_7_is_refused_because_only_7_can_be_told_apart() {
+        let p5 = DoviRpu::profile5_config(&GenerateConfig::default()).expect("generate");
+        assert_eq!(p5.dovi_profile, 5);
+        let p5 = p5.write_hevc_unspec62_nalu().expect("write");
 
-        // The premise: without the guard this converts, and reports success.
+        // The premise for Profile 5: without a guard this converts, and says
+        // it succeeded.
         let mut unguarded = DoviRpu::parse_unspec62_nalu(&p5).expect("parses");
         unguarded
             .convert_with_mode(ConversionMode::To81)
             .expect("the library converts P5 without complaint — that is the danger");
         assert_eq!(unguarded.dovi_profile, 8);
 
-        let stream = annex_b(&[(&[0, 0, 1], &p5)]);
-        let mut out = Vec::new();
-        let error = convert_annex_b(&stream, &mut out).expect_err("must refuse");
-        assert!(
-            matches!(
-                error,
-                DvConvertError::UnsupportedProfile {
-                    frame: 0,
-                    profile: 5,
-                    ..
-                }
-            ),
-            "{error}"
+        // …and for Profile 8: an 8.1 RPU and an 8.4 RPU both parse as profile
+        // 8, and neither carries the compatibility id that tells them apart.
+        // 8.4's base layer is HLG. Converting it would produce a `dvvC` that
+        // says HDR10 over a stream that is not.
+        let p84_config = GenerateConfig {
+            profile: GenerateProfile::Profile84,
+            ..GenerateConfig::default()
+        };
+        let p84 = DoviRpu::profile84_config(&p84_config).expect("generate");
+        assert_eq!(
+            p84.dovi_profile, 8,
+            "8.4 is indistinguishable from 8.1 at the RPU"
         );
+        let p84 = p84.write_hevc_unspec62_nalu().expect("write");
+
+        let p81 = DoviRpu::profile81_config(&GenerateConfig::default()).expect("generate");
+        let p81 = p81.write_hevc_unspec62_nalu().expect("write");
+
+        for (nal, profile, why) in [
+            (&p5, 5u8, "an IPT base layer is not the HDR10 one 8.1 means"),
+            (&p84, 8u8, "8.4 is an HLG base wearing profile 8's number"),
+            (
+                &p81,
+                8u8,
+                "and 8.1 needs no conversion, so refusing costs it nothing",
+            ),
+        ] {
+            let stream = annex_b(&[(&[0, 0, 1], nal)]);
+            let mut out = Vec::new();
+            let error = convert_annex_b(&stream, &mut out).expect_err(why);
+            let DvConvertError::UnsupportedProfile {
+                frame: 0,
+                profile: got,
+                ..
+            } = error
+            else {
+                panic!("wrong variant for {why}: {error}");
+            };
+            assert_eq!(got, profile, "{why}");
+        }
     }
 
     /// The report describes the *source*, so the first RPU wins.
@@ -600,31 +661,42 @@ mod tests {
     /// — and the badge has to name what the title was, not what its last frame
     /// happened to be. Overwriting on every RPU would make the badge depend on
     /// where the stream ended.
+    ///
+    /// The known limit, recorded here rather than in a comment nobody reads:
+    /// a stream that opens MEL and continues FEL is badged near-lossless while
+    /// real residual detail is discarded. Refusing a mixed stream outright was
+    /// the alternative; first-wins was chosen because a splice is a property of
+    /// the remux, not a fault, and refusing would take a playable title away
+    /// to avoid an imprecise badge on a rare one.
     #[test]
-    fn the_reported_source_profile_is_the_first_rpus_and_not_the_last() {
-        let p7 = rpu_bytes();
-        let mut already_8 = DoviRpu::parse_unspec62_nalu(&p7).expect("fixture parses");
-        already_8
-            .convert_with_mode(ConversionMode::To81)
-            .expect("convert");
-        assert_eq!(already_8.dovi_profile, 8);
-        let p8 = already_8.write_hevc_unspec62_nalu().expect("write");
+    fn the_reported_enhancement_layer_is_the_first_rpus_and_not_the_last() {
+        let fel = rpu_bytes();
+        let mut converted = DoviRpu::parse_unspec62_nalu(&fel).expect("fixture parses");
+        converted
+            .convert_with_mode(ConversionMode::ToMel)
+            .expect("the library rewrites a FEL RPU's layer as minimum");
+        assert_eq!(converted.dovi_profile, 7, "still profile 7, now MEL");
+        assert_eq!(converted.el_type, Some(DoviELType::MEL));
+        let mel = converted.write_hevc_unspec62_nalu().expect("write");
 
-        let stream = annex_b(&[(&[0, 0, 1], &p7), (&[0, 0, 1], &p8)]);
+        let stream = annex_b(&[(&[0, 0, 1], &fel), (&[0, 0, 1], &mel)]);
         let mut out = Vec::new();
         let report = convert_annex_b(&stream, &mut out).expect("convert");
 
         assert_eq!(report.rpus, 2, "both units are rewritten");
+        assert_eq!(report.source_profile, Some(7));
         assert_eq!(
-            report.source_profile,
-            Some(7),
-            "the source is what the first RPU declared"
-        );
-        assert_ne!(
             report.enhancement_layer,
-            EnhancementLayer::None,
-            "and so is the enhancement layer — the P8 RPU declares none"
+            EnhancementLayer::Full,
+            "the first RPU declared FEL, so the badge says detail was lost"
         );
+
+        // …and the other way round, so this pins first-wins rather than
+        // FEL-wins.
+        let reversed = annex_b(&[(&[0, 0, 1], &mel), (&[0, 0, 1], &fel)]);
+        let mut out = Vec::new();
+        let report = convert_annex_b(&reversed, &mut out).expect("convert");
+        assert_eq!(report.enhancement_layer, EnhancementLayer::Minimum);
     }
 
     /// A rewritten unit keeps the width of the start code it arrived with.
@@ -675,9 +747,9 @@ mod tests {
     /// The cut a streaming caller makes, so no unit is ever handed over in
     /// halves.
     ///
-    /// This is what bounds a converting session's memory to one NAL unit. The
-    /// alternative — buffering the stream — is ~72 GB for a two-hour 4K remux,
-    /// which is not a thing that fits anywhere.
+    /// This is what bounds the tail a session carries between reads to one NAL
+    /// unit. The alternative — buffering until the stream ends — is ~72 GB for
+    /// a two-hour 4K remux, which is not a thing that fits anywhere.
     #[test]
     fn a_partial_read_is_cut_at_the_last_whole_unit() {
         let first: &[u8] = &[0x26, 0x01, 0xaf];
@@ -689,8 +761,19 @@ mod tests {
         assert_eq!(cut, 3 + first.len(), "everything before the final unit");
         assert_eq!(&stream[cut..cut + 4], &[0, 0, 0, 1], "…at a start code");
 
-        // One unit, or none, is never safe to convert yet.
+        // One unit, or none, is never safe to convert yet — including when
+        // that one unit is preceded by a carried fragment, which is the shape
+        // every read after the first has. Cutting in front of a lone start
+        // code would hand `convert_annex_b` a NAL that is still growing: a
+        // good RPU refused as unreadable, or a truncated unit emitted.
         assert_eq!(whole_units_prefix(&annex_b(&[(&[0, 0, 1], first)])), 0);
+        let mut carried = vec![0xde, 0xad, 0xbe, 0xef];
+        carried.extend_from_slice(&annex_b(&[(&[0, 0, 1], first)]));
+        assert_eq!(
+            whole_units_prefix(&carried),
+            0,
+            "a lone start code is a unit that may still be growing, wherever it sits"
+        );
         assert_eq!(whole_units_prefix(&[]), 0);
         assert_eq!(whole_units_prefix(&[0, 0]), 0);
 
@@ -712,19 +795,24 @@ mod tests {
         let mut out = Vec::new();
         let report = convert_annex_b(&stream, &mut out).expect("convert");
 
-        // Whatever this disc carries, it must be named — and the reason string
-        // has to say what was lost rather than only that something was.
-        assert!(
-            matches!(
-                report.enhancement_layer,
-                EnhancementLayer::Minimum | EnhancementLayer::Full
-            ),
-            "a Profile 7 source declares one or the other: {:?}",
-            report.enhancement_layer
+        // Which one, not merely that one was named. The badge tells a viewer
+        // whether the conversion cost them picture detail, so getting MEL and
+        // FEL the wrong way round is worse than saying nothing: a FEL source
+        // would be called near-lossless while its residual detail is dropped.
+        // The fixture is a real disc remux and the library reads it as FEL.
+        assert_eq!(
+            report.enhancement_layer,
+            EnhancementLayer::Full,
+            "the captured Nosferatu RPU declares a full enhancement layer"
         );
-        assert!(report
-            .enhancement_layer
-            .reason()
-            .contains("enhancement layer"));
+        assert!(
+            report.enhancement_layer.reason().contains("is lost"),
+            "a FEL source must be told detail was lost: {}",
+            report.enhancement_layer.reason()
+        );
+        assert!(
+            EnhancementLayer::Minimum.reason().contains("near-lossless"),
+            "…and a MEL source must not be"
+        );
     }
 }

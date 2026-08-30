@@ -422,12 +422,31 @@ pub fn hevc_copy_tag(hdr: Option<&str>, preserve_dolby_vision: bool) -> &'static
 
 /// Format-aware sample-entry choice for segmented copies, whose source model
 /// includes the richer HDR compatibility label.
+///
+/// Prefer [`hevc_copy_tag_for_source`] where a whole `MediaFile` is in hand:
+/// the label is the fallback answer, not the authoritative one.
 pub fn hevc_copy_tag_for_format(
     hdr: Option<&str>,
     hdr_format: Option<&str>,
     preserve_dolby_vision: bool,
 ) -> &'static str {
-    let compatible_base = dolby_vision_has_compatible_base(hdr_format);
+    tag_for(
+        hdr,
+        compatible_base_from_label(hdr_format),
+        preserve_dolby_vision,
+    )
+}
+
+/// The sample-entry choice made from everything the source row knows.
+pub fn hevc_copy_tag_for_source(source: &MediaFile, preserve_dolby_vision: bool) -> &'static str {
+    tag_for(
+        source.hdr.as_deref(),
+        dolby_vision_has_compatible_base(source),
+        preserve_dolby_vision,
+    )
+}
+
+fn tag_for(hdr: Option<&str>, compatible_base: bool, preserve_dolby_vision: bool) -> &'static str {
     if hdr == Some("dolby_vision") && preserve_dolby_vision && !compatible_base {
         "dvh1"
     } else {
@@ -435,7 +454,26 @@ pub fn hevc_copy_tag_for_format(
     }
 }
 
-fn dolby_vision_has_compatible_base(hdr_format: Option<&str>) -> bool {
+/// Does this Dolby Vision source have a base layer a non-DV client can watch?
+///
+/// The stored compatibility id answers it directly — 1 and 6 are HDR10, 4 is
+/// HLG, 2 is SDR, 0 is none — and the label parse is the fallback for rows
+/// scanned before M2 populated the column. This is deliberately the same
+/// precedence [`crate::playback`] uses, and it has to be: the two decide the
+/// same question about the same row, and a row where they disagree is one
+/// where the decider routes a copy that the argv builder then renders for a
+/// different stream. A column-only row (the columns populated, no label
+/// written) took the Profile 5 branch here while the decider called its base
+/// HDR10-compatible — `-tag:v dvh1`, and no `-bsf:v` at all, so NAL types
+/// 32-34 went unfiltered and the `hvc1` boundary-stutter fix was silently off.
+fn dolby_vision_has_compatible_base(source: &MediaFile) -> bool {
+    if let Some(compat) = source.dolby_vision.bl_compat_id {
+        return matches!(compat, 1 | 4 | 6);
+    }
+    compatible_base_from_label(source.hdr_format.as_deref())
+}
+
+fn compatible_base_from_label(hdr_format: Option<&str>) -> bool {
     hdr_format.is_some_and(|format| {
         format.contains("HDR10-compatible") || format.contains("HLG-compatible")
     })
@@ -1294,14 +1332,7 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
     // is commonly `hev1`, which renders black. Harmless if already hvc1.
     if matches!(source.video_codec.as_deref(), Some("hevc" | "h265")) {
         args.push("-tag:v".into());
-        args.push(
-            hevc_copy_tag_for_format(
-                source.hdr.as_deref(),
-                source.hdr_format.as_deref(),
-                options.preserve_dolby_vision,
-            )
-            .into(),
-        );
+        args.push(hevc_copy_tag_for_source(source, options.preserve_dolby_vision).into());
         // FFmpeg's MOV muxer guards dvcC/dvvC behind `unofficial`. Without
         // this, it keeps the Dolby Vision RPUs and writes a `dvh1` sample
         // entry but silently omits the decoder configuration box. A media
@@ -1325,7 +1356,7 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
         // promise honest.
         let promote_profile5_parameter_sets = source.hdr.as_deref() == Some("dolby_vision")
             && options.preserve_dolby_vision
-            && !dolby_vision_has_compatible_base(source.hdr_format.as_deref());
+            && !dolby_vision_has_compatible_base(source);
         if options.promote_hevc_parameter_sets {
             let mut filters = Vec::new();
             if source.hdr.as_deref() == Some("dolby_vision")
@@ -1349,20 +1380,28 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
                 options.preserve_dolby_vision,
             ));
         }
-        // The conversion is not an ffmpeg argument — it happens between two
-        // ffmpegs, in `transcode::dvconvert` — but it has to appear here, and
-        // this is the honest place for it.
-        //
-        // `copy_video_args` is what the fragment index fingerprints. A
-        // converted stream has different bytes and therefore different
-        // segment boundaries, so it needs its own index identity; without a
-        // token in the argv it would silently share the unconverted stream's,
-        // and a client would be handed a playlist whose cut points describe
-        // different media. The token is stripped before exec by
-        // [`strip_plurx_markers`].
-        if options.dv_convert {
-            args.push(DV_CONVERT_MARKER.into());
-        }
+    }
+    // The conversion is not an ffmpeg argument — it happens between two
+    // ffmpegs, in `transcode::dvconvert` — but it has to appear here, and this
+    // is the honest place for it.
+    //
+    // `copy_video_args` is what the fragment index fingerprints. A converted
+    // stream has different bytes and therefore different segment boundaries,
+    // so it needs its own index identity; without a token in the argv it would
+    // silently share the unconverted stream's, and a client would be handed a
+    // playlist whose cut points describe different media. The token is
+    // stripped before exec by [`strip_plurx_markers`].
+    //
+    // Outside the HEVC branch, and gated on the source actually being Dolby
+    // Vision, for the two reasons those are not the same reason: a non-HEVC
+    // source with the flag set would otherwise fingerprint identically to one
+    // without it, so a converted index could alias an unconverted one; and a
+    // plain HDR10 HEVC source with the flag set would otherwise earn a third
+    // index identity for a pipeline byte-identical to the second. Both are
+    // unreachable through today's decider, which is exactly why the argv
+    // builder should not depend on that.
+    if options.dv_convert && source.hdr.as_deref() == Some("dolby_vision") {
+        args.push(DV_CONVERT_MARKER.into());
     }
     args
 }
@@ -3590,7 +3629,11 @@ mod index_pipe_tests {
     /// process, every copy session and every index build for a converted title
     /// dies at startup with "Unrecognized option". The marker is added in
     /// `copy_video_args` and removed in exactly two places; this is the test
-    /// that says so, over every argv builder that ends in an exec.
+    /// that says so, over every public builder in this module that produces an
+    /// argv a caller execs. They all funnel through `copy_input_args` or
+    /// `copy_index_pipe_args_with_input`, which is why two strip sites suffice
+    /// — but the funnel is an implementation detail, and a refactor that
+    /// widened it would be caught here rather than on a node.
     #[test]
     fn no_executed_argv_carries_a_plurx_marker() {
         let file = hevc_dv();
@@ -3619,6 +3662,32 @@ mod index_pipe_tests {
             (
                 "index pipe with input",
                 copy_index_pipe_args_with_input(&file, "pipe:3", convert),
+            ),
+            (
+                "hls copy",
+                hls_copy_args_with_dolby_vision(
+                    &file,
+                    0.0,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    convert,
+                    "/tmp/out",
+                ),
+            ),
+            (
+                "hls copy with sequence",
+                hls_copy_args_with_sequence(
+                    &file,
+                    0.0,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    convert,
+                    7,
+                    "init.mp4",
+                    "/tmp/out",
+                ),
             ),
         ];
         for (name, args) in executed {
