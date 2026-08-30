@@ -76,7 +76,17 @@ static FRAGMENT_INDEX_ENGINE: tokio::sync::OnceCell<FragmentIndexEngine> =
     tokio::sync::OnceCell::const_new();
 
 const ENGINE_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
-const ENGINE_PROBE_MAX_BYTES: u64 = 1024 * 1024;
+/// Runaway guard for what a probe subprocess may hand back, not a correctness
+/// gate: exceeding it turns a real answer into "this build has no features",
+/// so it has to sit far above anything a healthy ffmpeg can legitimately say.
+///
+/// It was 1 MiB, which `ffmpeg -h full` outgrew years ago — measured stdout is
+/// 1,005,926 bytes on 4.4.2 and 1,165,847 bytes on 6.1.1, and 8.x lists more
+/// still. Every build from 6.1 on therefore failed the pacing probe and was
+/// classified as having no `-readrate`, so remux streams ran unpaced and HLS
+/// fell back to realtime pacing — silently, because a bounded read is
+/// indistinguishable from a missing binary at the call site.
+const ENGINE_PROBE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const ENGINE_OBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -255,7 +265,11 @@ async fn read_bounded(input: impl AsyncRead + Unpin) -> Result<Vec<u8>, String> 
         .await
         .map_err(|error| error.to_string())?;
     if bytes.len() as u64 > ENGINE_PROBE_MAX_BYTES {
-        return Err("engine probe exceeded its output bound".to_owned());
+        // Name the bound. The last time this fired it read as "could not probe
+        // ffmpeg", which sent three people looking for a missing binary.
+        return Err(format!(
+            "engine probe exceeded its output bound of {ENGINE_PROBE_MAX_BYTES} bytes"
+        ));
     }
     Ok(bytes)
 }
@@ -1298,6 +1312,59 @@ mod tests {
         std::fs::remove_file(&path).expect("unlink original");
         std::fs::rename(replacement, &path).expect("install replacement");
         assert!(!engine_objects_are_current(&objects));
+    }
+
+    /// The pacing answer comes from `ffmpeg -h full`, and that listing has been
+    /// over a megabyte on every build since 6.1 (measured: 1,005,926 bytes on
+    /// 4.4.2, 1,165,847 on 6.1.1, more on 8.x). Read the size class that broke
+    /// through the real subprocess path, not through a hand-made string: with
+    /// the old 1 MiB bound this returns Err, `pacing_from_probe` maps Err to
+    /// the conservative answer, and every remux stream runs unpaced while HLS
+    /// falls back to realtime pacing — with nothing in the logs but "could not
+    /// probe ffmpeg".
+    #[tokio::test]
+    async fn a_help_listing_larger_than_a_megabyte_survives_the_probe_bound() {
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg(
+            "yes '  -pad <int>  ..FV....... filler line standing in for a real option' \
+             | head -n 70000; \
+             printf '  -readrate speed\\n  -readrate_initial_burst seconds\\n'",
+        );
+        let out = bounded_command_output(command)
+            .await
+            .expect("a help listing of the real size must not trip the bound");
+        assert!(
+            out.stdout.len() as u64 > 1024 * 1024,
+            "the fixture has to be the size class that broke: {} bytes",
+            out.stdout.len()
+        );
+
+        let caps = pacing_from_probe(Ok(merged_output(&out.stdout, &out.stderr)));
+        assert!(
+            caps.readrate,
+            "the declaration is in the listing; only our own bound could hide it"
+        );
+        assert!(caps.initial_burst);
+    }
+
+    /// The bound still bites — it is a runaway guard, and raising it must not
+    /// have quietly turned it off. One byte over is refused, and the refusal
+    /// says what it refused against.
+    #[tokio::test]
+    async fn output_past_the_bound_is_still_refused_and_names_the_bound() {
+        let over = tokio::io::repeat(b'x').take(ENGINE_PROBE_MAX_BYTES + 1);
+        let error = read_bounded(over)
+            .await
+            .expect_err("one byte past the bound is refused");
+        assert!(
+            error.contains(&ENGINE_PROBE_MAX_BYTES.to_string()),
+            "the error must name the bound it hit: {error}"
+        );
+
+        let exact = read_bounded(tokio::io::repeat(b'x').take(ENGINE_PROBE_MAX_BYTES))
+            .await
+            .expect("the bound itself is fine");
+        assert_eq!(exact.len() as u64, ENGINE_PROBE_MAX_BYTES);
     }
 
     #[tokio::test]
