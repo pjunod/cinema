@@ -35,6 +35,7 @@ from validation.apple_build import (
     status_blockquote,
     validate_notes,
 )
+from validation.doc_versions import validate_documented_builds
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -103,6 +104,20 @@ class RepositoryClaimCase(unittest.TestCase):
         stale = render(read, build)
 
         self.assertIn(STATUS, stale)
+
+    def test_a_generated_next_build_satisfies_the_document_claim_sweep(self) -> None:
+        """Every live status claim must be owned by the build generator."""
+        build = current_build(ROOT) + 1
+
+        def base_read(path: str) -> str:
+            return (ROOT / path).read_text(encoding="utf-8")
+
+        generated = render(base_read, build)
+
+        def read(path: str) -> str:
+            return generated.get(path, base_read(path))
+
+        self.assertEqual(validate_documented_builds(read), ())
 
     def test_a_missing_generated_surface_fails_closed(self) -> None:
         """A reworded anchor must be a hard error, not a silent no-op rewrite."""
