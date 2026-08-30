@@ -966,7 +966,7 @@ pub async fn create(
     AxPath(id): AxPath<i64>,
     headers: HeaderMap,
     super::network::RemoteAddress(remote): super::network::RemoteAddress,
-    Json(mut req): Json<CreateSession>,
+    Json(req): Json<CreateSession>,
 ) -> Result<Json<StartResponse>, ApiError> {
     if !valid_playback_id(&req.playback_id) {
         return Err(ApiError::BadRequest(
