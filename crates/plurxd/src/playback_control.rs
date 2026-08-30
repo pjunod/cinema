@@ -811,6 +811,55 @@ impl ControlAction {
 /// does the advisory hold get derived from the delivery the response is
 /// already carrying, so the action and `delivery.hold_reason` can never
 /// disagree — they are the same fact read once.
+/// Which metric slots one resolved response occupies.
+///
+/// Separated from the counters so the classification can be tested. The
+/// interesting field is `suppressed`: production was held, and the client
+/// could not be told because it had not declared the action. That number is
+/// the size of the problem the vocabulary rollout exists to close, and it is
+/// the one an operator should watch fall to zero before recovery authority
+/// moves off the clients.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ActionMetrics {
+    pub action: ActionKind,
+    pub hold_reason: Option<HoldReason>,
+    pub suppressed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ActionKind {
+    None = 0,
+    Hold = 1,
+}
+
+/// What this response's action says about the exchange, for metrics only.
+pub(crate) fn action_metrics(
+    action: &ControlAction,
+    delivery: &DeliveryView,
+    request: &ControlRequestV1,
+) -> ActionMetrics {
+    match action {
+        ControlAction::Hold { reason } => ActionMetrics {
+            action: ActionKind::Hold,
+            hold_reason: Some(*reason),
+            suppressed: false,
+        },
+        ControlAction::None => ActionMetrics {
+            action: ActionKind::None,
+            hold_reason: None,
+            // Only a hold this server could actually have named counts as
+            // suppressed. A reason it does not recognise was never a candidate
+            // instruction, so counting it here would inflate the gap with
+            // responses no vocabulary rollout would change.
+            suppressed: !request.accepts_hold()
+                && delivery
+                    .hold_reason
+                    .as_deref()
+                    .is_some_and(|reason| HoldReason::from_delivery(reason).is_some()),
+        },
+    }
+}
+
 pub(crate) fn resolve_action(
     decided: &ControlAction,
     delivery: &DeliveryView,
@@ -8673,6 +8722,16 @@ static CONTROL_RELAY_BUCKETS: [AtomicU64; RELAY_BUCKETS_MS.len() + 1] =
 static CONTROL_RELAY_DURATION_MICROS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RENEWALS: [AtomicU64; 3] =
     [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+/// Resolved actions by kind and client platform.
+static CONTROL_ACTIONS: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
+/// Holds actually sent, by reason.
+static CONTROL_HOLD_REASONS: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+/// Exchanges where production was held and the client had not declared the
+/// action, so it was told nothing. Watch this fall as clients roll out.
+static CONTROL_ACTIONS_SUPPRESSED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// Clients by platform and whether they declared they accept a hold. This is
+/// the fleet's rollout progress, readable without touching a device.
+static CONTROL_VOCABULARY: [[AtomicU64; 3]; 2] = [const { [const { AtomicU64::new(0) }; 3] }; 2];
 static ROLLING_LEASE_EXPIRATIONS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_LEASE_RETIREMENTS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_HOLDS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
@@ -8763,6 +8822,34 @@ fn hold_reason_index(reason: crate::transcode::AheadHoldReason) -> usize {
     }
 }
 
+fn platform_index(platform: ClientPlatform) -> usize {
+    match platform {
+        ClientPlatform::Web => 0,
+        ClientPlatform::Apple => 1,
+        ClientPlatform::Android => 2,
+    }
+}
+
+/// Record what one accepted exchange's action was, and what it could not be.
+pub(crate) fn record_action(
+    action: &ControlAction,
+    delivery: &DeliveryView,
+    request: &ControlRequestV1,
+    platform: ClientPlatform,
+) {
+    let metrics = action_metrics(action, delivery, request);
+    let platform = platform_index(platform);
+    CONTROL_ACTIONS[metrics.action as usize][platform].fetch_add(1, Ordering::Relaxed);
+    if let Some(reason) = metrics.hold_reason {
+        CONTROL_HOLD_REASONS[reason as usize].fetch_add(1, Ordering::Relaxed);
+    }
+    if metrics.suppressed {
+        CONTROL_ACTIONS_SUPPRESSED[platform].fetch_add(1, Ordering::Relaxed);
+    }
+    CONTROL_VOCABULARY[usize::from(request.accepts_hold())][platform]
+        .fetch_add(1, Ordering::Relaxed);
+}
+
 pub(crate) fn record_producer_hold(reason: crate::transcode::AheadHoldReason) {
     ROLLING_PRODUCER_HOLDS[hold_reason_index(reason)].fetch_add(1, Ordering::Relaxed);
 }
@@ -8804,6 +8891,61 @@ pub(crate) fn prometheus() -> String {
             output.push_str(&format!(
                 "plurx_playback_control_platform_exchanges_total{{outcome=\"{outcome}\",platform=\"{platform}\"}} {}\n",
                 CONTROL_PLATFORMS[outcome_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_actions_total Resolved playback-control actions by kind and client platform.\n\
+         # TYPE plurx_playback_control_actions_total counter\n",
+    );
+    for (action_index, action) in ["none", "hold"].iter().enumerate() {
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_control_actions_total{{action=\"{action}\",platform=\"{platform}\"}} {}\n",
+                CONTROL_ACTIONS[action_index][platform_index].load(Ordering::Relaxed)
+            ));
+        }
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_holds_total Holds sent to a client, by the reason production is not advancing.\n\
+         # TYPE plurx_playback_control_holds_total counter\n",
+    );
+    for (index, reason) in [
+        "demand",
+        "time",
+        "bytes",
+        "global",
+        "ahead",
+        "working_set",
+        "no_room",
+    ]
+    .iter()
+    .enumerate()
+    {
+        output.push_str(&format!(
+            "plurx_playback_control_holds_total{{reason=\"{reason}\"}} {}\n",
+            CONTROL_HOLD_REASONS[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_actions_suppressed_total Exchanges where production was held and the client had not declared the action, so it was told nothing.\n\
+         # TYPE plurx_playback_control_actions_suppressed_total counter\n",
+    );
+    for (index, platform) in ["web", "apple", "android"].iter().enumerate() {
+        output.push_str(&format!(
+            "plurx_playback_control_actions_suppressed_total{{platform=\"{platform}\"}} {}\n",
+            CONTROL_ACTIONS_SUPPRESSED[index].load(Ordering::Relaxed)
+        ));
+    }
+    output.push_str(
+        "# HELP plurx_playback_control_vocabulary_total Accepted exchanges by client platform and whether the client declared it accepts a hold.\n\
+         # TYPE plurx_playback_control_vocabulary_total counter\n",
+    );
+    for (accepts_index, accepts) in ["false", "true"].iter().enumerate() {
+        for (platform_index, platform) in ["web", "apple", "android"].iter().enumerate() {
+            output.push_str(&format!(
+                "plurx_playback_control_vocabulary_total{{accepts_hold=\"{accepts}\",platform=\"{platform}\"}} {}\n",
+                CONTROL_VOCABULARY[accepts_index][platform_index].load(Ordering::Relaxed)
             ));
         }
     }
@@ -9225,6 +9367,87 @@ mod tests {
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
         }
+    }
+
+    #[test]
+    fn a_suppressed_hold_is_counted_so_the_rollout_can_be_watched() {
+        // The number that says how much a client upgrade would buy. Production
+        // is held, the server knows why, and the client cannot be told because
+        // it never declared the action.
+        let passive = request();
+        let held = delivery_with_hold(Some("demand"));
+        let action = resolve_action(&ControlAction::None, &held, &passive);
+        assert_eq!(action, ControlAction::None);
+        assert_eq!(
+            action_metrics(&action, &held, &passive),
+            ActionMetrics {
+                action: ActionKind::None,
+                hold_reason: None,
+                suppressed: true,
+            },
+        );
+
+        // Nothing was held, so nothing was withheld.
+        let flowing = delivery_with_hold(None);
+        assert!(
+            !action_metrics(
+                &resolve_action(&ControlAction::None, &flowing, &passive),
+                &flowing,
+                &passive,
+            )
+            .suppressed,
+        );
+
+        // A reason this server cannot name was never a candidate instruction.
+        // Counting it would inflate the gap with responses that no client
+        // rollout would change.
+        let unknown = delivery_with_hold(Some("a_reason_from_next_year"));
+        assert!(
+            !action_metrics(
+                &resolve_action(&ControlAction::None, &unknown, &passive),
+                &unknown,
+                &passive,
+            )
+            .suppressed,
+        );
+    }
+
+    #[test]
+    fn a_sent_hold_is_counted_by_reason_and_never_as_suppressed() {
+        let mut accepting = request();
+        accepting.supported_actions = Some(vec![HOLD_ACTION.to_owned()]);
+        let held = delivery_with_hold(Some("working_set"));
+        let action = resolve_action(&ControlAction::None, &held, &accepting);
+        assert_eq!(
+            action_metrics(&action, &held, &accepting),
+            ActionMetrics {
+                action: ActionKind::Hold,
+                hold_reason: Some(HoldReason::WorkingSet),
+                suppressed: false,
+            },
+        );
+    }
+
+    #[test]
+    fn every_hold_reason_has_its_own_counter_slot() {
+        // The exposition indexes `CONTROL_HOLD_REASONS` by `reason as usize`,
+        // so a variant added in the middle would silently report under its
+        // neighbour's name. This pins the discriminants to the exposed order.
+        for (expected, reason) in [
+            HoldReason::Demand,
+            HoldReason::Time,
+            HoldReason::Bytes,
+            HoldReason::Global,
+            HoldReason::Ahead,
+            HoldReason::WorkingSet,
+            HoldReason::NoRoom,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            assert_eq!(reason as usize, expected, "{reason:?} moved slot");
+        }
+        assert_eq!(CONTROL_HOLD_REASONS.len(), 7);
     }
 
     #[test]
