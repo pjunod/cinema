@@ -2319,7 +2319,7 @@ pub(super) async fn node_hostnames(state: &AppState, permitted: bool) -> BTreeMa
     match state.membership.node_hostnames().await {
         Ok(hostnames) => hostnames,
         Err(error) => {
-            tracing::warn!(?error, "node hostnames unavailable for activity");
+            tracing::warn!(?error, "roster machine names unavailable");
             BTreeMap::new()
         }
     }
@@ -3506,6 +3506,65 @@ mod tests {
         );
     }
 
+    /// Every route that reads the roster's machine names, enumerated.
+    ///
+    /// `node_hostnames` is `pub(super)`, so any of the modules under
+    /// `http/` can call it, and the argument that says whether the caller may
+    /// see the names is a plain `bool` the callee cannot check. A new caller
+    /// passing `true` from a household route compiles, passes every other test
+    /// in this file, and hands the fleet's machine names to anyone signed in.
+    ///
+    /// So the call sites are a closed set. Adding one is allowed; adding one
+    /// without saying so here is not.
+    #[test]
+    fn the_roster_reader_has_exactly_these_callers() {
+        let http = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/http");
+        let mut found: Vec<(String, String)> = Vec::new();
+        for entry in std::fs::read_dir(&http).expect("the http module directory") {
+            let path = entry.expect("a directory entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a file name")
+                .to_owned();
+            let source = std::fs::read_to_string(&path).expect("a readable module");
+            // Production halves only: the test modules quote these call sites
+            // as string literals, and a test is not a route. Split on the test
+            // *module*, not on the attribute — it also sits on ordinary items.
+            let source = source
+                .split_once("\n#[cfg(test)]\nmod tests {")
+                .map_or(source.as_str(), |(production, _)| production);
+            for (at, _) in source.match_indices("node_hostnames(&state,") {
+                let argument = source[at..]
+                    .split_once(',')
+                    .expect("an argument")
+                    .1
+                    .split_once(')')
+                    .expect("a closing paren")
+                    .0
+                    .trim()
+                    .to_owned();
+                found.push((name.clone(), argument));
+            }
+        }
+        found.sort();
+        assert_eq!(
+            found,
+            vec![
+                // Admin-only route: `AdminUser` was extracted before the body
+                // ran, so `true` is that proof handed on.
+                ("analysis.rs".to_owned(), "true".to_owned()),
+                // Any signed-in household member reaches this one, so the
+                // permission is this reader's own admin flag.
+                ("system.rs".to_owned(), "user.0.is_admin".to_owned()),
+            ],
+            "a route reads the roster's machine names without this test knowing"
+        );
+    }
+
     #[test]
     fn a_roster_read_costs_the_page_its_labels_and_never_the_page() {
         let source = include_str!("system.rs");
@@ -3545,24 +3604,45 @@ mod tests {
         // so an ungated map here would make the activity page the one place an
         // ordinary household member can read the fleet's hostnames.
         //
-        // Asserted as "the branch this line is inside", not "a gate appears
-        // somewhere above": an ungated `if clustered {` added immediately
-        // before the publish would satisfy the weaker form while leaking.
+        // Asserted as "every use of the map value", not "the text near the
+        // publication I happen to know about". An earlier form of this test
+        // found the publication by its key and checked the branch above it,
+        // and a second publication under a *different* key from an ungated
+        // `if clustered {` satisfied it while leaking to every signed-in
+        // household member.
+        let names = handler
+            .match_indices("hostnames")
+            // `node_hostnames` is the reader's name, not the value's.
+            .filter(|(at, _)| !handler[..*at].ends_with("node_"))
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        let bound = names.first().copied().expect("the map is read at all");
+        let gate = handler
+            .find("if clustered && user.0.is_admin {")
+            .expect("machine names are gated on the admin the roster is gated on");
+        for at in &names {
+            assert!(
+                *at <= bound || handler[..*at].ends_with("(local, peers, ") || *at > gate,
+                "the roster map is used outside the admin branch at byte {at}: {}",
+                &handler[at.saturating_sub(80)..*at + 40]
+            );
+        }
+        // …and the one use past the gate is the publication itself.
         assert_eq!(
-            handler.matches("response[\"node_hostnames\"]").count(),
-            1,
-            "one publication site, or this test reasons about the wrong one"
+            handler[gate..]
+                .matches("response[\"node_hostnames\"] = serde_json::to_value(&hostnames)")
+                .count(),
+            1
         );
-        let published = handler
-            .find("response[\"node_hostnames\"]")
-            .expect("the activity page is sent the roster's machine names");
-        let enclosing = handler[..published]
-            .rfind("if clustered")
-            .expect("the publication is inside a clustered branch");
-        assert!(
-            handler[enclosing..].starts_with("if clustered && user.0.is_admin {"),
-            "the branch the map is published from is not the admin branch"
+        // The reader itself is asked for the map exactly once, with this
+        // reader's own admin flag and not a literal.
+        assert_eq!(
+            handler
+                .matches("node_hostnames(&state, user.0.is_admin)")
+                .count(),
+            1
         );
+        assert!(!handler.contains("node_hostnames(&state, true)"));
     }
 
     #[test]

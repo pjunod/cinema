@@ -259,10 +259,14 @@ pub async fn jobs(
 mod tests {
     /// The history page attributes every row to a node by id, so it has to
     /// carry the names for them. Asserted on the source because the handler
-    /// needs a replicated `AppState` behind it; the rendered end of this
-    /// contract is `tests/web/analysis-node-names.test.js`, and the wire end
-    /// is proved by the daemon suite for the activity read that shares the
-    /// same accessor.
+    /// needs a replicated `AppState` behind it, and the rendered end of the
+    /// contract is `tests/web/analysis-node-names.test.js`.
+    ///
+    /// Nothing issues a request to this route and reads the response back, so
+    /// the field name is agreed between this file and that one by spelling
+    /// alone. `crates/plurxd/tests/cluster_activity.rs` proves the *accessor*
+    /// against two real daemons, through `/activity/detail`; it says nothing
+    /// about this route's wire shape.
     #[test]
     fn the_history_page_is_sent_the_names_for_the_nodes_it_attributes_rows_to() {
         let source = include_str!("analysis.rs");
