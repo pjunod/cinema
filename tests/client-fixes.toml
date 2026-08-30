@@ -540,3 +540,11 @@ source = "clients/apple/Sources/PlurxAPI.swift"
 source_anchor = "static func acceptHlsSessionPresentation(_ started: HlsStart) -> HlsStart"
 test = "clients/apple/Tests/AppleClientTests.swift"
 test_anchor = "testLiveRecoveryPresentationIsAPlayableHlsSession"
+
+[[fixes]]
+id = "apple.control-reporter-executor-assumption"
+commits = ["69058a9f"]
+source = "clients/apple/Sources/PlaybackControlSession.swift"
+source_anchor = "private let latest = PlaybackControlLatestSnapshot()"
+test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
+test_anchor = "testAStartedSessionExchangesWhatThePlayerReported"
