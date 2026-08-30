@@ -98,6 +98,17 @@ bounded to 500 requests, 500 worker jobs, and 500 file/title labels. It omits
 source digests and filesystem paths; pipeline identity is shortened for
 display.
 
+The status response also carries `node_hostnames`, a `{node_id: short
+hostname}` object covering the roster, so the page can say which machine owns
+or targets a row instead of printing a UUID. It is unconditional here — every
+reader of this route is already an administrator, which is the same permission
+`GET /api/v1/cluster/nodes` requires — and a node the roster could not name is
+absent from it rather than present as `unknown-host`. Consumers treat a missing
+name as normal and show the id. Machine names are not filesystem paths or
+digests, so this does not widen the omissions above; it is the roster fact the
+Settings → Cluster page has always shown, reaching the page that attributes the
+work.
+
 The queue is initially governed by the existing default-off **Cluster index
 cache** setting. When paused, POST returns conflict with exact remediation and
 the status page remains readable. Existing published indexes continue serving.

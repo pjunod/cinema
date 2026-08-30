@@ -10,7 +10,7 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
-- **The Now playing table names the node instead of its id.** The Node column
+- **Activity and Content analysis name the node instead of its id.** The Node column
   printed a raw UUID, which is stable and recognizes nothing — an operator
   could not tell which machine was serving the stream, the only question that
   column exists to answer. The roster has known every node's short hostname
@@ -23,6 +23,15 @@ bump may break compatibility and a **patch** bump never does.
   and this page must not become the one place a household member can read the
   fleet's machine names. A household member, or a roster read that fails, gets
   the id the page has always shown.
+
+  The Content analysis workspace printed the same UUIDs in three places — the
+  Node column, the Technical details grid, and the Copy details text an
+  operator pastes into a support question — and now leads with the name in all
+  three. Its shape differs: that row is already four lines deep and carries a
+  disclosure, so the column shows the name alone and the id keeps a labelled
+  line inside the details, where it stays selectable and reaches the clipboard.
+  `GET /api/v1/analysis/jobs` carries the names unconditionally, since every
+  reader of that route is already an administrator.
 
 - **The Dolby Vision configuration record is stored as columns.** The profile
   used to live only inside the human display label, and everything that needed
