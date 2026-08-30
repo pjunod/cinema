@@ -2302,13 +2302,18 @@ impl ClusterDelivery {
 /// The roster's machine names, for a reader allowed to see them.
 ///
 /// Admin-only, matching `GET /api/v1/cluster/nodes`: machine names are an
-/// operator fact, and the activity page must not become the one place an
-/// ordinary household member can read the fleet's hostnames. A household
-/// member keeps the node id they are already shown.
+/// operator fact, and a page must not become the one place an ordinary
+/// household member can read the fleet's hostnames. A household member keeps
+/// the node id they are already shown.
+///
+/// `permitted` is the caller's own proof, not a second gate. A route that
+/// already extracted `AdminUser` passes `true`; a route open to any signed-in
+/// household member passes the reader's admin flag and gets an empty map for
+/// everyone else.
 ///
 /// A roster read that fails costs the page its labels, never the page.
-async fn node_hostnames(state: &AppState, is_admin: bool) -> BTreeMap<String, String> {
-    if !is_admin {
+pub(super) async fn node_hostnames(state: &AppState, permitted: bool) -> BTreeMap<String, String> {
+    if !permitted {
         return BTreeMap::new();
     }
     match state.membership.node_hostnames().await {
@@ -3505,14 +3510,14 @@ mod tests {
     fn a_roster_read_costs_the_page_its_labels_and_never_the_page() {
         let source = include_str!("system.rs");
         let reader = source
-            .split_once("async fn node_hostnames(state: &AppState")
+            .split_once("pub(super) async fn node_hostnames(")
             .expect("the roster reader")
             .1
             .split_once("\nasync fn peer_activity(")
             .expect("function after node_hostnames")
             .0;
         // A household member is refused before the roster is touched at all.
-        let refused = reader.find("if !is_admin {").expect("the admin gate");
+        let refused = reader.find("if !permitted {").expect("the admin gate");
         let read = reader
             .find("state.membership.node_hostnames().await")
             .expect("the roster read");

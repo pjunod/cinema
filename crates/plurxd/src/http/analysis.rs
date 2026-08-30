@@ -239,13 +239,58 @@ pub async fn jobs(
     };
     let page = state.store.analysis_history(&query).await?;
     let enabled = state.jobs.analysis_queue_enabled().await;
+    // Every row here is attributed to a node by id, and an id names no
+    // machine. `AdminUser` above is the permission this read needs, so it is
+    // passed as the caller's own proof rather than re-derived.
+    let hostnames = super::system::node_hostnames(&state, true).await;
     Ok(Json(serde_json::json!({
         "enabled": enabled,
         "node_id": state.node_id,
+        "node_hostnames": hostnames,
         "now_ms": now_ms,
         "page_size": query.limit.clamp(10, 100),
         "filtered_total": page.filtered_total,
         "next_cursor": page.next_cursor.map(encode_cursor),
         "rows": page.rows.into_iter().map(history_row_value).collect::<Vec<_>>(),
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    /// The history page attributes every row to a node by id, so it has to
+    /// carry the names for them. Asserted on the source because the handler
+    /// needs a replicated `AppState` behind it; the rendered end of this
+    /// contract is `tests/web/analysis-node-names.test.js`, and the wire end
+    /// is proved by the daemon suite for the activity read that shares the
+    /// same accessor.
+    #[test]
+    fn the_history_page_is_sent_the_names_for_the_nodes_it_attributes_rows_to() {
+        let source = include_str!("analysis.rs");
+        let handler = source
+            .split_once("pub async fn jobs(")
+            .expect("history handler")
+            .1
+            .split_once("\n#[cfg(test)]")
+            .expect("module after jobs")
+            .0;
+        let read = handler
+            .find("super::system::node_hostnames(&state, true)")
+            .expect("the roster read");
+        let published = handler
+            .find("\"node_hostnames\": hostnames")
+            .expect("the history page is sent the roster's machine names");
+        assert!(read < published);
+        // `AdminUser` is this route's permission, and it is extracted before
+        // anything else runs. Passing `true` is that proof being handed on,
+        // not a gate being skipped — so the extractor must still be there.
+        assert!(handler.contains("_admin: AdminUser"));
+        // A roster read that fails must cost the page its labels, not the
+        // page: the shared reader swallows the error, so no `?` may appear on
+        // this call.
+        assert!(!handler.contains("node_hostnames(&state, true).await?"));
+        // Unconditional, unlike the activity read. Every reader here is
+        // already an admin, so presence answers nothing and an absent field
+        // would only make the client guess.
+        assert!(!handler.contains("if clustered"));
+    }
 }
