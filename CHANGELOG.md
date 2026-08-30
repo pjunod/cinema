@@ -10,6 +10,20 @@ bump may break compatibility and a **patch** bump never does.
 
 ### Added
 
+- **The Now playing table names the node instead of its id.** The Node column
+  printed a raw UUID, which is stable and recognizes nothing — an operator
+  could not tell which machine was serving the stream, the only question that
+  column exists to answer. The roster has known every node's short hostname
+  since the cluster page learned to lead with it; the activity read now asks
+  for it. The name leads the cell and the id keeps its place underneath, so it
+  stays selectable and readable aloud rather than retreating into a tooltip.
+  The "Activity is incomplete" banner names the node that did not answer the
+  same way. `GET /api/v1/activity/detail` carries the names as one
+  `node_hostnames` map, admin-only — `GET /api/v1/cluster/nodes` is admin-only,
+  and this page must not become the one place a household member can read the
+  fleet's machine names. A household member, or a roster read that fails, gets
+  the id the page has always shown.
+
 - **The Dolby Vision configuration record is stored as columns.** The profile
   used to live only inside the human display label, and everything that needed
   it read a number back out of that string — so a scan that saw a Dolby Vision

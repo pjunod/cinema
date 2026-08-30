@@ -593,7 +593,9 @@ page (3-second refresh) instead of dumping you into Settings.
 - **Now playing:** every transcode session with who's watching, what, the
   encoder and target height, and when it started; admins get a **Stop** button
   (`DELETE /activity/sessions/{id}`). Direct play and remux flow straight
-  through without a server session and say so.
+  through without a server session and say so. On a cluster the row also names
+  the node serving it — the machine's short hostname over its node id, for an
+  admin; a household member sees the id alone.
 - **Library:** per-library scan/enrich state with the same live counters as
   Settings.
 - **Offline downloads:** every package currently waiting/preparing, plus ready
