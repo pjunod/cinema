@@ -282,6 +282,26 @@ id = "legacy-stall-watch-owner"
 pattern = "watch_for_stall"
 expected_occurrences = 0
 
+# Three owners the M4 cuts removed that had no reintroduction guard at all.
+# A symbol absent from both the source and the ledger is not protected — it is
+# merely gone, and nothing notices when it comes back. The contract names
+# begin_copy_child_replacement explicitly (M4 §8); the other two were the copy
+# watchdog's election claim and the request-side exit verdict, deleted by #642.
+[[module_symbols]]
+id = "legacy-copy-replacement-transaction"
+pattern = "begin_copy_child_replacement"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "legacy-watchdog-claim"
+pattern = "WatchdogClaim"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "legacy-request-side-exit-verdict"
+pattern = "playlist_producer_failed"
+expected_occurrences = 0
+
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
