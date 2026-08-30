@@ -449,7 +449,15 @@ for P7 files and the VOD index keyspace stays honest.
 The one open mechanical question was the **configuration-record box**: the
 P8.1 stream out of ffmpeg#2 must carry one with `dv_profile=8`,
 `el_present_flag=0` and the source's `dv_bl_signal_compatibility_id`, and the
-master playlist must say `dvh1.08.06` (compat id 6) or `.08.01`.
+master playlist must say `dvh1.08.06`.
+
+A correction to that sentence, since the same mistake was in an earlier draft
+of the writer: the two digits after the profile are the **level**, not the
+compatibility id — `dolby_vision_codec_from_init` builds `PP.LL` from
+`dv_profile` and `dv_level`. Both happen to read 6 on the titles measured, and
+`.08.01` was the compatibility id leaking into the wrong field. The
+compatibility id is what a client reads to decide whether the base layer alone
+is watchable; it never reaches the codec string.
 
 **M5a-0 answered it on 2026-08-30** (`docs/PLAYBACK-CAPS-V2-M0.md` §8, measured
 on nuc4 against a real P7 dual-layer source). **ffmpeg does not derive the
