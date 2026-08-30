@@ -227,3 +227,52 @@ data class PlayerControlObservation(
     val runwayMs: Long
         get() = bufferedThroughMs?.let { maxOf(0L, it - positionMs) } ?: 0L
 }
+
+/**
+ * The control protocol's view of this device, derived from the very map that
+ * goes to `/decision`.
+ *
+ * Deriving rather than re-probing is the point: two independent probes would
+ * eventually disagree, and then the server would be told one thing when it
+ * decided and another while it played.
+ */
+fun controlCapabilities(query: Map<String, String>): DynamicCapabilities {
+    val codecs = query["vcodec"].orEmpty().split(",")
+        .mapNotNull { name ->
+            when (name.trim().lowercase()) {
+                "h264" -> CodecPolicy.H264
+                "hevc" -> CodecPolicy.HEVC
+                "av1" -> CodecPolicy.AV1
+                else -> null
+            }
+        }
+        .distinct()
+        // AVC decoding is mandatory on Android, and the protocol refuses an
+        // empty codec list. An unreadable registry reports the baseline rather
+        // than a claim the server cannot act on.
+        .ifEmpty { listOf(CodecPolicy.H264) }
+
+    val hdr = query["hdr"] == "1"
+    val ranges = buildList {
+        add(DynamicRangePolicy.SDR)
+        if (hdr) {
+            add(DynamicRangePolicy.HDR10)
+            add(DynamicRangePolicy.HLG)
+        }
+        // `dv` is the same guarded claim the decision query makes: generic HDR
+        // eligibility is not a Dolby Vision claim, and overclaiming makes the
+        // server preserve DV metadata this device then refuses.
+        if (hdr && query["dv"] == "1") add(DynamicRangePolicy.DOLBY_VISION)
+    }
+
+    return DynamicCapabilities(
+        platform = "android",
+        // The protocol's own ceiling. The capability query reports per-codec
+        // decoder limits rather than one device height, and collapsing them
+        // into a single number here would be a claim rather than a capability.
+        maxHeight = PlaybackControl.MAX_HEIGHT,
+        codecs = codecs,
+        dynamicRanges = ranges,
+        dualPlayerPreparation = false,
+    )
+}
