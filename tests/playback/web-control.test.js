@@ -641,7 +641,15 @@ async function main() {
   assert.match(shippedSource("startPlaybackControl"),/p\.controlReporter!==reporter/);
   assert.match(shippedSource("togglePlay"),/if\(v\.ended\) replayEnded\(\)/);
   const playSource=shippedSource("play");
-  assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<playSource.indexOf("await api("),
+  // The reason is one-shot: whatever consumes it first wins, so `play` has to
+  // take it before it yields to anything. This used to name `await api(`, the
+  // call that happened to be first at the time; the request moved behind
+  // `askDecision` and the assertion started reading -1 < -1 and passing
+  // vacuously — and then failing outright once the reason moved. Ask the real
+  // question instead: nothing at all may be awaited before the reason is taken.
+  const firstAwait=playSource.indexOf("await ");
+  assert.notEqual(firstAwait,-1,"play no longer awaits anything");
+  assert.ok(playSource.indexOf("takePlaybackAttemptReason()")<firstAwait,
     "play captures its one-shot reason before its first await");
   assert.match(playSource,/PLAY_OPEN_GATE\.current\(openAttempt\)/);
   assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);

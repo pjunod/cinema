@@ -190,6 +190,7 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
   const harness = new Function(
     `${shippedSource("activityNodeFailures")};
      ${shippedSource("activityNodeStatusText")};
+     ${shippedSource("activityNodeName")};
      ${shippedSource("activityNodeFailureText")};
      ${shippedSource("detailActivitySummary")};
      return {activityNodeFailures,activityNodeFailureText,detailActivitySummary};`,
@@ -204,7 +205,16 @@ test("Activity names missing cluster nodes and attributes delivered rows", () =>
   };
   const missing = harness.activityNodeFailures(detail);
   assert.deepEqual(missing.map((node) => node.node_id), ["node-b", "node-c"]);
-  assert.equal(harness.activityNodeFailureText(missing[0]), "Node node-b · timed out");
+  assert.equal(
+    harness.activityNodeFailureText(missing[0], {}),
+    "Node node-b · timed out",
+  );
+  // Named when the roster could name it. tests/web/activity-node-names.test.js
+  // owns the rest of this contract; this is the budget page's own call site.
+  assert.equal(
+    harness.activityNodeFailureText(missing[0], { "node-b": "m6" }),
+    "Node m6 · timed out",
+  );
   assert.deepEqual(harness.detailActivitySummary(detail, []), [{
     label: "Activity incomplete",
     detail: "2 cluster nodes did not answer",

@@ -85,10 +85,15 @@ the disclosure to the in-player path.
 Cross-node direct, remux, HLS-copy, and transcode rows live in the additive
 `deliveries` superset. In cluster responses each delivery adds the stable
 `node_id`, and the additive `activity_nodes` array records which voters
-answered or failed. Remote rows deliberately have no session capability and
-cannot be stopped through this read surface. SQLite and peerless responses omit
-the clustered-only fields, so existing native decoders retain their original
-wire shape and behavior.
+answered or failed. An **admin** read additionally carries `node_hostnames`, a
+`{node_id: short hostname}` object covering the roster — present even when
+empty, so its absence means the reader may not see machine names rather than
+that the roster named nobody. It is admin-only because `GET
+/api/v1/cluster/nodes` is; a household member keeps the node id. Consumers must
+treat a missing name as normal and fall back to the id. Remote rows
+deliberately have no session capability and cannot be stopped through this read
+surface. SQLite and peerless responses omit the clustered-only fields, so
+existing native decoders retain their original wire shape and behavior.
 
 ## 2. Per-platform notes
 

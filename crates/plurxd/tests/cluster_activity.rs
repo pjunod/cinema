@@ -20,6 +20,7 @@ use axum::extract::State;
 use axum::http::{HeaderMap, Response, StatusCode};
 use axum::routing::get;
 use axum::Router;
+use plurx_core::cluster::membership::UNKNOWN_HOSTNAME;
 use plurx_core::store::SqliteStore;
 use serde_json::{json, Value};
 use tokio::net::TcpListener as TokioTcpListener;
@@ -76,7 +77,7 @@ struct Daemon {
 }
 
 impl Daemon {
-    fn spawn(config: &Path, log: PathBuf) -> Self {
+    fn spawn(config: &Path, log: PathBuf, hostname: &str) -> Self {
         let output = File::create(&log).expect("daemon log");
         let errors = output.try_clone().expect("clone daemon log");
         let child = Command::new(env!("CARGO_BIN_EXE_plurxd"))
@@ -85,6 +86,12 @@ impl Daemon {
             // file. ANSI styling splits `built=1` into control-coded pieces.
             .env("NO_COLOR", "1")
             .env("PLURX_TEST_SCHEDULER_TICK_MS", "250")
+            // Both daemons share one machine, so without this they would share
+            // one machine name — and on a container runner they would have
+            // none at all, because `short_hostname` rejects a Docker container
+            // id. Naming them apart makes the roster's names a test input
+            // rather than a property of whichever box CI landed on.
+            .env("PLURX_NODE_HOSTNAME", hostname)
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::from(errors))
@@ -501,7 +508,7 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     a_http.release();
     a_raft.release();
     a_api.release();
-    let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"));
+    let mut node_a = Daemon::spawn(&a_config, root.path().join("node-a.log"), "plurx-node-a");
     wait_ready(&client, &mut node_a, a_http_port).await;
     let a_base = format!("http://127.0.0.1:{a_http_port}");
     let setup = client
@@ -559,7 +566,7 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
     b_http.release();
     b_raft.release();
     b_api.release();
-    let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"));
+    let mut node_b = Daemon::spawn(&b_config, root.path().join("node-b.log"), "plurx-node-b");
     wait_ready(&client, &mut node_b, b_http_port).await;
     let roster = wait_for_two_voters(&client, &mut node_a, &a_base, &token).await;
     let local_node = roster["local_node_id"].as_str().expect("local node id");
@@ -692,6 +699,96 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .expect("activity nodes")
         .iter()
         .all(|node| node["status"] == "answered"));
+
+    // A node id names no machine. The page is sent the roster's own short
+    // hostnames so the Node column can say which box is serving the stream.
+    // The two reads are compared rather than each being separately plausible.
+    let roster_view = client
+        .get(format!("{a_base}/api/v1/cluster/nodes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("cluster roster request")
+        .json::<Value>()
+        .await
+        .expect("cluster roster JSON");
+    let named = healthy["node_hostnames"]
+        .as_object()
+        .expect("a clustered admin read carries the roster's machine names");
+    for node in roster_view["nodes"].as_array().expect("roster nodes") {
+        let node_id = node["node_id"].as_str().expect("roster node id");
+        let hostname = node["hostname"].as_str().unwrap_or_default();
+        // The local node is deliberately named from memory rather than from the
+        // replicated row the heartbeat writes, so it is the one node the two
+        // reads may disagree about — and only until the first heartbeat lands.
+        if node_id == local_node {
+            continue;
+        }
+        assert_eq!(
+            named.get(node_id).and_then(Value::as_str),
+            Some(hostname),
+            "the page names {node_id} differently from the roster"
+        );
+    }
+    // Both daemons were started with a name of their own, so nothing here
+    // should have fallen back to the sentinel — and the sentinel is never a
+    // published value in any case.
+    assert_eq!(
+        named.get(local_node).and_then(Value::as_str),
+        Some("plurx-node-a")
+    );
+    assert_eq!(
+        named.get(&remote_node).and_then(Value::as_str),
+        Some("plurx-node-b")
+    );
+    assert!(!named.values().any(|hostname| hostname == UNKNOWN_HOSTNAME));
+    // The invariant the column actually needs: every row it will draw has a
+    // name to draw. A map that named some other node would satisfy the loop
+    // above and still leave the operator reading a UUID.
+    for delivery in healthy["deliveries"].as_array().expect("deliveries") {
+        let node_id = delivery["node_id"].as_str().expect("delivery node id");
+        assert!(
+            named.contains_key(node_id),
+            "a delivery on {node_id} has no machine name to render"
+        );
+    }
+
+    // `GET /api/v1/cluster/nodes` is admin-only. The activity page is not, so
+    // an ungated map here would make this page the one place an ordinary
+    // household member can read the fleet's machine names.
+    let created = client
+        .post(format!("{a_base}/api/v1/users"))
+        .bearer_auth(&token)
+        .json(&json!({ "username": "household", "password": "longenough" }))
+        .send()
+        .await
+        .expect("create household user");
+    assert_eq!(created.status(), StatusCode::OK);
+    let household = client
+        .post(format!("{a_base}/api/v1/auth/login"))
+        .json(&json!({ "username": "household", "password": "longenough" }))
+        .send()
+        .await
+        .expect("household login")
+        .json::<Value>()
+        .await
+        .expect("household login JSON")["token"]
+        .as_str()
+        .expect("household token")
+        .to_owned();
+    let household_view = activity_detail(&client, &a_base, &household).await;
+    // The field is present for every clustered admin read even when the roster
+    // named nobody, so its absence here is the gate and not an empty roster.
+    assert!(
+        household_view.get("node_hostnames").is_none(),
+        "a household member was sent the fleet's machine names"
+    );
+    // …and still sees the streams themselves, so the gate narrows one field.
+    assert!(household_view["deliveries"]
+        .as_array()
+        .expect("deliveries")
+        .iter()
+        .any(|delivery| delivery["node_id"] == remote_node));
 
     proxy.set(UNREACHABLE);
     let unavailable = activity_detail(&client, &a_base, &token).await;

@@ -36,6 +36,12 @@ use super::migration::status::{ReplicationMonitor, ReplicationStatus};
 use super::migration::ActivationMarker;
 use super::ClusterIdentity;
 
+/// What a node is called when nothing usable could be derived for it: no
+/// reported hostname, no advertised name, and no reverse lookup. It is a
+/// sentinel rather than a name, so callers that have a stable identifier of
+/// their own are better off showing that instead.
+pub const UNKNOWN_HOSTNAME: &str = "unknown-host";
+
 const JOIN_TOKEN_PREFIX: &str = "plxjoin:v1";
 const JOIN_TOKEN_AAD: &[u8] = b"plurx-cluster-join-v1";
 const JOIN_TOKEN_VERSION: u32 = 1;
@@ -4739,6 +4745,52 @@ impl MembershipManager {
             .collect())
     }
 
+    /// Machine names for the roster, keyed by node id.
+    ///
+    /// *Cheaper* than [`Self::status`], not a subset of it: a caller that only
+    /// wants to put a name on a node id should not pay for Raft metrics,
+    /// protocol status and five joins, and the activity page polls this every
+    /// few seconds. The price of skipping the Raft read is that this cannot
+    /// filter on committed membership the way `status` does, so it can still
+    /// name a node that has been written to `cluster_nodes` by a join whose
+    /// Raft change has not landed. Naming a node the caller never asks about
+    /// costs nothing; a delivery is only ever attributed to a node the peer
+    /// directory returned. The durable removal fence *is* applied, because a
+    /// node whose `removed_at` write did not land is fenced by its pending
+    /// removal row alone and would otherwise be named forever.
+    ///
+    /// A node whose name could not be derived is *absent* from the map rather
+    /// than present as [`UNKNOWN_HOSTNAME`], so a caller that already holds a
+    /// stable node id shows that instead of a sentinel that names nothing.
+    /// The local node answers from memory: its replicated row is written by
+    /// the heartbeat, so a table read alone would leave this node nameless for
+    /// the first heartbeat interval after start. `status` has no such override,
+    /// so during that window the two reads disagree about this one node — in
+    /// the direction of the page knowing more, not less.
+    pub async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
+        let Some(inner) = self.inner.as_deref() else {
+            return Ok(BTreeMap::new());
+        };
+        let rows = inner
+            .client
+            .query_map::<NodeHostnameRow, _>(
+                "SELECT node.node_id, node.api_address, \
+                        COALESCE(host.hostname, '') AS hostname \
+                 FROM cluster_nodes node \
+                 LEFT JOIN cluster_node_hostnames host ON host.node_id = node.node_id \
+                 WHERE node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
+                params!(),
+            )
+            .await?;
+        Ok(roster_hostnames(
+            rows,
+            &inner.identity.node_id,
+            &inner.local_hostname,
+        ))
+    }
+
     /// Resolve the directly observable committed members for one bounded
     /// operations-status refresh.
     ///
@@ -8140,6 +8192,22 @@ struct ActivityPeerRow {
     http_base: Option<String>,
 }
 
+struct NodeHostnameRow {
+    node_id: String,
+    hostname: String,
+    api_address: String,
+}
+
+impl From<&mut Row<'_>> for NodeHostnameRow {
+    fn from(row: &mut Row<'_>) -> Self {
+        Self {
+            node_id: row.get("node_id"),
+            hostname: row.get("hostname"),
+            api_address: row.get("api_address"),
+        }
+    }
+}
+
 struct MediaPeerRow {
     node_id: String,
     raft_id: u64,
@@ -8463,6 +8531,36 @@ fn advertised_host(address: &str) -> String {
     }
 }
 
+/// Name every roster row that can be named, and nothing that cannot.
+///
+/// Split out of [`MembershipManager::node_hostnames`] so the naming rules are
+/// reachable without a replicated client behind them. Two rules carry weight:
+/// a row that normalizes to [`UNKNOWN_HOSTNAME`] is dropped rather than
+/// published, because a caller holding a node id is better served showing that
+/// id than a sentinel; and the local node is named from memory, overriding its
+/// own replicated row, because that row is written by the heartbeat and is
+/// therefore absent for the first heartbeat interval after start.
+fn roster_hostnames(
+    rows: Vec<NodeHostnameRow>,
+    local_node_id: &str,
+    local_hostname: &str,
+) -> BTreeMap<String, String> {
+    let mut hostnames = rows
+        .into_iter()
+        .map(|row| {
+            let hostname = membership_hostname(&row.hostname, &row.api_address);
+            (row.node_id, hostname)
+        })
+        .filter(|(_, hostname)| hostname != UNKNOWN_HOSTNAME)
+        .collect::<BTreeMap<_, _>>();
+    if local_hostname == UNKNOWN_HOSTNAME {
+        hostnames.remove(local_node_id);
+    } else {
+        hostnames.insert(local_node_id.to_owned(), local_hostname.to_owned());
+    }
+    hostnames
+}
+
 /// Reduce a machine name or FQDN to the short hostname people use at a shell.
 /// An IP address is deliberately not accepted as a machine name.
 fn short_hostname(raw: &str) -> Option<String> {
@@ -8473,7 +8571,7 @@ fn short_hostname(raw: &str) -> Option<String> {
     let label = hostname.split('.').next().unwrap_or_default().trim();
     if label.is_empty()
         || label.eq_ignore_ascii_case("localhost")
-        || label.eq_ignore_ascii_case("unknown-host")
+        || label.eq_ignore_ascii_case(UNKNOWN_HOSTNAME)
         || looks_like_container_id(label)
         || label.chars().any(char::is_control)
     {
@@ -8508,7 +8606,7 @@ fn membership_hostname_with_lookup(
                 .and_then(reverse_lookup)
                 .and_then(|hostname| short_hostname(&hostname))
         })
-        .unwrap_or_else(|| "unknown-host".to_owned())
+        .unwrap_or_else(|| UNKNOWN_HOSTNAME.to_owned())
 }
 
 fn cached_reverse_hostname(address: IpAddr) -> Option<String> {
@@ -11870,6 +11968,102 @@ mod tests {
         assert_eq!(short_hostname("192.0.2.40"), None);
         assert_eq!(membership_hostname("", "plurx-a.lan:32402"), "plurx-a");
         assert_eq!(membership_hostname("", "127.0.0.1:32402"), "unknown-host");
+    }
+
+    fn hostname_row(node_id: &str, hostname: &str, api_address: &str) -> NodeHostnameRow {
+        NodeHostnameRow {
+            node_id: node_id.to_owned(),
+            hostname: hostname.to_owned(),
+            api_address: api_address.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_roster_names_every_node_it_can_and_omits_the_ones_it_cannot() {
+        let named = roster_hostnames(
+            vec![
+                hostname_row("node-a", "nuc3.lan", "192.168.4.7:32402"),
+                hostname_row("node-b", "", "m6.lan:32402"),
+                // No reported name, and an address that is a bare loopback IP:
+                // nothing here names a machine.
+                hostname_row("node-c", "", "127.0.0.1:32402"),
+            ],
+            "node-a",
+            "nuc3",
+        );
+        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
+        assert_eq!(named.get("node-b").map(String::as_str), Some("m6"));
+        // The point of omitting it: a caller holding "node-c" shows that id,
+        // which at least identifies the machine, rather than a sentinel that
+        // names every unnamed node identically.
+        assert_eq!(named.get("node-c"), None);
+        assert!(!named.values().any(|hostname| hostname == UNKNOWN_HOSTNAME));
+    }
+
+    #[test]
+    fn the_local_node_is_named_from_memory_before_its_heartbeat_lands() {
+        // The local row is written by the heartbeat, so for the first heartbeat
+        // interval after start the table has no name for this node at all.
+        let named = roster_hostnames(
+            vec![hostname_row("node-b", "m6.lan", "192.168.4.14:32402")],
+            "node-a",
+            "nuc3",
+        );
+        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
+        assert_eq!(named.get("node-b").map(String::as_str), Some("m6"));
+    }
+
+    #[test]
+    fn the_local_node_prefers_its_own_name_over_a_stale_replicated_row() {
+        let named = roster_hostnames(
+            vec![hostname_row("node-a", "old-name", "192.168.4.7:32402")],
+            "node-a",
+            "nuc3",
+        );
+        assert_eq!(named.get("node-a").map(String::as_str), Some("nuc3"));
+    }
+
+    #[test]
+    fn a_local_node_that_cannot_name_itself_is_omitted_not_sentinelled() {
+        // A container whose hostname is its own truncated id, on an address
+        // that reverses to nothing. Publishing "unknown-host" here would put
+        // that word in the operator's Node column.
+        let named = roster_hostnames(
+            vec![hostname_row("node-a", "9f2c1b0a4d5e", "127.0.0.1:32402")],
+            "node-a",
+            UNKNOWN_HOSTNAME,
+        );
+        assert_eq!(named.get("node-a"), None);
+        assert!(named.is_empty());
+    }
+
+    #[test]
+    fn the_hostname_read_stays_cheap_and_delegates_its_naming_rules() {
+        let source = production_source();
+        let accessor = source
+            .split_once("pub async fn node_hostnames(")
+            .expect("node_hostnames accessor")
+            .1
+            .split_once("\n    /// Resolve the directly observable")
+            .expect("method after node_hostnames")
+            .0;
+        // The roster's own name table, and only the live rows in it.
+        assert!(accessor.contains("LEFT JOIN cluster_node_hostnames"));
+        assert!(accessor.contains("WHERE node.removed_at IS NULL"));
+        // A node whose `removed_at` write did not land is fenced by its
+        // pending removal row alone; without this it would be named forever.
+        assert!(accessor.contains("FROM cluster_node_removals removal"));
+        // The naming rules live in one tested place. An accessor that filtered
+        // or defaulted inline would leave `roster_hostnames` asserting nothing
+        // about what the cluster actually publishes.
+        assert!(accessor.contains("roster_hostnames("));
+        assert!(!accessor.contains(UNKNOWN_HOSTNAME));
+        assert!(!accessor.contains("membership_hostname("));
+        // The activity page polls this every few seconds. `status()` pulls Raft
+        // metrics, protocol status and five joins for the same names.
+        assert!(!accessor.contains("metrics_db()"));
+        assert!(!accessor.contains("protocol_status()"));
+        assert!(!accessor.contains("self.status()"));
     }
 
     #[test]
