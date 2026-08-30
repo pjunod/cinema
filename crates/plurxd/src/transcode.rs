@@ -26614,10 +26614,7 @@ mod tests {
     async fn playlist_waits_during_the_production_fallback_replacement() {
         use plurx_core::store::SqliteStore;
 
-        super::require_ffmpeg();
         let store: Arc<dyn Store> = Arc::new(SqliteStore::open_in_memory().expect("store"));
-        let file_id = seed_file(&store).await;
-        let file = store.get_file(file_id).await.expect("get").expect("file");
         let (mgr, _work, _cache) = cached_manager(&store);
         let mgr = Arc::new(mgr);
         let dir = crate::test_tempdir().expect("session dir");
@@ -26627,54 +26624,36 @@ mod tests {
             .await
             .insert("fallback-gap".into(), Arc::clone(&session));
 
-        let pause = Arc::new(tokio::sync::Barrier::new(2));
-        *session
-            .replacement_pause
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::clone(&pause));
-
-        let mut opts = mgr.options_for_tone_map(
-            Encoder::VideoToolbox,
-            &file,
-            720,
-            0.0,
-            None,
-            None,
-            None,
-            ToneMap::Zscale,
-            OutputGrade::Sdr,
+        // The gap is the property, and it belongs to begin_child_replacement
+        // — the production primitive the actor's retry executor opens before
+        // it terminates the failed attempt. Holding one open here observes
+        // exactly the window a real retry creates, without going through a
+        // ladder helper production no longer runs.
+        let replacement = session.begin_child_replacement().await;
+        assert!(
+            session.replacing_child.load(Relaxed),
+            "an open replacement marks the session as replacing"
         );
-        opts.pipeline = Pipeline::Cpu;
-        let sw_pool = mgr.admissions.software_pool();
-        let fallback = TranscodeManager::downgrade_one_step(
-            &session,
-            &file,
-            &opts,
-            Encoder::VideoToolbox,
-            EffectiveRateControl::Vbr,
-            Pacing::unpaced(),
-            &sw_pool,
-            dir.path(),
-            "fallback-gap",
-            &mgr.runtime_cache,
-        );
-        let observe_gap = async {
-            pause.wait().await;
-            let waiting =
-                tokio::time::timeout(Duration::from_millis(250), mgr.playlist("fallback-gap"))
-                    .await;
-            assert!(
-                waiting.is_err(),
-                "the production replacement gap keeps the publication window open"
-            );
-            assert!(
-                !session.failed.load(Relaxed),
-                "the production fallback's killed predecessor must not poison its successor"
-            );
-            pause.wait().await;
-        };
 
-        let (_, ()) = tokio::join!(fallback, observe_gap);
+        let waiting =
+            tokio::time::timeout(Duration::from_millis(250), mgr.playlist("fallback-gap")).await;
+        assert!(
+            waiting.is_err(),
+            "the production replacement gap keeps the publication window open"
+        );
+        assert!(
+            !session.failed.load(Relaxed),
+            "the production replacement's killed predecessor must not poison its successor"
+        );
+
+        // Completing rather than dropping mid-admission: a cancelled
+        // admission deliberately fails the session, and that is a different
+        // test's property.
+        replacement.complete();
+        assert!(
+            !session.replacing_child.load(Relaxed),
+            "a completed replacement reopens the publication window"
+        );
         session.kill_child().await;
     }
 
