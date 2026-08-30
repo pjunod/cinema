@@ -233,23 +233,58 @@ writer emits `dvvC`, and the golden test in `crates/plurx-core/src/fmp4`
 should be taken against a native P8 init (which has one) rather than against
 a P7 init (which has the other).
 
-### The bug this turned up: today's strip path lies about the enhancement layer
+### Retracted: the "strip path lies" finding was measured on the wrong argv
 
-Control 2 above is the path plurx runs **today** for a P7 title on a client
-that cannot decode it: one ffmpeg, `filter_units=remove_types=63` to drop the
-EL NALs, `-c copy`. The output's record is copied verbatim from the mkv, so
-it still says:
+An earlier revision of this section reported that today's Dolby Vision strip
+emits a record still declaring `el_present_flag=1` over a stream with no
+enhancement layer, and called it a live bug. **That was wrong**, and the error
+was in the control, not the reasoning: it ran `filter_units=remove_types=63`,
+which plurx does not run.
+
+The strip's real argv is chosen by `hevc_copy_bsf_for_client`
+(`crates/plurx-core/src/transcode/mod.rs:271`), and on a node that proves
+`dovi_rpu` — which is the only node the strip route is offered on at all
+(`playback/mod.rs`, `DvHandling::Strip` requires `dv_strippable`) — it is:
 
 ```
-dv_profile=7 · el_present_flag=1 · dv_bl_signal_compatibility_id=6
+dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63
 ```
 
-over a stream whose enhancement layer has just been removed. The bytes and
-the record disagree: a decoder is told to expect a dual layer that is not
-there. It is a plausible cause of P7 titles that negotiate as Dolby Vision
-and then render wrong, and it is worth fixing whether or not M5a lands —
-the same init-segment writer M5a needs can correct `el_present_flag` to 0 on
-the strip path, which is a strictly smaller change than the conversion.
+`dovi_rpu=strip=1` removes the RPUs *and* the DOVI side data, so nothing is
+left to write a record from. Re-measured 2026-08-30 on nuc4, same source:
+
+| argv | boxes in the init | ffprobe side data |
+|---|---|---|
+| **production strip** | `hvc1` · `hvcC` — **no DV record at all** | *(none)* |
+| **production preserve** (`remove_types=32-34`) | `dvcC` · `dvh1` · `hvcC` | `7,1,1` — correct, the EL is there |
+| the retracted control (`remove_types=63`) | `dvcC` · `dvh1` · `hvcC` | `7,1,1` |
+
+So a stripped Dolby Vision stream is signalled as plain HDR10, which is what
+it now is, and the code comment at `transcode/mod.rs:260-263` describing
+exactly that has been right all along. There is no lying record and nothing
+to correct.
+
+The retraction is recorded rather than deleted because a fix was written
+against the wrong premise and opened as a PR before the error was caught
+(#681, closed unmerged). It would have been dead code on the strip path —
+`Track::dolby_vision_config` is only true when a record exists — and an active
+regression on the **preserve** fragment index, the one path where a record is
+present and correct: clearing `el_present` there would tell a client that
+asked for dual-layer Profile 7 there is no enhancement layer.
+
+**The lesson, since it is the whole value of this section now:** a control has
+to run the argv the system runs. `hevc_copy_bsf_for_client` has four branches
+and the spike exercised none of them.
+
+### What survives
+
+The primary finding is unaffected, because it was measured on the input the
+conversion pipe actually produces rather than on a guess about it: **ffmpeg
+does not derive a record from the RPU.** Both the retracted control and the
+production preserve above carry a record only because their *input container*
+had one to copy; the raw Annex B stream at the top of this section has no
+container and gets nothing. That is why M5a's conversion needs plurx to write
+the box, and it is what PR #678 built.
 
 ### Throughput — far above the bar
 
@@ -271,5 +306,3 @@ EL drop.
 
 - §4.8's `dvcC` becomes `dvvC` for the P8.1 output.
 - Branch two is chosen: the init-segment writer is required, not optional.
-- A new, separate finding: the existing strip path's `el_present_flag` is
-  wrong, and the same writer corrects it.
