@@ -963,7 +963,7 @@ mod tests {
         let (first, _) = two_generations();
         let promoting = PromotionInputs {
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
-            hdr10_sei: Vec::new(),
+            ..PromotionInputs::default()
         };
         // This init has no hvcC, so promotion no-ops and the two agree...
         let identity = InitIdentity::establish(&first, promoting).expect("establish");

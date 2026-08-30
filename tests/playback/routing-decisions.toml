@@ -33,6 +33,16 @@ source_anchor = "pub fn decide("
 test = "crates/plurx-core/src/playback/mod.rs"
 test_anchor = "automatic_routing_matrix_covers_every_compatibility_dimension"
 
+# What the served init DECLARES, as distinct from what the pipeline does to
+# the picture. The strip removes the enhancement layer and leaves the record
+# claiming one, which is a delivery-affecting statement and belongs in this map.
+[[decisions]]
+id = "server.dolby-vision-record"
+source = "crates/plurx-core/src/fmp4.rs"
+source_anchor = "fn correct_dolby_vision_enhancement_layer("
+test = "crates/plurx-core/src/fmp4.rs"
+test_anchor = "a_record_claiming_an_enhancement_layer_the_samples_lack_is_corrected"
+
 [[decisions]]
 id = "server.dolby-vision"
 source = "crates/plurx-core/src/playback/mod.rs"

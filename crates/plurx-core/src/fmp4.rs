@@ -777,6 +777,26 @@ pub struct PromotionInputs {
     pub parameter_sets: Vec<Vec<u8>>,
     /// Prefix-SEI NAL units carrying HDR10 static metadata.
     pub hdr10_sei: Vec<Vec<u8>>,
+    /// Whether the opening access unit carried a Dolby Vision enhancement
+    /// layer (NAL type 63).
+    ///
+    /// An observation, not a setting, and it exists because the sample entry's
+    /// own answer cannot be trusted: `filter_units=remove_types=63` removes
+    /// the enhancement layer's NAL units and does not touch the configuration
+    /// record beside them, which ffmpeg copied verbatim out of the source
+    /// container. So a stripped Profile 7 stream goes out declaring an
+    /// enhancement layer it no longer has (`docs/PLAYBACK-CAPS-V2-M0.md` §8).
+    ///
+    /// `None` when there was nothing to observe — no video track, no sample,
+    /// or a track that never claimed Dolby Vision at all. Absent is not
+    /// evidence of absence, and only evidence corrects the record.
+    ///
+    /// Defaulted for decode because these inputs are persisted per rendition:
+    /// a rendition established before this field existed decodes to `None`
+    /// and keeps serving exactly the init it already promised, rather than
+    /// being refused for `PromotionDrift` on its next generation.
+    #[serde(default)]
+    pub dolby_vision_enhancement_layer: Option<bool>,
 }
 
 impl PromotionInputs {
@@ -804,11 +824,21 @@ impl PromotionInputs {
                 .into_iter()
                 .map(<[u8]>::to_vec)
                 .collect(),
+            // Only asked of a track that claims Dolby Vision. On anything
+            // else there is no record to correct and the answer would be
+            // noise in the stored inputs.
+            dolby_vision_enhancement_layer: video.dolby_vision_config.then(|| {
+                length_prefixed_nals(sample, video.nal_length_size)
+                    .into_iter()
+                    .any(|nal| hevc_nal_type(nal) == Some(DOLBY_VISION_EL_NAL_TYPE))
+            }),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.parameter_sets.is_empty() && self.hdr10_sei.is_empty()
+        self.parameter_sets.is_empty()
+            && self.hdr10_sei.is_empty()
+            && self.dolby_vision_enhancement_layer.is_none()
     }
 }
 
@@ -820,7 +850,43 @@ impl PromotionInputs {
 pub fn promote_from(init: &mut Init, inputs: &PromotionInputs) -> Result<bool, Fmp4Error> {
     let hevc = promote_hevc_parameter_sets_from(init, &inputs.parameter_sets)?;
     let hdr10 = promote_hdr10_static_metadata_from(init, &inputs.hdr10_sei)?;
-    Ok(hevc || hdr10)
+    let dolby =
+        correct_dolby_vision_enhancement_layer(init, inputs.dolby_vision_enhancement_layer)?;
+    Ok(hevc || hdr10 || dolby)
+}
+
+/// Tell the truth about the enhancement layer, when the stream disagrees with
+/// the record beside it.
+///
+/// `observed` is what the opening access unit actually carried; `None` means
+/// nothing was observed and nothing is corrected, because absent is not
+/// evidence of absence.
+///
+/// Only one direction is ever taken: a record claiming an enhancement layer
+/// over samples that have none is corrected to say so. The reverse — samples
+/// carrying a layer the record does not mention — is left alone, because
+/// setting the flag would be *adding* a claim on the strength of one access
+/// unit, and this function's whole purpose is that a claim nobody verified is
+/// what caused the problem.
+///
+/// The safe direction is also the corrected one. A decoder told there is no
+/// enhancement layer renders the base layer; a decoder told there is one and
+/// then not finding it is the failure this exists to stop
+/// (`docs/PLAYBACK-CAPS-V2-M0.md` §8).
+fn correct_dolby_vision_enhancement_layer(
+    init: &mut Init,
+    observed: Option<bool>,
+) -> Result<bool, Fmp4Error> {
+    if observed != Some(false) {
+        return Ok(false);
+    }
+    let Some(record) = dolby_vision_record(init)? else {
+        return Ok(false);
+    };
+    if !record.el_present {
+        return Ok(false);
+    }
+    set_dolby_vision_record(init, &record.without_enhancement_layer())
 }
 
 pub fn promote_hevc_parameter_sets(init: &mut Init, first: &Fragment) -> Result<bool, Fmp4Error> {
@@ -1280,6 +1346,10 @@ fn hevc_parameter_set_nals(sample: &[u8], length_size: u8) -> Vec<&[u8]> {
         .filter(|nal| matches!(hevc_nal_type(nal), Some(32..=34)))
         .collect()
 }
+
+/// The NAL type a Dolby Vision enhancement layer travels in (`unspec63`), and
+/// the one `filter_units=remove_types=63` removes.
+const DOLBY_VISION_EL_NAL_TYPE: u8 = 63;
 
 fn hevc_nal_type(nal: &[u8]) -> Option<u8> {
     (nal.len() >= 2).then(|| (nal[0] >> 1) & 0x3f)
@@ -4029,6 +4099,159 @@ mod tests {
         reparse_init(&init.bytes);
     }
 
+    /// The record stops claiming an enhancement layer the samples do not have.
+    ///
+    /// This is the live bug M5a-0 found (`docs/PLAYBACK-CAPS-V2-M0.md` §8),
+    /// closed where every served init already passes: `filter_units=
+    /// remove_types=63` removes the enhancement layer's NAL units and does not
+    /// touch the configuration record beside them, which ffmpeg copied
+    /// verbatim out of the source container. The stream and the record
+    /// disagree, and a decoder is told to expect a layer that is not there.
+    #[test]
+    fn a_record_claiming_an_enhancement_layer_the_samples_lack_is_corrected() {
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let stripped_p7 = DolbyVisionRecord::new(7, 6, true, true, true, 6).expect("representable");
+        set_dolby_vision_record(&mut init, &stripped_p7).expect("seed the lying record");
+
+        // Nothing observed: nothing corrected. Absent is not evidence of
+        // absence, and a rendition established before this observation existed
+        // decodes to exactly this and must keep serving the init it promised.
+        let untouched = init.clone();
+        let mut blind = init.clone();
+        assert!(!promote_from(&mut blind, &PromotionInputs::default()).expect("promote"));
+        assert_eq!(blind.bytes, untouched.bytes);
+
+        // Observed present: nothing corrected either. The record is right.
+        let mut honest = init.clone();
+        assert!(!promote_from(
+            &mut honest,
+            &PromotionInputs {
+                dolby_vision_enhancement_layer: Some(true),
+                ..PromotionInputs::default()
+            }
+        )
+        .expect("promote"));
+        assert_eq!(honest.bytes, untouched.bytes);
+
+        // Observed absent: corrected, and only that one flag moves.
+        let mut corrected = init.clone();
+        assert!(promote_from(
+            &mut corrected,
+            &PromotionInputs {
+                dolby_vision_enhancement_layer: Some(false),
+                ..PromotionInputs::default()
+            }
+        )
+        .expect("promote"));
+        let after = dolby_vision_record(&corrected)
+            .expect("read")
+            .expect("still present");
+        assert!(!after.el_present, "the correction happened");
+        assert_eq!(
+            (
+                after.profile,
+                after.bl_signal_compatibility_id,
+                after.rpu_present
+            ),
+            (7, 6, true),
+            "the profile, the compatibility id and the RPU are untouched — a \
+             stripped Profile 7 is still a Profile 7 with an RPU"
+        );
+        assert_eq!(
+            corrected.bytes.len(),
+            untouched.bytes.len(),
+            "a flag correction is not a resize"
+        );
+        reparse_init(&corrected.bytes);
+
+        // And it is idempotent: promoting the corrected init again with the
+        // same observation changes nothing. `InitIdentity` digests the served
+        // init and refuses a generation that does not hash the same.
+        let settled = corrected.bytes.clone();
+        assert!(!promote_from(
+            &mut corrected,
+            &PromotionInputs {
+                dolby_vision_enhancement_layer: Some(false),
+                ..PromotionInputs::default()
+            }
+        )
+        .expect("promote"));
+        assert_eq!(corrected.bytes, settled);
+    }
+
+    /// The observation is only ever taken from a track that claims Dolby
+    /// Vision, and only ever read one way.
+    #[test]
+    fn the_enhancement_layer_observation_is_asked_only_where_it_means_something() {
+        let feed = pipe("open-gop");
+        let (init, fragments, _) = read_all(&feed);
+        let first = fragments.first().expect("a fragment");
+
+        // An ordinary HEVC track has no record to correct, so the question is
+        // not asked at all — an answer here would be noise in inputs that are
+        // persisted and digest-compared.
+        assert!(!init.video().expect("video").dolby_vision_config);
+        assert_eq!(
+            PromotionInputs::from_fragment(first, &init).dolby_vision_enhancement_layer,
+            None
+        );
+
+        // Once the track declares Dolby Vision the question is asked, and this
+        // fixture's samples carry no enhancement layer.
+        let mut dv = init.clone();
+        let record = DolbyVisionRecord::new(7, 6, true, true, true, 6).expect("representable");
+        set_dolby_vision_record(&mut dv, &record).expect("declare Dolby Vision");
+        assert_eq!(
+            PromotionInputs::from_fragment(first, &dv).dolby_vision_enhancement_layer,
+            Some(false)
+        );
+
+        // A record that does NOT claim a layer is left alone even when none is
+        // observed: this function only ever removes a claim, never adds one.
+        let mut without = init.clone();
+        let honest = DolbyVisionRecord::new(8, 6, false, true, true, 1).expect("representable");
+        set_dolby_vision_record(&mut without, &honest).expect("declare");
+        let before = without.bytes.clone();
+        assert!(!promote_from(
+            &mut without,
+            &PromotionInputs {
+                dolby_vision_enhancement_layer: Some(false),
+                ..PromotionInputs::default()
+            }
+        )
+        .expect("promote"));
+        assert_eq!(without.bytes, before);
+    }
+
+    /// Stored inputs written before the observation existed still decode.
+    ///
+    /// These are persisted per rendition and digest-compared on every later
+    /// generation, so a field that failed to decode — or decoded to something
+    /// that changed the served init — would refuse every open rendition on the
+    /// fleet for `PromotionDrift` the moment this shipped.
+    #[test]
+    fn promotion_inputs_from_before_this_field_still_decode_and_change_nothing() {
+        let stored = r#"{"parameter_sets":[[64,1,12]],"hdr10_sei":[]}"#;
+        let inputs: PromotionInputs = serde_json::from_str(stored).expect("older stored inputs");
+        assert_eq!(inputs.dolby_vision_enhancement_layer, None);
+
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        let record = DolbyVisionRecord::new(7, 6, true, true, true, 6).expect("representable");
+        set_dolby_vision_record(&mut init, &record).expect("seed");
+
+        // `InitIdentity` compares a digest of exactly these bytes, so byte
+        // equality is the property it enforces, stated directly.
+        let promised = init.bytes.clone();
+        let mut served = init.clone();
+        promote_from(&mut served, &inputs).expect("promote from older stored inputs");
+        assert_eq!(
+            served.bytes, promised,
+            "an older rendition must keep serving the bytes it promised"
+        );
+    }
+
     /// A `largesize` box puts a 64-bit length where an ordinary box puts its
     /// name. Writing the name there succeeds and destroys the init.
     #[test]
@@ -4945,6 +5168,7 @@ mod tests {
         let inputs = PromotionInputs {
             parameter_sets: vec![vec![0x40, 0x01, 0x0c], vec![0x42, 0x01, 0x01]],
             hdr10_sei: vec![vec![0x4e, 0x01, 0x89]],
+            dolby_vision_enhancement_layer: Some(false),
         };
         let text = serde_json::to_string(&inputs).expect("encode");
         let back: PromotionInputs = serde_json::from_str(&text).expect("decode");

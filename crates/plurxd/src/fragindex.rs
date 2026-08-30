@@ -705,11 +705,11 @@ mod tests {
         use plurx_core::fmp4::PromotionInputs;
         let canonical = PromotionInputs {
             parameter_sets: vec![vec![0x40, 0x01, 0x0c]],
-            hdr10_sei: Vec::new(),
+            ..PromotionInputs::default()
         };
         let differing = PromotionInputs {
             parameter_sets: vec![vec![0x40, 0x01, 0x0d]],
-            hdr10_sei: Vec::new(),
+            ..PromotionInputs::default()
         };
         assert_ne!(
             canonical, differing,

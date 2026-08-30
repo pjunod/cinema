@@ -88,6 +88,7 @@ one.
 | `server.learned-decode-limit` | Honour a limit the client learned | An entry the client sent in caps v2 whose identity matches this exact media load routes to a **transcode** — the limit is a statement about the decoder, so the same frames in a different envelope change nothing. Matching is on the whole identity and never a codec-and-height prefix. The reason is the browser's own sentence, verbatim, with its `HDR10 → SDR` clause when the demotion is what costs the grade. | Rust unit in `playback/mod.rs` |
 | `server.learned-decode-limit-expiry` | When one still applies | The **client's** policy, reproduced: applied inside the 7-day re-test window, ignored past it, and ignored outright past the 30-day TTL, with no timestamp, or with a timestamp in the future. Standing aside past re-test is not leniency — the browser only consults its own limits when the server answered direct or remux, so a server that answers transcode first is a server that stops the weekly re-measure from ever running. | Age matrix in `playback/mod.rs` |
 | `server.verdict` | Direct vs remux vs transcode | Video codec, height, bitrate, or HDR failure means transcode. Container, audio, or A/V correction alone means remux. No failures means direct. Unknown container is not permission to direct-play it. | Table-driven Rust unit in `playback/mod.rs` |
+| `server.dolby-vision-record` | What the init segment declares | The strip removes the enhancement layer's NAL units; ffmpeg copies the source container's configuration record beside them verbatim, so the served init would declare an enhancement layer the stream no longer has. The record is corrected from **evidence** — the opening access unit is checked for a type-63 NAL — and only ever downward: a claim nobody verified is what caused the problem, so the reverse correction is never made. Absent evidence corrects nothing. | Init-rewrite regressions in `plurx-core/fmp4.rs` |
 | `server.dolby-vision` | Preserve vs strip vs re-encode DV | A client-approved profile is preserved. An unsupported profile with a compatible base and `dovi_rpu` becomes a strip remux. Without both, re-encode. Apple-supported DV profiles still request a normalized copy-HLS envelope. Profile 5 has no backward-compatible HDR base: its compatibility transcode software-decodes the RPU side data and applies Dolby Vision reshaping through `tonemapx` before any scale or SDR conversion. Boot proves the renderer mechanics, then the first request for each source must prove that enabling RPU application changes sampled pixels; unknown, non-compatible, or unproved routes are refused. | DV profile matrix in `playback/mod.rs`; Profile 5 graph/admission regressions in `transcode/mod.rs` and `plurxd/transcode.rs` |
 | `server.manual-quality` | Auto vs Original vs a rung | Auto uses the ordinary verdict. Original never re-encodes video; it may direct or remux and lets the client rescue a rejection. Any numbered rung forces transcode. Unknown force values degrade to Auto. | Force matrix in `playback/mod.rs` |
 | `server.execution-plan` | Verdict to API action | Direct owns `/direct`; remux owns `/stream.mp4` plus a copy-session URL and flags; transcode owns the HLS-session URL. A caller's `audio=` selection travels in the plan — applied to the remux URL and repeated as `audio` for the session body — and a selection the container's own default cannot deliver reports remux instead of an unexecutable direct plan. Clients execute this plan instead of rebuilding it from `method`. | Exhaustive `DeliveryPlan` Rust unit plus a follow-the-plan selection regression |
@@ -419,6 +420,22 @@ against delivered with string equality:
   session actually created. It **overrides** the decision's value the moment
   a session attaches — a burn or a manually-picked rung produces a transcode
   the decision never promised.
+
+**What the init segment declares is corrected from evidence.** A Dolby Vision
+strip drops the enhancement layer's NAL units with a bitstream filter, and
+ffmpeg copies the source container's configuration record beside them
+untouched — so without a correction the served init declares an enhancement
+layer the stream no longer carries, and a decoder is told to expect a layer
+that is not there. `PromotionInputs` therefore records whether the opening
+access unit actually carried one, and `promote_from` clears the flag when it
+did not.
+
+Only that direction is ever taken. Adding the claim when a layer *is* seen
+would be asserting something on the strength of one access unit, and an
+unverified claim is the whole problem. An absent observation — including a
+rendition established before the observation existed — corrects nothing and
+keeps serving exactly the bytes it already promised, which is what stops
+`InitIdentity` refusing it for `PromotionDrift`.
 
 Both come from one function, `plurx_core::playback::delivered_dynamic_range`,
 so the two answers cannot drift. It is a reporter, not a decider: the three
