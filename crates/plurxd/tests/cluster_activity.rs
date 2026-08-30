@@ -693,6 +693,91 @@ async fn node_a_reports_node_b_delivery_and_bounded_peer_failures() {
         .iter()
         .all(|node| node["status"] == "answered"));
 
+    // A node id names no machine. The page is sent the roster's own short
+    // hostnames so the Node column can say which box is serving the stream,
+    // and this proves the two agree rather than being separately plausible.
+    let roster_view = client
+        .get(format!("{a_base}/api/v1/cluster/nodes"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .expect("cluster roster request")
+        .json::<Value>()
+        .await
+        .expect("cluster roster JSON");
+    let named = healthy["node_hostnames"]
+        .as_object()
+        .expect("the activity page is sent the roster's machine names");
+    let mut agreed = 0;
+    for node in roster_view["nodes"].as_array().expect("roster nodes") {
+        let node_id = node["node_id"].as_str().expect("roster node id");
+        let hostname = node["hostname"].as_str().unwrap_or_default();
+        // "unknown-host" is the roster's sentinel for a node it could not name;
+        // the activity map omits those rather than publishing the sentinel.
+        if hostname.is_empty() || hostname == "unknown-host" {
+            assert_eq!(named.get(node_id), None, "a sentinel reached the page");
+            continue;
+        }
+        assert_eq!(
+            named.get(node_id).and_then(Value::as_str),
+            Some(hostname),
+            "the page names {node_id} differently from the roster"
+        );
+        agreed += 1;
+    }
+    assert!(agreed > 0, "no node was named at all: {named:?}");
+    let roster_ids = roster_view["nodes"]
+        .as_array()
+        .expect("roster nodes")
+        .iter()
+        .filter_map(|node| node["node_id"].as_str())
+        .collect::<Vec<_>>();
+    for node_id in named.keys() {
+        assert!(
+            roster_ids.contains(&node_id.as_str()),
+            "the page was sent a name for {node_id}, which is not on the roster"
+        );
+    }
+    assert!(
+        named.contains_key(local_node),
+        "the node answering the request never named itself"
+    );
+
+    // `GET /api/v1/cluster/nodes` is admin-only. The activity page is not, so
+    // an ungated map here would make this page the one place an ordinary
+    // household member can read the fleet's machine names.
+    let created = client
+        .post(format!("{a_base}/api/v1/users"))
+        .bearer_auth(&token)
+        .json(&json!({ "username": "household", "password": "longenough" }))
+        .send()
+        .await
+        .expect("create household user");
+    assert_eq!(created.status(), StatusCode::OK);
+    let household = client
+        .post(format!("{a_base}/api/v1/auth/login"))
+        .json(&json!({ "username": "household", "password": "longenough" }))
+        .send()
+        .await
+        .expect("household login")
+        .json::<Value>()
+        .await
+        .expect("household login JSON")["token"]
+        .as_str()
+        .expect("household token")
+        .to_owned();
+    let household_view = activity_detail(&client, &a_base, &household).await;
+    assert!(
+        household_view["node_hostnames"].is_null(),
+        "a household member was sent the fleet's machine names"
+    );
+    // …and still sees the streams themselves, so the gate narrows one field.
+    assert!(household_view["deliveries"]
+        .as_array()
+        .expect("deliveries")
+        .iter()
+        .any(|delivery| delivery["node_id"] == remote_node));
+
     proxy.set(UNREACHABLE);
     let unavailable = activity_detail(&client, &a_base, &token).await;
     assert!(unavailable["activity_nodes"]

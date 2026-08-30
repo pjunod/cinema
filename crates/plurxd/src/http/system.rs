@@ -2901,6 +2901,28 @@ pub async fn activity_detail(
         response["activity_nodes"] = serde_json::to_value(activity_nodes(&state.node_id, &peers))
             .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
+    // Node ids are stable but name nothing: an operator reading this page
+    // cannot tell which machine `5deeeebc-…` is. The roster already knows every
+    // node's short hostname, so send the id -> hostname map once per response
+    // and let the page label its rows from it.
+    //
+    // Admin-only, matching `GET /api/v1/cluster/nodes`: machine names are an
+    // operator fact, and this page must not become the one place an ordinary
+    // household member can read the fleet's hostnames. Non-admins keep the node
+    // id they are already shown. A roster read that fails costs the page its
+    // labels, never the page.
+    if clustered && user.0.is_admin {
+        match state.membership.node_hostnames().await {
+            Ok(hostnames) if !hostnames.is_empty() => {
+                response["node_hostnames"] = serde_json::to_value(hostnames)
+                    .map_err(|error| ApiError::Internal(error.to_string()))?;
+            }
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(?error, "node hostnames unavailable for activity");
+            }
+        }
+    }
     // Analysis is an operator concern: keep it out of ordinary household
     // responses, but make it a first-class part of the admin Activity page.
     // This is folded into the existing page read rather than making the web
@@ -3452,6 +3474,37 @@ mod tests {
                 "5", "10", "30", "60", "120", "300",
             ]
         );
+    }
+
+    #[test]
+    fn machine_names_reach_the_activity_page_only_for_an_admin() {
+        let source = include_str!("system.rs");
+        let handler = source
+            .split_once("pub async fn activity_detail(")
+            .expect("activity handler")
+            .1
+            .split_once("\n/// DELETE /api/v1/activity/producer")
+            .expect("handler after activity_detail")
+            .0;
+        let published = handler
+            .find("response[\"node_hostnames\"]")
+            .expect("the activity page is sent the roster's machine names");
+        let gate = handler
+            .find("if clustered && user.0.is_admin {")
+            .expect("machine names are gated on the admin the roster is gated on");
+        // `GET /api/v1/cluster/nodes` is `AdminUser`. This page is `AuthUser`,
+        // so an ungated map here would make the activity page the one place an
+        // ordinary household member can read the fleet's hostnames.
+        assert!(gate < published);
+        // A roster read that fails must cost the page its labels, not the page.
+        let read = handler
+            .find("state.membership.node_hostnames().await")
+            .expect("the roster read");
+        assert!(gate < read && read < published);
+        assert!(handler[read..].contains("Err(error) =>"));
+        assert!(!handler.contains("node_hostnames().await?"));
+        // The cheap accessor, not the full membership status.
+        assert!(!handler.contains("membership.status()"));
     }
 
     #[test]
