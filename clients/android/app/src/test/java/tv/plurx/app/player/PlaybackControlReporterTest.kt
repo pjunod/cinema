@@ -341,6 +341,86 @@ class PlaybackControlRefusalTest {
         assertEquals("protocol:action", harness.exchanges.last().failure)
         assertEquals(1, harness.requests.size)
     }
+
+    @Test
+    fun `a hold is an explanation and keeps the reporter running`() = runTest {
+        // The point of declaring the action. The server is saying production is
+        // deliberately not advancing; a client that stopped reporting there
+        // would go silent for the rest of the film exactly when the server had
+        // just explained itself.
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("hold", "working_set"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertFalse(subject.isStopped(), "a hold is not a reason to stop reporting")
+        assertNull(harness.exchanges.first().failure)
+        subject.stop()
+    }
+
+    @Test
+    fun `an unrecognised hold reason is still a hold`() = runTest {
+        // A reason this client has never heard of is a newer server, not a
+        // broken one. Refusing over one unknown word is the same silence by a
+        // different route.
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(
+                    PlaybackControl.PROTOCOL,
+                    GENERATION,
+                    7,
+                    1,
+                    ControlAction("hold", "a_reason_from_next_year"),
+                ),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertFalse(subject.isStopped())
+        subject.stop()
+    }
+
+    @Test
+    fun `a hold without its reason is terminal`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(PlaybackControl.PROTOCOL, GENERATION, 7, 1, ControlAction("hold")),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertTrue(subject.isStopped())
+        assertEquals("protocol:action", harness.exchanges.last().failure)
+    }
+
+    @Test
+    fun `the request declares the actions this client accepts`() = runTest {
+        val harness = Harness(this)
+        harness.enqueue(
+            Result.success(
+                ControlResponse(PlaybackControl.PROTOCOL, GENERATION, 7, 1, ControlAction("none")),
+            ),
+        )
+        val subject = assertNotNull(reporter(harness))
+        subject.start(backgroundScope)
+        advanceTimeBy(30_001)
+        assertEquals(listOf("hold"), harness.requests.first().supportedActions)
+        subject.stop()
+    }
 }
 
 class PlaybackControlFailureTest {
@@ -660,13 +740,14 @@ class PlaybackControlWireTest {
             "\"render_state\":", "\"seek_target_ms\":", "\"observed_download_bps\":",
             "\"audio_track\":", "\"audio_offset_ms\":", "\"dynamic_range\":",
             "\"max_height\":", "\"dynamic_ranges\":", "\"dual_player_preparation\":",
-            "\"dropped_frames\":", "\"decoder_state\":",
+            "\"dropped_frames\":", "\"decoder_state\":", "\"supported_actions\":",
         ).forEach { assertTrue(encoded.contains(it), "missing $it in $encoded") }
         assertTrue(encoded.contains("\"mode\":\"manual\""))
         assertTrue(encoded.contains("\"height\":1080"))
         assertTrue(encoded.contains("\"dynamic_range\":\"dolby_vision\""))
         assertTrue(encoded.contains("\"render_state\":\"waiting\""))
         assertTrue(encoded.contains("\"demand\":\"hold\""))
+        assertTrue(encoded.contains("\"supported_actions\":[\"hold\"]"))
         assertFalse(encoded.contains("\"error_detail\""), "explicitNulls is off; absent means absent")
     }
 

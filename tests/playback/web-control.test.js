@@ -655,6 +655,71 @@ async function main() {
   assert.match(playSource,/PLAY_OPEN_GATE\.acceptResource\(openAttempt/);
   assert.match(shippedSource("startCopyHls"),/PLAY_OPEN_GATE\.acceptResource/);
 
+  // The action vocabulary. Declaring `hold` is what permits the server to send
+  // it at all: an undeclared action is never sent, so a client that did not ask
+  // cannot be silenced by one.
+  let declared = null;
+  const declaring = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "66666666-6666-4666-8666-666666666666",
+    snapshot: () => snapshot(),
+    send: async (_url, request) => { declared = request.supported_actions; return response(request); },
+  }).start();
+  await flush();
+  assert.deepEqual(declared, ["hold"], "the request declares the actions this client accepts");
+  declaring.stop();
+
+  // A hold is not a failure and not a reason to stop. This is the whole point:
+  // the server is saying production is deliberately not advancing, and a client
+  // that treated that as a protocol error would lose reporting for the rest of
+  // the film exactly when the server had just explained itself.
+  let holdExchanges = 0;
+  let holdErrors = 0;
+  const holding = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "77777777-7777-4777-8777-777777777777",
+    snapshot: () => snapshot(),
+    send: async (_url, request) =>
+      Object.assign(response(request), { action: { type: "hold", reason: "working_set" } }),
+    onExchange: ({ error }) => { if (error) holdErrors += 1; else holdExchanges += 1; },
+  }).start();
+  await flush();
+  assert.equal(holdErrors, 0, "a hold is an explanation, not a protocol error");
+  assert.ok(holdExchanges >= 1);
+  assert.equal(holding.status().stopped, false, "a held client keeps reporting");
+  holding.stop();
+
+  // A reason this client has never heard of is a newer server, not a broken
+  // one. The reason is diagnostic; refusing the exchange over one unknown word
+  // would silence the client for the rest of the film.
+  let unknownReasonErrors = 0;
+  const unknownReason = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "88888888-8888-4888-8888-888888888888",
+    snapshot: () => snapshot(),
+    send: async (_url, request) =>
+      Object.assign(response(request), { action: { type: "hold", reason: "a_reason_from_next_year" } }),
+    onExchange: ({ error }) => { if (error) unknownReasonErrors += 1; },
+  }).start();
+  await flush();
+  assert.equal(unknownReasonErrors, 0, "an unrecognised hold reason is still a hold");
+  unknownReason.stop();
+
+  // A hold without a reason is malformed rather than merely unfamiliar.
+  let malformedHold = 0;
+  const malformed = new control.Reporter({
+    bootstrap: bootstrap(),
+    clientInstanceId: "99999999-9999-4999-8999-999999999999",
+    snapshot: () => snapshot(),
+    send: async (_url, request) =>
+      Object.assign(response(request), { action: { type: "hold" } }),
+    onExchange: ({ error }) => { if (error) malformedHold += 1; },
+  }).start();
+  await flush();
+  assert.equal(malformedHold, 1, "a hold must carry its reason");
+  assert.equal(malformed.status().stopped, true);
+  malformed.stop();
+
   reporter.stop();
   process.stdout.write("PASS passive web playback-control reporter\n");
 }
