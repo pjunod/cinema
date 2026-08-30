@@ -680,6 +680,9 @@ data class CreateSessionReq(
     val aac: Boolean? = null,
     /** With `copy`: the decision said this client can take the source's DV. */
     val preserve_dolby_vision: Boolean? = null,
+    /** The probe snapshot that produced `/decision`, repeated for server-side
+     * plan derivation instead of trusting the DV/HDR echo above. */
+    val caps: DeviceCaps? = null,
     /**
      * The session this one replaces — set only on a stall-driven reopen so
      * the server can step the resolved rung down. Omitted on ordinary seeks
@@ -706,6 +709,9 @@ data class CreateSessionReq(
     /** Media3's measured first-byte budget will replace the server default. */
     val block_budget_secs: Double? = null,
 )
+
+@Serializable
+data class DecisionCapsReq(val caps: DeviceCaps)
 
 @Serializable
 data class ProgressReq(

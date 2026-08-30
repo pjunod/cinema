@@ -84,11 +84,19 @@ interface PlurxApi {
     @POST("items/{id}/unscrobble")
     suspend fun markUnwatched(@Path("id") id: Long): MutationResult
 
-    /** Runtime caps (vcodec/vmaxheight/acodec/container/HDR/force) ride as query params. */
+    /** Mixed-fleet fallback for nodes that predate caps v2. */
     @GET("files/{id}/decision")
     suspend fun decision(
         @Path("id") id: Long,
         @QueryMap caps: Map<String, String>,
+    ): Decision
+
+    /** The same decision with capabilities in one versioned document. */
+    @POST("files/{id}/decision")
+    suspend fun decisionV2(
+        @Path("id") id: Long,
+        @QueryMap request: Map<String, String>,
+        @Body body: DecisionCapsReq,
     ): Decision
 
     /**

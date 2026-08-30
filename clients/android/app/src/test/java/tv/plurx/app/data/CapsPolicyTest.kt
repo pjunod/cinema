@@ -1,6 +1,11 @@
 package tv.plurx.app.data
 
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class CapsPolicyTest {
@@ -92,22 +97,25 @@ class CapsPolicyTest {
     }
 
     @Test
-    fun dolbyVisionClaimsOnlyTheSingleLayerDeliveryProfiles() {
-        // A Shield-class decoder lists dual-layer P7 alongside 4/5/8.
+    fun dolbyVisionClaimsEveryEnumeratedHevcDeliveryProfileInOrder() {
         val decoder = listOf(
             DolbyVisionCodecProfile.DVHE_DTR,
             DolbyVisionCodecProfile.DVHE_STN,
             DolbyVisionCodecProfile.DVHE_DTB,
             DolbyVisionCodecProfile.DVHE_ST,
         )
-        assertEquals(listOf(4, 5, 8), dolbyVisionProfiles(decoder))
+        assertEquals(listOf(4, 5, 7, 8), dolbyVisionProfiles(decoder))
     }
 
     @Test
-    fun dolbyVisionNeverClaimsProfileSevenAlone() {
-        // P7 is not a delivery profile: a decoder that lists only DvheDtb
-        // must keep taking the server's strip path.
-        assertEquals(emptyList<Int>(), dolbyVisionProfiles(listOf(DolbyVisionCodecProfile.DVHE_DTB)))
+    fun dolbyVisionClaimsProfileSevenOnlyFromDvheDtb() {
+        assertEquals(listOf(7), dolbyVisionProfiles(listOf(DolbyVisionCodecProfile.DVHE_DTB)))
+        assertEquals(
+            listOf(7, 8),
+            dolbyVisionProfiles(
+                listOf(DolbyVisionCodecProfile.DVHE_ST, DolbyVisionCodecProfile.DVHE_DTB),
+            ),
+        )
     }
 
     @Test
@@ -138,6 +146,58 @@ class CapsPolicyTest {
         assertEquals(emptyMap<String, String>(), dolbyVisionCaps(listOf(5, 8), false))
         // No DV decoder: the display alone proves nothing.
         assertEquals(emptyMap<String, String>(), dolbyVisionCaps(emptyList(), true))
+    }
+
+    @Test
+    fun capsDocumentKeepsDisplayPresentationAndDecoderClaimsSeparate() {
+        val video = videoCodecCaps(
+            listOf(
+                VideoDecoderLimit("h264", 2160),
+                VideoDecoderLimit("hevc", 2160),
+                VideoDecoderLimit("av1", 2160, hardwareAccelerated = false),
+            ),
+        )
+        val client = ClientInfo("android", "52", "Shield")
+
+        val hdr10Only = capsDocument(
+            video = video,
+            audio = listOf("aac", "truehd"),
+            hdrTypes = setOf(HdrType.HDR10, HdrType.HLG),
+            decoderDolbyVisionProfiles = listOf(7, 8),
+            client = client,
+        )
+        assertEquals(DisplayCaps(hdr = true, dolby_vision = false), hdr10Only.display)
+        assertTrue(hdr10Only.video.all { it.present == listOf("sdr", "pq", "hlg") })
+        assertTrue(hdr10Only.video.all { it.dv_profiles == null })
+        assertEquals(1080, hdr10Only.video.single { it.codec == "av1" }.max_height)
+
+        val dolbyVision = capsDocument(
+            video = video,
+            audio = listOf("aac", "truehd"),
+            hdrTypes = setOf(HdrType.DOLBY_VISION, HdrType.HDR10),
+            decoderDolbyVisionProfiles = listOf(7, 8),
+            client = client,
+        )
+        assertEquals(listOf(7, 8), dolbyVision.video.single { it.codec == "hevc" }.dv_profiles)
+        assertTrue(dolbyVision.display.dolby_vision)
+        assertNull(dolbyVision.video.single { it.codec == "h264" }.dv_profiles)
+        assertEquals(listOf("progressive", "hls"), dolbyVision.transports)
+        assertEquals(DIRECT_PLAY_CONTAINERS.split(','), dolbyVision.containers)
+
+        val wire = Json.encodeToString(dolbyVision)
+        assertTrue(wire.contains("\"v\":2"))
+        assertTrue(wire.contains("\"max_height\":2160"))
+        assertTrue(wire.contains("\"dv_profiles\":[7,8]"))
+        assertFalse(wire.contains("dv_transport"))
+    }
+
+    @Test
+    fun decisionPostFallsBackOnlyForTheMixedFleetStatuses() {
+        assertTrue(shouldFallBackToLegacyDecision(400))
+        assertTrue(shouldFallBackToLegacyDecision(404))
+        assertTrue(shouldFallBackToLegacyDecision(405))
+        assertFalse(shouldFallBackToLegacyDecision(401))
+        assertFalse(shouldFallBackToLegacyDecision(500))
     }
 
     @Test

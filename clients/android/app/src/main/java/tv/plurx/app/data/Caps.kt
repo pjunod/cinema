@@ -17,6 +17,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import tv.plurx.app.BuildConfig
 
+internal data class CapabilitySnapshot(
+    val legacyQuery: Map<String, String>,
+    val document: DeviceCaps,
+)
+
 /**
  * Runtime playback capabilities for this device, sent to `/decision` so the
  * server only transcodes what this hardware can't play. Android's advantage
@@ -51,10 +56,15 @@ object Caps {
     )
 
     suspend fun query(context: Context): Map<String, String> = withContext(Dispatchers.IO) {
-        probe(context)
+        probe(context).legacyQuery
     }
 
-    private fun probe(context: Context): Map<String, String> {
+    /** One probe, two equivalent wire spellings. Re-run for every decision:
+     * the active audio sink can change while the app remains open. */
+    internal suspend fun snapshot(context: Context): CapabilitySnapshot =
+        withContext(Dispatchers.IO) { probe(context) }
+
+    private fun probe(context: Context): CapabilitySnapshot {
         val codecs = try {
             MediaCodecList(MediaCodecList.REGULAR_CODECS).codecInfos
         } catch (_: Exception) {
@@ -116,7 +126,20 @@ object Caps {
                 "rawDvProfiles=${rawDolbyVisionProfiles.sorted()} " +
                 "claimedDvProfiles=$dolbyVisionProfiles caps=$result",
         )
-        return result
+        return CapabilitySnapshot(
+            legacyQuery = result,
+            document = capsDocument(
+                video = video,
+                audio = audio,
+                hdrTypes = hdrTypes,
+                decoderDolbyVisionProfiles = dolbyVisionProfiles,
+                client = ClientInfo(
+                    kind = "android",
+                    build = BuildConfig.VERSION_CODE.toString().take(48),
+                    ua = Build.MODEL.take(160),
+                ),
+            ),
+        )
     }
 
     /**
@@ -247,23 +270,6 @@ object Caps {
         }
     }
 }
-
-internal const val DIRECT_PLAY_CONTAINERS =
-    "mkv,mp4,webm,mov,ts,m4a,m4b,mp3,aac,flac,ogg,opus,wav"
-
-/**
- * `Display.HdrCapabilities.HDR_TYPE_*`, restated so the pure badge policy can
- * read them without an Android import (they are API-24 stable constants).
- */
-internal object HdrType {
-    const val DOLBY_VISION = 1
-    const val HDR10 = 2
-    const val HLG = 3
-    const val HDR10_PLUS = 4
-}
-
-/** The coarse "this panel shows some kind of HDR" answer `/decision` asks for. */
-internal fun displayIsHdr(hdrTypes: Set<Int>): Boolean = hdrTypes.isNotEmpty()
 
 /**
  * The dynamic-range vocabulary shared by `MediaFile.hdr`, the decision's
