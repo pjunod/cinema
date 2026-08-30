@@ -31,7 +31,7 @@
       "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",5]"
     },
     {
-      "name": "the same title at a different bitrate in the same bucket",
+      "name": "the same media load one bitrate apart, inside one bucket",
       "source": {
         "video_codec": "hevc",
         "video_profile": "Main 10",
@@ -45,7 +45,7 @@
       "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",5]"
     },
     {
-      "name": "and one bucket up, which must key differently",
+      "name": "the same media load one bucket up, which must key differently",
       "source": {
         "video_codec": "hevc",
         "video_profile": "Main 10",
@@ -57,6 +57,20 @@
         "bitrate": 60000000
       },
       "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",6]"
+    },
+    {
+      "name": "the label that says BOTH dolby vision and hdr10, with no declared range",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "Dolby Vision · Profile 7 (HDR10-compatible)",
+        "bitrate": 50000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",5]"
     },
     {
       "name": "HDR10 inferred from the label, with no declared range",
@@ -101,6 +115,118 @@
       "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dv profile 5\",4]"
     },
     {
+      "name": "a substring is not a word: 'advanced' is not DV",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "hdr": null,
+        "hdr_format": "advanced video",
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main\",1920,1080,8,\"sdr_or_unknown\",\"advanced video\",0]"
+    },
+    {
+      "name": "a substring is not a word: 'highlight' is not HLG",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "hdr": null,
+        "hdr_format": "highlight pass",
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main\",1920,1080,8,\"sdr_or_unknown\",\"highlight pass\",0]"
+    },
+    {
+      "name": "underscores are word characters to a JS word boundary",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "HDR_DV_HLG",
+        "bitrate": 40000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"sdr_or_unknown\",\"hdr_dv_hlg\",4]"
+    },
+    {
+      "name": "a Unicode letter next to the word, which JS does not treat as a boundary char",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "dv中",
+        "bitrate": 40000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dv中\",4]"
+    },
+    {
+      "name": "non-ASCII case folding must be full Unicode, not ASCII",
+      "source": {
+        "video_codec": "HEVC",
+        "video_profile": "İΣÉ",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 10,
+        "hdr": "HDR10",
+        "hdr_format": "ÉTALONNAGE HDR10",
+        "bitrate": 12000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"i̇σé\",1920,1080,10,\"hdr10\",\"étalonnage hdr10\",1]"
+    },
+    {
+      "name": "U+FEFF is whitespace to JS and not to Rust",
+      "source": {
+        "video_codec": "﻿hevc﻿",
+        "video_profile": "Main﻿﻿10",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": null,
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",1920,1080,10,\"sdr_or_unknown\",\"none\",0]"
+    },
+    {
+      "name": "U+0085 is whitespace to Rust and not to JS",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 10,
+        "hdr": "",
+        "hdr_format": null,
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",1920,1080,10,\"\",\"none\",0]"
+    },
+    {
+      "name": "an ordinary no-break space, which both fold",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": null,
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",1920,1080,10,\"sdr_or_unknown\",\"none\",0]"
+    },
+    {
       "name": "nothing known at all",
       "source": {
         "video_codec": null,
@@ -127,6 +253,48 @@
         "bitrate": 0
       },
       "identity": "decode-v2:[\"av1\",\"main\",0,0,0,\"sdr\",\"none\",\"unknown\"]"
+    },
+    {
+      "name": "a negative bitrate has no bucket",
+      "source": {
+        "video_codec": "av1",
+        "video_profile": "Main",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "hdr": "sdr",
+        "hdr_format": null,
+        "bitrate": -1
+      },
+      "identity": "decode-v2:[\"av1\",\"main\",1920,1080,8,\"sdr\",\"none\",\"unknown\"]"
+    },
+    {
+      "name": "a dimension above MAX_SAFE_INTEGER, where JS clamps",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main",
+        "width": 9007199254740992,
+        "height": 9007199254740991,
+        "bit_depth": 8,
+        "hdr": "sdr",
+        "hdr_format": null,
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main\",9007199254740991,9007199254740991,8,\"sdr\",\"none\",0]"
+    },
+    {
+      "name": "a bitrate above MAX_SAFE_INTEGER, where the bucket clamps",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "hdr": "sdr",
+        "hdr_format": null,
+        "bitrate": 9007199260000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main\",1920,1080,8,\"sdr\",\"none\",900719925]"
     },
     {
       "name": "whitespace and case the two implementations must fold the same way",

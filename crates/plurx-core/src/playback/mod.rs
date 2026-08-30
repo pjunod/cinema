@@ -272,6 +272,17 @@ impl DeviceProfile {
             .find(|limit| limit.identity == identity)
     }
 
+    /// Drop every learned limit the client's own policy would no longer
+    /// apply, as of `now_ms`.
+    ///
+    /// Called at the request boundary rather than inside [`decide`], which
+    /// stays a pure function of its inputs — a decision that silently
+    /// depended on the wall clock would be untestable and unreproducible from
+    /// a log line.
+    pub fn retain_applicable_learned_limits(&mut self, now_ms: i64) {
+        self.learned_limits.retain(|limit| limit.applies_at(now_ms));
+    }
+
     fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
         self.supports_dolby_vision
             || dolby_vision_profile(file)
@@ -948,6 +959,12 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // static-metadata caveat, which is specific to a re-encode of a source
     // whose HDR metadata lives in an RPU nobody else has.
     let mut grade_explained = false;
+    // Whether the strip branch fired. Its reason is deferred rather than
+    // pushed there, because a later demotion can turn the remux it describes
+    // into a transcode — and "the compatible HDR base was kept untouched" on
+    // a delivery that re-encoded it is exactly the class of lie this
+    // milestone exists to stop telling.
+    let mut stripped_dolby_vision = false;
 
     match dv_handling(file, profile, node, target) {
         DvHandling::None => {}
@@ -956,10 +973,7 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
             // DV configuration goes. But it takes ffmpeg, so the raw file
             // cannot be handed over as-is.
             c.container_ok = false;
-            reasons.push(
-                "Dolby Vision metadata removed for this device; compatible HDR base kept"
-                    .to_owned(),
-            );
+            stripped_dolby_vision = true;
         }
         DvHandling::Reencode(grade) => {
             c.video_ok = false;
@@ -1038,12 +1052,36 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
     // nothing.
     let learned_limit = profile.matching_learned_limit(file);
     if let Some(limit) = learned_limit {
+        // What this demotion costs the picture, if it costs anything. The
+        // grade is read BEFORE `video_ok` is cleared, because the question is
+        // what the ordinary decision would have delivered — a transcode's
+        // own grade is a different answer and would report "HDR10 → SDR" for
+        // a rung that is still HDR10.
+        let lost_range = (!c.needs_transcode() && target == OutputGrade::Sdr)
+            .then(|| match file.hdr.as_deref() {
+                Some(range @ ("dolby_vision" | "hdr10" | "hlg")) => Some(range),
+                _ => None,
+            })
+            .flatten();
         c.video_ok = false;
         // The browser's own wording, verbatim. A server paraphrase would put
         // two different explanations of one decision in front of the same
         // viewer, in the same UI, and the reconciliation would be theirs to
         // do.
-        reasons.push(limit.reason());
+        reasons.push(limit.reason(lost_range));
+    }
+
+    if stripped_dolby_vision {
+        reasons.push(if c.needs_transcode() {
+            // The strip was planned and then overtaken. Say what actually
+            // happens to the picture, not what the strip alone would have
+            // done to it.
+            "Dolby Vision metadata removed for this device; re-encoding from the \
+             compatible HDR base"
+                .to_owned()
+        } else {
+            "Dolby Vision metadata removed for this device; compatible HDR base kept".to_owned()
+        });
     }
 
     // A manual A/V sync correction can only be applied by ffmpeg, so direct
@@ -1957,6 +1995,36 @@ mod tests {
         }
     }
 
+    fn four_k_hevc() -> MediaFile {
+        let mut file = file("mp4", "hevc", "aac");
+        file.video_profile = Some("Main 10".into());
+        file.width = Some(3840);
+        file.height = Some(2160);
+        file.bit_depth = Some(10);
+        file.bitrate = Some(50_000_000);
+        file
+    }
+
+    fn learned(file: &MediaFile, age_ms: i64) -> caps::LearnedLimit {
+        caps::LearnedLimit {
+            identity: caps::decode_limit_identity(file),
+            label: "4K HEVC Main 10".to_owned(),
+            lost: 41,
+            secs: 60,
+            rate: 41,
+            at_ms: NOW_MS - age_ms,
+        }
+    }
+
+    const NOW_MS: i64 = 1_756_400_000_000;
+    const DAY_MS: i64 = 24 * 60 * 60 * 1_000;
+
+    fn applied(profile: &DeviceProfile, file: &MediaFile, now_ms: i64) -> Decision {
+        let mut profile = profile.clone();
+        profile.retain_applicable_learned_limits(now_ms);
+        decide(file, &profile, &RenderCaps::proven(true))
+    }
+
     /// A limit the client already applies, applied by the server too.
     ///
     /// The gap this closes: the browser routed every matching title to a
@@ -1966,13 +2034,7 @@ mod tests {
     /// described a delivery that never happened.
     #[test]
     fn a_learned_client_limit_demotes_the_verdict_in_the_clients_own_words() {
-        let mut file = file("mp4", "hevc", "aac");
-        file.video_profile = Some("Main 10".into());
-        file.width = Some(3840);
-        file.height = Some(2160);
-        file.bit_depth = Some(10);
-        file.bitrate = Some(50_000_000);
-
+        let file = four_k_hevc();
         let mut profile = caps_profile(
             vec!["mp4".into()],
             vec!["hevc".into(), "h264".into()],
@@ -1983,19 +2045,13 @@ mod tests {
         );
 
         // Without the limit this is an ordinary direct play.
-        let before = decide(&file, &profile, &RenderCaps::proven(true));
-        assert_eq!(before.method, PlaybackMethod::DirectPlay);
+        assert_eq!(
+            applied(&profile, &file, NOW_MS).method,
+            PlaybackMethod::DirectPlay
+        );
 
-        profile.learned_limits = vec![caps::LearnedLimit {
-            identity: caps::decode_limit_identity(&file),
-            label: "HEVC Main 10 · 3840×2160 · 10-bit · 50–60 Mb/s".to_owned(),
-            lost: 41,
-            secs: 60,
-            rate: 41,
-            at_ms: 1_756_400_000_000,
-        }];
-
-        let after = decide(&file, &profile, &RenderCaps::proven(true));
+        profile.learned_limits = vec![learned(&file, DAY_MS)];
+        let after = applied(&profile, &file, NOW_MS);
         assert_eq!(
             after.method,
             PlaybackMethod::Transcode,
@@ -2004,8 +2060,8 @@ mod tests {
         );
         assert!(
             after.reasons.iter().any(|reason| reason
-                == "learned client-performance limit for HEVC Main 10 · 3840×2160 · \
-                    10-bit · 50–60 Mb/s: lost 41 frames in 60s (41/min)"),
+                == "learned client-performance limit for 4K HEVC Main 10: \
+                    lost 41 frames in 60s (41/min)"),
             "the reason must be the browser's own sentence: {:?}",
             after.reasons
         );
@@ -2016,17 +2072,269 @@ mod tests {
         let mut other = file.clone();
         other.bitrate = Some(90_000_000);
         assert_eq!(
-            decide(&other, &profile, &RenderCaps::proven(true)).method,
+            applied(&profile, &other, NOW_MS).method,
             PlaybackMethod::DirectPlay,
             "a limit learned at 50 Mb/s must not condemn the 90 Mb/s load"
         );
     }
 
-    /// A limit with no label, and one with no measurement.
+    /// The server applies the client's policy, not a stricter one of its own.
     ///
-    /// Both are shapes a real `localStorage` entry takes — the plan's own
-    /// §4.6 keys the map BY the identity, so the value need not repeat it —
-    /// and neither may produce a sentence with a hole in it.
+    /// The browser stops *applying* an entry after a week and only stops
+    /// *keeping* it after a month, so an identity match alone would honour,
+    /// for twenty-three days, entries the browser had already decided to
+    /// re-measure. Worse, it would break the re-measurement: the browser only
+    /// consults its own limits when the server answered `direct_play` or
+    /// `remux`, so a server that answers `transcode` first is a server that
+    /// makes the weekly re-test — the fix for limits that were "in practice
+    /// permanent" — never run again.
+    ///
+    /// Standing aside at exactly the right moment is therefore not leniency.
+    /// It is what hands the decision back to the only party that can
+    /// re-measure it.
+    #[test]
+    fn an_expired_limit_hands_the_decision_back_to_the_client_that_can_retest() {
+        let file = four_k_hevc();
+        let mut profile = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+
+        for (age_days, expected, why) in [
+            (0, PlaybackMethod::Transcode, "measured moments ago"),
+            (6, PlaybackMethod::Transcode, "inside the re-test window"),
+            (7, PlaybackMethod::Transcode, "exactly at the boundary"),
+            (
+                8,
+                PlaybackMethod::DirectPlay,
+                "past re-test: the browser would re-measure, so the server steps aside",
+            ),
+            (
+                31,
+                PlaybackMethod::DirectPlay,
+                "past the TTL: the browser has already thrown this away",
+            ),
+        ] {
+            profile.learned_limits = vec![learned(&file, age_days * DAY_MS)];
+            assert_eq!(
+                applied(&profile, &file, NOW_MS).method,
+                expected,
+                "{age_days} days old: {why}"
+            );
+        }
+
+        // A negative age is a clock disagreement, not a very fresh entry, and
+        // an entry with no timestamp is not evidence of freshness either.
+        for at_ms in [NOW_MS + DAY_MS, 0, -1] {
+            profile.learned_limits = vec![caps::LearnedLimit {
+                at_ms,
+                ..learned(&file, 0)
+            }];
+            assert_eq!(
+                applied(&profile, &file, NOW_MS).method,
+                PlaybackMethod::DirectPlay,
+                "at_ms {at_ms}"
+            );
+        }
+
+        // And a server with no clock applies nothing at all.
+        profile.learned_limits = vec![learned(&file, 0)];
+        assert_eq!(
+            applied(&profile, &file, 0).method,
+            PlaybackMethod::DirectPlay
+        );
+    }
+
+    /// What the demotion costs the picture is part of the sentence.
+    ///
+    /// The browser appends `HDR10 → SDR` when its own limit is what turns an
+    /// HDR delivery into an SDR one, and `docs/PLAYBACK.md` promises the
+    /// Reason row names that consequence. A server that dropped it would put
+    /// two different explanations of one decision in front of one viewer.
+    #[test]
+    fn the_reason_names_the_grade_the_demotion_costs() {
+        let mut file = four_k_hevc();
+        file.hdr = Some("hdr10".into());
+        file.hdr_format = Some("HDR10".into());
+
+        // A client that cannot present PQ: this demotion really does cost the
+        // grade, so the browser's consequence clause applies.
+        let mut sdr_only = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+        sdr_only.learned_limits = vec![learned(&file, DAY_MS)];
+        let lost = applied(&sdr_only, &file, NOW_MS);
+        assert!(
+            lost.reasons.iter().any(
+                |reason| reason.ends_with("lost 41 frames in 60s (41/min); HDR10 \u{2192} SDR")
+            ),
+            "{:?}",
+            lost.reasons
+        );
+
+        // A client that presents Main10 PQ keeps HDR10 through the transcode,
+        // so nothing was lost and the clause must not appear — reporting a
+        // grade loss on a rung that is still HDR10 is the same lie in reverse.
+        let mut pq = sdr_only.clone();
+        pq.supports_hdr10_transcode = true;
+        pq.presents = [(
+            "hevc".to_owned(),
+            [caps::Transfer::Sdr, caps::Transfer::Pq]
+                .into_iter()
+                .collect(),
+        )]
+        .into();
+        let kept = applied(&pq, &file, NOW_MS);
+        assert_eq!(kept.transcode_grade, OutputGrade::Hdr10);
+        assert!(
+            kept.reasons
+                .iter()
+                .any(|reason| reason.ends_with("(41/min)")),
+            "{:?}",
+            kept.reasons
+        );
+    }
+
+    /// A planned strip that gets overtaken must not keep describing itself.
+    ///
+    /// The strip branch says the compatible HDR base was "kept" — true of the
+    /// remux it plans. A learned limit then turns that remux into a
+    /// transcode, and the sentence becomes a claim about untouched bytes on a
+    /// delivery that re-encoded them.
+    #[test]
+    fn a_strip_overtaken_by_a_demotion_stops_claiming_the_base_was_kept() {
+        let mut file = four_k_hevc();
+        file.hdr = Some("dolby_vision".into());
+        file.hdr_format = Some("Dolby Vision · Profile 8 (HDR10-compatible)".into());
+
+        let mut profile = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+
+        let stripped = applied(&profile, &file, NOW_MS);
+        assert_eq!(stripped.method, PlaybackMethod::Remux);
+        assert!(
+            stripped
+                .reasons
+                .iter()
+                .any(|reason| reason.ends_with("compatible HDR base kept")),
+            "{:?}",
+            stripped.reasons
+        );
+
+        profile.learned_limits = vec![learned(&file, DAY_MS)];
+        let demoted = applied(&profile, &file, NOW_MS);
+        assert_eq!(demoted.method, PlaybackMethod::Transcode);
+        assert!(
+            !demoted
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("HDR base kept")),
+            "a re-encode did not keep anything untouched: {:?}",
+            demoted.reasons
+        );
+        assert!(
+            demoted
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("re-encoding from the compatible HDR base")),
+            "{:?}",
+            demoted.reasons
+        );
+    }
+
+    /// The reason is reprinted verbatim, so what a client may put in it is
+    /// bounded before it is ever printed.
+    ///
+    /// It reaches the badge, the stats overlay, the admin session list and
+    /// the server log. A newline in a log line is how one line becomes two
+    /// forged ones, and sixty thousand characters of label is an
+    /// authenticated caller choosing how much of every `/decision` response
+    /// it occupies.
+    #[test]
+    fn a_hostile_learned_limit_is_bounded_before_it_is_ever_printed() {
+        let caps: caps::DeviceCaps = serde_json::from_str(&format!(
+            r#"{{"v":2,"video":[{{"codec":"hevc"}}],"audio":[],"containers":[],
+                "learned_limits":[{{"identity":"decode-v2:[]","label":{},
+                                   "lost":1,"secs":1,"rate":1,"at_ms":1}}]}}"#,
+            serde_json::Value::from(format!("x\n2026 WARN forged\r\n{}", "y".repeat(60_000)))
+        ))
+        .expect("the document still parses");
+
+        let profile = DeviceProfile::from_caps_v2(&caps);
+        let label = &profile.learned_limits[0].label;
+        assert!(
+            !label.chars().any(char::is_control),
+            "a control character in a reprinted label forges log lines: {label:?}"
+        );
+        assert!(label.chars().count() <= 160, "{}", label.chars().count());
+
+        // And the count of entries is bounded too, not just each one.
+        let many: Vec<serde_json::Value> = (0..500)
+            .map(|n| serde_json::json!({"identity": format!("decode-v2:[{n}]"), "at_ms": 1}))
+            .collect();
+        let flood: caps::DeviceCaps = serde_json::from_value(serde_json::json!({
+            "v": 2, "video": [{"codec": "hevc"}], "audio": [], "containers": [],
+            "learned_limits": many,
+        }))
+        .expect("the document parses");
+        assert_eq!(
+            DeviceProfile::from_caps_v2(&flood).learned_limits.len(),
+            256
+        );
+    }
+
+    /// A limit with no identity matches nothing, ever.
+    ///
+    /// The browser stores these in a map keyed BY the identity, so the
+    /// obvious client serialization — the map's values — omits it, and
+    /// `LearnedLimit::identity` is `#[serde(default)]` precisely so that
+    /// mistake cannot refuse a create. It must therefore also be unable to
+    /// match: an empty identity that compared equal to anything would demote
+    /// every title on the server on the strength of one malformed entry.
+    #[test]
+    fn a_learned_limit_with_no_identity_can_never_match() {
+        let file = four_k_hevc();
+        let mut profile = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+        profile.learned_limits = vec![caps::LearnedLimit {
+            identity: String::new(),
+            ..learned(&file, DAY_MS)
+        }];
+        assert_eq!(
+            applied(&profile, &file, NOW_MS).method,
+            PlaybackMethod::DirectPlay
+        );
+    }
+
+    /// A limit with no label, and one the browser recorded at a zero rate.
+    ///
+    /// Both are shapes a real `localStorage` entry takes, and neither may
+    /// produce a sentence with a hole in it — nor a sentence the browser
+    /// would not have written. `pruneDecodeLimits` deliberately keeps a
+    /// zero-rate entry, so printing "measured unstable original playback"
+    /// over it would be the server inventing a wording for a measurement the
+    /// browser prints in full.
     #[test]
     fn a_partial_learned_limit_still_produces_a_whole_sentence() {
         let unlabelled = caps::LearnedLimit {
@@ -2035,24 +2343,37 @@ mod tests {
             lost: 41,
             secs: 60,
             rate: 41,
-            at_ms: 0,
+            at_ms: NOW_MS,
         };
         assert_eq!(
-            unlabelled.reason(),
+            unlabelled.reason(None),
             "learned client-performance limit for decode-v2:[\"hevc\"]: \
              lost 41 frames in 60s (41/min)"
         );
 
-        let unmeasured = caps::LearnedLimit {
+        let zero_rate = caps::LearnedLimit {
             label: "HEVC Main 10".to_owned(),
+            lost: 0,
             rate: 0,
+            ..unlabelled.clone()
+        };
+        assert_eq!(
+            zero_rate.reason(None),
+            "learned client-performance limit for HEVC Main 10: \
+             lost 0 frames in 60s (0/min)",
+            "the browser keeps a zero-rate entry and prints it in full"
+        );
+
+        let anonymous = caps::LearnedLimit {
+            identity: String::new(),
+            label: String::new(),
             ..unlabelled
         };
         assert_eq!(
-            unmeasured.reason(),
-            "learned client-performance limit for HEVC Main 10: \
-             measured unstable original playback",
-            "the browser's own wording for a limit it recorded without a rate"
+            anonymous.reason(Some("dolby_vision")),
+            "learned client-performance limit for this media load: \
+             lost 41 frames in 60s (41/min); Dolby Vision \u{2192} SDR",
+            "no subject is still not a sentence with a hole in it"
         );
     }
 
@@ -2116,20 +2437,73 @@ mod tests {
             );
         }
 
-        // And the property the rows are chosen to prove: the bitrate bucket
-        // separates the 40 and 90 Mb/s 4K loads that the old codec-and-height
-        // key conflated, while tolerating jitter inside one bucket.
-        let same_bucket: Vec<&str> = fixture
-            .cases
-            .iter()
-            .filter(|case| case.name.contains("same bitrate") || case.name.contains("same title"))
-            .map(|case| case.identity.as_str())
-            .collect();
-        if let [first, rest @ ..] = same_bucket.as_slice() {
-            for other in rest {
-                assert_eq!(first, other, "one bucket, one key");
-            }
+        // The rows are also chosen to prove properties, and a fixture that
+        // only regression-pins its own output proves none of them. Each
+        // lookup below panics if its row is renamed or dropped, so an
+        // assertion cannot end up passing over an empty set — which is
+        // exactly what the first version of this test did.
+        let by_name = |needle: &str| -> &str {
+            fixture
+                .cases
+                .iter()
+                .find(|case| case.name.contains(needle))
+                .unwrap_or_else(|| panic!("the fixture has lost its `{needle}` row"))
+                .identity
+                .as_str()
+        };
+
+        // The bucket tolerates jitter inside one 10 Mb/s step and separates
+        // the loads either side of it. This is the property that replaced the
+        // old `codec@height` key, which condemned every 4K HEVC title on the
+        // strength of one 90 Mb/s remux.
+        assert_eq!(
+            by_name("the 4K Profile 7 remux"),
+            by_name("inside one bucket"),
+            "one bucket, one key"
+        );
+        assert_ne!(
+            by_name("the 4K Profile 7 remux"),
+            by_name("one bucket up"),
+            "two buckets, two keys — this is the whole point of the bucket"
+        );
+
+        // "Dolby Vision · Profile 7 (HDR10-compatible)" contains both words,
+        // and the browser checks Dolby Vision first. Reading them in the
+        // other order re-keys the exact label this feature exists for.
+        assert!(
+            by_name("BOTH dolby vision and hdr10").contains("\"dolby_vision\""),
+            "the check order is not a detail: {}",
+            by_name("BOTH dolby vision and hdr10")
+        );
+
+        // A word boundary, not a substring, and JavaScript's notion of one:
+        // `_` is a word character and `中` is not.
+        for (row, expected) in [
+            ("'advanced' is not DV", "sdr_or_unknown"),
+            ("'highlight' is not HLG", "sdr_or_unknown"),
+            ("underscores are word characters", "sdr_or_unknown"),
+            ("Unicode letter next to the word", "dolby_vision"),
+        ] {
+            assert!(
+                by_name(row).contains(&format!("\"{expected}\"")),
+                "{row}: {}",
+                by_name(row)
+            );
         }
+
+        // Both integer clamps, which exist only because JavaScript cannot
+        // represent the values above them.
+        assert!(
+            by_name("above MAX_SAFE_INTEGER, where JS clamps")
+                .contains("9007199254740991,90071992"),
+            "{}",
+            by_name("above MAX_SAFE_INTEGER, where JS clamps")
+        );
+        assert!(
+            by_name("where the bucket clamps").ends_with(",900719925]"),
+            "{}",
+            by_name("where the bucket clamps")
+        );
     }
 
     /// The two-entry HEVC ladder that replaces the web's min-of-rungs hack —

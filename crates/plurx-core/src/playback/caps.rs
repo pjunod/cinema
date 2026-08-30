@@ -406,7 +406,12 @@ impl DeviceProfile {
             remux_dolby_vision: caps.dv_transport.as_deref() == Some("hls"),
             presents,
             profile_max_heights,
-            learned_limits: caps.learned_limits.clone(),
+            learned_limits: caps
+                .learned_limits
+                .iter()
+                .take(MAX_LEARNED_LIMITS)
+                .map(LearnedLimit::bounded)
+                .collect(),
         }
     }
 }
@@ -422,6 +427,58 @@ const DECODE_LIMIT_BITRATE_BUCKET_BPS: i64 = 10_000_000;
 /// shared fixture pins both spellings together.
 const DECODE_LIMIT_SCHEMA: &str = "v2";
 
+/// JavaScript's `Number.MAX_SAFE_INTEGER`, which `positiveInteger` and
+/// `bitrateBucket` both clamp to.
+///
+/// Reproduced because the browser cannot represent an integer above it and
+/// therefore writes the clamp into its key. A server that did not clamp would
+/// key every such source one apart from the browser — for values no real
+/// probe produces, which is exactly the kind of divergence that survives
+/// review and then surfaces years later on one weird file.
+const JS_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
+
+/// The whitespace class JavaScript's `String.prototype.trim` and `\s` use.
+///
+/// It is *not* Rust's `char::is_whitespace`, and the difference is two
+/// codepoints in opposite directions: U+FEFF (zero-width no-break space) is
+/// whitespace to JS and not to Rust, and U+0085 (NEL) is whitespace to Rust
+/// and not to JS. Both appear in text scraped out of container metadata.
+fn js_whitespace(character: char) -> bool {
+    character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
+}
+
+/// A JavaScript regex `\b` word character: ASCII letters, digits, underscore.
+///
+/// Rust's `char::is_alphanumeric` is the Unicode answer and therefore the
+/// wrong one here. Using it makes `"HDR_DV_HLG"` key as Dolby Vision where
+/// the browser reads no word boundary at all, and makes `"dv中"` key as
+/// nothing where the browser reads one.
+fn js_word_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_'
+}
+
+/// `\bword\b` as JavaScript matches it, against an already-normalized string.
+fn js_word_match(haystack: &str, word: &str) -> bool {
+    let mut from = 0;
+    while let Some(offset) = haystack[from..].find(word) {
+        let start = from + offset;
+        let end = start + word.len();
+        let before_is_word = haystack[..start]
+            .chars()
+            .next_back()
+            .is_some_and(js_word_char);
+        let after_is_word = haystack[end..].chars().next().is_some_and(js_word_char);
+        if !before_is_word && !after_is_word {
+            return true;
+        }
+        from = start + word.chars().next().map_or(1, char::len_utf8);
+        if from >= haystack.len() {
+            break;
+        }
+    }
+    false
+}
+
 /// The browser's `decodeLimitIdentity(source)`, in Rust.
 ///
 /// This is a deliberate second implementation of a function that already
@@ -433,19 +490,33 @@ const DECODE_LIMIT_SCHEMA: &str = "v2";
 ///
 /// `tests/playback/decode-limit-identity.json` is the contract between the
 /// two. Both this function and the browser's are run against every row in it,
-/// so a change to either spelling fails in both languages at once.
-///
-/// Returns `None` for a source shape the browser would also refuse to key.
+/// so a change to either spelling fails in both languages at once — and the
+/// rows deliberately include the shapes where two implementations of one
+/// function drift: the label that contains *both* "dolby vision" and "hdr10",
+/// non-ASCII case folding, the two whitespace codepoints the languages
+/// disagree about, underscores against word boundaries, and both integer
+/// clamps.
 pub fn decode_limit_identity(file: &crate::domain::MediaFile) -> String {
     fn text(value: Option<&str>, fallback: &str) -> String {
-        let normalized = value
+        // `String(value).trim().toLowerCase().replace(/\s+/g, " ")`, in that
+        // order, with JavaScript's whitespace class throughout.
+        let normalized: String = value
             .map(|value| {
-                value
-                    .trim()
-                    .to_lowercase()
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ")
+                let trimmed = value.trim_matches(js_whitespace).to_lowercase();
+                let mut out = String::with_capacity(trimmed.len());
+                let mut in_space = false;
+                for character in trimmed.chars() {
+                    if js_whitespace(character) {
+                        if !in_space {
+                            out.push(' ');
+                            in_space = true;
+                        }
+                    } else {
+                        out.push(character);
+                        in_space = false;
+                    }
+                }
+                out
             })
             .unwrap_or_default();
         if normalized.is_empty() {
@@ -454,33 +525,33 @@ pub fn decode_limit_identity(file: &crate::domain::MediaFile) -> String {
             normalized
         }
     }
-    // `positiveInteger`: anything not strictly positive is zero, including a
-    // negative, a NaN and an absent column.
+    // `positiveInteger`: anything not strictly positive is zero, and anything
+    // JavaScript could not have represented exactly is clamped where it
+    // clamps.
     fn positive(value: Option<i64>) -> i64 {
-        value.filter(|value| *value > 0).unwrap_or(0)
+        value
+            .filter(|value| *value > 0)
+            .map(|value| value.min(JS_MAX_SAFE_INTEGER))
+            .unwrap_or(0)
     }
 
     let hdr_format = file.hdr_format.as_deref();
     // `sourceDynamicRange`: the declared range wins; otherwise the rich label
-    // is read for the words the browser reads, in the browser's order.
+    // is read for the words the browser reads, **in the browser's order**.
+    // "Dolby Vision · Profile 7 (HDR10-compatible)" contains both, and it is
+    // the exact label this whole feature exists for, so the order is not a
+    // detail.
     let dynamic_range = {
         let declared = text(file.hdr.as_deref(), "");
         if !declared.is_empty() {
             declared
         } else {
             let rich = text(hdr_format, "");
-            if rich.contains("dolby vision")
-                || rich
-                    .split(|c: char| !c.is_alphanumeric())
-                    .any(|word| word == "dv")
-            {
+            if rich.contains("dolby vision") || js_word_match(&rich, "dv") {
                 "dolby_vision".to_owned()
             } else if rich.contains("hdr10") {
                 "hdr10".to_owned()
-            } else if rich
-                .split(|c: char| !c.is_alphanumeric())
-                .any(|word| word == "hlg")
-            {
+            } else if js_word_match(&rich, "hlg") {
                 "hlg".to_owned()
             } else {
                 "sdr_or_unknown".to_owned()
@@ -491,9 +562,11 @@ pub fn decode_limit_identity(file: &crate::domain::MediaFile) -> String {
     // positive bitrate to bucket — a string where the other rows are integers,
     // which is exactly what the browser writes.
     let bucket = match file.bitrate.filter(|bitrate| *bitrate > 0) {
-        Some(bitrate) => {
-            serde_json::Value::from(bitrate.div_euclid(DECODE_LIMIT_BITRATE_BUCKET_BPS))
-        }
+        Some(bitrate) => serde_json::Value::from(
+            bitrate
+                .min(JS_MAX_SAFE_INTEGER)
+                .div_euclid(DECODE_LIMIT_BITRATE_BUCKET_BPS),
+        ),
         None => serde_json::Value::from("unknown"),
     };
 
@@ -510,33 +583,138 @@ pub fn decode_limit_identity(file: &crate::domain::MediaFile) -> String {
     format!("decode-{DECODE_LIMIT_SCHEMA}:{fields}")
 }
 
+/// How many learned limits a client may have applied to it in one decision.
+///
+/// The browser's own map is bounded by how many distinct media loads one
+/// person stutters through in a month; this is a bound on what an
+/// authenticated caller may *send*, which is a different question. The body
+/// limit already caps the bytes — this caps what gets cloned into a profile
+/// and scanned once per decision, and it is far above any real client.
+const MAX_LEARNED_LIMITS: usize = 256;
+
+/// How long a client-supplied label may be before it stops being a label.
+///
+/// It is reprinted verbatim into a reason string that reaches the badge, the
+/// stats overlay, the admin session list and the server log. The browser
+/// builds these from `mediaLoadLabel`, which is under a hundred characters;
+/// a caller that sends sixty thousand is not describing a media load.
+const MAX_LEARNED_LIMIT_TEXT: usize = 160;
+
+/// How long the browser keeps a learned limit before discarding it entirely
+/// (`DECODE_LIMIT_DEFAULTS.ttlMs`): 30 days.
+pub const LEARNED_LIMIT_TTL_MS: i64 = 30 * 24 * 60 * 60 * 1_000;
+
+/// How long the browser applies a learned limit before it insists on
+/// re-measuring instead (`DECODE_LIMIT_DEFAULTS.retestMs`): 7 days.
+pub const LEARNED_LIMIT_RETEST_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+
+impl LearnedLimit {
+    /// The same entry with its two free-text fields made safe to reprint.
+    ///
+    /// Control characters go first, then the length. The order matters: this
+    /// text ends up in a log line, and a newline inside it is how one log
+    /// line becomes two forged ones. The length cap is second because a
+    /// truncated label is still a useful label, while an unbounded one is a
+    /// client choosing how much of the server's log and every `/decision`
+    /// response it gets to occupy.
+    fn bounded(&self) -> Self {
+        fn clean(value: &str) -> String {
+            let cleaned: String = value
+                .chars()
+                .filter(|character| !character.is_control())
+                .take(MAX_LEARNED_LIMIT_TEXT)
+                .collect();
+            cleaned.trim().to_owned()
+        }
+        Self {
+            identity: clean(&self.identity),
+            label: clean(&self.label),
+            ..*self
+        }
+    }
+
+    /// Whether this entry may steer a decision *right now*.
+    ///
+    /// The browser's own policy, reproduced, and reproducing it is not
+    /// optional: `learnedDecodeLimitAction` returns `"retest"` rather than
+    /// `"apply"` once an entry is older than `retestMs`, and
+    /// `pruneDecodeLimits` drops it outright past `ttlMs` or when its shape is
+    /// junk. A server that matched on identity alone would be **stricter than
+    /// the client that owns the policy** for the whole 23-day window between
+    /// those two ages — honouring limits the browser had already decided to
+    /// stop trusting.
+    ///
+    /// It is also the only thing that keeps the re-test loop alive. The
+    /// browser only consults its own limits when the server answered
+    /// `direct_play` or `remux`; once the server starts answering `transcode`
+    /// first, the weekly one-session re-measure — the fix for limits that
+    /// were "in practice permanent" — never runs again unless the server
+    /// stands aside exactly when the browser would have. So an expired entry
+    /// is not merely ignored here: ignoring it is what hands the decision
+    /// back to the client that can actually re-measure it.
+    ///
+    /// A `now_ms` of zero or less means the caller has no clock, and an
+    /// unknown age is not evidence of freshness: nothing applies.
+    pub fn applies_at(&self, now_ms: i64) -> bool {
+        if now_ms <= 0 || self.at_ms <= 0 {
+            return false;
+        }
+        let age = now_ms - self.at_ms;
+        // A negative age is a clock disagreement, not a very fresh entry.
+        (0..=LEARNED_LIMIT_RETEST_MS).contains(&age)
+    }
+}
+
 impl LearnedLimit {
     /// The browser's own sentence for this demotion
-    /// (`learnedDecodeLimitView().reason`, `playback-policy.js:990`).
+    /// (`learnedDecodeLimitView().reason`, `playback-policy.js:969-995`).
     ///
     /// Reproduced rather than paraphrased so the badge, the stats overlay and
     /// the admin's session list all say what the browser would have said on
     /// its own. Two wordings for one decision is how a viewer ends up
     /// reconciling the server against their own client.
     ///
-    /// The label is the client's, and a client that sent none gets its
-    /// identity instead — ugly, and better than a sentence with a hole in it.
-    /// The measurement degrades the same way the browser's does when the rate
-    /// is missing.
-    pub fn reason(&self) -> String {
+    /// `lost_range` is the grade the ordinary decision would have delivered,
+    /// when this demotion is what costs it — the browser appends that
+    /// consequence and so must this. `None` when nothing was lost.
+    ///
+    /// The measurement degrades exactly where the browser's does: the browser
+    /// gates on the rate being a finite number, **not** on it being positive,
+    /// and `pruneDecodeLimits` deliberately keeps a zero-rate entry. Gating
+    /// on `> 0` here would print "measured unstable original playback" over a
+    /// measurement the browser prints in full.
+    pub fn reason(&self, lost_range: Option<&str>) -> String {
         let label = if self.label.trim().is_empty() {
-            self.identity.as_str()
+            // The browser always has a label; a client that sent none is
+            // showing its identity instead, which is ugly and still better
+            // than a sentence with a hole where the subject goes.
+            self.identity.trim()
         } else {
             self.label.trim()
         };
-        let measurement = if self.rate > 0 {
-            format!(
-                "lost {} frames in {}s ({}/min)",
-                self.lost, self.secs, self.rate
-            )
+        let label = if label.is_empty() {
+            "this media load"
         } else {
-            "measured unstable original playback".to_owned()
+            label
         };
-        format!("learned client-performance limit for {label}: {measurement}")
+        let measurement = format!(
+            "lost {} frames in {}s ({}/min)",
+            self.lost, self.secs, self.rate
+        );
+        let consequence = match lost_range {
+            Some(range) => format!("; {} \u{2192} SDR", Self::range_label(range)),
+            None => String::new(),
+        };
+        format!("learned client-performance limit for {label}: {measurement}{consequence}")
+    }
+
+    /// `dynamicRangeLabel`, for the handful of values that reach it.
+    fn range_label(range: &str) -> &str {
+        match range {
+            "dolby_vision" => "Dolby Vision",
+            "hdr10" => "HDR10",
+            "hlg" => "HLG",
+            other => other,
+        }
     }
 }
