@@ -45,7 +45,7 @@ android {
         // 23 covers phones and the vast majority of Android TV / Google TV boxes.
         minSdk = 23
         targetSdk = 37
-        versionCode = 48
+        versionCode = 51
         versionName = "0.2.8"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -122,6 +122,10 @@ dependencies {
     implementation(libs.google.code.scanner)
 
     testImplementation(libs.junit)
+    // The reporter's rules are about ordering and backoff, so its tests drive
+    // a virtual clock rather than waiting out real seconds.
+    testImplementation(libs.kotlin.test.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(libs.androidx.test.ext.junit)
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.espresso)

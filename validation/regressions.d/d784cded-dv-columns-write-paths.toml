@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["d784cded"]
+points = ["persistence.upgrades", "library.catalog"]
+checks = ["rust-gate"]
+reason = "`dolby_vision_facts_round_trip_and_the_backfill_finds_what_it_needs` (crates/plurx-core/tests/store_contract.rs) runs on both backends and fails against the pre-fix code in two places: the cursor arm requires a row the walk has passed to stop being selectable, which the uncursored query cannot satisfy, and the label arm requires the listing to report the stored `hdr_format` the backfill compares against, which the two-column query did not return. `pre_v38_file_projection_supplies_null_dolby_vision_facts` (crates/plurx-core/src/store/hiqlite_import.rs) requires the v37 projection to end in five NULLs; without the projection arm it ends in the five column names and the import emits `no such column: dv_profile` against every backup the importer is documented to accept. `v6_rebuild_preserves_everything` (crates/plurx-core/src/store/sqlite/mod.rs) now asserts the five columns exist after the full migration chain and that the per-statement and batch spellings of the migration are the same text, which is the only thing holding the two backends' DDL together. `the_derived_label_is_the_label_the_scan_used_to_write` (crates/plurx-core/src/scan/probe.rs) pins the derived string byte for byte for eight profile/compatibility pairs, because `hdr_format` feeds `copy_video_args` and a re-worded label re-keys every affected file's fragment index."

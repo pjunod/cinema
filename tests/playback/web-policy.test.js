@@ -2991,6 +2991,160 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
   assert.equal(pressured.emergency, true);
 });
 
+test("the caps document says the two things the flat query could not", () => {
+  // The two-entry HEVC ladder replacing the min-of-rungs hack
+  // (PLAYBACK-CAPS-V2-PLAN §2, edge E5, and the M3 acceptance check).
+  //
+  // The flat query has one `maxheight` slot, so a browser whose 8-bit ceiling
+  // is 2160 and whose Main10 ceiling is 1080 had to send 1080 — transcoding
+  // every 4K 8-bit title it would have direct-played. The document says both.
+  const build = new Function(
+    "SERVER",
+    "navigator",
+    // The newline matters: `shippedSource` can end on a `//` comment, and
+    // appending the return to that line comments it out — the harness then
+    // hands back `undefined` and every assertion below fails on the wrong
+    // thing.
+    `${shippedSource("capsDocument")}\n; return capsDocument;`,
+  )({ build: "v0.2.8-20-gabc1234" }, { userAgent: "Mozilla/5.0 (Test)" });
+
+  const both = build(
+    {
+      vcodec: "h264,hevc,hevc10",
+      acodec: "aac,ac3",
+      container: "mp4,mov",
+      hdr: 1,
+      hdrDisplay: true,
+      dv: 1,
+      dvprofile: "5,8",
+      maxheight: 2160,
+      hdr10t: 1,
+    },
+    {},
+  );
+
+  assert.equal(both.v, 2);
+  assert.equal(both.client.kind, "web");
+  assert.equal(both.client.build, "v0.2.8-20-gabc1234");
+
+  const hevc = both.video.filter((entry) => entry.codec === "hevc");
+  assert.equal(hevc.length, 2, "one entry per profile ladder rung");
+  assert.deepEqual(hevc[0].profiles, ["main"]);
+  assert.deepEqual(hevc[1].profiles, ["main10"]);
+  assert.ok(
+    !both.video.some((entry) => entry.codec === "hevc10"),
+    "`hevc10` is this app's name for a PROFILE; it is not a codec on the wire",
+  );
+
+  // `hdr10t` is a per-codec presentation claim and always was — the flat
+  // query just had nowhere to say so.
+  assert.deepEqual(hevc[0].present, ["sdr", "pq"]);
+  assert.deepEqual(
+    both.video.find((entry) => entry.codec === "h264").present,
+    ["sdr"],
+    "the PQ claim was only ever about HEVC",
+  );
+
+  // `hdr` is a DISPLAY fact, kept separate from what any codec can emit.
+  assert.equal(both.display.hdr, true);
+  assert.deepEqual(hevc[0].dv_profiles, [5, 8]);
+
+  // A browser with no HEVC decoder claims no HEVC, and one with a single
+  // HEVC ceiling sends a single entry rather than a fabricated ladder.
+  const plain = build(
+    { vcodec: "h264", acodec: "aac", container: "mp4", hdr: 0, hdrDisplay: false,
+      dv: 0, dvprofile: "", maxheight: null, hdr10t: 0 },
+    {},
+  );
+  assert.deepEqual(plain.video.map((entry) => entry.codec), ["h264"]);
+  assert.equal(plain.display.hdr, false);
+  assert.equal(plain.max_height, undefined, "absent is not a claim");
+
+  // There is no way to spell the blanket Dolby Vision claim in this shape.
+  assert.deepEqual(plain.video[0].dv_profiles, undefined);
+  assert.equal(plain.display.dolby_vision, false);
+});
+
+test("a learned limit reaches the server with the identity it was keyed by", () => {
+  // The trap this exists for: localStorage keys these entries BY the
+  // identity, so the obvious `Object.values(...)` sends a document whose
+  // every limit is anonymous — and an anonymous limit matches nothing on the
+  // server, silently. The whole feature would look like it simply did not
+  // work.
+  const build = new Function(
+    "SERVER",
+    "navigator",
+    `${shippedSource("capsDocument")}\n; return capsDocument;`,
+  )({ build: "test" }, { userAgent: "Mozilla/5.0 (Test)" });
+
+  const identity =
+    'decode-v2:["hevc","main 10",3840,2160,10,"dolby_vision","dolby vision · profile 7 (hdr10-compatible)",5]';
+  const document = build(
+    { vcodec: "hevc", acodec: "aac", container: "mp4", hdr: 1, hdrDisplay: true,
+      dv: 0, dvprofile: "", maxheight: 2160, hdr10t: 1 },
+    {
+      [identity]: {
+        lost: 41, rate: 41, secs: 60, label: "4K HEVC Main 10", at: 1756400000000,
+      },
+    },
+  );
+
+  assert.equal(document.learned_limits.length, 1);
+  assert.equal(document.learned_limits[0].identity, identity);
+  assert.equal(document.learned_limits[0].label, "4K HEVC Main 10");
+  assert.equal(
+    document.learned_limits[0].at_ms,
+    1756400000000,
+    "the server reads `at_ms`; localStorage spells it `at`",
+  );
+});
+
+test("the caps document POST falls back to the query a mixed fleet still answers", () => {
+  // Mid-deploy, some nodes predate the POST. It has to degrade to the GET
+  // rather than fail a play — and it can, because the server puts both wire
+  // shapes through one translation and returns the same verdict.
+  const source = shippedSource("askDecision");
+  assert.match(source, /method:\s*"POST"/);
+  assert.match(source, /caps:\s*capsDocument\(PLAY_CAPS,\s*decodeLimits\(\)\)/);
+  for (const status of [404, 405, 400]) {
+    assert.ok(
+      new RegExp(`e\\.status===${status}`).test(source),
+      `a ${status} from an older or stricter node must fall back, not fail the play`,
+    );
+  }
+  assert.match(source, /return api\(decisionUrl\(fileId, force, sel\)\)/);
+});
+
+test("the browser and the server key a learned limit identically", () => {
+  // `tests/playback/decode-limit-identity.json` is the contract between this
+  // function and `plurx_core::playback::caps::decode_limit_identity`. The
+  // browser keys a learned limit by the source it is looking at; the server
+  // has to recompute the same string from the file row it is deciding about.
+  //
+  // A divergence has no symptom. Nothing errors — the server's key simply
+  // never matches, no limit is ever applied, and the viewer keeps stuttering
+  // through the exact title they already taught their browser to avoid. So
+  // both implementations run against these rows, and a change to either
+  // spelling fails in both languages at once.
+  const fixture = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "decode-limit-identity.json"),
+      "utf8",
+    ),
+  );
+  assert.ok(
+    fixture.cases.length >= 10,
+    "a fixture this small stops being a contract",
+  );
+  for (const row of fixture.cases) {
+    assert.equal(
+      policy.decodeLimitIdentity(row.source),
+      row.identity,
+      row.name,
+    );
+  }
+});
+
 // Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {

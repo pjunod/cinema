@@ -230,7 +230,18 @@ pub fn router(state: AppState) -> Router {
                 .layer(DefaultBodyLimit::max(64 * 1024)),
         )
         // Playback
-        .route("/files/{id}/decision", get(stream::decision))
+        .route(
+            "/files/{id}/decision",
+            get(stream::decision)
+                .post(stream::decision_post)
+                // A capabilities document is a short list of codecs and a
+                // handful of learned limits; axum's 2 MiB default is four
+                // orders of magnitude of headroom for an authenticated caller
+                // to spend on a body the server has to walk. The same 64 KiB
+                // the reading-state route uses is more than any real client
+                // needs.
+                .layer(DefaultBodyLimit::max(64 * 1024)),
+        )
         .route("/files/{id}/audio-offset", put(stream::set_audio_offset))
         // App-managed offline viewing. JSON/package ownership uses bearer
         // auth; only immutable child media uses the package-scoped capability.
@@ -642,6 +653,12 @@ fn learner_route_eligible(method: &Method, path: &str) -> bool {
             ["api", "v1", "files", _, "hls", "sessions"]
                 | ["api", "v1", "files", _, "publication"]
                 | ["api", "v1", "hls", _, "control"]
+                // The caps-v2 spelling of the decision read. It is a POST only
+                // because its capabilities are a JSON document rather than a
+                // query string — it writes nothing, and a learner that answers
+                // the GET and refuses the POST would stop playback dead for
+                // exactly the clients that have migrated.
+                | ["api", "v1", "files", _, "decision"]
         );
     let node_local_close = method == Method::DELETE
         && matches!(
@@ -918,6 +935,10 @@ mod tests {
         }
         for (method, path) in [
             (Method::POST, "/api/v1/files/8/hls/sessions"),
+            // The caps-v2 decision read. A learner that answers the GET and
+            // refuses the POST would break playback for exactly the clients
+            // that have migrated, and nothing else in this matrix would say so.
+            (Method::POST, "/api/v1/files/8/decision"),
             (Method::POST, "/api/v1/hls/session-8/control"),
             (Method::DELETE, "/api/v1/hls/session-8"),
             (Method::POST, crate::media_sessions::START_PATH),
@@ -957,6 +978,11 @@ mod tests {
         for (method, path) in [
             (Method::GET, "/api/v1/libraries"),
             (Method::GET, "/api/v1/files/8/decision"),
+            // Both spellings of the decision read behave the same in
+            // maintenance: refused. A node draining for a restart is not a
+            // node that should be handing out playback plans, whichever verb
+            // the client used to ask.
+            (Method::POST, "/api/v1/files/8/decision"),
             (Method::GET, "/api/v1/files/8/direct"),
             (Method::POST, "/api/v1/files/8/hls/sessions"),
             (Method::POST, crate::media_sessions::START_PATH),
@@ -970,6 +996,77 @@ mod tests {
                 "{method} {path}"
             );
         }
+    }
+
+    /// The capabilities document is bounded before the handler walks it.
+    ///
+    /// `from_caps_v2` iterates every `video` entry and every `learned_limits`
+    /// entry synchronously inside an async handler. On axum's 2 MiB default
+    /// that is an authenticated caller choosing how long to pin a worker
+    /// thread; 64 KiB is more than any real client needs and the walk is then
+    /// bounded by construction.
+    #[tokio::test]
+    async fn the_capabilities_document_is_bounded_before_it_is_walked() {
+        let app = test_app();
+        let admin = setup_admin(&app).await;
+        let oversized = Request::builder()
+            .method("POST")
+            .uri("/api/v1/files/8/decision")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {admin}"))
+            .body(Body::from(format!(
+                "{{\"caps\":{{\"v\":2,\"video\":[],\"audio\":[],\"containers\":[\"{}\"]}}}}",
+                "m".repeat(96 * 1024)
+            )))
+            .expect("oversized decision request");
+        assert_eq!(
+            app.clone()
+                .oneshot(oversized)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        // …and an ordinary document is not refused by the limit. It reaches
+        // the handler and fails on the missing file, which is exactly as far
+        // as this test can see and exactly far enough.
+        let ordinary = Request::builder()
+            .method("POST")
+            .uri("/api/v1/files/8/decision")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {admin}"))
+            .body(Body::from(
+                r#"{"caps":{"v":2,"video":[{"codec":"hevc","present":["sdr","pq"]}],
+                    "audio":["aac"],"containers":["mp4"]}}"#,
+            ))
+            .expect("ordinary decision request");
+        assert_ne!(
+            app.clone()
+                .oneshot(ordinary)
+                .await
+                .expect("response")
+                .status(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        // A document version this server cannot read is refused outright
+        // rather than guessed at: reading a v3 client's fields as if they
+        // meant what v2's mean is how a device is handed a stream it never
+        // claimed.
+        let future = Request::builder()
+            .method("POST")
+            .uri("/api/v1/files/8/decision")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {admin}"))
+            .body(Body::from(
+                r#"{"caps":{"v":3,"video":[],"audio":[],"containers":[]}}"#,
+            ))
+            .expect("future decision request");
+        assert_eq!(
+            app.oneshot(future).await.expect("response").status(),
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]

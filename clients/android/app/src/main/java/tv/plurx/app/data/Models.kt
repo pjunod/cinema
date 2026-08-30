@@ -583,6 +583,14 @@ data class HlsStart(
      * read the source mid-request — the client then keeps what it had.
      */
     val delivered_dynamic_range: String? = null,
+    /**
+     * Where this session's playback-control exchange lives, and the exact
+     * generation and owner epoch it addresses. Absent from an older server,
+     * and absent from a session the server does not consider controllable —
+     * either way the client simply does not report, which is the passive M2
+     * behaviour rather than a failure.
+     */
+    val control: tv.plurx.app.player.ControlBootstrap? = null,
 )
 
 /** Live HLS telemetry shared by the web, Apple, and Android stats views. */

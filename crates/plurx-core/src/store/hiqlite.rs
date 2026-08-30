@@ -58,7 +58,8 @@ const ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION: i64 = 15;
 const TERMINAL_REASON_SCHEMA_VERSION: i64 = 16;
 const PUBLICATION_FENCE_SCHEMA_VERSION: i64 = 17;
 const PUBLICATION_CLAIM_SCHEMA_VERSION: i64 = 18;
-pub const AUTH_SCHEMA_VERSION: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
+const DOLBY_VISION_COLUMNS_SCHEMA_VERSION: i64 = 19;
+pub const AUTH_SCHEMA_VERSION: i64 = DOLBY_VISION_COLUMNS_SCHEMA_VERSION;
 /// Oldest schema this binary can advance through the complete migration chain.
 pub const AUTH_SCHEMA_MIGRATION_SOURCE: i64 = 5;
 const READING_SCHEMA_VERSION: i64 = 6;
@@ -74,6 +75,7 @@ const ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_ACK_SCHEMA_
 const TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE: i64 = ANALYSIS_HISTORY_INDEX_SCHEMA_VERSION;
 const PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE: i64 = TERMINAL_REASON_SCHEMA_VERSION;
 const PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_FENCE_SCHEMA_VERSION;
+const DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE: i64 = PUBLICATION_CLAIM_SCHEMA_VERSION;
 // Session routing and shared-cache identity are additive durable state and use
 // the existing Hiqlite transport contract. Protocol 4 stays supported so a
 // healthy v9/v10 cluster can authorize the daemon that advances its schema.
@@ -1641,6 +1643,34 @@ impl HiqliteAuthStore {
                     )
                     .await?;
                 }
+                SchemaMigrationAction::MigrateFrom(
+                    DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE,
+                ) => {
+                    let now = self.now()?;
+                    // One entry per statement: the replicated transport runs
+                    // each through rusqlite's `execute`, which refuses a
+                    // multi-statement string outright.
+                    let mut statements: Vec<(&str, hiqlite::Params)> =
+                        super::FILES_DOLBY_VISION_COLUMNS
+                            .iter()
+                            .map(|statement| (*statement, params!()))
+                            .collect();
+                    statements.push((
+                        "UPDATE cluster_meta SET schema_version = $1, migrated_at = $2 \
+                         WHERE singleton = 1 AND schema_version = $3",
+                        params!(
+                            DOLBY_VISION_COLUMNS_SCHEMA_VERSION,
+                            now,
+                            DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE
+                        ),
+                    ));
+                    let attempt = self.client().txn(statements).await;
+                    self.settle_migration_attempt(
+                        DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE,
+                        attempt,
+                    )
+                    .await?;
+                }
                 SchemaMigrationAction::MigrateFrom(version) => {
                     return Err(StoreError::Migration(format!(
                         "cluster schema {version} has no migration implementation"
@@ -2913,7 +2943,8 @@ fn schema_migration_action(
         | ANALYSIS_HISTORY_INDEX_SCHEMA_MIGRATION_SOURCE
         | TERMINAL_REASON_SCHEMA_MIGRATION_SOURCE
         | PUBLICATION_FENCE_SCHEMA_MIGRATION_SOURCE
-        | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE => {
+        | PUBLICATION_CLAIM_SCHEMA_MIGRATION_SOURCE
+        | DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE => {
             Ok(SchemaMigrationAction::MigrateFrom(meta.schema_version))
         }
         version => Err(StoreError::Migration(format!(
@@ -4404,9 +4435,18 @@ mod tests {
             "v17 must advance exactly one step to the publication-claim schema"
         );
         assert_eq!(
-            AUTH_SCHEMA_MIGRATION_SOURCE + 13,
+            DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE, PUBLICATION_CLAIM_SCHEMA_VERSION,
+            "the Dolby Vision column migration must start from the exact v18 shape"
+        );
+        assert_eq!(
+            DOLBY_VISION_COLUMNS_SCHEMA_MIGRATION_SOURCE + 1,
+            DOLBY_VISION_COLUMNS_SCHEMA_VERSION,
+            "v18 must advance exactly one step to the Dolby Vision column schema"
+        );
+        assert_eq!(
+            AUTH_SCHEMA_MIGRATION_SOURCE + 14,
             AUTH_SCHEMA_VERSION,
-            "this implementation contains every additive v5→v18 step"
+            "this implementation contains every additive v5→v19 step"
         );
         let row = |schema_version| CompatibilityRow {
             schema_version,

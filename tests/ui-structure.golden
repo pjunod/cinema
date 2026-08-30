@@ -1711,7 +1711,7 @@ catalog|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
 catalog|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
 catalog|player@1280x860|focus|015|<wrap>
 catalog|player@1280x860|req|GET /api/v1/activity|2
-catalog|player@1280x860|req|GET /api/v1/files/<id>/decision|1
+catalog|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 catalog|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 catalog|player@1280x860|req|GET /api/v1/items/<id>|1
 catalog|player@1280x860|req|GET /api/v1/libraries|1
@@ -1890,7 +1890,7 @@ catalog|player@390x780|focus|015|button#pbpip.picon "Picture in picture"
 catalog|player@390x780|focus|016|button#pbfs.picon "Fullscreen"
 catalog|player@390x780|focus|017|<wrap>
 catalog|player@390x780|req|GET /api/v1/activity|2
-catalog|player@390x780|req|GET /api/v1/files/<id>/decision|1
+catalog|player@390x780|req|POST /api/v1/files/<id>/decision|1
 catalog|player@390x780|req|GET /api/v1/files/<id>/direct|1
 catalog|player@390x780|req|GET /api/v1/items/<id>|1
 catalog|player@390x780|req|GET /api/v1/libraries|1
@@ -3671,7 +3671,7 @@ classic|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
 classic|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
 classic|player@1280x860|focus|015|<wrap>
 classic|player@1280x860|req|GET /api/v1/activity|2
-classic|player@1280x860|req|GET /api/v1/files/<id>/decision|1
+classic|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 classic|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 classic|player@1280x860|req|GET /api/v1/items/<id>|1
 classic|player@1280x860|req|GET /api/v1/libraries|1
@@ -3817,7 +3817,7 @@ classic|player@390x780|focus|011|button#pbpip.picon "Picture in picture"
 classic|player@390x780|focus|012|button#pbfs.picon "Fullscreen"
 classic|player@390x780|focus|013|<wrap>
 classic|player@390x780|req|GET /api/v1/activity|2
-classic|player@390x780|req|GET /api/v1/files/<id>/decision|1
+classic|player@390x780|req|POST /api/v1/files/<id>/decision|1
 classic|player@390x780|req|GET /api/v1/files/<id>/direct|1
 classic|player@390x780|req|GET /api/v1/items/<id>|1
 classic|player@390x780|req|GET /api/v1/libraries|1
@@ -5591,7 +5591,7 @@ theater|player@1280x860|focus|013|button#pbpip.picon "Picture in picture"
 theater|player@1280x860|focus|014|button#pbfs.picon "Fullscreen"
 theater|player@1280x860|focus|015|<wrap>
 theater|player@1280x860|req|GET /api/v1/activity|2
-theater|player@1280x860|req|GET /api/v1/files/<id>/decision|1
+theater|player@1280x860|req|POST /api/v1/files/<id>/decision|1
 theater|player@1280x860|req|GET /api/v1/files/<id>/direct|1
 theater|player@1280x860|req|GET /api/v1/items/<id>|1
 theater|player@1280x860|req|GET /api/v1/libraries|1
@@ -5744,7 +5744,7 @@ theater|player@390x780|focus|014|button#pbpip.picon "Picture in picture"
 theater|player@390x780|focus|015|button#pbfs.picon "Fullscreen"
 theater|player@390x780|focus|016|<wrap>
 theater|player@390x780|req|GET /api/v1/activity|2
-theater|player@390x780|req|GET /api/v1/files/<id>/decision|1
+theater|player@390x780|req|POST /api/v1/files/<id>/decision|1
 theater|player@390x780|req|GET /api/v1/files/<id>/direct|1
 theater|player@390x780|req|GET /api/v1/items/<id>|1
 theater|player@390x780|req|GET /api/v1/libraries|1

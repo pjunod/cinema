@@ -2898,6 +2898,14 @@ impl JobManager {
             let state = Arc::clone(self);
             tokio::spawn(async move { state.genre_backfill_pass().await });
         }
+        // Also not a `DueJob`, and deliberately not hung off the VOD index
+        // tick: `vod_index_mins = 0` is an operator-offered "Paused", and a
+        // schema migration whose data half a preference can switch off is a
+        // library that silently keeps a column of nulls.
+        {
+            let state = Arc::clone(self);
+            tokio::spawn(async move { state.backfill_dolby_vision_facts().await });
+        }
         Ok(())
     }
 
@@ -3389,6 +3397,147 @@ impl JobManager {
                 plans,
                 examined = held.len(),
                 "swept node-local VOD rows for files that are gone"
+            );
+        }
+    }
+
+    /// Fill in the Dolby Vision columns from the probe JSON already stored for
+    /// each file (PLAYBACK-CAPS-V2-PLAN §4.3).
+    ///
+    /// The incremental scanner skips unchanged files, so without this an
+    /// existing library would never gain the columns short of a destructive
+    /// re-add — the same reason `hdr_format` needed a backfill when it was
+    /// added. No ffprobe runs: every fact comes out of JSON that was captured
+    /// at scan time and has been sitting in the row ever since.
+    ///
+    /// Walks a node-local cursor, strictly forward, and stamps itself done
+    /// when a window comes back empty. The cursor is what makes it terminate:
+    /// some rows can never be fixed here — a Dolby Vision codec tag whose
+    /// stored probe carries no configuration record needs a real re-probe,
+    /// which is an operator action rather than a boot side-effect — and
+    /// without a cursor they would sit at the front of every window forever,
+    /// re-read every tick, hiding every fixable row behind them.
+    ///
+    /// The label moves with the columns only when it would actually change. A
+    /// label naming no profile is wrong rather than merely sparse, and leaving
+    /// it keeps the file unclaimable by every client — but `hdr_format` is an
+    /// input to `copy_video_args`, so rewriting one re-keys that file's
+    /// fragment index and orphans what was built. Comparing first makes the
+    /// common case structurally free instead of empirically free.
+    async fn backfill_dolby_vision_facts(self: Arc<Self>) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self.store.get_setting(keys::JOB_DV_BACKFILL_DONE).await {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the Dolby Vision backfill stamp");
+                return;
+            }
+        }
+        // One node at a time. The rows are replicated, so every voter running
+        // this simultaneously would be N times the Raft writes for one
+        // outcome — and a learner, which may not run cluster jobs at all,
+        // would be doing them uninvited.
+        let lease = match self.acquire_job("catalogue:dv-facts".to_owned()).await {
+            Ok(Some(lease)) => lease,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "Dolby Vision backfill lease failed");
+                return;
+            }
+        };
+        let _lease = lease;
+        let cursor_key = self.local_job_key(keys::JOB_DV_BACKFILL_CURSOR);
+        let cursor = self
+            .store
+            .get_setting(&cursor_key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.trim().parse::<i64>().ok())
+            .unwrap_or(0);
+        let pending = match self
+            .store
+            .files_missing_dolby_vision(cursor, BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the Dolby Vision backfill");
+                return;
+            }
+        };
+        if pending.is_empty() {
+            // Nothing left ahead of the cursor. Stamped rather than left to
+            // re-ask, because the only rows that could still appear behind it
+            // are ones a future scan writes, and a scan writes the columns
+            // itself.
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_DV_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the Dolby Vision backfill as complete");
+            } else {
+                tracing::info!("dv backfill: complete");
+            }
+            return;
+        }
+        let mut updated = 0usize;
+        let mut relabelled = 0usize;
+        let mut without_record = 0usize;
+        let mut walked = cursor;
+        for (file_id, probe_json, stored_label) in pending {
+            walked = walked.max(file_id);
+            let facts = serde_json::from_str::<serde_json::Value>(&probe_json)
+                .ok()
+                .map(|value| plurx_core::scan::probe::parse_probe_json(&value));
+            let Some(probe) = facts.filter(|probe| !probe.dolby_vision.is_empty()) else {
+                // The row says Dolby Vision and its stored JSON has no
+                // configuration record to prove it. Nothing here can fix that;
+                // the cursor walks past so it cannot block the rest.
+                without_record += 1;
+                continue;
+            };
+            // Only when it would actually change. See the doc comment: this is
+            // what keeps the re-index cost at zero rather than merely small.
+            let label = probe
+                .hdr_format
+                .as_deref()
+                .filter(|derived| Some(*derived) != stored_label.as_deref());
+            if label.is_some() {
+                relabelled += 1;
+            }
+            if let Err(error) = self
+                .store
+                .set_file_dolby_vision(file_id, probe.dolby_vision, label)
+                .await
+            {
+                tracing::warn!(file_id, %error, "writing backfilled Dolby Vision facts");
+                // Do NOT walk past a row this pass failed to write: a
+                // transient store error must leave it due, not skipped.
+                walked = walked.min(file_id.saturating_sub(1));
+                break;
+            }
+            updated += 1;
+        }
+        if walked > cursor {
+            if let Err(error) = self
+                .store
+                .put_setting(&cursor_key, &walked.to_string())
+                .await
+            {
+                tracing::warn!(%error, "advancing the Dolby Vision backfill cursor");
+            }
+        }
+        if updated > 0 || without_record > 0 {
+            tracing::info!(
+                updated,
+                relabelled,
+                without_record,
+                cursor = walked,
+                "dv backfill: filled Dolby Vision columns from stored probe data"
             );
         }
     }

@@ -101,6 +101,50 @@ enum Caps {
     /// Do not replace this with `eligibleForHDRPlayback` alone: that promotes
     /// an HDR10-only HDMI path to Dolby Vision and can hand AVPlayer a stream
     /// its current display cannot present.
+    /// The control protocol's view of this device, from the same primitives
+    /// the `/decision` query is built from. Pure half separated for the same
+    /// reason that one is: a display may take HDR10 without taking Dolby
+    /// Vision, and that distinction should be regression-testable rather than
+    /// only observable on hardware.
+    static func controlCapabilities(
+        hevc: Bool,
+        av1: Bool,
+        displayHDR: Bool,
+        dolbyVision: Bool
+    ) -> DynamicCapabilities {
+        var codecs: [CodecPolicy] = [.h264]
+        if hevc { codecs.append(.hevc) }
+        if av1 { codecs.append(.av1) }
+        var ranges: [DynamicRangePolicy] = [.sdr]
+        if displayHDR {
+            ranges.append(.hdr10)
+            ranges.append(.hlg)
+        }
+        // The same overclaim guard `query` applies: generic HDR eligibility is
+        // not a Dolby Vision claim, and asserting one on an HDR10-only output
+        // makes the server preserve DV metadata AVPlayer then rejects.
+        if hevc && displayHDR && dolbyVision { ranges.append(.dolbyVision) }
+        return DynamicCapabilities(
+            platform: "apple",
+            // The protocol's own ceiling. This client's capability query has
+            // never declared a height, and a number it cannot actually back
+            // would be a claim rather than a capability.
+            maxHeight: PlaybackControl.maximumHeight,
+            codecs: codecs,
+            dynamicRanges: ranges,
+            dualPlayerPreparation: false
+        )
+    }
+
+    static func controlCapabilities() -> DynamicCapabilities {
+        controlCapabilities(
+            hevc: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
+            av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1),
+            displayHDR: displayIsHDR,
+            dolbyVision: dolbyVisionIsAvailable
+        )
+    }
+
     private static var dolbyVisionIsAvailable: Bool {
         return AVPlayer.availableHDRModes.contains(.dolbyVision)
     }
