@@ -1,0 +1,9 @@
+version = 1
+
+[[coverage]]
+commits = [
+  "bf5baebe",
+]
+points = ["playback.pipeline"]
+checks = ["rust-gate", "rust-gate-ci"]
+reason = "The engine probe's 1 MiB runaway guard was smaller than ffmpeg's own `-h full` listing, so every build from 6.1 on failed the pacing probe and was classified as having no -readrate -- unpaced remux streams and realtime-paced HLS, reported only as \"could not probe ffmpeg\". Two rust-gate tests read through the real subprocess path: one drives a listing of the size class that broke and asserts the caps survive it, the other asserts one byte past the bound is still refused and that the refusal names the bound, so neither lowering the constant nor disabling the guard passes."
