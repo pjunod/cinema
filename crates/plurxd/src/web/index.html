@@ -855,6 +855,9 @@
     font-size:11.5px;font-weight:500;line-height:1.35;overflow-wrap:anywhere}
   .clid{margin-top:3px;color:var(--muted);font-family:ui-monospace,"JetBrains Mono",Menlo,Consolas,monospace;
     font-size:10.5px;font-weight:400;line-height:1.35;word-break:break-all}
+  /* The same idea one table row deep: the machine name leads, the id keeps its
+     own treatment underneath instead of disappearing into a tooltip. */
+  .clnode{font-weight:600;line-height:1.3;overflow-wrap:anywhere}
   .clleader{color:var(--accent);border-color:var(--accent)}
   .clopshead{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;flex-wrap:wrap}
   .clopsfacts{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px 14px;margin:12px 0 4px}
@@ -10563,21 +10566,27 @@ function activityNodeStatusText(status){
 // A node id is stable but names nothing: nobody recognizes a machine from
 // `5deeeebc-…`. The response carries the roster's id -> short-hostname map, so
 // every node the page mentions is labelled with the name its operator uses at a
-// shell, keeping the id as the copyable detail behind it. The map is passed in
-// rather than kept in a module variable so a snapshot that arrives without one
-// (a non-admin read, a roster read that failed) cannot be painted with the
-// names of the snapshot before it.
+// shell. The map is passed in rather than kept in a module variable, so a
+// snapshot that arrives without one (a household member's read, a roster read
+// that failed) cannot be painted with the names of the snapshot before it.
+//
+// Callers guarantee a node id; the map is what may be missing.
 function activityNodeName(names,nodeId){
-  if(!nodeId) return "";
   const name=names&&names[nodeId];
   return typeof name==="string"&&name?name:nodeId;
 }
+// The id stays on the page in the same `.clid` treatment it has always had —
+// visible, selectable, and read aloud — with the machine name added above it.
+// A tooltip would have been shorter and would have taken the id away from
+// touch, from selection, and from assistive technology, which is the opposite
+// of what the cluster page's own design note asks for: lead with the short
+// hostname, keep the node id as a copyable detail.
 function activityNodeCell(names,nodeId){
   if(!nodeId) return `<span class="clid">Unknown</span>`;
   const name=activityNodeName(names,nodeId);
   return name===nodeId
     ? `<span class="clid">${esc(nodeId)}</span>`
-    : `<span title="Node ID ${esc(nodeId)}">${esc(name)}</span>`;
+    : `<div class="clnode">${esc(name)}</div><div class="clid">${esc(nodeId)}</div>`;
 }
 function activityNodeFailureText(node,names){
   const name=node.node_id?`Node ${activityNodeName(names,node.node_id)}`:"The cluster peer directory";

@@ -121,11 +121,17 @@ async function test(name, run) {
   finished += 1;
 }
 
-test("the Node cell names the machine, and demotes the id to the tooltip", () => {
+test("the Node cell leads with the machine name and keeps the id under it", () => {
   const html = paint(snapshot({ node_hostnames: { [NODE_A]: "nuc3" } }));
-  assert.match(html, /<td><span title="Node ID 5deeeebc-8f39-4cb5-8e4a-aa5f912f327f">nuc3<\/span><\/td>/);
-  // The defect this file exists for: the id must not be what the operator reads.
-  assert.doesNotMatch(html, /<span class="clid">5deeeebc/);
+  assert.match(
+    html,
+    /<td><div class="clnode">nuc3<\/div><div class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/div><\/td>/,
+  );
+  // The defect this file exists for: the id must not be the whole answer.
+  assert.doesNotMatch(html, /<td><span class="clid">5deeeebc/);
+  // …and it must not be the *only* answer either. A tooltip would take the id
+  // away from touch, from selection, and from assistive technology.
+  assert.doesNotMatch(html, /title="Node ID/);
 });
 
 test("without a roster map the cell still shows the id it always showed", () => {
@@ -140,8 +146,8 @@ test("a node the roster could not name keeps its id while its neighbours are nam
     Object.assign({}, d.deliveries[0], { node_id: NODE_B, file_id: 2, user: "guest" }),
   );
   const html = paint(d);
-  assert.match(html, />nuc3</);
-  assert.match(html, /<span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span>/);
+  assert.match(html, /<div class="clnode">nuc3<\/div>/);
+  assert.match(html, /<td><span class="clid">9a1c77e2-0000-4000-8000-aa5f912f327f<\/span><\/td>/);
 });
 
 test("the Node column still appears on ids alone, and disappears without them", () => {
@@ -192,12 +198,30 @@ test("the peer directory keeps its own sentence when no node can be named", () =
   assert.match(html, /The cluster peer directory · directory unavailable/);
 });
 
-test("a hostile hostname is escaped in the text and in the tooltip", () => {
+test("a hostile hostname is escaped", () => {
   const html = paint(
     snapshot({ node_hostnames: { [NODE_A]: '"><img src=x onerror=alert(1)>' } }),
   );
   assert.doesNotMatch(html, /<img src=x/);
   assert.match(html, /&quot;&gt;&lt;img src=x onerror=alert\(1\)&gt;/);
+});
+
+test("a hostile node id is escaped, named or not", () => {
+  // The id is server-generated, but it reaches this cell down the same path as
+  // the peer-reported hostname and is printed in both branches of the cell.
+  const hostile = '"><img src=x onerror=alert(1)>';
+  const named = paint(snapshot({
+    deliveries: [Object.assign({}, snapshot().deliveries[0], { node_id: hostile })],
+    node_hostnames: { [hostile]: "nuc3" },
+  }));
+  assert.doesNotMatch(named, /<img src=x/);
+  assert.match(named, /<div class="clid">&quot;&gt;&lt;img src=x/);
+
+  const unnamed = paint(snapshot({
+    deliveries: [Object.assign({}, snapshot().deliveries[0], { node_id: hostile })],
+  }));
+  assert.doesNotMatch(unnamed, /<img src=x/);
+  assert.match(unnamed, /<span class="clid">&quot;&gt;&lt;img src=x/);
 });
 
 test("a non-string name is refused rather than printed", () => {
@@ -211,13 +235,6 @@ test("names never survive into a snapshot that did not carry them", () => {
   const html = paint(snapshot());
   assert.doesNotMatch(html, /nuc3/);
   assert.match(html, /<span class="clid">5deeeebc-8f39-4cb5-8e4a-aa5f912f327f<\/span>/);
-});
-
-test("the painter reads the map off the snapshot it is painting", () => {
-  const source = shippedSource("paintActivityBody");
-  assert.match(source, /const nodeNames=d\.node_hostnames\|\|\{\}/);
-  // A module-level cache is the bug the test above proves absent; keep it absent.
-  assert.doesNotMatch(SHIPPED_UI, /ACTIVITY_NODE_NAMES/);
 });
 
 let reported = false;
