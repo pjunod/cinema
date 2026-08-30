@@ -172,9 +172,16 @@ pub enum DvConvertError {
     ///   compatibility id 1 and advertises `dvh1.08.06` over an HLG base:
     ///   every frame decoded through PQ where ARIB STD-B67 was meant.
     ///
-    /// So Profile 7 is the only accepted input. Nothing is given up by
-    /// refusing 8: an already-8.1 RPU converts to itself byte for byte, so
-    /// there is no input for which accepting 8 is both necessary and safe.
+    /// So Profile 7 is the only accepted input, and what that costs is one
+    /// real stream: a remux spliced from a Profile 7 source and an already-8.1
+    /// one — or a P7 file some earlier tool converted halfway — now refuses
+    /// where it would previously have converted, because an 8.1 RPU passes
+    /// through byte for byte. That is the trade taken deliberately: a mixed
+    /// stream is rare and its refusal is loud and diagnosable (the error names
+    /// the byte), while an 8.4 source is indistinguishable from an 8.1 one at
+    /// this layer and its acceptance is silent and wrong on every frame. A
+    /// caller that wants the spliced case back should widen the check with the
+    /// container's compatibility id in hand, not by trusting the RPU.
     #[error("the Dolby Vision RPU at frame {frame} (byte {offset}) declares profile {profile}; this converts profile 7 only, because the RPU alone cannot tell an HDR10 base from an HLG one")]
     UnsupportedProfile {
         frame: u64,
@@ -203,11 +210,30 @@ pub enum DvConvertError {
 /// is not an error: the caller decides whether a source it believed was
 /// Profile 7 having no RPUs is a reason to refuse, and it has the file's
 /// stored facts to decide with, which this function does not.
+///
+/// **On any error `out` is left empty**, not holding the units that converted
+/// before the failure. A refusal happens partway through by construction — the
+/// bad RPU is discovered after its predecessors were written — and a caller
+/// that forwarded the buffer on its error path would publish a stream truncated
+/// mid-frame, which a segmenter will happily index and a player will happily
+/// stall on. The bytes are unrecoverable anyway: the refusal means the stream
+/// cannot be converted, not that some prefix of it can.
 pub fn convert_annex_b(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvConvertError> {
-    let mut report = Converted::default();
     out.clear();
     out.reserve(input.len());
+    match convert_units(input, out) {
+        Ok(report) => Ok(report),
+        Err(error) => {
+            out.clear();
+            Err(error)
+        }
+    }
+}
 
+/// The conversion proper. Separate only so its early returns cannot leave a
+/// half-converted stream behind — see `convert_annex_b`.
+fn convert_units(input: &[u8], out: &mut Vec<u8>) -> Result<Converted, DvConvertError> {
+    let mut report = Converted::default();
     for unit in annex_b_units(input) {
         let AnnexBUnit {
             start_code,
@@ -558,6 +584,49 @@ mod tests {
             matches!(error, DvConvertError::Unreadable { frame: 0, .. }),
             "{error}"
         );
+    }
+
+    /// A refusal leaves nothing behind for a caller to forward by accident.
+    ///
+    /// Refusals happen partway through by construction: the bad RPU is only
+    /// discovered after its predecessors have been written. A caller that
+    /// forwarded `out` on its error path — a cleanup that flushes what it has,
+    /// say — would publish a stream truncated mid-picture, which a segmenter
+    /// indexes without complaint and a player stalls on with nothing to say
+    /// why.
+    #[test]
+    fn a_refusal_leaves_the_output_buffer_empty() {
+        let good: &[u8] = &[0x26, 0x01, 0xaf, 0x12, 0x34, 0x56, 0x78];
+        let mut broken = rpu_bytes();
+        for byte in broken.iter_mut().skip(2) {
+            *byte = 0xff;
+        }
+
+        // Enough good bytes before the failure that a partial write would be
+        // both non-empty and plausible-looking.
+        let stream = annex_b(&[
+            (&[0, 0, 0, 1], good),
+            (&[0, 0, 1], &rpu_bytes()),
+            (&[0, 0, 1], &broken),
+        ]);
+        let mut out = vec![0xab; 64];
+        convert_annex_b(&stream, &mut out).expect_err("must refuse");
+        assert!(
+            out.is_empty(),
+            "a refused conversion published {} bytes",
+            out.len()
+        );
+
+        // The same for the profile refusal, which is the one a real
+        // partially-converted remux would hit.
+        let p81 = DoviRpu::profile81_config(&GenerateConfig::default())
+            .expect("generate")
+            .write_hevc_unspec62_nalu()
+            .expect("write");
+        let mixed = annex_b(&[(&[0, 0, 1], &rpu_bytes()), (&[0, 0, 1], &p81)]);
+        let mut out = Vec::new();
+        convert_annex_b(&mixed, &mut out).expect_err("a spliced stream is refused");
+        assert!(out.is_empty());
     }
 
     /// A refusal names the byte it happened at, not only the RPU ordinal.

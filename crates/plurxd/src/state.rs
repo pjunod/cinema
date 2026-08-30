@@ -3433,6 +3433,16 @@ impl JobManager {
     /// input to `copy_video_args`, so rewriting one re-keys that file's
     /// fragment index and orphans what was built. Comparing first makes the
     /// common case structurally free instead of empirically free.
+    ///
+    /// `bl_compat_id` is now an input to `copy_video_args` too — it is what
+    /// `transcode::dolby_vision_has_compatible_base` reads before the label —
+    /// and this backfill writes the columns unconditionally. That is free only
+    /// while the stored label is the one `scan::probe::dolby_vision_label`
+    /// derives from those same columns, so the two answers move together and
+    /// a rewritten column cannot change the argv on its own. `probe.rs`'s
+    /// `the_derived_label_is_the_label_the_scan_used_to_write` is what holds
+    /// that; if the label's marker mapping and the compatibility-id set ever
+    /// drift apart, this becomes a re-key of every Dolby Vision row.
     async fn backfill_dolby_vision_facts(self: Arc<Self>) {
         const BACKFILL_PER_TICK: i64 = 256;
 

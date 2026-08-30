@@ -4910,6 +4910,15 @@ mod startup_tests {
         assert_eq!(system.ffmpeg, "/opt/jellyfin-ffmpeg/ffmpeg");
         assert_eq!(system.encoder_selected, selected);
         assert_eq!(system.hwaccel_pref, "auto");
+        // The record has to carry the switch's answer, not a literal. A test
+        // suite that only covers `dv_convert_enabled` leaves the wire between
+        // it and this record uncovered: replacing the call with `true` would
+        // pass everything else and quietly ignore the operator.
+        assert_eq!(
+            system.dolby_vision_convert,
+            dv_convert_enabled(std::env::var("PLURX_DV_CONVERT").ok().as_deref()),
+            "the reported conversion state is the one the switch decides"
+        );
         assert!(system.dovi_rpu);
         assert!(system.dovi_reshape);
         assert!(system.pacing.readrate);

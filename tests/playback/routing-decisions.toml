@@ -40,7 +40,7 @@ id = "server.dolby-vision-convert"
 source = "crates/plurx-core/src/playback/mod.rs"
 source_anchor = "pub fn dolby_vision_converts_to_p81("
 test = "crates/plurx-core/src/playback/mod.rs"
-test_anchor = "only_a_client_that_takes_eight_but_not_seven_gets_a_converted_stream"
+test_anchor = "the_conversion_reads_the_stored_columns_not_only_the_label"
 
 [[decisions]]
 id = "server.dolby-vision"

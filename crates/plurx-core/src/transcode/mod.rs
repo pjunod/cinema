@@ -3706,6 +3706,112 @@ mod index_pipe_tests {
         );
     }
 
+    /// The marker follows the source, not the flag.
+    ///
+    /// It reserves a fragment-index identity, so the rule is that two argvs
+    /// differ exactly when the bytes they produce differ. Two shapes get that
+    /// wrong in opposite directions, and neither is reachable through today's
+    /// decider — which is the reason to hold the invariant in the builder
+    /// rather than rely on the decider to keep holding it.
+    #[test]
+    fn the_conversion_marker_tracks_the_source_and_not_the_flag() {
+        let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
+        let carries = |file: &MediaFile, options| {
+            copy_video_args(file, options)
+                .iter()
+                .any(|arg| arg == DV_CONVERT_MARKER)
+        };
+
+        // Plain HDR10 HEVC: there is no Dolby Vision to convert, so a set flag
+        // must not earn a third index identity for a pipeline byte-identical
+        // to the second.
+        let mut hdr10 = hevc_dv();
+        hdr10.hdr = Some("hdr10".into());
+        hdr10.hdr_format = Some("HDR10".into());
+        assert!(!carries(&hdr10, convert));
+        assert_eq!(
+            crate::segplan::argv_fingerprint(&copy_video_args(&hdr10, convert)),
+            crate::segplan::argv_fingerprint(&copy_video_args(
+                &hdr10,
+                CopyVideoOptions::new(true, true)
+            )),
+            "an unconverted pipeline must not fork an index"
+        );
+
+        // A non-HEVC source: the marker lives outside the HEVC branch, so a
+        // converted identity can never collide with an unconverted one. If it
+        // did, an index built for one would be served for the other.
+        let mut h264 = hevc_dv();
+        h264.video_codec = Some("h264".into());
+        assert!(carries(&h264, convert), "the marker is not HEVC-only");
+        assert_ne!(
+            crate::segplan::argv_fingerprint(&copy_video_args(&h264, convert)),
+            crate::segplan::argv_fingerprint(&copy_video_args(
+                &h264,
+                CopyVideoOptions::new(true, true)
+            )),
+            "a converting copy must never share an identity with a plain one"
+        );
+    }
+
+    /// The sample entry and the bitstream filter come from the stored columns,
+    /// not only from the label.
+    ///
+    /// The two facts answer one question — is this Dolby Vision's base layer
+    /// watchable — and `playback` has read the column first since M2. When
+    /// this side read only the label, a row with the columns populated and no
+    /// label diverged: the decider called the base HDR10-compatible and routed
+    /// a preserving copy, while this builder took the Profile 5 branch and
+    /// rendered `-tag:v dvh1` with **no `-bsf:v` at all**, so NAL types 32-34
+    /// went unfiltered and the `hvc1` boundary-stutter fix was silently off.
+    #[test]
+    fn a_column_only_source_row_renders_the_compatible_base_arguments() {
+        let row = |compat: Option<i64>, label: Option<&str>| {
+            let mut file = hevc_dv();
+            file.hdr_format = label.map(str::to_owned);
+            file.dolby_vision.profile = Some(7);
+            file.dolby_vision.bl_compat_id = compat;
+            file
+        };
+        let preserving = CopyVideoOptions::new(true, true);
+
+        // 1 and 6 are HDR10 bases and 4 is HLG; all three are watchable
+        // without a Dolby Vision decoder, which is what the tag and the filter
+        // turn on. No label at all, so only the column can answer.
+        for compat in [1, 4, 6] {
+            let rendered = copy_video_args(&row(Some(compat), None), preserving).join(" ");
+            assert!(
+                rendered.contains("-tag:v hvc1"),
+                "compatibility id {compat} is a watchable base: {rendered}"
+            );
+            assert!(
+                rendered.contains("-bsf:v filter_units=remove_types=32-34"),
+                "…so the parameter-set filtering must still run: {rendered}"
+            );
+        }
+
+        // 2 is an SDR base and 0 is none: neither is watchable, so preserved
+        // Dolby Vision keeps the `dvh1` entry and skips the filter, exactly as
+        // Profile 5 does.
+        for compat in [0, 2] {
+            let rendered = copy_video_args(&row(Some(compat), None), preserving).join(" ");
+            assert!(
+                rendered.contains("-tag:v dvh1"),
+                "compatibility id {compat} has no watchable base: {rendered}"
+            );
+            assert!(!rendered.contains("-bsf:v"), "{rendered}");
+        }
+
+        // The column outranks the label, in both directions. A row where they
+        // disagree cannot be produced by today's scanner — the label is
+        // derived from these same columns — but the precedence has to match
+        // `playback`'s or the decider and the builder describe two streams.
+        let contradicted = copy_video_args(&row(Some(2), Some("HDR10-compatible")), preserving);
+        assert!(contradicted.join(" ").contains("-tag:v dvh1"));
+        let rescued = copy_video_args(&row(Some(1), Some("Dolby Vision · Profile 5")), preserving);
+        assert!(rescued.join(" ").contains("-tag:v hvc1"));
+    }
+
     /// A converting copy preserves the RPUs it converts.
     ///
     /// The trap this closes: the decider reaches the conversion through a
