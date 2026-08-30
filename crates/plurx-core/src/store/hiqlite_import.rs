@@ -1874,6 +1874,22 @@ fn value_projection(table: TablePlan, schema_version: i64, qualify: bool) -> Str
                 && schema_version < 35
             {
                 "0".to_owned()
+            } else if table.name == "files"
+                && matches!(
+                    *column,
+                    "dv_profile"
+                        | "dv_level"
+                        | "dv_bl_compat_id"
+                        | "dv_el_present"
+                        | "dv_rpu_present"
+                )
+                && schema_version < 38
+            {
+                // The backup is opened read-only and never migrated, so a
+                // source below v38 has no such column to select. NULL is also
+                // the honest value: the destination's own backfill will fill
+                // it in from the probe JSON that comes across with the row.
+                "NULL".to_owned()
             } else if table.name == "items"
                 && matches!(
                     *column,
@@ -2094,6 +2110,35 @@ mod tests {
         assert!(current.ends_with(
             "artwork_error, genres, author, book_work_id, book_edition_id, book_metadata_source"
         ));
+    }
+
+    /// A backup taken before the Dolby Vision columns existed still imports.
+    ///
+    /// The import opens the source read-only and never migrates it, and it
+    /// accepts every schema back to `MINIMUM_IMPORT_SCHEMA_VERSION` — so a
+    /// column added to the plan without a projection arm turns the whole
+    /// clustering import into `no such column`, on the one path an operator
+    /// takes exactly once and cannot retry differently.
+    #[test]
+    fn pre_v38_file_projection_supplies_null_dolby_vision_facts() {
+        let table = TABLES
+            .iter()
+            .find(|table| table.name == "files")
+            .copied()
+            .expect("files table plan");
+        let v37 = value_projection(table, 37, false);
+        let current = value_projection(table, SQLITE_SCHEMA_VERSION, false);
+        assert!(
+            v37.ends_with("hdr_format, audio_offset_ms, NULL, NULL, NULL, NULL, NULL"),
+            "{v37}"
+        );
+        assert!(
+            current.ends_with(
+                "hdr_format, audio_offset_ms, dv_profile, dv_level, dv_bl_compat_id, \
+                 dv_el_present, dv_rpu_present"
+            ),
+            "{current}"
+        );
     }
 
     #[test]

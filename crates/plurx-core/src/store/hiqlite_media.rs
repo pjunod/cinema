@@ -2368,34 +2368,37 @@ impl MediaStore for HiqliteAuthStore {
 
     async fn files_missing_dolby_vision(
         &self,
+        after_id: i64,
         limit: i64,
-    ) -> Result<Vec<(i64, String)>, StoreError> {
+    ) -> Result<Vec<(i64, String, Option<String>)>, StoreError> {
         #[derive(Debug)]
         struct MissingRow {
             id: i64,
             probe_json: String,
+            hdr_format: Option<String>,
         }
         impl From<&mut Row<'_>> for MissingRow {
             fn from(row: &mut Row<'_>) -> Self {
                 Self {
                     id: row.get("id"),
                     probe_json: row.get("probe_json"),
+                    hdr_format: row.get("hdr_format"),
                 }
             }
         }
         Ok(self
             .client()
             .query_consistent_map::<MissingRow, _>(
-                "SELECT id, probe_json FROM files \
+                "SELECT id, probe_json, hdr_format FROM files \
                   WHERE hdr = 'dolby_vision' AND dv_profile IS NULL \
-                    AND probe_json IS NOT NULL \
-                  ORDER BY id LIMIT $1",
-                params!(limit.max(0)),
+                    AND probe_json IS NOT NULL AND id > $1 \
+                  ORDER BY id LIMIT $2",
+                params!(after_id, limit.max(0)),
             )
             .await
             .map_err(database_error)?
             .into_iter()
-            .map(|row| (row.id, row.probe_json))
+            .map(|row| (row.id, row.probe_json, row.hdr_format))
             .collect())
     }
 

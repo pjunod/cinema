@@ -446,8 +446,11 @@ pub fn delivered_dynamic_range(
 /// all. The fallback exists for rows written before the columns did, and can
 /// be deleted once no such row remains.
 pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
-    if let Some(profile) = file.dolby_vision.profile {
-        return u8::try_from(profile).ok();
+    // `and_then`, not an early return: a column outside a profile number's
+    // range is a fact the record got wrong, and the label is still the better
+    // answer for that row rather than nothing at all.
+    if let Some(profile) = file.dolby_vision.profile.and_then(|p| u8::try_from(p).ok()) {
+        return Some(profile);
     }
     let label = file.hdr_format.as_deref()?;
     let after = label.to_ascii_lowercase();
@@ -459,10 +462,10 @@ pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
 /// Does this Dolby Vision source have a base layer a non-DV client can watch?
 ///
 /// The compatibility id says what that client sees: 1 and 6 are HDR10, 4 is
-/// HLG, 2 is SDR and 0 is none. Only the first two are a base worth stripping
-/// to — which is exactly what the label's "(HDR10-compatible)" and
-/// "(HLG-compatible)" markers were derived from, so the column and the
-/// fallback answer the same question from the same fact.
+/// HLG, 2 is SDR and 0 is none. The three HDR ids are a base worth stripping
+/// to; SDR and none are not — which is exactly what the label's
+/// "(HDR10-compatible)" and "(HLG-compatible)" markers were derived from, so
+/// the column and the fallback answer the same question from the same fact.
 fn has_compatible_dv_base(file: &MediaFile) -> bool {
     if let Some(compat) = file.dolby_vision.bl_compat_id {
         return matches!(compat, 1 | 4 | 6);

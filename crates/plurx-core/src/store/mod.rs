@@ -477,6 +477,11 @@ pub mod keys {
     /// unchanged files, so without a backfill an existing library would never
     /// gain the columns short of a destructive re-add.
     pub const JOB_DV_BACKFILL_DONE: &str = "jobs.dv_facts_backfilled";
+    /// How far this node's Dolby Vision backfill has walked. Node-local, and
+    /// strictly-after: a row this pass cannot fix — a Dolby Vision codec tag
+    /// whose stored probe has no configuration record — would otherwise sit at
+    /// the front of every window forever, hiding every fixable row behind it.
+    pub const JOB_DV_BACKFILL_CURSOR: &str = "jobs.dv_facts_backfill_cursor";
 }
 
 #[async_trait]
@@ -895,16 +900,19 @@ pub trait MediaStore: Send + Sync + 'static {
     /// Persist a manual A/V sync correction for one file (0 clears it).
     async fn set_file_audio_offset(&self, file_id: i64, offset_ms: i64) -> Result<(), StoreError>;
     /// Dolby Vision files whose configuration columns are still empty, with
-    /// the probe JSON to fill them from — id first, lowest first, bounded.
+    /// the probe JSON to fill them from and the display label they currently
+    /// carry — strictly after `after_id`, lowest first, bounded.
     ///
-    /// The M2 backfill's input. A row appears here when `hdr` says Dolby
-    /// Vision, `dv_profile` is null and there is stored probe JSON to read;
-    /// it stops appearing once the columns are written, so an empty answer is
-    /// the backfill's own completion signal rather than a separate count.
+    /// The M2 backfill's input, and the cursor is what makes it terminate.
+    /// Some of these rows can never be fixed — a Dolby Vision codec tag whose
+    /// stored probe has no configuration record in it needs a real re-probe,
+    /// not a re-read — and without a cursor they stay in the answer forever,
+    /// re-read every tick, hiding every fixable row behind them.
     async fn files_missing_dolby_vision(
         &self,
+        after_id: i64,
         limit: i64,
-    ) -> Result<Vec<(i64, String)>, StoreError>;
+    ) -> Result<Vec<(i64, String, Option<String>)>, StoreError>;
     /// Write one file's Dolby Vision columns, and the display label derived
     /// from them.
     ///

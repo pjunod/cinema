@@ -10493,11 +10493,11 @@ async fn dolby_vision_facts_round_trip_and_the_backfill_finds_what_it_needs() {
             .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
 
         let missing = store
-            .files_missing_dolby_vision(16)
+            .files_missing_dolby_vision(0, 16)
             .await
             .unwrap_or_else(|error| panic!("{backend}: list missing: {error}"));
         assert_eq!(
-            missing.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            missing.iter().map(|(id, _, _)| *id).collect::<Vec<_>>(),
             vec![legacy],
             "backend {backend}: only the row with no facts is pending, and the \
              one that already has them is not"
@@ -10537,11 +10537,63 @@ async fn dolby_vision_facts_round_trip_and_the_backfill_finds_what_it_needs() {
         );
         assert!(
             store
-                .files_missing_dolby_vision(16)
+                .files_missing_dolby_vision(0, 16)
                 .await
                 .unwrap_or_else(|error| panic!("{backend}: list again: {error}"))
                 .is_empty(),
             "backend {backend}: an empty answer is how the backfill knows to stop"
+        );
+
+        // The cursor is what makes the walk terminate. A row this pass cannot
+        // fix stays selectable forever without it, so the query has to be able
+        // to start strictly after any id.
+        let unfixable = store
+            .upsert_file(
+                item,
+                "/dv/no-record.mkv",
+                3_000,
+                30,
+                &ProbeResult {
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    hdr: Some("dolby_vision".into()),
+                    hdr_format: Some("Dolby Vision".into()),
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: unfixable file: {error}"));
+        assert_eq!(
+            store
+                .files_missing_dolby_vision(0, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list unfixable: {error}"))
+                .len(),
+            1,
+            "backend {backend}"
+        );
+        assert!(
+            store
+                .files_missing_dolby_vision(unfixable, 16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list past cursor: {error}"))
+                .is_empty(),
+            "backend {backend}: a row the walk has passed must not come back"
+        );
+
+        // And the label it reports is the one it would be asked to replace —
+        // the backfill compares against it so a label that is already right
+        // is not rewritten, which would re-key the file's fragment index for
+        // nothing.
+        let listed = store
+            .files_missing_dolby_vision(0, 16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list for label: {error}"));
+        assert_eq!(
+            listed.first().and_then(|(_, _, label)| label.as_deref()),
+            Some("Dolby Vision"),
+            "backend {backend}"
         );
     })
     .await;

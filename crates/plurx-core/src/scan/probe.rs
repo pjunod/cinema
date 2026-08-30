@@ -284,9 +284,6 @@ fn detect_hdr(stream: &Value) -> Option<String> {
     }
 }
 
-/// A richer, human HDR label for display — the Dolby Vision profile number and
-/// compatibility, HDR10+ vs HDR10, HLG. Parallels [`detect_hdr`] (which stays
-/// coarse for the decision engine); returns None for SDR.
 /// The Dolby Vision configuration record on this stream, if ffprobe emitted
 /// one.
 ///
@@ -339,6 +336,14 @@ pub(crate) fn dolby_vision_label(facts: &DolbyVisionFacts) -> String {
     label
 }
 
+/// A richer, human HDR label for display — the Dolby Vision profile number and
+/// compatibility, HDR10+ vs HDR10, HLG. Parallels [`detect_hdr`] (which stays
+/// coarse for the decision engine); returns None for SDR.
+///
+/// Since M2 the Dolby Vision half is derived from
+/// [`detect_dolby_vision`]'s facts rather than assembled inline, so the string
+/// a viewer reads and the numbers the decider uses cannot describe different
+/// files.
 fn detect_hdr_format(stream: &Value) -> Option<String> {
     let side = stream.get("side_data_list").and_then(|v| v.as_array());
 
@@ -558,6 +563,50 @@ mod tests {
                           "color_transfer": "smpte2084" }]
         });
         assert!(parse_probe_json(&j).dolby_vision.is_empty());
+    }
+
+    /// The derived label is the label, byte for byte.
+    ///
+    /// It has to be. `hdr_format` is an input to `copy_video_args`, which
+    /// feeds the fragment index's argv fingerprint, so a re-worded label
+    /// re-keys every affected file's index and orphans what was built. The
+    /// backfill compares before it writes for the same reason; this is what
+    /// makes that comparison usually come out equal.
+    #[test]
+    fn the_derived_label_is_the_label_the_scan_used_to_write() {
+        for (profile, compat, expected) in [
+            (
+                Some(7),
+                Some(6),
+                "Dolby Vision · Profile 7 (HDR10-compatible)",
+            ),
+            (
+                Some(8),
+                Some(1),
+                "Dolby Vision · Profile 8 (HDR10-compatible)",
+            ),
+            (
+                Some(7),
+                Some(4),
+                "Dolby Vision · Profile 7 (HLG-compatible)",
+            ),
+            (Some(5), Some(0), "Dolby Vision · Profile 5"),
+            (Some(5), None, "Dolby Vision · Profile 5"),
+            (Some(4), Some(2), "Dolby Vision · Profile 4"),
+            (None, Some(6), "Dolby Vision (HDR10-compatible)"),
+            (None, None, "Dolby Vision"),
+        ] {
+            let facts = DolbyVisionFacts {
+                profile,
+                bl_compat_id: compat,
+                ..DolbyVisionFacts::default()
+            };
+            assert_eq!(
+                dolby_vision_label(&facts),
+                expected,
+                "{profile:?}/{compat:?}"
+            );
+        }
     }
 
     #[test]

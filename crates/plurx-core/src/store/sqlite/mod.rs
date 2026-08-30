@@ -1846,6 +1846,21 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("files table");
+        // The two spellings of the same migration must not drift. The
+        // replicated backend runs one statement per transaction entry and
+        // rusqlite refuses a multi-statement `execute`, so the DDL exists as a
+        // list and as a batch; the single-node list is append-only, which
+        // makes a divergent edit unfixable once shipped.
+        assert_eq!(
+            super::super::FILES_DOLBY_VISION_COLUMNS
+                .iter()
+                .map(|statement| format!("{statement};"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            super::super::FILES_DOLBY_VISION_COLUMNS_BATCH.trim(),
+            "the per-statement and batch spellings of the Dolby Vision \
+             migration have drifted"
+        );
         for column in [
             "dv_profile",
             "dv_level",

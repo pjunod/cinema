@@ -1413,19 +1413,25 @@ impl MediaStore for SqliteStore {
 
     async fn files_missing_dolby_vision(
         &self,
+        after_id: i64,
         limit: i64,
-    ) -> Result<Vec<(i64, String)>, StoreError> {
+    ) -> Result<Vec<(i64, String, Option<String>)>, StoreError> {
         self.with_conn(move |conn| {
             let mut statement = conn.prepare(
-                "SELECT id, probe_json FROM files
+                "SELECT id, probe_json, hdr_format FROM files
                   WHERE hdr = 'dolby_vision'
                     AND dv_profile IS NULL
                     AND probe_json IS NOT NULL
+                    AND id > ?1
                   ORDER BY id
-                  LIMIT ?1",
+                  LIMIT ?2",
             )?;
-            let rows = statement.query_map(params![limit.max(0)], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            let rows = statement.query_map(params![after_id, limit.max(0)], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
             })?;
             Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
         })

@@ -344,6 +344,13 @@ pub struct FileDto {
     pub hdr: Option<String>,
     /// Rich HDR label for display ("Dolby Vision · Profile 7 (HDR10-compatible)").
     pub hdr_format: Option<String>,
+    /// The Dolby Vision profile as a number, from the configuration record
+    /// rather than parsed back out of the label above. Absent for a non-DV
+    /// file, and for a row the backfill has not reached — which is the state
+    /// the label cannot express, since a scan that saw no record writes the
+    /// bare string "Dolby Vision" and no profile at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dv_profile: Option<i64>,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
@@ -536,6 +543,7 @@ impl FileDto {
             bit_depth: f.bit_depth,
             hdr: f.hdr,
             hdr_format: f.hdr_format,
+            dv_profile: f.dolby_vision.profile,
             bitrate: f.bitrate,
             audio_streams: f.audio_streams,
             subtitle_streams: f.subtitle_streams,

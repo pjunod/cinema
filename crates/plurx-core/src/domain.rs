@@ -417,7 +417,7 @@ pub struct SubtitleStream {
 /// default. A file scanned before these columns existed, or one whose ffprobe
 /// emitted no DOVI record, has to be distinguishable from one that genuinely
 /// reported zero.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 pub struct DolbyVisionFacts {
     /// 4, 5, 7, 8, 9 or 10. The number a client's `dv_profiles` list is
     /// matched against.
@@ -473,7 +473,6 @@ pub struct MediaFile {
     /// The Dolby Vision configuration record's own facts, as columns. Empty
     /// for a non-DV file, and empty for a DV file whose row predates the
     /// backfill — `hdr_format` is the fallback for those.
-    #[serde(default)]
     pub dolby_vision: DolbyVisionFacts,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
