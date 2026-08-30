@@ -56,6 +56,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import tv.plurx.app.data.Caps
+import tv.plurx.app.data.HlsStart
 import tv.plurx.app.data.CreateSessionReq
 import tv.plurx.app.data.ReopenReason
 import tv.plurx.app.data.AudioTrack
@@ -306,6 +308,37 @@ class Controller(
     private val playbackId = UUID.randomUUID().toString()
 
     /**
+     * This player's passive control reporting. Nothing about playback depends
+     * on it: a server that offers no bootstrap leaves it silent.
+     */
+    private val playbackControl = PlaybackControlSession(scope)
+
+    /**
+     * When the player began buffering, or null while it is not. The protocol
+     * separates waiting from stalled by how long, and Media3 reports only that
+     * it is buffering.
+     */
+    private var controlWaitingSince: Long? = null
+
+    /**
+     * What this device can take, resolved once. `Caps.query` probes the
+     * decoder registry and suspends, and the answer does not change while a
+     * player exists — so asking it per snapshot would be both illegal here and
+     * wasteful.
+     */
+    private var deviceControlCapabilities: DynamicCapabilities? = null
+
+    /**
+     * Resolved once, here, because `Caps.query` probes the decoder registry
+     * and suspends while `context` is only reachable from an initializer. The
+     * answer cannot change while a player exists, so asking per snapshot would
+     * be both illegal and wasteful.
+     */
+    private val controlCapabilityProbe: Job = scope.launch {
+        deviceControlCapabilities = controlCapabilities(Caps.query(context))
+    }
+
+    /**
      * The open session is the whole stream on disk (a pre-transcode cache
      * hit): its timeline starts at zero, so it seeks in place rather than
      * churning a server session per scrub.
@@ -461,6 +494,7 @@ class Controller(
         pgsOverlay.select(selectedSubtitle.takeIf { subtitleDelivery == SubtitleDelivery.BitmapOverlay })
         stallWatchdogJob = scope.launch {
             while (isActive) {
+                playbackControlPlayerChanged()
                 val measurement = playbackTelemetry.sampleStall(establishedPlayback, monotonicNowMs())
                 if (measurement != null) {
                     onStall(measurement.positionMs)
@@ -541,6 +575,8 @@ class Controller(
         clearStatusPolling()
         pgsOverlay.release()
         stallGuard.invalidateForUserAction()
+        playbackControl.end()
+        controlWaitingSince = null
         sessionId?.let { vm.endHlsSession(it) }
         sessionId = null
 
@@ -708,6 +744,7 @@ class Controller(
                 return@launch
             }
             sessionId = hls.session_id
+            beginPlaybackControl(hls)
             startStatusPolling(hls.session_id)
             // Save this session's resolved height so the stall-reopen budget
             // can compare each stall response against the predecessor rung.
@@ -824,6 +861,7 @@ class Controller(
             // the client can compare.
             stallReopenBudget.record(hls.height)
             sessionId = hls.session_id
+            beginPlaybackControl(hls)
             startStatusPolling(hls.session_id)
             encoder = hls.encoder
             sessionIsVod = hls.vod
@@ -1074,6 +1112,117 @@ class Controller(
         if (Session.canonicalOrigin(authority) != primary) return null
         val path = uri.encodedPath?.takeIf { it.startsWith('/') } ?: return null
         return uri.encodedQuery?.let { "$path?$it" } ?: path
+    }
+
+    // ---------------------------------------------------- passive control
+
+    /**
+     * Start reporting for a session the server said is controllable.
+     *
+     * A server that sends no bootstrap, or one this client cannot address,
+     * leaves the reporter silent. That is the passive M2 behaviour: playback
+     * does not depend on the control plane and never should.
+     */
+    private fun beginPlaybackControl(hls: HlsStart) {
+        val bootstrap = hls.control
+        if (bootstrap == null || !bootstrap.isValid) {
+            playbackControl.end()
+            return
+        }
+        // Capabilities are the one input that has to be probed rather than
+        // read, and the protocol requires them on the first request of a
+        // generation, so reporting waits for that one probe. Until it lands
+        // the reporter has nothing complete to say.
+        scope.launch {
+            controlCapabilityProbe.join()
+            playbackControl.begin(bootstrap = bootstrap, observe = ::playbackControlObservation)
+        }
+    }
+
+    /**
+     * Everything the mapping needs, read from the player once.
+     *
+     * This is the only place Media3 meets the control protocol, and it is
+     * deliberately all reads: nothing here decides anything, so every rule
+     * that could be wrong lives in [PlaybackControlMapping], where it is
+     * tested.
+     */
+    private fun playbackControlObservation(): PlayerControlObservation? {
+        val capabilities = deviceControlCapabilities ?: return null
+        val position = realPosition()
+        val duration = player.duration
+        // Only the runway *ahead* is protocol runway. Media3's bufferedPosition
+        // is in player time while the protocol wants title time, so the range
+        // is reported from the playhead forward rather than converted with an
+        // offset a copy session's keyframe start would make wrong.
+        val runway = (player.bufferedPosition - player.currentPosition).coerceAtLeast(0L)
+        return PlayerControlObservation(
+            positionMs = position,
+            durationMs = if (duration > 0) duration else 0L,
+            bufferedFromMs = position,
+            bufferedThroughMs = position + runway,
+            rate = player.playbackParameters.speed.toDouble(),
+            isPaused = !player.playWhenReady,
+            isEnded = player.playbackState == Player.STATE_ENDED,
+            // A seek Media3 has accepted but not yet rendered is exactly the
+            // discontinuity the protocol calls seeking.
+            isSeeking = player.isCurrentMediaItemSeekable &&
+                player.playbackState == Player.STATE_BUFFERING &&
+                player.currentPosition != player.contentPosition,
+            hasStarted = establishedPlayback,
+            waitingForMs = controlWaitingSince?.let {
+                (monotonicNowMs() - it).coerceAtLeast(0L)
+            },
+            isLikelyToKeepUp = player.playbackState == Player.STATE_READY,
+            droppedFrames = null,
+            observedDownloadBps = null,
+            selection = playbackControlSelection(),
+            capabilities = capabilities,
+        )
+    }
+
+    /**
+     * What the viewer chose, in the protocol's vocabulary.
+     *
+     * Codec and dynamic range report `auto` on purpose: after `/decision` this
+     * client forces neither, and saying otherwise would tell the server it had
+     * made a choice it has not made.
+     */
+    private fun playbackControlSelection(): ClientSelection {
+        val mode = when {
+            selectedSubtitle == null -> SubtitleMode.OFF
+            subtitleDelivery == SubtitleDelivery.Burn -> SubtitleMode.BURN
+            subtitleDelivery == SubtitleDelivery.BitmapOverlay -> SubtitleMode.OVERLAY
+            else -> SubtitleMode.NATIVE
+        }
+        return ClientSelection(
+            // A picked rung rebuilds this controller rather than being held
+            // as state here, so there is no manual height to report and
+            // inventing one would claim a choice the client is not carrying.
+            quality = QualitySelection.Auto,
+            audioTrack = selectedAudio?.toInt(),
+            subtitle = SubtitleSelection(
+                mode = mode,
+                track = if (mode == SubtitleMode.OFF) null else selectedSubtitle?.toInt(),
+            ),
+            audioOffsetMs = audioOffsetMs,
+            codec = CodecPolicy.AUTO,
+            dynamicRange = DynamicRangePolicy.AUTO,
+        )
+    }
+
+    /**
+     * Called from the tick that already runs every second. The reporter
+     * coalesces, so a notification between exchanges costs nothing but
+     * replaces what the next exchange will carry.
+     */
+    private fun playbackControlPlayerChanged() {
+        if (player.playbackState == Player.STATE_BUFFERING) {
+            if (controlWaitingSince == null) controlWaitingSince = monotonicNowMs()
+        } else {
+            controlWaitingSince = null
+        }
+        playbackControl.playerChanged()
     }
 }
 
