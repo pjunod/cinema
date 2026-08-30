@@ -10781,6 +10781,41 @@ async fn fragment_index_contract_runs_through_dyn_store() {
             "backend {backend}"
         );
 
+        // A Dolby Vision title is asked for as two byte streams -- the
+        // preserved envelope and the strip -- and both have to be answerable
+        // at once. Before M1 the second `put` overwrote the first on every
+        // backend, which is why a DV session never found an index for the
+        // pipeline it had actually requested.
+        let mut second = index.clone();
+        second.source = repiped.clone();
+        second.rows.truncate(1);
+        store
+            .put_fragment_index(42, &second)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: store a second pipeline: {error}"));
+        assert_eq!(
+            store
+                .fragment_index(42, &repiped)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: read the second pipeline: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the second pipeline it just stored"))
+                .rows
+                .len(),
+            1,
+            "backend {backend}"
+        );
+        assert_eq!(
+            store
+                .fragment_index(42, &identity)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: reread the first pipeline: {error}"))
+                .unwrap_or_else(|| panic!("{backend}: the first pipeline must still be there"))
+                .rows
+                .len(),
+            2,
+            "backend {backend}: storing one pipeline must not evict another"
+        );
+
         assert!(
             store
                 .forget_fragment_index(42)

@@ -305,7 +305,7 @@ test_anchor = "testDeliveryStarvationNeverFiresOnAHealthyBufferedPlayer"
 id = "apple.build-65-release-claims"
 commits = ["9989092"]
 source = "docs/APPLE-CLIENT-PARITY.md"
-source_anchor = "source is v0.2.7, Apple build"
+source_anchor = "source is v0.2.8, Apple build"
 test = "tests/operations/test_mobile_build_claims.py"
 test_anchor = "test_repository_build_claims_match_release_inputs"
 
@@ -417,7 +417,7 @@ test_anchor = "resetForUserActionResetsBudgetAndAdvancesSequence"
 id = "android.merge-resolution-fix"
 commits = ["4c9d964"]
 source = "clients/android/README.md"
-source_anchor = "**v0.2.7**, build"
+source_anchor = "**v0.2.8**, build"
 test = "tests/validation/test_history.py"
 test_anchor = "test_client_anchor_survives_a_non_corrective_squash_title"
 

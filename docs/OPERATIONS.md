@@ -323,10 +323,47 @@ quorum-confirmed commit watermark against this node's applied index, apply lag,
 how far behind the projection says this node is, when convergence was last
 positively observed, snapshot and WAL health, the active protocol range, and
 how old the readings themselves are. **Cluster nodes** is the machines carrying
-it. **Maintenance** holds the restart-readiness verdict, planned work, and the
-Danger zone that mints join tokens and removes members. **Troubleshooting**
-holds the cluster log, the quorum and sample readings, and the last refusal,
-one tab at a time.
+it, with the restart-readiness verdict beneath them because it names one of
+them. **Maintenance** is the operations rail. **Troubleshooting** holds the
+cluster log, the quorum and sample readings, and the last refusal, one tab at
+a time.
+
+#### The operations rail
+
+**Maintenance** lists every action this screen can take with its precondition
+already evaluated, so a refusal is something you read while deciding rather
+than a paragraph that arrives after the click. Each row is marked **Ready**,
+**Blocked** or **Permanent**, and a blocked row says which preflight failed:
+a learner that is caught up but whose data root has not proved the voter
+reserve, an election with no caught-up follower to campaign, a voter removal
+below the three voters the server requires, a lifecycle change already in
+flight on a named node, or a recovery that has locked membership entirely. A
+blocked maintenance row names the blocker the preflight actually returned
+rather than a plausible one — that verdict fails for a dozen different reasons
+and only two of them are about quorum.
+
+The rail never widens what the server allows — it reports the same conditions
+the endpoints enforce, from the roster and the direct status. Two of them it
+cannot see: whether a node still owns unresolved offline work, and whether
+every binary understands the current membership fences. Those are still
+answered by the server when you act, and the answer lands in
+**Troubleshooting → Refusals**.
+
+**Add a node** and **Leave this cluster** carry their own controls, as an
+expansion of the row that states the precondition. Opening Add reveals the
+token lifetime, the role, and the mint button; the credential then appears in
+that same place and nowhere else, because a join token is shown exactly once
+and two surfaces that mint one are two surfaces to leak it from. Whether a row
+is expanded is held for as long as the panel is on screen and is never written
+to browser storage, so a fresh page always starts collapsed and a status
+refresh cannot pull the panel shut while you are reading a token. Both rows
+carry a precondition. Adding is blocked by a recovery that has locked
+membership or a lifecycle change already in flight; leaving is blocked by that
+same recovery, by an active maintenance fence anywhere in the cluster, and — for
+a voter — by the three-voter bar the server holds a self-leave to, which is the
+same arithmetic the Remove row reports. A blocked row has no expansion at all,
+so the blocked reason is the whole row rather than a disabled control you have
+to open to discover.
 
 A machine that is not in a cluster gets a shorter version of the same tab:
 the banner, a **Replicated database** section that names the backend and says
@@ -334,6 +371,14 @@ there are no peers, and **Troubleshooting**. There is no roster, no
 restart-readiness verdict and no maintenance section, because none of them
 describe a single machine — and eleven `unknown` rows would read as a failed
 read rather than as an install with no Raft in it.
+
+The node list is a fixed-height scroller on a window with room for one, so
+opening and closing cards changes what is in the list and nothing else on the
+page. Before that it moved every section below it by as much as 1259px on a
+four-node cluster, and left the store's column that much shorter than the
+machines'. Its height is the height of the list with every card closed, capped
+by the window, so a collapsed roster does not sit above a box of nothing.
+Below three nodes it keeps its natural height instead.
 
 Both **Replicated database** and the node cards fold. The database section
 keeps its health pill and a one-line summary — leader, term, commit, applied,
@@ -349,6 +394,41 @@ a node drain.
 The cluster-wide operational verdict and its quorum/build/sample facts sit in
 **Maintenance** rather than beside the roster, because they authorize one
 cluster action, not one machine in isolation.
+
+#### What the tab refreshes, and when
+
+The committed roster and the direct all-voter status are two different reads
+with two different costs, and the tab treats them that way. The roster is
+refetched every two seconds only while something is in flight — a node in
+maintenance, or a recovery in progress. The direct status behind every rail
+verdict, every node card's Operations group, and the ledger's Raft, WAL,
+snapshot and protocol readings is collected at most every fifteen seconds for
+as long as the tab is visible: it probes every voter, so it is not a
+two-second reading, and the restart-preparation flow that does need one keeps
+its own poll. Nothing is collected while the tab is hidden, nothing is
+collected at all on a machine that is not in a cluster, and a probe slower than
+the interval is never overlapped. A refused collection retries at the next
+interval rather than the next tick.
+
+A collection is not a redraw. The panel repaints only when something it
+actually shows has changed. The comparison excludes the ages in the payload, so
+time passing on its own never rewrites the screen — but a cluster that is
+committing writes is genuinely changing what the ledger reports, and there the
+tab will repaint about as often as it collects. That is intended, so a repaint
+has to be survivable: the roster's scroll position, any open **WAL, snapshot,
+and protocol details**, and every control you have touched — the token's
+lifetime and role, the log level, the auto-refresh box — are all put back
+afterwards, and a repaint is deferred entirely while a dialog is open — the
+sample is held rather than stored, so what the panel holds is always what it
+painted, and the repaint is paid on the next collection after you close it. Between repaints the **Reading
+age** row is updated in place, because the one row whose job is freshness must
+not be the row that goes stale. Text selection is the one thing that cannot
+survive the rewrite, which is why repaints are driven by change and not by the
+clock.
+
+The restart-preparation poll is the exception: while a preparation is active it
+repaints every two seconds regardless, because the drain countdown is the whole
+point of that view. It defers under a dialog like everything else.
 
 ### Planned node maintenance — fence, drain, update, resume
 
@@ -505,9 +585,9 @@ in its own 2,000-line process-local ring. Those events do not consume the
 general Settings → System log ring; cluster warnings and errors still reach
 stdout/journald so a startup failure remains visible without the web UI.
 
-**Add a node** mints one token through the role's distinct endpoint: voters use
-`POST /api/v1/cluster/join-tokens`, while read workers use
-`POST /api/v1/cluster/learner-join-tokens`. The panel displays it exactly once,
+**Add a node** — the rail row, expanded — mints one token through the role's
+distinct endpoint: voters use `POST /api/v1/cluster/join-tokens`, while read
+workers use `POST /api/v1/cluster/learner-join-tokens`. It is displayed exactly once,
 with a lifetime you pick between 10 minutes and 1 hour. plurx keeps only its
 digest, so the browser is the only copy: the panel never writes it to browser
 storage, a URL, or a log, and it is dropped when you leave the tab. Everything

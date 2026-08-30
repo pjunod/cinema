@@ -887,7 +887,31 @@
      exactly one of them. */
   .cluster-board{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.05fr);gap:16px;align-items:start}
   .cluster-board.clsolo{grid-template-columns:1fr}
-  .clcolumn{min-width:0}
+  .clcolumn{min-width:0;display:grid;gap:16px;align-content:start}
+  /* The roster is the one part of this screen that changes size while you use
+     it: opening a node card used to move every section below it by as much as
+     1259px, and left the store's column 1259px shorter than the machines'.
+     Capping the list turns it into a scroller whose height no longer depends
+     on what is expanded, so the page stops moving and the two columns end up
+     the same length. Narrow or short windows keep the ordinary page scroll —
+     a phone has no room to give a nested one. */
+  @media(min-width:1100px) and (min-height:720px){
+    /* Fixed, not capped: a maximum still shrinks when every card is closed,
+       which moves whatever sits below the taller column. Only applied from
+       three nodes up, where the list fills it — a two-node cluster would just
+       get an empty box. */
+    /* Flex, not the grid the unbounded list uses: auto grid rows inside a
+       definite height are compressed to fit, and .clnode hides its overflow,
+       so every expanded card silently lost its body. */
+    .clnodes.clnodes-capped{display:flex;flex-direction:column;
+      height:min(var(--clnodes-h,570px),max(360px,calc(100vh - 330px)));overflow-y:auto;
+      overscroll-behavior:contain;scrollbar-width:thin;padding-right:3px;
+      scroll-padding-block-end:34px;
+      -webkit-mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent);
+      mask-image:linear-gradient(to bottom,#000 calc(100% - 18px),transparent)}
+    .clnodes.clnodes-capped>.clnode{flex:0 0 auto}
+    .clnode{scroll-margin:6px 0 34px}
+  }
   /* What a folded database section still says. Collapsing hides the detail,
      never the verdict: the health pill stays in the header and this line keeps
      the readings somebody checks before expanding it again. */
@@ -915,6 +939,19 @@
   .clcontextfact>span{display:block;color:var(--muted);font-size:10.5px;margin-bottom:4px}
   .clcontextfact>b{display:block;font-size:12.5px;line-height:1.45;color:var(--text)}
   .clcontextfact>small{display:block;margin-top:4px;color:var(--muted);font-size:10.5px;line-height:1.4}
+  .clrail{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+    border-radius:10px;overflow:hidden;margin-top:12px}
+  .clrailrow{background:var(--panel);padding:11px 13px;display:flex;align-items:flex-start;
+    justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clrailtext{min-width:180px;flex:1 1 240px}
+  .clrailrow .t{font-size:13px;font-weight:650;line-height:1.35}
+  .clrailrow .r{font-size:11.5px;color:var(--muted);line-height:1.5;margin-top:3px}
+  .clrailside{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+  .clrailrow.blocked .t{color:var(--muted)}
+  .clrailrow.destructive{background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
+  .clrailrow.destructive .t{color:var(--bad)}
+  .btn-danger{background:transparent;color:var(--bad);border:1px solid var(--bad)}
+  .btn-danger:hover{background:color-mix(in srgb,var(--bad) 12%,transparent)}
   .clopssummary{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
   .clopssummary .clstate{margin:10px 0 0}
   .clopssummary h4{margin:0 0 3px;font-size:13.5px}
@@ -955,9 +992,8 @@
   .clrecovery .recovery-count{font-size:25px;font-weight:750;color:var(--text);margin:12px 0 2px}
   .clvoters{display:grid;gap:6px;margin:12px 0}
   .clvoter{display:flex;justify-content:space-between;gap:10px;padding:8px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12px}
-  .cldanger{margin-top:0;border:1px solid var(--line);border-radius:10px;background:var(--panel2);padding:0 14px}
-  .cldanger>summary{cursor:pointer;padding:13px 0;font-weight:650;font-size:13px}
-  .cldangerbody{padding:0 0 14px}
+  .clrailpanel{flex-basis:100%;margin-top:11px;padding-top:11px;border-top:1px solid var(--line)}
+  .clrailrow.destructive .clrailpanel{border-top-color:color-mix(in srgb,var(--bad) 35%,var(--line))}
   .cldialog{width:min(540px,calc(100vw - 30px));border:1px solid var(--line);border-radius:13px;background:var(--panel);color:var(--text);padding:0;box-shadow:0 22px 70px #0009}
   .cldialog::backdrop{background:#0009}
   .cldialogbody{padding:20px}
@@ -2997,6 +3033,7 @@ if(window.matchMedia){ try{ window.matchMedia("(prefers-color-scheme: dark)").ad
 <div class="modal" id="modal"><div class="player" id="player"><video id="video" autoplay playsinline x-webkit-airplay="allow"></video><div class="pbar" id="pbar"><div class="ptitle" id="playTitle"></div><div class="row"><button class="pbtn" id="audiobtn" style="display:none" onclick="toggleMenu('audio')">🔊 Audio</button><button class="pbtn" id="subsbtn" style="display:none" onclick="toggleMenu('subs')">💬 Subtitles</button><button class="pbtn" id="qualbtn" title="Playback quality" onclick="toggleMenu('quality')">◆ Quality</button><button class="pbtn" id="syncbtn" title="Audio sync adjustment" onclick="toggleMenu('sync')">⇄ Sync</button><button class="pbtn" id="statsbtn" title="Playback info (i)" onclick="toggleStats()">ⓘ Stats</button><button class="pbtn" id="skipbtn" title="Auto-skip intro & credits" onclick="togglePlayerAutoskip()">⏭ Auto-skip</button><button class="pbtn" id="autonextbtn" title="Auto-play the next episode when one finishes" onclick="togglePlayerAutonext()">▶ Autoplay</button><button class="pbtn" id="apbtn" style="display:none" title="AirPlay">📺 AirPlay</button><button class="pbtn" title="Close (Esc)" onclick="closePlayer()">✕ Close</button></div></div><div class="ptransport" id="ptransport"><button class="picon" id="pbplay" aria-label="Play" title="Play / Pause (space)" onclick="togglePlay()">▶</button><button class="picon nudge" aria-label="Back 10 seconds" title="Back 10s (←)" onclick="nudge(-10)">↺</button><button class="picon nudge" aria-label="Forward 10 seconds" title="Forward 10s (→)" onclick="nudge(10)">↻</button><span class="ptime" id="ptcur" aria-hidden="true">0:00</span><div class="pseek" id="pseek" role="slider" tabindex="0" aria-label="Seek" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-valuetext="0:00"><div class="pseek-buf" id="pseekbuf" aria-hidden="true"></div><div class="pseek-fill" id="pseekfill" aria-hidden="true"></div><div class="pseek-thumb" id="pseekthumb" aria-hidden="true"></div></div><span class="ptime" id="ptdur" aria-hidden="true">0:00</span><button class="picon paud" id="pbaudio" aria-label="Audio track" title="Audio track (a)" style="display:none" onclick="toggleMenu('audio',1)">🔊</button><button class="picon pcc" id="pbsubs" aria-label="Subtitles" title="Subtitles (c)" style="display:none" onclick="toggleMenu('subs',1)">CC</button><button class="picon" id="pbinfo" aria-label="Title info" title="Show title, synopsis & release info" onclick="togglePlayerInfo()">ⓘ</button><button class="picon" id="pbpip" aria-label="Picture in picture" title="Picture-in-picture" style="display:none" onclick="togglePip()">◲</button><button class="picon" id="pbfs" aria-label="Fullscreen" title="Fullscreen (f)" onclick="toggleFullscreen()">⛶</button></div><div class="pinfo" id="pinfo"></div><div class="pskip" id="pskip"></div><div class="ploading" id="ploading"><div class="pspin"></div><div class="ploadText" id="ploadText">Loading…</div><div class="ploadSub" id="ploadSub"></div><div class="ploadAct" id="ploadAct"></div></div><div class="statsov" id="statsov" data-mode="standard"><div class="statshd"><span>Playback info</span><div class="statsmodes" role="radiogroup" aria-label="Playback info size"><button type="button" data-stats-mode="mini" role="radio" onclick="setStatsMode('mini')">Mini</button><button type="button" data-stats-mode="standard" role="radio" onclick="setStatsMode('standard')">Standard</button><button type="button" data-stats-mode="debug" role="radio" onclick="setStatsMode('debug')">Debug</button></div><button class="statsx" aria-label="Close playback info" title="Close (i)" onclick="toggleStats()">✕</button></div><div class="statsbody" id="statsbody"></div></div><div class="pmenu" id="pmenu"></div></div></div>
 <div class="toast" id="toast"></div>
 
+<script src="/assets/cluster-panel.js"></script>
 <script src="/assets/playback-policy.js"></script>
 <script src="/assets/playback-control.js"></script>
 <script src="/assets/reader.js"></script>
@@ -4948,10 +4985,12 @@ function specBlock(f){
   // is deciding whether to use.
   const hlsRow=f.vod_index_status==="indexed"
     ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Fixed, seekable timeline · analysis is ready for this file</span></dd>`
-    : f.vod_index_status==="pending"
-      ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
-      : f.vod_index_status==="unsupported"
-        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
+    : f.vod_index_status==="partial"
+      ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS on some devices</span><span class="mode-detail">Analysis is ready for some of this file's delivery routes but not all — a Dolby Vision device can still fall back to Live HLS until the rest is built</span></dd>`
+      : f.vod_index_status==="pending"
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
+        : f.vod_index_status==="unsupported"
+          ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
@@ -4965,7 +5004,10 @@ function analysisFileControl(f){
   const rebuild=f.vod_index_status==="indexed";
   const unsupported=f.vod_index_status==="unsupported";
   const fileId=exactWireId(f);
-  const state=rebuild?"VOD HLS ready":f.vod_index_status==="unsupported"?"VOD analysis unsupported":"VOD analysis pending";
+  const state=rebuild?"VOD HLS ready"
+    :f.vod_index_status==="unsupported"?"VOD analysis unsupported"
+    :f.vod_index_status==="partial"?"VOD analysis partly built"
+    :"VOD analysis pending";
   return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
     <div class="analysis-brief-head"><div><h2>Content analysis</h2>
       <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>
@@ -10680,7 +10722,10 @@ const SETTINGS_ENDPOINTS={
     if(error&&error.status===401) throw error;
     return {unavailable:true,code:error.code,message:error.message};
   }),
-  clusterOps:()=>api("/cluster/status"),
+  // Stamped here rather than where the value is painted: loadSettingsKey serves
+  // a cached aggregate without a request, and stamping that would let a tab
+  // switch every ten seconds starve the refresh indefinitely.
+  clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
@@ -11341,6 +11386,10 @@ function systemPanel(sys,playbackEvents){
 // SQLite box where the endpoint answers `membership_unavailable`; spending an
 // admin request on every Settings visit to learn that would be noise.
 let CLUSTER_LOADED=false;
+// When /cluster/status last left the server, so the Cluster tab can keep it
+// fresh without a timer of its own. Every path that stores a new aggregate
+// stamps this; the tick reads it. See clusterOpsInterval().
+let CLUSTER_OPS_FETCHED_AT=0;
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -11351,161 +11400,110 @@ let CLUSTER_LEAVING=false;
 // for exactly as long as the panel showing it is on screen, and dropped on tab
 // change and on every re-entry into Settings.
 let CLUSTER_TOKEN=null;
-function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; }
+// Which rail rows have their membership control showing. Module state, never
+// storage: a credential surface must not reopen itself on the next visit, and a
+// fresh page is always collapsed. Because it is state rather than markup, a
+// repaint cannot yank the form shut under someone mid-mint.
+let CLUSTER_RAIL_EXPANDED=[];
+function forgetJoinToken(){ CLUSTER_TOKEN=null; CLUSTER_REFUSAL=null; CLUSTER_RAIL_EXPANDED=[]; }
 async function loadCluster(){
   const generation=PAGE_RENDER_GENERATION;
   SETTINGS_LOADED.delete("cluster"); CLUSTER_LOADED=false;
   await loadSettingsKey("cluster",generation);
   if(settingsCurrent(generation,"cluster")) renderSettings();
 }
-// A Raft majority is floor(n/2)+1, so the number of voters that may be lost is
-// n minus that majority: 1 of 3, 1 of 4, 2 of 5. Said once, here.
-function clusterQuorum(voters){
-  const majority=Math.floor(voters/2)+1;
-  return {majority, tolerates:Math.max(0,voters-majority)};
+// The model in cluster-panel.js never reaches for a global: the shell's own
+// escaping and formatting helpers are passed to it. One `esc` implementation,
+// one escaping contract to review, and the module loads under Node with no
+// setup at all.
+function clenv(){ return {esc,fmtAgo,fmtBytes}; }
+// /cluster/status is a bounded direct fan-out that probes every voter, so it is
+// not a 2s reading. Fifteen seconds is slow enough that the probe cost stays
+// where it was measured and fast enough that a rail row cannot state a verdict
+// off a nine-minute-old sample. The restart flow, which does need 2s freshness,
+// keeps its own poll and stamps this clock as it goes.
+function clusterOpsInterval(){ return 15000; }
+function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
+function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
+// A modal is a decision in progress. renderSettings() rewrites the tab, and the
+// force-election dialog lives in that markup, so repainting under it would close
+// it mid-sentence.
+//
+// What the panel holds in SETTINGS_DATA is therefore exactly what it painted: a
+// sample that arrives while a dialog is open is dropped rather than stored, so
+// the next collection sees the same difference and pays the repaint then. One
+// invariant — never store what you did not paint — instead of a second copy of
+// the payload for the screen to drift from.
+function clusterRepaintDeferred(){
+  return Boolean(document.querySelector(".clusterwrap dialog[open]"));
 }
-// The state banner as sentences rather than as an enum. Pure on purpose: the
-// promise this panel makes is the words, so the words are what gets tested.
-function clusterStateView(cluster){
-  if(cluster&&cluster.unavailable&&cluster.code==="membership_unavailable")
-    return {tone:"calm", title:"Not clustered",
-      body:"This server keeps watch state in its own database and is not part of a cluster. That is the "+
-        "normal setup for a single machine — nothing is missing here and nothing is misconfigured. "+
-        "Clustering is opt-in, and a second server is a deliberate step you can take later."};
-  if(!cluster||cluster.unavailable)
-    return {tone:"warn", title:"Cluster status unavailable",
-      body:"The current membership roster could not be read. This does not mean this server has left its "+
-        "cluster. Keep the available nodes running and retry the roster; if it still fails, read the "+
-        "replicated database section below and inspect the server logs before restarting anything."};
-  const nodes=cluster.nodes||[];
-  const voters=nodes.filter(n=>n.is_voter).length;
-  const learnerNodes=nodes.filter(n=>n.role==="learner"&&!n.is_voter);
-  const learners=learnerNodes.length;
-  const readyLearners=learnerNodes.filter(n=>n.bounded_read_ready).length;
-  const joiningVoters=nodes.filter(n=>n.role==="voter"&&!n.is_voter).length;
-  const catching=learners?` ${learners===1?"One node is":`${learners} nodes are`} `+
-    `${learners===1?"a learner":"learners"}: ${learners===1?"it receives":"they receive"} `+
-    `replication, ${learners===1?"holds":"hold"} no vote, and ${learners===1?"is":"are"} `+
-    `not counted toward quorum. ${readyLearners===1?"One":readyLearners} ${readyLearners===1?"is":"are"} currently ready for `+
-    `bounded reads and declared node-local media work.`:"";
-  const joining=joiningVoters?` ${joiningVoters===1?"One voter is":`${joiningVoters} voters are`} `+
-    `joining and catching up: ${joiningVoters===1?"it has":"they have"} no committed vote yet and `+
-    `${joiningVoters===1?"is":"are"} not counted toward quorum until Raft promotes `+
-    `${joiningVoters===1?"it":"them"}.`:"";
-  if(cluster.availability==="degraded_reconfiguration")
-    return {tone:"warn", title:"Reconfiguration in progress — not redundant",
-      body:"Two voters is a waypoint while a node is being added or removed, never a redundant pair. "+
-        "Both machines must be running and must agree on every write and every membership change, so "+
-        "this cluster survives no failure — it is less resilient than a single server, not more. "+
-        "Add a third node to finish the reconfiguration, and keep both of these running until three "+
-        "are present and in sync."+catching+joining};
-  if(cluster.availability==="high_availability"){
-    const q=clusterQuorum(voters);
-    return {tone:"good", title:`Redundant — ${voters} voters`,
-      body:`${q.majority} of the ${voters} voters must agree on every write, so the cluster keeps serving `+
-        `and recording watch state while ${q.tolerates===1?"one node is":`${q.tolerates} nodes are`} down. `+
-        "Removing a node is accepted only while enough voters remain to keep that majority."+catching+joining};
-  }
-  return {tone:"calm", title:"One node",
-    body:"This is the only node in this cluster. Watch state is durable here, and one node is a complete, "+
-      "supported configuration rather than a half-finished cluster. Add a second and a third node only "+
-      "if you want another machine carrying the same watch state."+catching+joining};
+// Which node cards have their "WAL, snapshot, and protocol details" open. A
+// drill-down is not layout, so it is never persisted to storage — it just has
+// to survive the repaint happening underneath it.
+function clusterOpenDetailNodes(){
+  const open=[];
+  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
+    const detail=body.querySelector(".clnodedetail");
+    const id=body.getAttribute("data-node");
+    if(detail&&detail.open&&id) open.push(id);
+  });
+  return open;
 }
-// Membership lifecycle refusals as sentences that say what to do next.
-// `node_owns_offline_work` is expected to be the common removal refusal, while
-// the learner proof codes are the expected promotion refusals; both need a
-// route forward rather than a statement of fact and a dead end.
-function membershipRefusalText(code,message){
-  const REFUSALS={
-    removal_would_lose_quorum:
-      "This cluster has two voters, and dropping to one is refused. Every membership change from two "+
-      "needs both machines, so plurx will not present an unproved downgrade as a rollback. Add a third "+
-      "node first, then remove the one you don't want.",
-    node_owns_offline_work:
-      "This node still has offline download work that could not be resolved safely. Let any active "+
-      "downloads from this node finish or delete those packages, stop clients from starting new "+
-      "downloads here, then retry the removal. plurx will move work only when a surviving node proves "+
-      "it can read the source; otherwise it fails the package cleanly so the client can request it again.",
-    cluster_leader_removal_refused:
-      "That node is the cluster's current leader, so another voter cannot remove it remotely. Open Cinema "+
-      "on the leader itself and use Leave this cluster; it coordinates its own removal with the surviving "+
-      "quorum and then shuts down.",
-    self_removal_requires_leave:
-      "That row is this server. Use Leave this cluster below so the daemon settles local work, commits its "+
-      "own removal, drains active connections, and shuts down instead of leaving a tombstoned process online.",
-    leave_node_mismatch:
-      "The leave confirmation reached a different backend than the roster you confirmed, so nothing was "+
-      "removed. Refresh this page and retry against the same node; configure sticky admin requests at the proxy.",
-    cluster_node_not_found:
-      "This node is not in the cluster's current membership — it may already have been removed from "+
-      "another browser or another server. The current roster is being refreshed now.",
-    membership_unavailable:
-      "This server is not running a replicated store, so it has no cluster membership to change.",
-    membership_upgrade_required:
-      "Finish upgrading every active cluster node before changing membership, then retry. The reference-counted removal and learner-lifecycle fences are enabled only after every running binary proves it understands them.",
-    membership_removal_pending:
-      "This node is still protected by a pending removal fence because another, ambiguous, or older-version "+
-      "attempt may still commit. Finish upgrading every cluster node and retry this same removal; do not return "+
-      "the fenced node to service while its outcome is unresolved.",
-    learner_not_ready:
-      "This learner has not yet published a fresh zero-lag apply proof. Leave it running until its Read worker badge says ready, then retry promotion.",
-    voter_storage_preflight_failed:
-      "This learner can serve reads, but its authoritative filesystem did not prove the durable free-space reserve required of a voter. Free space or move the data root, then retry.",
-    maintenance_conflict:
-      "Maintenance and membership changes are mutually exclusive. Let the active operation settle, refresh the roster, and retry this action.",
-    cluster_operation_pending:
-      "Another node already owns the cluster's planned-outage lease. Finish or cancel that restart preparation or maintenance operation, then refresh and retry.",
-    maintenance_would_lose_quorum:
-      "Restarting this voter would leave fewer reachable voters than quorum requires. Restore the missing voter or add capacity before retrying maintenance.",
-    maintenance_resume_unsafe:
-      "The target process has not yet proved its maintenance acknowledgement, catch-up, and complete local workload drain. Open that node directly, let it settle, and retry there.",
-    maintenance_node_mismatch:
-      "Open the target node directly. Only that running process can fence and drain its own work or clear its durable maintenance fence.",
-    maintenance_preflight_unsafe:
-      "Direct cluster observations do not currently prove this node safe to maintain. Keep every available voter running and clear the Operations blockers first.",
-    election_quorum_unavailable:
-      "Raft cannot elect a leader without a reachable voter majority. Restore an original voter instead of repeatedly forcing elections.",
-    election_candidate_unavailable:
-      "No reachable follower has published a fresh zero-lag apply proof. Restore or catch up a follower, then retry the election.",
-    election_lifecycle_pending:
-      "A maintenance, promotion, join, or removal operation is still pending. Let it settle before changing leadership.",
-  };
-  if(REFUSALS[code]) return REFUSALS[code];
-  return message?`The server refused this cluster operation: ${message}`
-                :"The server refused this cluster operation and gave no reason.";
+// renderSettings() rewrites the whole tab. The folds and the troubleshooting tab
+// already come back (applyClusterFolds restores them from storage) and the join
+// token is module state, but the roster's scroll position and the open
+// drill-downs are in the markup that just got thrown away. Every repaint path on
+// this tab goes through here so all three behave the same way. Text selection
+// cannot be preserved across innerHTML at all — which is exactly why repaints
+// are change-driven rather than periodic.
+function repaintClusterPreserving(paint){
+  const list=document.getElementById("cluster-node-list");
+  const scroll=list?list.scrollTop:0;
+  const open=clusterOpenDetailNodes();
+  const controls=clusterControlValues();
+  paint();
+  const painted=document.getElementById("cluster-node-list");
+  if(painted) painted.scrollTop=scroll;
+  clusterRestoreControlValues(controls);
+  if(!open.length) return;
+  document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
+    const detail=body.querySelector(".clnodedetail");
+    if(detail&&open.indexOf(body.getAttribute("data-node"))!==-1) detail.open=true;
+  });
 }
-// last_seen_at is Unix MILLISECONDS (docs/OPERATIONS.md); fmtAgo takes seconds.
-// Feeding it milliseconds prints a healthy node as decades stale.
-function clusterDirectMaintenanceStatus(ops,nodeId){
-  const row=clusterDirectOperationRow(ops,nodeId);
-  return row&&row.observation==="answered"&&row.status?row.status:null;
+// Every choice the operator has made in this panel that lives only in the
+// markup: the token's lifetime and role, the log level, the auto-refresh box.
+// A repaint rebuilds them from their defaults, so a status refresh arriving
+// between choosing "1 hour · read worker" and clicking Create would silently
+// mint a ten-minute VOTER token. Captured by id and put back.
+function clusterControlValues(){
+  const values=[];
+  document.querySelectorAll(".clusterwrap select[id],.clusterwrap input[id]").forEach(control=>{
+    values.push({id:control.id,value:control.value,checked:control.checked});
+  });
+  return values;
 }
-function clusterDirectOperationRow(ops,nodeId){
-  if(!ops||ops.unavailable) return null;
-  return (ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId)||null;
+function clusterRestoreControlValues(values){
+  (values||[]).forEach(saved=>{
+    const control=document.getElementById(saved.id);
+    if(!control) return;
+    if(control.type==="checkbox"||control.type==="radio") control.checked=saved.checked;
+    else if(saved.value!==undefined&&saved.value!==null) control.value=saved.value;
+  });
 }
-function clusterMaintenanceEntryVerdict(ops,nodeId){
-  if(!ops||ops.unavailable) return null;
-  return (ops.maintenance||[]).find(verdict=>verdict.node_id===nodeId)||null;
-}
-function clusterMaintenanceReady(n,ops){
-  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
-  return Boolean(n.maintenance_ready&&direct&&direct.process&&direct.process.live&&
-    direct.serving&&direct.serving.reason==="maintenance"&&direct.media&&
-    direct.media.drained&&Number(direct.media.admissions_in_flight||0)===0);
-}
-function clusterMaintenanceResumeReady(n,ops){
-  const direct=clusterDirectMaintenanceStatus(ops,n.node_id);
-  return Boolean(n.maintenance&&n.maintenance_acknowledged&&n.reachable&&
-    n.apply_lag_entries===0&&Number(n.active_media_sessions||0)===0&&direct&&
-    direct.process&&direct.process.live&&direct.serving&&
-    direct.serving.reason==="maintenance"&&direct.media&&direct.media.drained&&
-    Number(direct.media.admissions_in_flight||0)===0);
+// The one reading that moves without a new fetch. When the projection has not
+// changed there is no repaint, so this cell is patched on its own; without it
+// the row whose only job is freshness would say "now" indefinitely.
+function patchClusterReadingAge(){
+  const cell=document.getElementById("cldb-reading-age");
+  if(!cell) return;
+  const data=SETTINGS_DATA||{};
+  cell.innerHTML=PlurxClusterPanel.clusterReadingAge(clenv(),data.cluster,data.clusterOps);
 }
 function clusterNodeOperationsBadge(n,ops){
   if(!ops) return `<span class="pill">Collecting status</span>`;
   if(ops.unavailable) return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Status unavailable</span>`;
-  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
   if(!row||row.observation!=="answered"||!s)
     return `<span class="pill" style="color:var(--bad);border-color:var(--bad)">Not observed</span>`;
   const wal=s.wal&&s.wal.snapshot;
@@ -11519,26 +11517,26 @@ function clusterNodeOperationsHtml(n,ops){
     <div class="clnodeunknown">Collecting direct process, serving, Raft, WAL, snapshot, media, and build evidence…</div></section>`;
   if(ops.unavailable) return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
     <div class="clnodeunknown" style="color:var(--bad)">Direct status is unavailable. Keep every available voter running and retry status above.</div></section>`;
-  const row=clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
+  const row=PlurxClusterPanel.clusterDirectOperationRow(ops,n.node_id), s=row&&row.status;
   if(!row||row.observation!=="answered"||!s){
-    const why=clusterOperationReason(row&&(row.error_class||row.observation)||"not_observed");
+    const why=PlurxClusterPanel.clusterOperationReason(row&&(row.error_class||row.observation)||"not_observed");
     return `<section class="clnodegroup"><div class="clgrouptitle">Operations</div>
       <div class="clnodeunknown" style="color:var(--bad)">Not observed · ${esc(why)}. Membership heartbeat state is not a substitute for a direct peer sample.</div></section>`;
   }
   const raft=s.raft||{}, wal=s.wal&&s.wal.snapshot, snap=s.snapshot||{}, media=s.media||{};
   const process=s.process&&s.process.live
-    ? `<span style="color:var(--good)">Live</span> · ${esc(clusterOperationAge(row.sample_age_ms))}`
+    ? `<span style="color:var(--good)">Live</span> · ${esc(PlurxClusterPanel.clusterOperationAge(row.sample_age_ms))}`
     : `<span style="color:var(--bad)">Not live</span>`;
   const serving=s.serving&&s.serving.ready
     ? `<span style="color:var(--good)">Ready</span>`
-    : `<span style="color:var(--bad)">Fenced: ${esc(clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
+    : `<span style="color:var(--bad)">Fenced: ${esc(PlurxClusterPanel.clusterOperationReason(s.serving&&s.serving.reason))}</span>`;
   const raftRole=raft.is_leader===true?"Leader":raft.is_leader===false?"Follower":"Unknown role";
   const raftText=raft.sample_valid&&raft.watermark_valid
     ? `${raftRole} · term ${esc(String(raft.current_term))} · lag ${raft.apply_lag_entries===null?"unknown":esc(String(raft.apply_lag_entries))}`
     : `<span style="color:var(--bad)">${raftRole} · stale or incomplete proof</span>`;
   const walHealthy=wal&&wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
   const walText=wal
-    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`
+    ? `<span style="color:var(--${walHealthy?"good":"bad"})">${esc(PlurxClusterPanel.clusterOperationReason(wal.state))}</span> · ${esc(String(wal.segment_count))} segment${wal.segment_count===1?"":"s"} · ${esc(fmtBytes(wal.allocated_bytes)||"0 B")}`
     : `<span style="color:var(--bad)">Unavailable</span>`;
   const snapshotText=snap.available
     ? snap.last_build_outcome
@@ -11556,7 +11554,7 @@ function clusterNodeOperationsHtml(n,ops){
       <dl class="kvgrid"><dt>Node / Raft id</dt><dd class="clopscode">${esc(n.node_id)} / ${esc(String(n.raft_id))}</dd>
         <dt>Protocol range</dt><dd>${s.protocol_min===undefined?"unknown":esc(String(s.protocol_min))}–${s.protocol_max===undefined?"unknown":esc(String(s.protocol_max))}</dd>
         <dt>Applied / commit</dt><dd>${raft.applied_index===null||raft.applied_index===undefined?"unknown":esc(String(raft.applied_index))} / ${raft.commit_index===null||raft.commit_index===undefined?"unknown":esc(String(raft.commit_index))}</dd>
-        <dt>Raft sample</dt><dd>${esc(clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(clusterOperationAge(raft.watermark_age_millis))}</dd>
+        <dt>Raft sample</dt><dd>${esc(PlurxClusterPanel.clusterOperationAge((raft.sample_age_seconds||0)*1000))}; watermark ${esc(PlurxClusterPanel.clusterOperationAge(raft.watermark_age_millis))}</dd>
         <dt>WAL retained / purged</dt><dd>${wal?(wal.first_retained_index===null?"unknown":esc(String(wal.first_retained_index))):"unknown"} / ${wal?(wal.last_purged_index===null?"none":esc(String(wal.last_purged_index))):"unknown"}</dd>
         <dt>WAL durable index</dt><dd>${wal&&wal.last_durable_index!==null?esc(String(wal.last_durable_index)):"unknown"}</dd>
         <dt>Last WAL sync</dt><dd>${wal&&wal.last_sync_unix_ms?esc(fmtAgo(Math.floor(wal.last_sync_unix_ms/1000))):"unknown"}</dd>
@@ -11592,8 +11590,8 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
     ? `<div class="claddr">Advertised host ${esc(n.advertised_host)}</div>`:"";
   const lifecycleLocked=Boolean(context.lifecycleLocked);
   const localTarget=n.node_id===localNodeId;
-  const directReady=clusterMaintenanceReady(n,context.operations);
-  const resumeReady=clusterMaintenanceResumeReady(n,context.operations);
+  const directReady=PlurxClusterPanel.clusterMaintenanceReady(n,context.operations);
+  const resumeReady=PlurxClusterPanel.clusterMaintenanceResumeReady(n,context.operations);
   const promote=!voter&&n.role==="learner"
     ? `<button class="ghost sm" ${n.bounded_read_ready&&n.voter_storage_ready&&!lifecycleLocked?"":"disabled"} onclick='promoteNode(${esc(JSON.stringify(n.node_id))})'>Promote to voter</button>`
     : "";
@@ -11601,9 +11599,9 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
     ? `<button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Resume only after direct process drain proof is complete; leadership is handed off first when needed.':'Open this node directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},false)'>Resume service</button>`
     : `<button class="ghost sm" ${!maintenanceAllowed||!localTarget||!n.reachable||n.removal_pending?"disabled":""} title="${!localTarget?'Open this node directly to fence and drain it.':!maintenanceAllowed?'Direct maintenance preflight has not approved this node.':'Fence new work, hand off leadership when needed, and let existing work drain.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(n.node_id))},true)'>Enter maintenance</button>`;
   const remove=n.node_id===localNodeId
-    ? `<span class="muted">Use graceful leave in Danger zone</span>`
+    ? `<span class="muted">Use Leave this cluster on the Maintenance card</span>`
     : `<button class="ghost sm" ${lifecycleLocked?"disabled":""} title="${lifecycleLocked?'Finish maintenance before changing membership.':'Permanently remove this member.'}" onclick='removeNode(${esc(JSON.stringify(n.node_id))})'>${n.removal_pending?"Retry removal":"Remove permanently"}</button>`;
-  const direct=clusterDirectMaintenanceStatus(context.operations,n.node_id);
+  const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(context.operations,n.node_id);
   const sessions=direct&&direct.media?Number(direct.media.local_active_sessions||0):Number(n.active_media_sessions||0);
   const lag=n.apply_lag_entries==null?"unavailable":`${n.apply_lag_entries} entr${n.apply_lag_entries===1?"y":"ies"}`;
   const note=n.maintenance
@@ -11611,7 +11609,7 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
       ? "Fenced, caught up, and directly observed with no local work. Resume from this node after the update or reboot."
       : `New work is fenced. ${sessions?`${sessions} local media operation${sessions===1?" is":"s are"} still draining.`:"Waiting for direct acknowledgement, leader handoff, catch-up, or drain proof."}`
     : "Maintenance is reversible and does not remove this node from membership.";
-  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater()">
+  return `<details class="clnode${n.maintenance?" maintenance":""}${n.reachable?"":" stale"}" open ontoggle="syncClusterNodeToggle()" onclick="clusterNodeFoldLater(this)">
     <summary><div class="clnodesummary"><div class="clidentity"><div class="clhostline"><span class="clhost">${esc(hostname)}</span>${leader}${local}${pending}${maintenance}${worker}</div>
       ${advertised}<div class="clid">Node ID ${esc(n.node_id)}</div></div><div class="clnodesummaryright">${role}${clusterNodeOperationsBadge(n,context.operations)}</div></div></summary>
     <div class="clnodebody" data-node="${esc(n.node_id)}"><div class="clnodegroups"><section class="clnodegroup"><div class="clgrouptitle">Membership</div>
@@ -11620,16 +11618,6 @@ function clusterNodeRow(n,localNodeId,maintenanceAllowed=true,context={}){
       ${clusterNodeOperationsHtml(n,context.operations)}</div>
       <div class="clnodefoot"><div class="hint">${esc(note)}</div><div class="row">${promote}${maintenanceAction}${remove}</div></div></div>
   </details>`;
-}
-function clusterRecoveryState(cluster){
-  if(cluster.recovery) return cluster.recovery;
-  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
-  const required=Math.floor(voters.length/2)+1;
-  const reachable=voters.filter(n=>n.reachable).length;
-  const leader=voters.some(n=>n.is_leader);
-  return {required:voters.length>1&&(reachable<required||!leader),quorum_available:reachable>=required,
-    reachable_voters:reachable,required_voters:required,leader_elected:leader,
-    permanent_majority_loss_supported:false};
 }
 function clusterRecoveryPanel(cluster,recovery,active,ops){
   const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
@@ -11662,11 +11650,11 @@ function clusterRecoveryPanel(cluster,recovery,active,ops){
   </section>`;
 }
 function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
-  const direct=clusterDirectMaintenanceStatus(ops,active.node_id);
+  const direct=PlurxClusterPanel.clusterDirectMaintenanceStatus(ops,active.node_id);
   const media=direct&&direct.media;
   const sessions=media?Number(media.local_active_sessions||0):Number(active.active_media_sessions||0);
-  const directReady=clusterMaintenanceReady(active,ops);
-  const resumeReady=clusterMaintenanceResumeReady(active,ops);
+  const directReady=PlurxClusterPanel.clusterMaintenanceReady(active,ops);
+  const resumeReady=PlurxClusterPanel.clusterMaintenanceResumeReady(active,ops);
   const localTarget=active.node_id===localNodeId;
   return `<ol class="clsteps"><li class="${active.maintenance_acknowledged?'done':''}">Target acknowledged the replicated work fence</li>
     <li class="${!active.is_leader?'done':''}">Leadership is on another voter</li>
@@ -11675,8 +11663,39 @@ function clusterMaintenanceProgress(active,ops,localNodeId,recovering=false){
     <div class="claction"><b>${directReady?"Ready to update, reboot, or resume":resumeReady&&active.is_leader?"Ready to hand off leadership and resume":recovering?"Restore this fenced node":"Keep the node running while it drains"}</b><p>The maintenance fence survives a process restart. Resume only from the target node after direct process evidence is current; if it became leader during recovery, resume first hands leadership to a caught-up voter.</p>
       <div class="row"><button class="sm" ${localTarget&&resumeReady?"":"disabled"} title="${localTarget?'Direct drain proof is required.':'Open the maintenance target directly to resume it.'}" onclick='setNodeMaintenance(${esc(JSON.stringify(active.node_id))},false)'>Resume service</button></div></div>`;
 }
+// ---- the operations rail -------------------------------------------------
+// Every action this screen can take, with its precondition evaluated before the
+// click rather than after it. The rows themselves — and the preconditions they
+// state — are the model's, in cluster-panel.js; this is the mount.
+//
+// Two rows carry their control inside them: the join credential and the
+// graceful leave. Those panels read module state (the minted token, the leaving
+// flag) that the model cannot see, so the shell renders them and hands them
+// over. A blocked row gets none — the blocked reason is its whole content, and
+// an unreachable expansion is a control that lies about being available.
+function clusterOperationsRail(cluster,ops){
+  const maintenanceActive=(cluster.nodes||[]).some(node=>node.maintenance);
+  const controls={add:()=>joinPanel(maintenanceActive),
+    leave:()=>leavePanel(cluster.local_node_id,maintenanceActive)};
+  const rows=PlurxClusterPanel.clusterOperationRows(clenv(),cluster,ops,CLUSTER_RAIL_EXPANDED)
+    .map(row=>row.expand&&!row.blocked&&controls[row.expand]
+      ? Object.assign({},row,{expansion:controls[row.expand]()}):row);
+  return `<div class="clrail">${rows.map(PlurxClusterPanel.clusterRailRow).join("")}</div>`;
+}
+// Expanding is state, not markup: the panel is re-rendered from it, so a mint
+// or a status repaint cannot close a credential someone is reading. It is never
+// written to storage, and forgetJoinToken() clears it on the same three exits
+// that drop the token itself.
+function toggleClusterRailPanel(id){
+  CLUSTER_RAIL_EXPANDED=CLUSTER_RAIL_EXPANDED.indexOf(id)===-1
+    ? CLUSTER_RAIL_EXPANDED.concat([id])
+    : CLUSTER_RAIL_EXPANDED.filter(open=>open!==id);
+  repaintClusterPreserving(renderSettings);
+  const panel=document.getElementById("clrail-"+id);
+  if(panel&&!panel.hidden&&panel.scrollIntoView) panel.scrollIntoView({block:"nearest"});
+}
 function clusterOperationsPanel(cluster,ops){
-  const recovery=clusterRecoveryState(cluster);
+  const recovery=PlurxClusterPanel.clusterRecoveryState(cluster);
   const active=(cluster.nodes||[]).find(n=>n.maintenance);
   if(recovery.required) return clusterRecoveryPanel(cluster,recovery,active,ops);
   if(active){
@@ -11684,16 +11703,9 @@ function clusterOperationsPanel(cluster,ops){
       ${clusterMaintenanceProgress(active,ops,cluster.local_node_id)}
     </section>`;
   }
-  const voters=(cluster.nodes||[]).filter(n=>n.is_voter);
-  const candidate=voters.some(n=>!n.is_leader&&n.reachable&&n.apply_lag_entries===0&&!n.removal_pending);
-  const lifecycle=(cluster.nodes||[]).some(n=>n.removal_pending||n.maintenance);
-  const electionReady=voters.length>1&&candidate&&!lifecycle&&recovery.quorum_available;
-  return `<section class="cluster-card"><div class="clophead"><div><h3>Planned work</h3><p>Maintenance and leader elections, without changing membership.</p></div><span class="pill" style="color:var(--good);border-color:var(--good)">Preflights clear</span></div>
-    <div class="clactions"><div class="claction"><b>Maintain a node</b><p>Choose Enter maintenance on a node. New work is fenced, streams drain, and leader handoff happens before the node is marked ready.</p></div>
-      <div class="claction"><b>Force a leader election</b><p>Ask a reachable, caught-up follower to campaign. Raft still chooses the winner; this does not bypass quorum.</p>
-        <div class="row"><button class="ghost sm" ${electionReady?"":"disabled"} onclick="openElectionDialog()">Force election</button></div></div></div>
-    ${forceElectionDialog(electionReady)}
-  </section>`;
+  // Planned work is now the operations rail, which states these same two
+  // actions with their preconditions already evaluated.
+  return "";
 }
 function forceElectionDialog(enabled){
   return `<dialog class="cldialog" id="clelection"><div class="cldialogbody"><h3>Force leader election</h3>
@@ -11702,17 +11714,6 @@ function forceElectionDialog(enabled){
     <label class="row" style="margin-top:16px;font-size:13px"><input id="clelectionconfirm" type="checkbox" style="width:auto" onchange="document.getElementById('clelectiongo').disabled=!this.checked"> I understand this may briefly pause writes</label>
     <div class="cldialogactions"><button class="ghost sm" onclick="this.closest('dialog').close()">Cancel</button><button id="clelectiongo" disabled onclick="forceClusterElection(this)">Force election</button></div>
   </div></dialog>`;
-}
-function clusterOperationAge(ms){
-  if(ms===null||ms===undefined) return "unknown age";
-  if(ms<1000) return "now";
-  const seconds=Math.floor(ms/1000);
-  if(seconds<60) return `${seconds}s ago`;
-  const minutes=Math.floor(seconds/60);
-  return minutes<60?`${minutes}m ago`:`${Math.floor(minutes/60)}h ago`;
-}
-function clusterOperationReason(value){
-  return String(value||"unknown").replaceAll("_"," ");
 }
 function clusterOperationsUnavailable(message){
   return `<div class="clopssummary"><div class="clopshead"><div><h4>Operational readiness</h4>
@@ -11730,7 +11731,7 @@ function clusterRestartPreparationHtml(localRow){
     : "unknown";
   const commandHtml=media.drained&&commands.length
     ? `<p><b>This node is drained.</b> Remove it from new proxy traffic, confirm direct-play connections are zero, then run exactly one command for this host:</p>
-       <dl class="kvgrid">${commands.map(row=>`<dt>${esc(clusterOperationReason(row.supervisor))}</dt><dd><code>${esc(row.command)}</code></dd>`).join("")}</dl>`
+       <dl class="kvgrid">${commands.map(row=>`<dt>${esc(PlurxClusterPanel.clusterOperationReason(row.supervisor))}</dt><dd><code>${esc(row.command)}</code></dd>`).join("")}</dl>`
     : `<p>Waiting for ${esc(String(media.local_active_sessions))} owned session${media.local_active_sessions===1?"":"s"} and ${esc(String(media.admissions_in_flight))} admission${media.admissions_in_flight===1?"":"s"} in flight. Existing streams keep serving.</p>`;
   return `<div class="clstate ${media.drained?"good":"warn"}" role="status"><h3>${media.drained?"Prepared and drained":"Preparing this voter for restart"}</h3>
     ${commandHtml}<p>Preparation expires in ${esc(expires)}. Direct-play connections are not counted here; drain them at the proxy.</p>
@@ -11743,7 +11744,7 @@ function clusterOperationsCard(ops){
   const rows=ops.nodes||[], answered=rows.filter(row=>row.observation==="answered"&&row.status);
   const voters=rows.filter(row=>row.membership&&row.membership.is_voter);
   const ready=answered.filter(row=>row.membership.is_voter&&row.status.serving&&row.status.serving.ready).length;
-  const q=clusterQuorum(voters.length);
+  const q=PlurxClusterPanel.clusterQuorum(voters.length);
   const leader=answered.find(row=>row.status.raft&&row.status.raft.is_leader===true);
   const terms=[...new Set(answered.map(row=>row.status.raft&&row.status.raft.current_term).filter(value=>value!==null&&value!==undefined))];
   const builds=[...new Set(answered.map(row=>row.status.build))];
@@ -11756,7 +11757,7 @@ function clusterOperationsCard(ops){
   const blockers=(ops.verdict&&ops.verdict.blockers)||[];
   const warnings=(ops.verdict&&ops.verdict.warnings)||[];
   const findings=[...blockers,...warnings];
-  const findingHtml=findings.length?`<ul class="clopsblockers">${findings.map(f=>`<li><b>${esc(clusterOperationReason(f.code))}</b>${f.node_id?` on ${esc(f.node_id)}`:""}: ${esc(f.message)}</li>`).join("")}</ul>`
+  const findingHtml=findings.length?`<ul class="clopsblockers">${findings.map(f=>`<li><b>${esc(PlurxClusterPanel.clusterOperationReason(f.code))}</b>${f.node_id?` on ${esc(f.node_id)}`:""}: ${esc(f.message)}</li>`).join("")}</ul>`
     : `<p class="hint">No rollout blockers are present. The candidate is ${esc(ops.verdict.candidate_node_id)}; prepare and drain that exact node before restarting it.</p>`;
   const canPrepare=safe&&localRow&&ops.verdict.candidate_node_id===localRow.membership.node_id;
   const prepareAction=canPrepare
@@ -11775,8 +11776,12 @@ function clusterOperationsCard(ops){
       <div class="clopsfact"><span class="muted">Build convergence</span><b>${builds.length===1?esc(builds[0]):`${builds.length} observed builds`}</b></div>
       <div class="clopsfact"><span class="muted">Commit / apply</span><b>maximum lag ${lags.length?esc(String(Math.max(...lags))):"unknown"}</b></div>
       <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
-      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(clusterOperationAge(oldest))}</b></div></div></div>`;
+      <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(PlurxClusterPanel.clusterOperationAge(oldest))}</b></div></div></div>`;
 }
+// The manual refresh has no deferral, deliberately: the election dialog is
+// modal, so the button that reaches this code cannot be clicked while one is
+// open. It still obeys the invariant the other three paths obey — it paints
+// exactly what it stores.
 async function refreshClusterOperations(btn){
   const generation=PAGE_RENDER_GENERATION;
   if(btn) btn.disabled=true;
@@ -11787,7 +11792,7 @@ async function refreshClusterOperations(btn){
     const ops=await loadSettingsKey("clusterOps",generation);
     if(settingsCurrent(generation,"cluster")){
       SETTINGS_DATA.clusterOps=ops;
-      renderSettings();
+      repaintClusterPreserving(renderSettings);
     }
   }catch(error){
     if(settingsCurrent(generation,"cluster")){
@@ -11823,8 +11828,17 @@ async function pollLocalRestart(nodeId,generation){
     try{
       const ops=await api("/cluster/status");
       if(!settingsCurrent(generation,"cluster")) return;
-      SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-      renderSettings();
+      // The restart poll owns freshness while it runs, so it stamps the same
+      // clock the tick reads: the two never probe the fan-out at once. It
+      // repaints every two seconds by design — the drain countdown is the point
+      // of the view — but under an open modal it holds the sample like the tick
+      // does, so what is stored is still what is painted. Its own loop condition
+      // reads the fresh sample either way.
+      clusterOpsStamp();
+      if(!clusterRepaintDeferred()){
+        SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+        repaintClusterPreserving(renderSettings);
+      }
       const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
       const media=local&&local.status&&local.status.media;
       if(!media||!media.new_admissions_blocked||media.drained) return;
@@ -11844,147 +11858,22 @@ async function downloadClusterSupportBundle(btn){
   finally{ if(btn) btn.disabled=false; }
 }
 // ---- the replicated database ---------------------------------------------
-// The store is the other half of this screen, and until now it had no section
-// of its own: watch state was one run-on sentence ("Replicated in sync ·
-// applied term 7, index 118442 · …") wedged between the node cards, and every
-// other Raft reading was buried in per-node evidence or in /metrics. Nothing
-// here is a new measurement. `cluster.replication` is the same projection the
-// sentence already used, and the term / commit watermark / snapshot / WAL /
-// protocol readings come from this node's own row of the direct status the
-// node cards already render. Laid out as a ledger, they answer the question
-// the sentence could not: is a write that lands here durable, and how far
-// behind is this machine.
-// `sys` is not in the Cluster tab's manifest, so a cold load straight into
-// this tab has no replication projection to read. `membership_unavailable` is
-// the server saying this process is not running a replicated store, which is
-// the same fact the projection would have carried, so the panel states it
-// rather than reporting its own missing request as a cluster problem.
-function clusterSqliteReplication(){
-  return {backend:"sqlite",health:"healthy",clustered:false,
-    explanation:"Watch state is stored on this server only."};
-}
-function clusterDatabaseStatus(cluster,ops){
-  const row=clusterDirectOperationRow(ops,cluster&&cluster.local_node_id);
-  return row&&row.observation==="answered"&&row.status?row.status:null;
-}
-// Capacity and redundancy are different quantities and this panel must never
-// let one stand in for the other, so the arithmetic is said once, here.
-function clusterCapacityText(capacity){
-  if(!capacity) return {headline:"Capacity details unavailable",
-    detail:"Read capacity and voting redundancy could not be read."};
-  return {
-    headline:`${capacity.ready_read_workers} ready read worker${capacity.ready_read_workers===1?"":"s"} · `+
-      `${capacity.non_voting_replicas} non-voting replicated cop${capacity.non_voting_replicas===1?"y":"ies"}`,
-    detail:`${capacity.voting_nodes} voters · quorum ${capacity.voting_quorum} · tolerates `+
-      `${capacity.voting_failure_tolerance} voter failure${capacity.voting_failure_tolerance===1?"":"s"}. `+
-      "Read capacity and replicated copies do not increase voting redundancy."};
-}
-// SQLite is deliberately not "healthy" and not "synced": with no peer there is
-// nowhere for a pause to carry over to, and a green tick would be a claim
-// about redundancy this install does not have.
-function clusterDatabaseHealth(replication){
-  if(!replication) return {tone:"warn",label:"Status unavailable"};
-  if(replication.backend==="sqlite") return {tone:"calm",label:"Single node"};
-  if(replication.health==="degraded") return {tone:"warn",label:"Degraded"};
-  return {tone:"good",label:replication.clustered?"In sync":"One node"};
-}
-function clusterHealthPill(tone,label){
-  const colour=tone==="good"?"color:var(--good);border-color:var(--good)"
-    :tone==="warn"?"color:var(--warn);border-color:var(--warn)":"";
-  return `<span class="pill" style="${colour}">${esc(label)}</span>`;
-}
-// What survives folding. Collapsing the section hides the detail, never the
-// verdict: the health pill stays in the header and this line keeps the six
-// readings somebody would check before deciding whether to expand it again.
-function clusterDatabaseSummary(cluster,replication,ops){
-  const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
-  const leader=(cluster.nodes||[]).find(n=>n.is_leader);
-  const known=value=>value!==null&&value!==undefined;
-  const parts=[`leader <b>${leader?esc(leader.hostname||leader.node_id):"unknown"}</b>`];
-  if(known(raft.current_term)) parts.push(`term <b>${esc(String(raft.current_term))}</b>`);
-  if(known(raft.commit_index)) parts.push(`commit <b>${esc(String(raft.commit_index))}</b>`);
-  if(replication&&known(replication.last_applied_index))
-    parts.push(`applied <b>${esc(String(replication.last_applied_index))}</b>`);
-  if(known(raft.apply_lag_entries)) parts.push(`lag <b>${esc(String(raft.apply_lag_entries))}</b>`);
-  if(replication&&replication.last_converged_at)
-    parts.push(`converged <b>${esc(fmtAgo(replication.last_converged_at))}</b>`);
-  return parts.join(" · ");
-}
-// The WAL says one of three things: it was never observed, it is proven
-// unavailable, or it answered — and an answer that is `open` with a live error
-// or unflushed entries is a fault, which is exactly the predicate the node
-// badge already uses.
-// Every age in the direct status is computed on the server and frozen into
-// the response, while this panel keeps rendering from that one fetch for as
-// long as the tab is open. Without the time since the aggregate was taken, the
-// freshness row says "now" indefinitely.
-function clusterSampleAge(ops,millis){
-  if(millis===null||millis===undefined) return null;
-  const taken=ops&&ops.observed_at_unix_ms;
-  return taken?millis+Math.max(0,Date.now()-taken):millis;
-}
-function clusterDatabaseWal(status){
-  if(!status) return "unknown";
-  const wal=status.wal&&status.wal.snapshot;
-  if(!wal) return `<span style="color:var(--bad)">unavailable${
-    status.wal&&status.wal.reason?` · ${esc(clusterOperationReason(status.wal.reason))}`:""}</span>`;
-  const healthy=wal.state==="open"&&wal.lock_owned&&!wal.last_error&&wal.last_log_index===wal.last_durable_index;
-  const durable=wal.last_durable_index===null||wal.last_durable_index===undefined
-    ? "unknown":esc(String(wal.last_durable_index));
-  const fault=wal.last_error?` · ${esc(wal.last_error.message||"error")}`
-    :!wal.lock_owned?" · lock not held"
-    :wal.last_log_index!==wal.last_durable_index?` · ${esc(String(wal.last_log_index))} logged, ${durable} durable`:"";
-  return `<span style="color:var(--${healthy?"good":"bad"})">${esc(clusterOperationReason(wal.state))}</span> · durable ${durable}${fault}`;
-}
-function clusterDatabaseRows(cluster,replication,ops){
-  if(replication&&replication.backend==="sqlite")
-    return [["Backend","SQLite · single node",false],
-      ["Peers","none — watch state is durable here and has nowhere to fall behind",false]];
-  const status=clusterDatabaseStatus(cluster,ops);
-  const raft=(status&&status.raft)||{}, snap=(status&&status.snapshot)||{};
-  const wal=status&&status.wal&&status.wal.snapshot;
-  const leader=(cluster.nodes||[]).find(n=>n.is_leader);
-  const num=value=>(value===null||value===undefined)?"unknown":esc(String(value));
-  const sampled=raft.applied_index!==null&&raft.applied_index!==undefined;
-  const applied=sampled?esc(String(raft.applied_index))
-    :(replication&&replication.last_applied_index!==null&&replication.last_applied_index!==undefined
-      ? esc(String(replication.last_applied_index)):"unknown");
-  const behindKnown=replication&&(replication.behind_by!==null&&replication.behind_by!==undefined
-    ? true:replication.health!=="degraded");
-  const behind=behindKnown?Number(replication.behind_by||0):null;
-  const lag=raft.apply_lag_entries===null||raft.apply_lag_entries===undefined
-    ? "unknown":`${esc(String(raft.apply_lag_entries))} entr${raft.apply_lag_entries===1?"y":"ies"}`;
-  return [
-    ["Backend",replication?(replication.backend==="sqlite"?"SQLite · single node":"hiqlite · Raft"):"unknown",false],
-    ["Leader",leader?`${esc(leader.hostname||leader.node_id)}${leader.node_id===cluster.local_node_id?' <span class="muted">this node</span>':""}`:"none elected",false],
-    ["Term",num(raft.current_term),true],
-    ["Quorum commit",num(raft.commit_index),true],
-    ["Applied here",`${applied}${!sampled&&replication&&replication.last_applied_term!==null&&replication.last_applied_term!==undefined?` <span class="muted">term ${esc(String(replication.last_applied_term))}</span>`:""}`,true],
-    ["Apply lag",lag,true],
-    ["Behind by",behind===null?"unknown":`${behind} change${behind===1?"":"s"}`,true],
-    ["Last converged",replication&&replication.last_converged_at?esc(fmtAgo(replication.last_converged_at)):"not yet observed",true],
-    ["Snapshots",status?(snap.available
-      ? `build ${num(snap.build_ok_count)} ok / ${num(snap.build_error_count)} error · install ${num(snap.install_ok_count)} ok / ${num(snap.install_error_count)} error`
-      : `<span style="color:var(--bad)">unavailable</span>`):"unknown",true],
-    ["WAL",clusterDatabaseWal(status),true],
-    ["Protocol",status?`${num(status.protocol_min)}–${num(status.protocol_max)}`:"unknown",true],
-    ["Reading age",!status?"unknown":raft.sample_valid&&raft.watermark_valid
-      ? `local ${esc(clusterOperationAge(clusterSampleAge(ops,(raft.sample_age_seconds||0)*1000)))} · `+
-        `watermark ${esc(clusterOperationAge(clusterSampleAge(ops,raft.watermark_age_millis)))}`
-      : `<span style="color:var(--bad)">stale or incomplete proof</span>`,false],
-  ];
-}
+// The store is the other half of this screen. Nothing here is a new
+// measurement: the ledger's rows come from `cluster.replication` and this
+// node's own row of the direct status, and the arithmetic that turns them into
+// sentences lives in cluster-panel.js. This is the card they are painted into.
 function clusterDatabasePanel(cluster,replication,capacity,ops){
-  const health=clusterDatabaseHealth(replication);
-  const cap=clusterCapacityText(capacity);
-  const rows=clusterDatabaseRows(cluster,replication,ops)
-    .map(([label,value,numeric])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}>${value}</dd>`).join("");
-  return `<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Replicated database</h3>
+  const health=PlurxClusterPanel.clusterDatabaseHealth(replication);
+  const cap=PlurxClusterPanel.clusterCapacityText(capacity);
+  const rows=PlurxClusterPanel.clusterDatabaseRows(clenv(),cluster,replication,ops)
+    .map(([label,value,numeric,id])=>`<dt>${esc(label)}</dt><dd${numeric?' class="num"':""}${
+      id?` id="${esc(id)}"`:""}>${value}</dd>`).join("");
+  return `<section class="cluster-card"><div class="clophead"><div><h3>Replicated database</h3>
       <p>${replication&&replication.backend==="sqlite"?"Where watch state is stored on this machine."
         :"Where watch state is committed, how far behind this machine is, and what the store is doing to stay caught up."}</p></div>
-      <div class="row">${clusterHealthPill(health.tone,health.label)}<button class="ghost sm" id="cldb-toggle"
+      <div class="row">${PlurxClusterPanel.clusterHealthPill(clenv(),health.tone,health.label)}<button class="ghost sm" id="cldb-toggle"
         aria-controls="cluster-database" aria-expanded="true" onclick="toggleClusterDatabase(this)">Hide</button></div></div>
-    <div class="cldbsumm" id="cluster-database-summary" hidden>${clusterDatabaseSummary(cluster,replication,ops)}</div>
+    <div class="cldbsumm" id="cluster-database-summary" hidden>${PlurxClusterPanel.clusterDatabaseSummary(clenv(),cluster,replication,ops)}</div>
     <div id="cluster-database"><div class="clcontextfacts">
       <div class="clcontextfact"><span>Watch state</span><b>${replication?replicationText(replication):"Status unavailable"}</b><small>The one authoritative reading; the System tab no longer repeats it.</small></div>
       ${capacity?`<div class="clcontextfact"><span>Capacity</span><b>${esc(cap.headline)}</b><small>${esc(cap.detail)}</small></div>`:""}</div>
@@ -11992,32 +11881,18 @@ function clusterDatabasePanel(cluster,replication,capacity,ops){
 }
 // ---- folding, and remembering it -----------------------------------------
 // Which sections are open is a per-browser convenience, so it is kept in this
-// browser and never in the cluster. Nodes are keyed by node id rather than by
-// position, so a node leaving the cluster drops out of the stored set instead
-// of collapsing whichever card inherits its row. Every read and write is
-// guarded: a browser with site data blocked throws on access, and the panel
-// still has to render with no stored value at all.
-// A function rather than a bare const so the key travels with the two helpers
-// that use it: tests extract these by declaration, and a free const between
-// functions is picked up only by accident.
-function clusterFoldKey(){ return "plurx.cluster.fold"; }
-function clusterFoldRead(){
-  try{
-    const raw=localStorage.getItem(clusterFoldKey());
-    if(!raw) return null;
-    const state=JSON.parse(raw);
-    if(!state||typeof state!=="object"||Array.isArray(state)) return null;
-    const kept={};
-    if(typeof state.database==="boolean") kept.database=state.database;
-    if(Array.isArray(state.nodes_closed)) kept.nodes_closed=state.nodes_closed.filter(id=>typeof id==="string");
-    if(typeof state.tab==="string") kept.tab=state.tab;
-    return kept;
-  }catch(e){ return null; }
+// browser and never in the cluster. The reading and writing themselves are in
+// cluster-panel.js, which takes the storage object as a parameter; the shell
+// supplies it here. Merely touching browser storage throws where site data is
+// blocked, so that reference is guarded on its own.
+function clusterStorage(){ try{ return localStorage; }catch(e){ return null; } }
+function clusterFoldState(){
+  const store=clusterStorage();
+  return store?PlurxClusterPanel.clusterFoldRead(store):null;
 }
-function clusterFoldWrite(patch){
-  try{
-    localStorage.setItem(clusterFoldKey(),JSON.stringify(Object.assign({},clusterFoldRead()||{},patch)));
-  }catch(e){ /* storage blocked: the panel keeps working, it just forgets */ }
+function clusterFoldSave(patch){
+  const store=clusterStorage();
+  if(store) PlurxClusterPanel.clusterFoldWrite(store,patch);
 }
 function setClusterDatabaseFold(open){
   const body=document.getElementById("cluster-database");
@@ -12033,7 +11908,7 @@ function toggleClusterDatabase(btn){
   if(!body) return;
   const open=body.hidden;
   setClusterDatabaseFold(open);
-  clusterFoldWrite({database:open});
+  clusterFoldSave({database:open});
   if(btn) btn.focus();
 }
 // The node id lives on the card body rather than on the <details> itself so
@@ -12046,15 +11921,20 @@ function clusterNodeFoldId(card){
 // persisting from `ontoggle` would overwrite the stored set with "everything
 // open" on every visit — measured, not assumed. A click is a real gesture, and
 // the card's open state has flipped by the time the task runs.
-function clusterNodeFoldLater(){
-  setTimeout(clusterNodeFoldSave,0);
+function clusterNodeFoldLater(card){
+  setTimeout(()=>{
+    clusterNodeFoldSave();
+    // Opening a card inside a scrolling column can leave its own body below
+    // the fold. `nearest` scrolls the column, never the page.
+    if(card&&card.open&&card.scrollIntoView) card.scrollIntoView({block:"nearest"});
+  },0);
 }
 function clusterNodeFoldSave(){
   try{
     const closed=[...document.querySelectorAll("#cluster-node-list>.clnode")]
       .filter(card=>!card.open).map(clusterNodeFoldId).filter(Boolean);
-    clusterFoldWrite({nodes_closed:closed});
-  }catch(e){ /* see clusterFoldWrite */ }
+    clusterFoldSave({nodes_closed:closed});
+  }catch(e){ /* see clusterFoldSave */ }
 }
 // Run after the panel is written into the document: the markup ships with the
 // defaults (database open, every node open) and this restores what the last
@@ -12062,7 +11942,7 @@ function clusterNodeFoldSave(){
 // defaults rather than an empty screen.
 function applyClusterFolds(){
   try{
-    const state=clusterFoldRead();
+    const state=clusterFoldState();
     if(state&&typeof state.database==="boolean") setClusterDatabaseFold(state.database);
     if(state&&typeof state.tab==="string"&&document.getElementById("cltab-"+state.tab)) showClusterTab(state.tab);
     if(state&&Array.isArray(state.nodes_closed)){
@@ -12072,7 +11952,7 @@ function applyClusterFolds(){
       });
     }
     syncClusterNodeToggle();
-  }catch(e){ /* see clusterFoldWrite */ }
+  }catch(e){ /* see clusterFoldSave */ }
 }
 // ---- troubleshooting -----------------------------------------------------
 // One place for the evidence you reach for when something is wrong, instead of
@@ -12085,7 +11965,7 @@ function clusterTabButton(id,label,selected){
 }
 function selectClusterTab(id){
   showClusterTab(id);
-  clusterFoldWrite({tab:id});
+  clusterFoldSave({tab:id});
 }
 function showClusterTab(id){
   const tabs=[...document.querySelectorAll(".cltabs>.cltab")];
@@ -12097,15 +11977,15 @@ function showClusterTab(id){
   });
 }
 function clusterDiagnosticsFacts(cluster,ops){
-  const status=clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
+  const status=PlurxClusterPanel.clusterDatabaseStatus(cluster,ops), raft=(status&&status.raft)||{};
   const nodes=cluster.nodes||[];
   const voters=nodes.filter(n=>n.is_voter);
   const fresh=voters.filter(n=>n.reachable).length;
-  const q=clusterQuorum(voters.length);
+  const q=PlurxClusterPanel.clusterQuorum(voters.length);
   const pending=nodes.filter(n=>n.removal_pending).length;
   const ages=ops&&!ops.unavailable
     ? (ops.nodes||[]).map(row=>row.sample_age_ms).filter(age=>age!==null&&age!==undefined):[];
-  const oldest=ages.length?clusterSampleAge(ops,Math.max(...ages)):null;
+  const oldest=ages.length?PlurxClusterPanel.clusterSampleAge(ops,Math.max(...ages)):null;
   if(!voters.length) return `<dl class="cldbledger"><dt>Voter roster</dt>
     <dd>No committed voter roster is readable from this node, so there is no quorum arithmetic to state.</dd></dl>`;
   return `<dl class="cldbledger"><dt>Heartbeat quorum</dt><dd>${fresh>=q.majority
@@ -12114,7 +11994,7 @@ function clusterDiagnosticsFacts(cluster,ops){
     <dt>Quorum arithmetic</dt><dd>${q.majority} of ${voters.length} voters must agree on every write; ${q.tolerates} may be lost</dd>
     <dt>Removals pending</dt><dd class="num">${pending}</dd>
     <dt>Local Raft sample</dt><dd class="num">${raft.sample_valid&&raft.watermark_valid?"valid":"stale or incomplete"}</dd>
-    <dt>Oldest direct sample</dt><dd class="num">${oldest===null?"unknown":esc(clusterOperationAge(oldest))}</dd></dl>`;
+    <dt>Oldest direct sample</dt><dd class="num">${oldest===null?"unknown":esc(PlurxClusterPanel.clusterOperationAge(oldest))}</dd></dl>`;
 }
 function clusterTroubleshootingPanel(cluster,ops){
   const refusal=clusterRefusalHtml();
@@ -12147,27 +12027,28 @@ function clusterPanel(d){
   const cluster=d.cluster;
   if(!cluster) return `<div class="card"><h2 class="section" style="margin-top:0">Cluster</h2>
     <div class="empty">Loading…</div></div>`;
-  const state=clusterStateView(cluster);
+  const state=PlurxClusterPanel.clusterStateView(cluster);
   const clustered=!cluster.unavailable;
   const statusFailure=cluster.unavailable&&cluster.code!=="membership_unavailable";
   const nodes=clustered?(cluster.nodes||[]):[];
   // One lag answer, not a second competing one. The replicated database panel
   // below is now the only place in Cinema that reports it.
   const replication=(clustered&&cluster.replication)||(d.sys&&d.sys.replication)
-    ||(cluster.code==="membership_unavailable"?clusterSqliteReplication():null);
+    ||(cluster.code==="membership_unavailable"?PlurxClusterPanel.clusterSqliteReplication():null);
   const capacity=clustered&&cluster.capacity;
   const maintenanceActive=nodes.some(node=>node.maintenance);
   const nodeContext={operations:d.clusterOps,lifecycleLocked:maintenanceActive};
   const roster=nodes.length
-    ? `<div class="clnodes" id="cluster-node-list">${nodes.map(node=>{
-        const readiness=clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
+    ? `<div class="clnodes${nodes.length>=3?" clnodes-capped":""}" id="cluster-node-list"${
+        nodes.length>=3?` style="--clnodes-h:${nodes.length*104}px"`:""}>${nodes.map(node=>{
+        const readiness=PlurxClusterPanel.clusterMaintenanceEntryVerdict(d.clusterOps,node.node_id);
         return clusterNodeRow(node,cluster.local_node_id,Boolean(readiness&&readiness.safe_to_enter),nodeContext);
       }).join("")}</div>`
     : clustered?`<div class="empty">No node records yet.</div>`:"";
   // A failed roster read still belongs to a cluster, so the roster column and
   // its retry stay; only a machine that has never joined loses them.
   const roomForRoster=clustered||statusFailure;
-  const recovery=clustered?clusterRecoveryState(cluster):null;
+  const recovery=clustered?PlurxClusterPanel.clusterRecoveryState(cluster):null;
   const recoveryRequired=Boolean(recovery&&recovery.required);
   // Two components, two columns, and each one keeps its own facts: the store on
   // the left, the machines carrying it on the right. Maintenance and
@@ -12181,16 +12062,17 @@ function clusterPanel(d){
     <div class="clmetric"><strong>${reachable} / ${nodes.length}</strong><span>Fresh heartbeats</span></div>
     <div class="clmetric"><strong>${capacity?`${capacity.voting_nodes} · q${capacity.voting_quorum}`:"—"}</strong><span>Voters · quorum</span></div>`:""}</div>
     ${recoveryRequired?operations:""}
-    <div class="cluster-board${roomForRoster?"":" clsolo"}">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
-      ${roomForRoster?`<section class="cluster-card clcolumn"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
+    <div class="cluster-board${roomForRoster?"":" clsolo"}"><div class="clcolumn">${clusterDatabasePanel(cluster,replication,capacity,d.clusterOps)}
+      ${clustered?`<section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
+        <p>Every action this screen can take, with its precondition already evaluated.</p></div></div>
+        ${recoveryRequired?"":operations}
+        ${clusterOperationsRail(cluster,d.clusterOps)}
+        ${recoveryRequired?"":forceElectionDialog(true)}</section>`:""}</div>
+      ${roomForRoster?`<div class="clcolumn"><section class="cluster-card"><div class="clophead"><div><h3>Cluster nodes</h3><p>Each card combines committed membership with direct process, Raft, WAL, snapshot, media, and build evidence for that machine.</p></div>
         <div class="row">${nodes.length?`<button class="ghost sm" id="clnodes-toggle" aria-controls="cluster-node-list" aria-expanded="true" onclick="toggleClusterNodes(this)">Collapse all</button>`:""}<button class="ghost sm" onclick="retryCluster()">Refresh nodes</button></div></div>
         ${roster}${statusFailure?`<div class="empty">The committed roster could not be read from this node.</div>
-        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>`:""}</div>
-    ${clustered?`<div class="cluster-main"><section class="cluster-card"><div class="clophead"><div><h3>Maintenance</h3>
-        <p>Restart readiness, planned work, and the membership changes that need a credential.</p></div></div>
-        <div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div>
-        ${recoveryRequired?"":operations}
-        <details class="cldanger"><summary>Danger zone · membership changes</summary><div class="cldangerbody">${joinPanel(maintenanceActive)}${leavePanel(cluster.local_node_id,maintenanceActive)}</div></details></section></div>`:""}
+        <div class="row" style="margin-top:12px"><button class="ghost sm" onclick="retryCluster()">Retry roster</button></div>`:""}</section>
+        ${clustered?`<section class="cluster-card"><div id="cluster-operations">${clusterOperationsCard(d.clusterOps)}</div></section>`:""}</div>`:""}</div>
     ${clusterTroubleshootingPanel(cluster,d.clusterOps)}</div>`;
 }
 function toggleClusterNodes(btn){
@@ -12272,14 +12154,13 @@ function toggleRecoveryChecklist(btn){
 function clusterRefusalHtml(){
   if(!CLUSTER_REFUSAL) return "";
   return `<div class="clrefusal"><b>Cluster operation for ${esc(CLUSTER_REFUSAL.node_id)} was refused</b>${
-    esc(membershipRefusalText(CLUSTER_REFUSAL.code,CLUSTER_REFUSAL.message))}</div>`;
+    esc(PlurxClusterPanel.membershipRefusalText(CLUSTER_REFUSAL.code,CLUSTER_REFUSAL.message))}</div>`;
 }
 // Minting is separated from showing because the token exists exactly once: the
 // server hands back the only copy and keeps nothing but its digest.
 function joinPanel(lifecycleLocked=false){
   if(CLUSTER_TOKEN) return joinTokenHtml(CLUSTER_TOKEN);
-  return `<h2 class="section">Add a node</h2>
-    <div class="row" style="gap:10px;align-items:center">
+  return `<div class="row" style="gap:10px;align-items:center">
       <span class="schedpair">Token valid for
         <select id="clttl" style="max-width:130px;font-size:12px;padding:3px 6px">
           <option value="600" selected>10 minutes</option>
@@ -12294,14 +12175,11 @@ function joinPanel(lifecycleLocked=false){
       other machine is ready to start, not before.</div>`;
 }
 function leavePanel(localNodeId,lifecycleLocked=false){
-  if(CLUSTER_LEAVING) return `<h2 class="section">Remove this node</h2>
-    <div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
+  if(CLUSTER_LEAVING) return `<div class="clstate calm"><h3>Leaving the cluster</h3><p>The membership change committed. This
       Cinema node is draining connections and will shut down.</p></div>`;
-  if(!localNodeId) return `<h2 class="section">Remove this node</h2>
-    <div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
+  if(!localNodeId) return `<div class="clstate warn"><h3>Local node identity unavailable</h3><p>Refresh the roster before
       leaving. The server will not guess which backend this destructive action should remove.</p></div>`;
-  return `<h2 class="section">Remove this node</h2>
-    <button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
+  return `<button class="ghost sm" ${lifecycleLocked?'disabled title="Finish maintenance before changing membership."':''} onclick='leaveCluster(this,${esc(JSON.stringify(localNodeId))})'>Leave this cluster</button>
     <div class="hint">A graceful leave is permanent, not an update or restart action. This node resolves
       its owned offline work and coordinates a safe membership change with the surviving quorum. It then
       drains and shuts down. Rejoining this machine requires a fresh data directory and
@@ -12313,8 +12191,7 @@ function leavePanel(localNodeId,lifecycleLocked=false){
 function joinTokenHtml(issued){
   const mins=Math.max(0,Math.round((issued.expires_at-Date.now())/60000));
   const role=issued.role==="learner"?"a non-voting read worker":"a voting member";
-  return `<h2 class="section">Add a node</h2>
-    <div class="jointoken" id="cltoken">${esc(issued.token)}</div>
+  return `<div class="jointoken" id="cltoken">${esc(issued.token)}</div>
     <div class="hint"><b>Shown once.</b> plurx keeps only this token's digest, so closing this is the end of
       it — create another if you lose it. Until it is redeemed or expires it carries the complete authority
       to join a node to this cluster: treat it like a password, and do not paste it into a chat, an issue, or
@@ -12341,7 +12218,7 @@ async function mintJoinToken(btn){
     if(!settingsCurrent(generation,"cluster")) return;
     CLUSTER_TOKEN={...token,role};
     CLUSTER_REFUSAL=null;
-    renderSettings();
+    repaintClusterPreserving(renderSettings);
   }catch(e){
     if(e&&e.status===401) throw e;
     if(!settingsCurrent(generation,"cluster")) return;
@@ -12349,7 +12226,7 @@ async function mintJoinToken(btn){
     toast(e.message||"Couldn't create a join token");
   }
 }
-function clearJoinToken(){ forgetJoinToken(); renderSettings(); }
+function clearJoinToken(){ forgetJoinToken(); repaintClusterPreserving(renderSettings); }
 async function copyJoinToken(){
   if(!CLUSTER_TOKEN) return;
   try{
@@ -12506,20 +12383,64 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
     }
     if(tab==="cluster"){
       const current=SETTINGS_DATA.cluster;
-      const recovery=current&&!current.unavailable?clusterRecoveryState(current):null;
+      const recovery=current&&!current.unavailable?PlurxClusterPanel.clusterRecoveryState(current):null;
       const live=current&&!current.unavailable&&((current.nodes||[]).some(n=>n.maintenance)||(recovery&&recovery.required));
       if(live){
         const snapshot=await api("/cluster/nodes");
         if(!settingsCurrent(generation,tab)) return;
         const operational=cluster=>JSON.stringify({
-          recovery:clusterRecoveryState(cluster),
+          recovery:PlurxClusterPanel.clusterRecoveryState(cluster),
           nodes:(cluster.nodes||[]).map(n=>({id:n.node_id,leader:n.is_leader,reachable:n.reachable,
             lag:n.apply_lag_entries,maintenance:n.maintenance,ack:n.maintenance_acknowledged,
             ready:n.maintenance_ready,sessions:n.active_media_sessions,removal:n.removal_pending})),
         });
         const changed=operational(current)!==operational(snapshot);
-        SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
-        if(changed) renderSettings();
+        // This branch runs precisely while a node is fenced or a recovery is
+        // required — which is when the force-election dialog is most likely to
+        // be open. Hold the sample rather than paint over the decision; two
+        // seconds later the same difference is still there.
+        if(!(changed&&clusterRepaintDeferred())){
+          SETTINGS_DATA.cluster=snapshot; SETTINGS_LOADED.add("cluster"); CLUSTER_LOADED=true;
+          if(changed) repaintClusterPreserving(renderSettings);
+        }
+      }
+      // The direct status ages the same way the roster does, and every rail
+      // verdict, node card, and ledger reading is read off it. It is refreshed
+      // here rather than on a timer of its own because this loop already owns
+      // the cadence, the generation guard, the visibility check, and the
+      // re-entrancy latch, and a second loop would have to reimplement all four.
+      //
+      // Only on a machine that is actually in a cluster: a single SQLite box
+      // renders no rail, no roster and no direct readings, so collecting a
+      // fan-out it will not paint is a request spent to learn nothing.
+      if(current&&!current.unavailable&&clusterOpsDue()){
+        // Stamped BEFORE the await: a probe slower than the gate must not stack
+        // a second fan-out behind itself. A refusal leaves it stamped too — the
+        // retry is the next gate, not the next tick — but the freshness row
+        // still has to move, because a failing collection is exactly when the
+        // age of the reading on screen matters most.
+        clusterOpsStamp();
+        try{
+          const previous=SETTINGS_DATA.clusterOps;
+          const ops=await api("/cluster/status");
+          if(!settingsCurrent(generation,tab)) return;
+          const changed=PlurxClusterPanel.clusterOpsProjection(previous)
+            !==PlurxClusterPanel.clusterOpsProjection(ops);
+          if(changed&&clusterRepaintDeferred()){
+            // Held, not stored: the freshness row keeps reporting the age of the
+            // sample actually on screen, which is the only thing it can honestly
+            // describe.
+            patchClusterReadingAge();
+          }else{
+            SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+            if(changed) repaintClusterPreserving(renderSettings);
+            else patchClusterReadingAge();
+          }
+        }catch(error){
+          if(error&&error.status===401) throw error;
+          if(!settingsCurrent(generation,tab)) return;
+          patchClusterReadingAge();
+        }
       }
     }
     await Promise.all(secondary);

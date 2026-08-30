@@ -345,6 +345,7 @@ pub fn router(state: AppState) -> Router {
         // `/` serves the web app for browsers, Plex capabilities for Plex clients.
         .route("/", get(root_dispatch))
         .route("/assets/hls.min.js", get(web::hls_js))
+        .route("/assets/cluster-panel.js", get(web::cluster_panel_js))
         .route("/assets/playback-policy.js", get(web::playback_policy_js))
         .route("/assets/playback-control.js", get(web::playback_control_js))
         .route("/assets/reader.js", get(web::reader_js))
@@ -7394,6 +7395,7 @@ mod tests {
             "/icons/icon-192.png",
             "/icons/apple-touch-icon.png",
             "/assets/hls.min.js",
+            "/assets/cluster-panel.js",
             "/assets/playback-policy.js",
             "/assets/playback-control.js",
             "/assets/reader.js",
