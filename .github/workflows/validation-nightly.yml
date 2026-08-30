@@ -77,6 +77,16 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      # Every other Rust job here installs its toolchain through this action.
+      # This one assumed `rustup` was already on the box — true of a hosted
+      # runner image, not of a self-hosted one — and died with
+      # `rustup: command not found` before running a single fuzz case.
+      - uses: dtolnay/rust-toolchain@1.97.1
+      # `cargo install cargo-fuzz` is twenty minutes of compiling that does not
+      # change between nights.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: nightly-pgs-fuzz
       - name: Install the PGS fuzz runner
         run: |
           rustup toolchain install nightly-2026-08-01 --profile minimal
