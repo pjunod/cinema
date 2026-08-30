@@ -9495,6 +9495,7 @@ mod tests {
                     recent_producer_speed: None,
                     client_runway_ms: 9_000,
                     admitted,
+                    producer_decision: None,
                     hold_reason: None,
                     owner_node_hash: "n-0123456789abcdef".to_owned(),
                     owner_epoch: 1,

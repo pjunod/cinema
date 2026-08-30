@@ -568,6 +568,11 @@ impl ControlResponseV1 {
                     "demand" | "time" | "bytes" | "global" | "ahead" | "working_set" | "no_room"
                 )
             })
+            && self
+                .delivery
+                .producer_decision
+                .as_deref()
+                .is_none_or(|value| ProducerDecisionReason::from_status(value).is_some())
             && self.delivery.owner_epoch == self.control_epoch
             && self.delivery.owner_node_hash.starts_with("n-")
             && self.delivery.owner_node_hash.len() == 18
@@ -626,6 +631,13 @@ pub(crate) struct DeliveryView {
     pub client_runway_ms: i64,
     pub admitted: Option<bool>,
     pub hold_reason: Option<String>,
+    /// Why the producer stopped, when it stopped for a reason this server has
+    /// named. `producer_state` says only `failed`; this says which of the
+    /// fourteen decisions that was, and therefore whether trying again could
+    /// ever work. Optional: an older peer relaying a response has no such
+    /// field, and absence means "not classified here", never "healthy".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub producer_decision: Option<String>,
     pub owner_node_hash: String,
     pub owner_epoch: u64,
 }
@@ -656,6 +668,11 @@ impl DeliveryView {
                 recent_producer_speed: info.recent_speed,
                 client_runway_ms,
                 admitted: None,
+                producer_decision: info
+                    .producer_control
+                    .as_ref()
+                    .and_then(|control| control.decision_reason)
+                    .map(str::to_owned),
                 hold_reason: info.hold_reason.map(|reason| {
                     match reason {
                         crate::transcode::AheadHoldReason::Demand => "demand",
@@ -678,6 +695,10 @@ impl DeliveryView {
                 recent_producer_speed: None,
                 client_runway_ms,
                 admitted: Some(info.admitted),
+                // VOD's failure is still a prose cause rather than a bounded
+                // decision, so there is nothing honest to put here yet. It is
+                // absent rather than guessed.
+                producer_decision: None,
                 hold_reason: info.producer_hold.map(str::to_owned),
                 owner_node_hash: node_hash(owner_node_id),
                 owner_epoch,
@@ -1304,6 +1325,7 @@ pub(crate) fn terminal_response_for_test(result: &LocalControlResult) -> Control
             recent_producer_speed: None,
             client_runway_ms: 0,
             admitted: None,
+            producer_decision: None,
             hold_reason: None,
             owner_node_hash: "n-test".to_owned(),
             owner_epoch: 1,
@@ -1759,6 +1781,51 @@ impl ProducerDecisionReason {
             Self::InstallDeadline => "install_deadline",
             Self::ExecutorLost => "executor_lost",
         }
+    }
+
+    /// Whether retrying this source, unchanged, can ever succeed.
+    ///
+    /// Twelve of these fourteen reasons are timing, process, or executor
+    /// facts: the same file on the same pipeline may well work on the next
+    /// attempt. Two are verdicts about the source itself — this container
+    /// cannot be carried by this pipeline, or the recipe that was asked for is
+    /// not a legal one — and no amount of retrying changes either.
+    ///
+    /// The distinction is the whole reason a client cannot decide for itself.
+    /// `producer_state` flattens all fourteen to the word `failed`, so a
+    /// client seeing a failure has no way to tell "try again" from "this will
+    /// never work", and every client currently guesses toward retry: it
+    /// reopens the session, gets the same verdict, and reopens again.
+    /// Proven here before anything consumes it: the action that will read it
+    /// is the next slice, and shipping the split with its test now means that
+    /// slice cannot quietly get the classification wrong later.
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn is_permanent(self) -> bool {
+        matches!(self, Self::Unsupported | Self::InvalidConfiguration)
+    }
+
+    /// The bounded vocabulary, in the order the wire and metrics use.
+    pub(crate) const ALL: [Self; 14] = [
+        Self::StartupDeadline,
+        Self::ProgressDeadline,
+        Self::ExitClassificationDeadline,
+        Self::ProcessExit,
+        Self::PartialSuccessExit,
+        Self::Unsupported,
+        Self::InvalidConfiguration,
+        Self::ReaderFailed,
+        Self::FlowStopFailed,
+        Self::FlowResumeFailed,
+        Self::FlowStopDeadline,
+        Self::FlowResumeDeadline,
+        Self::InstallDeadline,
+        Self::ExecutorLost,
+    ];
+
+    pub(crate) fn from_status(status: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|reason| reason.status() == status)
     }
 }
 
@@ -9219,6 +9286,7 @@ mod tests {
                     recent_producer_speed: None,
                     client_runway_ms: 0,
                     admitted: None,
+                    producer_decision: None,
                     hold_reason: None,
                     owner_node_hash: "n-test".to_owned(),
                     owner_epoch: 1,
@@ -9363,6 +9431,7 @@ mod tests {
             recent_producer_speed: Some(1.4),
             client_runway_ms: 15_000,
             admitted: None,
+            producer_decision: None,
             hold_reason: reason.map(str::to_owned),
             owner_node_hash: "n-0123456789abcdef".to_owned(),
             owner_epoch: 1,
@@ -9448,6 +9517,57 @@ mod tests {
             assert_eq!(reason as usize, expected, "{reason:?} moved slot");
         }
         assert_eq!(CONTROL_HOLD_REASONS.len(), 7);
+    }
+
+    #[test]
+    fn only_a_verdict_about_the_source_itself_is_permanent() {
+        // The split that decides whether a client should ever be told to give
+        // up. Twelve of the fourteen are timing, process, or executor facts:
+        // the same file on the same pipeline may work on the next attempt.
+        // Two are verdicts about the source, and no retry changes those.
+        for reason in ProducerDecisionReason::ALL {
+            let expected = matches!(
+                reason,
+                ProducerDecisionReason::Unsupported | ProducerDecisionReason::InvalidConfiguration
+            );
+            assert_eq!(
+                reason.is_permanent(),
+                expected,
+                "{} classified wrongly",
+                reason.status(),
+            );
+        }
+        assert_eq!(
+            ProducerDecisionReason::ALL
+                .into_iter()
+                .filter(|reason| reason.is_permanent())
+                .count(),
+            2,
+        );
+    }
+
+    #[test]
+    fn every_decision_reason_round_trips_its_wire_name() {
+        // `ALL` is what the wire is bounded against and what metrics will be
+        // labelled by. A variant added to the enum and forgotten here would
+        // be accepted by the relay check under no name at all.
+        for reason in ProducerDecisionReason::ALL {
+            assert_eq!(
+                ProducerDecisionReason::from_status(reason.status()),
+                Some(reason),
+            );
+        }
+        assert_eq!(ProducerDecisionReason::ALL.len(), 14);
+        assert_eq!(ProducerDecisionReason::from_status("invented"), None);
+        // The names are wire-safe: lowercase, underscored, no spaces.
+        for reason in ProducerDecisionReason::ALL {
+            let name = reason.status();
+            assert!(
+                name.bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+                "{name} is not a wire-safe name",
+            );
+        }
     }
 
     #[test]
@@ -13127,6 +13247,7 @@ mod tests {
                 recent_producer_speed: None,
                 client_runway_ms: 15_000,
                 admitted: Some(true),
+                producer_decision: None,
                 hold_reason: None,
                 owner_node_hash: "n-0123456789abcdef".to_owned(),
                 owner_epoch: 1,

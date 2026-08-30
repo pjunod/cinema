@@ -277,6 +277,36 @@ class ControlRequestWireCase(unittest.TestCase):
                 f"{label} does not declare {hold!r}, so the server would never send it",
             )
 
+    def test_the_producer_decision_is_bounded_by_one_list(self) -> None:
+        """The relay check and the enum must agree on the fourteen names.
+
+        A variant added to `ProducerDecisionReason` but forgotten in `ALL`
+        would be accepted on the wire under no name the relay could bound, and
+        the permanence split that decides whether a client gives up would have
+        a hole in it.
+        """
+        listed = re.search(
+            r"pub\(crate\) const ALL: \[Self; (\d+)\] = \[(.*?)\];",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(listed, "the decision vocabulary is no longer enumerated")
+        count = int(listed.group(1))
+        entries = re.findall(r"Self::([A-Za-z]+),", listed.group(2))
+        self.assertEqual(len(entries), count)
+        declared = re.search(
+            r"pub\(crate\) enum ProducerDecisionReason \{(.*?)\n\}",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(declared, "ProducerDecisionReason is no longer an enum")
+        variants = re.findall(r"^\s+([A-Za-z]+),", declared.group(1), re.MULTILINE)
+        self.assertEqual(
+            sorted(entries),
+            sorted(variants),
+            "ProducerDecisionReason::ALL and the enum disagree",
+        )
+
     def test_the_hold_reason_is_one_vocabulary(self) -> None:
         """The action's reason and `DeliveryView.hold_reason` are the same fact."""
         mapping = re.search(
