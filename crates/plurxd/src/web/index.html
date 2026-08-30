@@ -4985,10 +4985,12 @@ function specBlock(f){
   // is deciding whether to use.
   const hlsRow=f.vod_index_status==="indexed"
     ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS</span><span class="mode-detail">Fixed, seekable timeline · analysis is ready for this file</span></dd>`
-    : f.vod_index_status==="pending"
-      ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
-      : f.vod_index_status==="unsupported"
-        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
+    : f.vod_index_status==="partial"
+      ? `<dt>HLS capability</dt><dd><span class="mode-chip vod">VOD HLS on some devices</span><span class="mode-detail">Analysis is ready for some of this file's delivery routes but not all — a Dolby Vision device can still fall back to Live HLS until the rest is built</span></dd>`
+      : f.vod_index_status==="pending"
+        ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">Can be used while VOD analysis is pending when live recovery is enabled in Playback settings</span></dd>`
+        : f.vod_index_status==="unsupported"
+          ? `<dt>HLS capability</dt><dd><span class="mode-chip live">Live HLS fallback</span><span class="mode-detail">This codec cannot use the VOD indexer; Live HLS requires live recovery to be enabled in Playback settings</span></dd>`:"";
   const analysis=analysisFileControl(f);
   return `<dl class="specs">
     ${vid||!auds.length?`<dt>Video</dt><dd>${esc(vid||"—")}</dd>`:''}
@@ -5002,7 +5004,10 @@ function analysisFileControl(f){
   const rebuild=f.vod_index_status==="indexed";
   const unsupported=f.vod_index_status==="unsupported";
   const fileId=exactWireId(f);
-  const state=rebuild?"VOD HLS ready":f.vod_index_status==="unsupported"?"VOD analysis unsupported":"VOD analysis pending";
+  const state=rebuild?"VOD HLS ready"
+    :f.vod_index_status==="unsupported"?"VOD analysis unsupported"
+    :f.vod_index_status==="partial"?"VOD analysis partly built"
+    :"VOD analysis pending";
   return `<div class="analysis-brief px-admin th-admin" style="margin-top:12px">
     <div class="analysis-brief-head"><div><h2>Content analysis</h2>
       <p><b>${esc(state)}</b> · Build and inspect the fragment index that enables fixed-timeline VOD HLS.</p></div>

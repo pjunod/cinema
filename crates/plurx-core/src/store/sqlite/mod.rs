@@ -860,6 +860,12 @@ const MIGRATIONS: &[&str] = &[
     // v36: route confirmation and the starting request's retry deadline are
     // one atomic database mutation on both Store backends.
     super::MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA,
+    // v37: one fragment index per (file, copy pipeline) instead of one per
+    // file. A Dolby Vision title has two byte streams real clients ask for and
+    // the old key could hold only one of them, which is why every preserved-DV
+    // session fell through to live-HLS recovery (PLAYBACK-CAPS-V2-PLAN §4.7).
+    // A table rebuild, because SQLite cannot re-key in place; rows carry over.
+    crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY,
 ];
 
 /// Highest SQLite schema version this binary can read and migrate.
@@ -1811,9 +1817,23 @@ mod tests {
             .expect("version");
         assert_eq!(version, MIGRATIONS.len() as i64);
         assert_eq!(
-            version, 36,
+            version, 37,
             "a new migration must be a deliberate bump, not a surprise — \
              the list is append-only and every entry is one somebody shipped"
+        );
+        let fragment_indexes: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                  WHERE type = 'table' AND name = 'fragment_indexes'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("fragment index table");
+        assert!(
+            fragment_indexes.contains("PRIMARY KEY (file_id, argv_fingerprint)"),
+            "v37 re-keys the table on the copy pipeline as well as the file, \
+             or a Dolby Vision title's second identity silently overwrites its \
+             first: {fragment_indexes}"
         );
 
         // Every row survives, values identical.

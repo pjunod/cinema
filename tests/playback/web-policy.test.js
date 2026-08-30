@@ -2125,6 +2125,29 @@ test("the detail screen names the supported HLS mode before playback", () => {
   assert.doesNotMatch(adminControl,/Analyze now/);
 });
 
+test("a partly analysed file says so rather than reading as ready", () => {
+  // A Dolby Vision title is delivered as two different byte streams, and an
+  // index for one of them is not an index for the other. Before the tri-state
+  // this file reported "indexed" off the stripped pipeline alone, so the
+  // screen promised VOD HLS to a device that would land on Live HLS.
+  const partial = detailHarness().specBlock({ ...MOVIE_FILE, vod_index_status: "partial" });
+  assert.match(
+    partial,
+    /<dt>HLS capability<\/dt><dd><span class="mode-chip vod">VOD HLS on some devices<\/span>/,
+  );
+  assert.match(partial, /some of this file's delivery routes but not all/);
+  assert.doesNotMatch(partial, /Fixed, seekable timeline/);
+
+  // And it stays actionable: the control offers the build that fills the gap,
+  // not the "Rebuild analysis" wording reserved for a file already complete.
+  const partialControl=detailHarness({admin:true}).analysisFileControl({
+    ...MOVIE_FILE,available:true,vod_index_status:"partial",
+  });
+  assert.match(partialControl,/VOD analysis partly built/);
+  assert.match(partialControl,/Analyze now/);
+  assert.doesNotMatch(partialControl,/Rebuild analysis/);
+});
+
 test("the detail screen keeps only the selected subtitle visible until expanded", () => {
   const html = detailHarness().specBlock(MOVIE_FILE);
   const disclosure = html.match(

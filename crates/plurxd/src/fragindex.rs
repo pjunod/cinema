@@ -264,6 +264,52 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
     )
 }
 
+/// Every copy-video pipeline a real client can ask this file for, in the order
+/// they should be built.
+///
+/// The indexer used to answer one pipeline — the Dolby-Vision-stripped one —
+/// for every file, while `vodserve` and `/decision` build a session's identity
+/// from the *session's* `preserve_dolby_vision`. A DV-capable client therefore
+/// asked for a byte stream nothing had ever indexed, got `vod_index_pending`,
+/// and was rescued by the temporary live-HLS recovery path on every play
+/// (PLAYBACK-CAPS-V2-PLAN §4.7, edge E1).
+///
+/// The stripped identity stays **first**. It is what every non-DV client and
+/// every non-DV file uses, and what a forced rebuild resolves to, so a library
+/// that is fully indexed today does not re-order its work to adopt this.
+///
+/// Deduplicated by fingerprint rather than by [`transcode::CopyVideoOptions`]
+/// equality, so that an option which happens to render to an argv another
+/// option already produced costs nothing. Nothing collapses today — even an
+/// ffmpeg with no `dovi_rpu` filter still tags the two differently — but the
+/// index keyspace is what a session looks itself up in, and a duplicate there
+/// is a whole redundant pass over a 60 GB remux.
+///
+/// Profile 5 is deliberately in the set even though it has no HDR10 base to
+/// strip to. [`plurx_core::playback::decide`] never routes it to a stripping
+/// copy, but `decide_forced` with `Force::Original` does, and that copy is
+/// indexed today — dropping it would regress a path that works.
+pub fn video_identities(
+    file: &MediaFile,
+    probe_json: Option<&str>,
+    have_dovi: bool,
+) -> Vec<transcode::CopyVideoOptions> {
+    let preserve_choices: &[bool] = if plurx_core::playback::is_dolby_vision(file) {
+        &[false, true]
+    } else {
+        &[false]
+    };
+    let mut identities = Vec::with_capacity(preserve_choices.len());
+    let mut seen = std::collections::HashSet::new();
+    for preserve in preserve_choices {
+        let video = transcode::CopyVideoOptions::from_probe(file, probe_json, have_dovi, *preserve);
+        if seen.insert(identity_for(file, video).argv_fingerprint) {
+            identities.push(video);
+        }
+    }
+    identities
+}
+
 /// Build a file's index by running the index pipe.
 ///
 /// `budget` bounds the whole pass. An index is background work; a NAS read
@@ -448,6 +494,95 @@ mod tests {
 
     fn identity() -> SourceIdentity {
         SourceIdentity::new(1, 1, "fingerprint")
+    }
+
+    fn hevc_file(hdr: Option<&str>, hdr_format: Option<&str>) -> MediaFile {
+        MediaFile {
+            id: 77,
+            item_id: 1,
+            path: std::path::PathBuf::from("/library/film.mkv"),
+            size: 60_000_000_000,
+            mtime: 1_700_000_000_000,
+            duration_ms: Some(7_200_000),
+            container: Some("mkv".into()),
+            video_codec: Some("hevc".into()),
+            video_profile: Some("Main 10".into()),
+            width: Some(3840),
+            height: Some(2160),
+            bit_depth: Some(10),
+            hdr: hdr.map(str::to_owned),
+            hdr_format: hdr_format.map(str::to_owned),
+            bitrate: Some(60_000_000),
+            audio_streams: vec![],
+            subtitle_streams: vec![],
+            scanned_at: 0,
+            audio_offset_ms: 0,
+            probed: true,
+        }
+    }
+
+    fn fingerprints_of(file: &MediaFile, have_dovi: bool) -> Vec<String> {
+        video_identities(file, None, have_dovi)
+            .into_iter()
+            .map(|video| identity_for(file, video).argv_fingerprint)
+            .collect()
+    }
+
+    #[test]
+    fn a_plain_file_has_one_pipeline_to_index() {
+        let file = hevc_file(None, None);
+        assert_eq!(video_identities(&file, None, true).len(), 1);
+        assert!(
+            !video_identities(&file, None, true)[0].preserves_dolby_vision(),
+            "the stripped identity stays first, so a fully indexed library \
+             does not re-order its work to adopt the identity set"
+        );
+    }
+
+    #[test]
+    fn a_dolby_vision_file_is_indexed_for_both_the_strip_and_the_envelope() {
+        let file = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+        );
+        let videos = video_identities(&file, None, true);
+        assert_eq!(videos.len(), 2);
+        assert!(!videos[0].preserves_dolby_vision());
+        assert!(videos[1].preserves_dolby_vision());
+
+        let held = fingerprints_of(&file, true);
+        assert_ne!(
+            held[0], held[1],
+            "the preserved envelope and the strip are different byte streams, \
+             which is why one index could never answer for both"
+        );
+    }
+
+    #[test]
+    fn profile_five_keeps_its_stripping_identity_too() {
+        // `decide` never routes a Profile 5 source to a stripping copy -- it
+        // has no HDR10 base -- but `decide_forced(Force::Original)` does, and
+        // that copy is indexed today. The plan's M1 acceptance check expects
+        // one row here; dropping the second would regress a live path.
+        let file = hevc_file(Some("dolby_vision"), Some("Dolby Vision · Profile 5"));
+        assert_eq!(video_identities(&file, None, true).len(), 2);
+    }
+
+    #[test]
+    fn an_ffmpeg_that_cannot_strip_still_offers_two_identities() {
+        // Worth pinning because it is the opposite of what it looks like:
+        // without the `dovi_rpu` filter nothing removes the RPU, so it would
+        // be easy to assume the two pipelines collapse into one. They do not.
+        // The sample entry tag is the same `hvc1` either way for a source with
+        // an HDR10-compatible base, but `-strict unofficial` and the bitstream
+        // filter chain both still differ, and those decide the emitted bytes.
+        let file = hevc_file(
+            Some("dolby_vision"),
+            Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+        );
+        let held = fingerprints_of(&file, false);
+        assert_eq!(held.len(), 2);
+        assert_ne!(held[0], held[1]);
     }
 
     /// The index pipe over a real fixture, read the way the daemon reads it.

@@ -87,7 +87,7 @@ CREATE INDEX network_priors_by_updated
     ON network_priors(updated_at_ms, user_id, client_class);";
 
 #[cfg(any(test, feature = "hiqlite-store"))]
-const SIDECAR_SCHEMA_VERSION: i64 = 6;
+const SIDECAR_SCHEMA_VERSION: i64 = 7;
 const MAX_QUERY_ROWS: i64 = 2_000;
 const MAX_PRUNE_ROWS: i64 = 10_000;
 const MAX_PRIORS_PER_USER_CLIENT: i64 = 64;
@@ -472,6 +472,21 @@ impl NodeLocalTelemetry {
             // as an upgraded one.
             if creating_indexes || !column_exists(&conn, "fragment_indexes", "promotion")? {
                 migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS);
+                migration.push('\n');
+            }
+            // v7: re-key `fragment_indexes` on (file_id, argv_fingerprint), so
+            // one file can hold an index per copy pipeline a client can ask
+            // for (PLAYBACK-CAPS-V2-PLAN §4.7).
+            //
+            // Guarded on `current < 7` and not on the branch it sits in. The
+            // branch is `current < SIDECAR_SCHEMA_VERSION`, which is the same
+            // thing today and stops being it the moment a v8 exists: every
+            // already-migrated sidecar would then rebuild this table on every
+            // upgrade — a full copy of every packed index the voter holds —
+            // and a v8 that added a column above this line would watch the
+            // rebuild's explicit column list silently drop it again.
+            if current < 7 {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY);
                 migration.push('\n');
             }
             migration.push_str(&format!(
@@ -978,7 +993,11 @@ mod tests {
         let error = NodeLocalTelemetry::open(&path)
             .err()
             .expect("future sidecar schema must be refused");
-        assert!(error.to_string().contains("only knows v6"), "{error}");
+        // The literal is the point: the error text is itself formatted from
+        // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
+        // constant can never fail on a bump. Update it by hand, deliberately,
+        // exactly as the single-node backend's `assert_eq!(version, 37)` is.
+        assert!(error.to_string().contains("only knows v7"), "{error}");
     }
 
     #[tokio::test]
@@ -1113,6 +1132,94 @@ mod tests {
             .expect("version");
         assert_eq!(version, SIDECAR_SCHEMA_VERSION);
         assert!(table_exists(&conn, "rendition_plans").expect("table check"));
+    }
+
+    #[tokio::test]
+    async fn sidecar_v6_gains_a_second_pipeline_per_file_without_losing_the_first() {
+        // v7 re-keys `fragment_indexes` on (file_id, argv_fingerprint) so a
+        // Dolby Vision title can hold the preserved envelope and the stripped
+        // one at once. It is a table rebuild, so the row that was already
+        // there is the thing most at risk.
+        let directory = tempfile::tempdir().expect("sidecar directory");
+        let path = directory.path().join("telemetry.db");
+        {
+            let conn = Connection::open(&path).expect("seed a v6 sidecar");
+            conn.execute_batch(PLAYBACK_EVENTS_SCHEMA).expect("events");
+            conn.execute_batch(NETWORK_PRIORS_SCHEMA).expect("priors");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_SCHEMA)
+                .expect("indexes");
+            conn.execute_batch(crate::store::renditionplan::RENDITION_PLANS_SCHEMA)
+                .expect("plans");
+            conn.execute_batch(crate::store::fragindex::FRAGMENT_INDEXES_PROMOTION_COLUMNS)
+                .expect("promotion columns");
+            conn.execute(
+                "INSERT INTO fragment_indexes (
+                     file_id, source_size, source_mtime, argv_fingerprint,
+                     segplan_version, timescale, init_sha256, fragments,
+                     rows_packed, built_at_ms, promotion, parameter_sets_constant
+                 ) VALUES (42, 4096, 1700000000000, 'stripped', ?1, 16000,
+                           'abc123', 1, X'00', 1700000000000, '{}', 1)",
+                rusqlite::params![i64::from(crate::segplan::SEGPLAN_VERSION)],
+            )
+            .expect("record an index the way a v6 voter would");
+            conn.pragma_update(None, "user_version", 6)
+                .expect("stamp v6");
+        }
+
+        let upgraded = NodeLocalTelemetry::open(&path).expect("upgrade to v7");
+        let held: Vec<String> = upgraded
+            .with_conn(|conn| {
+                let mut statement = conn
+                    .prepare("SELECT argv_fingerprint FROM fragment_indexes WHERE file_id = 42")?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+            })
+            .await
+            .expect("read the surviving fingerprints");
+        assert_eq!(
+            held,
+            vec!["stripped".to_owned()],
+            "the rebuild must carry the v6 row across: an existing index is \
+             still a true statement about the pipeline it names, and dropping \
+             it would re-index a whole library for nothing"
+        );
+
+        let conn = Connection::open(&path).expect("inspect");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .expect("version");
+        assert_eq!(version, SIDECAR_SCHEMA_VERSION);
+        let key: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='fragment_indexes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("table definition");
+        assert!(
+            key.contains("PRIMARY KEY (file_id, argv_fingerprint)"),
+            "the upgraded table must be keyed by pipeline as well as file, or \
+             a second identity silently overwrites the first: {key}"
+        );
+        // And the whole point: a second pipeline for the same file now fits.
+        conn.execute(
+            "INSERT INTO fragment_indexes (
+                 file_id, source_size, source_mtime, argv_fingerprint,
+                 segplan_version, timescale, init_sha256, fragments,
+                 rows_packed, built_at_ms, promotion, parameter_sets_constant
+             ) VALUES (42, 4096, 1700000000000, 'preserved', 9, 16000,
+                       'def456', 1, X'00', 1700000000001, '{}', 1)",
+            [],
+        )
+        .expect("a second pipeline for the same file");
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fragment_indexes WHERE file_id = 42",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(rows, 2);
     }
 
     #[tokio::test]
