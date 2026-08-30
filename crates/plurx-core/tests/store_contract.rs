@@ -6557,6 +6557,30 @@ async fn replicated_v5_store_migrates_atomically_through_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             ("DROP TABLE IF EXISTS reading_state", hiqlite::params!()),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = $1 WHERE singleton = 1",
                 hiqlite::params!(AUTH_SCHEMA_MIGRATION_SOURCE),
@@ -6737,6 +6761,30 @@ async fn replicated_v6_store_migrates_atomically_to_v11_on_daemon_open() {
                 "ALTER TABLE items DROP COLUMN book_metadata_source",
                 hiqlite::params!(),
             ),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 6 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -6895,6 +6943,30 @@ async fn replicated_v7_store_migrates_atomically_to_v11_on_daemon_open() {
                 hiqlite::params!(),
             ),
             ("DROP TABLE job_leases", hiqlite::params!()),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 7 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -7037,6 +7109,30 @@ async fn replicated_v8_store_migrates_exactly_to_v11_on_daemon_open() {
             ),
             (
                 "ALTER TABLE transcode_cache_locations DROP COLUMN scrub_object_index",
+                hiqlite::params!(),
+            ),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
                 hiqlite::params!(),
             ),
             (
@@ -7187,6 +7283,30 @@ async fn replicated_v9_store_migrates_exactly_to_v11_on_daemon_open() {
             ("DROP TABLE media_playback_pointers", hiqlite::params!()),
             ("DROP TABLE media_sessions", hiqlite::params!()),
             ("DROP TABLE media_session_requests", hiqlite::params!()),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 9 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -7371,6 +7491,30 @@ async fn replicated_v10_store_migrates_exactly_to_current_on_daemon_open() {
                 "ALTER TABLE transcode_cache_locations DROP COLUMN storage_id",
                 hiqlite::params!(),
             ),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 10 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -7528,6 +7672,30 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
             (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
             (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 12 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -7683,6 +7851,30 @@ async fn replicated_v11_and_v12_migrations_are_atomic_restartable_and_stepwise()
             (MEDIA_SESSIONS_FIXTURE_USER_INDEX, hiqlite::params!()),
             (MEDIA_SESSIONS_FIXTURE_EXPIRY_INDEX, hiqlite::params!()),
             (MEDIA_SESSIONS_FIXTURE_RETENTION_INDEX, hiqlite::params!()),
+            // The Dolby Vision columns are v19's, so a fixture claiming an
+            // earlier version has to give them back. Every fixture here is
+            // built by bootstrapping the CURRENT schema and undoing what each
+            // later migration added — miss one column and the migration under
+            // test re-runs its own `ALTER TABLE ADD COLUMN` against a table
+            // that already has it, and the chain fails on a fixture that was
+            // never really old.
+            (
+                "ALTER TABLE files DROP COLUMN dv_profile",
+                hiqlite::params!(),
+            ),
+            ("ALTER TABLE files DROP COLUMN dv_level", hiqlite::params!()),
+            (
+                "ALTER TABLE files DROP COLUMN dv_bl_compat_id",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_el_present",
+                hiqlite::params!(),
+            ),
+            (
+                "ALTER TABLE files DROP COLUMN dv_rpu_present",
+                hiqlite::params!(),
+            ),
             (
                 "UPDATE cluster_meta SET schema_version = 11 WHERE singleton = 1",
                 hiqlite::params!(),
@@ -8880,6 +9072,15 @@ fn populated_v14_import_fixture(data_dir: &std::path::Path) -> PathBuf {
     connection
         .execute_batch(
             "PRAGMA foreign_keys = OFF;
+             -- v38's Dolby Vision columns. A fixture that stamps user_version
+             -- back to 14 without removing them is not a v14 database: the
+             -- ordinary startup migration would re-run its own ALTER TABLE ADD
+             -- COLUMN against a table that already has them.
+             ALTER TABLE files DROP COLUMN dv_rpu_present;
+             ALTER TABLE files DROP COLUMN dv_el_present;
+             ALTER TABLE files DROP COLUMN dv_bl_compat_id;
+             ALTER TABLE files DROP COLUMN dv_level;
+             ALTER TABLE files DROP COLUMN dv_profile;
              DROP TRIGGER transcode_cache_location_identity_au;
              DROP TRIGGER transcode_cache_location_identity_ai;
              DROP INDEX transcode_cache_storage_lru;
