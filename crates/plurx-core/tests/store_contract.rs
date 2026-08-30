@@ -35,15 +35,15 @@ use plurx_core::cluster::migration::{
 use plurx_core::config::Config;
 use plurx_core::domain::{
     scopes, ArtworkAttempt, BookMetadataPatch, BookMetadataSource, CacheConsumerKind,
-    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration, ItemEdit,
-    ItemKind, ItemSort, LibraryKind, MediaSessionActivation, MediaSessionActivationSettlement,
-    MediaSessionEnd, MediaSessionProjectionCompletion, MediaSessionRenewal,
-    MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaSessionTakeoverCursor,
-    MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation, NewItem, NewLibrary,
-    NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome, OfflineLeaseOutcome,
-    PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements, PretranscodeWorkerCapabilities,
-    ProbeResult, ReadingStateWrite, TraktAuth, MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS,
-    MEDIA_SESSION_PUBLICATION_BLOCKED,
+    CacheConsumerPin, CacheManifestCheck, CacheStorageMember, CredentialGeneration,
+    DolbyVisionFacts, ItemEdit, ItemKind, ItemSort, LibraryKind, MediaSessionActivation,
+    MediaSessionActivationSettlement, MediaSessionEnd, MediaSessionProjectionCompletion,
+    MediaSessionRenewal, MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover,
+    MediaSessionTakeoverCursor, MediaSessionTerminalAck, MetadataPatch, NetworkPriorObservation,
+    NewItem, NewLibrary, NewOfflinePackage, NewPretranscodeJob, OfflineCreateOutcome,
+    OfflineLeaseOutcome, PlaybackEvent, PlaybackEventQuery, PretranscodeRequirements,
+    PretranscodeWorkerCapabilities, ProbeResult, ReadingStateWrite, TraktAuth,
+    MEDIA_SESSION_HANDOFF_SAFETY_WINDOW_MS, MEDIA_SESSION_PUBLICATION_BLOCKED,
 };
 use plurx_core::error::StoreError;
 use plurx_core::fmp4::CutClass;
@@ -234,6 +234,8 @@ const MEDIA_METHODS: &[&str] = &[
     "item_max_heights",
     "item_media_facts",
     "set_file_audio_offset",
+    "files_missing_dolby_vision",
+    "set_file_dolby_vision",
     "get_file_probe_json",
     "merge_file_probe_chapters",
     "files_missing_probe",
@@ -10384,11 +10386,165 @@ fn contract_inventory_matches_every_store_method() {
     .copied()
     .collect::<BTreeSet<_>>();
 
-    assert_eq!(declared.len(), 242, "review the Store method count");
+    assert_eq!(declared.len(), 244, "review the Store method count");
     assert_eq!(
         covered, declared,
         "the declared async method name inventory changed"
     );
+}
+
+/// The Dolby Vision columns round-trip, and the backfill can find the rows it
+/// exists for.
+///
+/// Both halves matter on both backends. A file scanned with a configuration
+/// record carries its facts from the moment it is written; a file scanned
+/// before the columns existed is what `files_missing_dolby_vision` has to
+/// return, and it must stop returning it once the facts are written — that
+/// empty answer is the backfill's own completion signal.
+#[tokio::test]
+async fn dolby_vision_facts_round_trip_and_the_backfill_finds_what_it_needs() {
+    for_each_backend(|store, backend| async move {
+        let library = store
+            .create_library(&NewLibrary {
+                name: "DV".into(),
+                kind: LibraryKind::Movies,
+                paths: vec!["/dv".into()],
+                anime: false,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: library: {error}"));
+        let item = store
+            .insert_item(&NewItem {
+                library_id: library.id,
+                kind: ItemKind::Movie,
+                parent_id: None,
+                title: "Disc Remux".to_owned(),
+                year: Some(2024),
+                season_number: None,
+                episode_number: None,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: item: {error}"));
+
+        // A scan that saw the record writes the facts with the row.
+        let scanned = store
+            .upsert_file(
+                item,
+                "/dv/scanned.mkv",
+                1_000,
+                10,
+                &ProbeResult {
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    hdr: Some("dolby_vision".into()),
+                    hdr_format: Some("Dolby Vision · Profile 7 (HDR10-compatible)".into()),
+                    dolby_vision: DolbyVisionFacts {
+                        profile: Some(7),
+                        level: Some(6),
+                        bl_compat_id: Some(6),
+                        el_present: Some(true),
+                        rpu_present: Some(true),
+                    },
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: scanned file: {error}"));
+        let read = store
+            .get_file(scanned)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: read: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the file it just wrote"));
+        assert_eq!(read.dolby_vision.profile, Some(7), "backend {backend}");
+        assert_eq!(read.dolby_vision.level, Some(6), "backend {backend}");
+        assert_eq!(read.dolby_vision.bl_compat_id, Some(6), "backend {backend}");
+        assert_eq!(
+            read.dolby_vision.el_present,
+            Some(true),
+            "backend {backend}"
+        );
+        assert_eq!(
+            read.dolby_vision.rpu_present,
+            Some(true),
+            "backend {backend}"
+        );
+
+        // A row written before the columns existed: Dolby Vision, no facts,
+        // and probe JSON to recover them from.
+        let legacy = store
+            .upsert_file(
+                item,
+                "/dv/legacy.mkv",
+                2_000,
+                20,
+                &ProbeResult {
+                    container: Some("mkv".into()),
+                    video_codec: Some("hevc".into()),
+                    hdr: Some("dolby_vision".into()),
+                    // The exact state that made a file unclaimable by every
+                    // client: the label names no profile.
+                    hdr_format: Some("Dolby Vision".into()),
+                    raw_json: Some("{}".into()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: legacy file: {error}"));
+
+        let missing = store
+            .files_missing_dolby_vision(16)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: list missing: {error}"));
+        assert_eq!(
+            missing.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![legacy],
+            "backend {backend}: only the row with no facts is pending, and the \
+             one that already has them is not"
+        );
+
+        store
+            .set_file_dolby_vision(
+                legacy,
+                DolbyVisionFacts {
+                    profile: Some(8),
+                    bl_compat_id: Some(1),
+                    el_present: Some(false),
+                    rpu_present: Some(true),
+                    ..Default::default()
+                },
+                Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: backfill write: {error}"));
+        let read = store
+            .get_file(legacy)
+            .await
+            .unwrap_or_else(|error| panic!("{backend}: reread: {error}"))
+            .unwrap_or_else(|| panic!("{backend}: the backfilled file"));
+        assert_eq!(read.dolby_vision.profile, Some(8), "backend {backend}");
+        assert_eq!(
+            read.dolby_vision.el_present,
+            Some(false),
+            "backend {backend}: an absent enhancement layer is a fact, not a \
+             missing one"
+        );
+        assert_eq!(
+            read.hdr_format.as_deref(),
+            Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+            "backend {backend}: the label moves with the columns, because a \
+             label that names no profile is wrong rather than merely sparse"
+        );
+        assert!(
+            store
+                .files_missing_dolby_vision(16)
+                .await
+                .unwrap_or_else(|error| panic!("{backend}: list again: {error}"))
+                .is_empty(),
+            "backend {backend}: an empty answer is how the backfill knows to stop"
+        );
+    })
+    .await;
 }
 
 #[tokio::test]

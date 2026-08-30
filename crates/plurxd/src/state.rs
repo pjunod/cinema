@@ -3381,6 +3381,102 @@ impl JobManager {
         }
     }
 
+    /// Fill in the Dolby Vision columns from the probe JSON already stored for
+    /// each file (PLAYBACK-CAPS-V2-PLAN §4.3).
+    ///
+    /// The incremental scanner skips unchanged files, so without this an
+    /// existing library would never gain the columns short of a destructive
+    /// re-add — the same reason `hdr_format` needed a backfill when it was
+    /// added. No ffprobe runs: every fact comes out of JSON that was captured
+    /// at scan time and has been sitting in the row ever since.
+    ///
+    /// Bounded per tick and stamped when a pass comes back short, so it stops
+    /// asking. Idempotent by construction — every node computes the same
+    /// values from the same stored JSON — which is what makes it safe to run
+    /// from whichever node's tick gets there first on a replicated store.
+    ///
+    /// It rewrites `hdr_format` too, and that is deliberate. A row whose scan
+    /// produced the bare string "Dolby Vision" while its probe JSON carried a
+    /// profile has a label that is *wrong*, and a file no client can claim.
+    /// The cost is that such a file's copy-video argv changes with its label,
+    /// so its fragment index stops matching and is rebuilt once. The M0 census
+    /// found no rows in that state in the movies libraries, so the cost is
+    /// expected to be zero.
+    async fn backfill_dolby_vision_facts(&self) {
+        const BACKFILL_PER_TICK: i64 = 256;
+
+        match self.store.get_setting(keys::JOB_DV_BACKFILL_DONE).await {
+            Ok(Some(_)) => return,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "reading the Dolby Vision backfill stamp");
+                return;
+            }
+        }
+        let pending = match self
+            .store
+            .files_missing_dolby_vision(BACKFILL_PER_TICK)
+            .await
+        {
+            Ok(pending) => pending,
+            Err(error) => {
+                tracing::warn!(%error, "listing files for the Dolby Vision backfill");
+                return;
+            }
+        };
+        let examined = pending.len();
+        let mut updated = 0usize;
+        let mut without_record = 0usize;
+        for (file_id, probe_json) in pending {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&probe_json) else {
+                without_record += 1;
+                continue;
+            };
+            let probe = plurx_core::scan::probe::parse_probe_json(&value);
+            if probe.dolby_vision.is_empty() {
+                // The row says Dolby Vision and the stored JSON has no
+                // configuration record to prove it. Nothing here can fix that
+                // — it needs a real re-probe, which is an operator action
+                // rather than a boot side-effect — so it is counted and left.
+                without_record += 1;
+                continue;
+            }
+            if let Err(error) = self
+                .store
+                .set_file_dolby_vision(file_id, probe.dolby_vision, probe.hdr_format.as_deref())
+                .await
+            {
+                tracing::warn!(file_id, %error, "writing backfilled Dolby Vision facts");
+                continue;
+            }
+            updated += 1;
+        }
+        if updated > 0 || without_record > 0 {
+            tracing::info!(
+                updated,
+                without_record,
+                "dv backfill: filled Dolby Vision columns from stored probe data"
+            );
+        }
+        // A short pass means the only rows left are the ones this can never
+        // fix, so there is nothing to come back for.
+        if (examined as i64) < BACKFILL_PER_TICK && updated == 0 {
+            if let Err(error) = self
+                .store
+                .put_setting(keys::JOB_DV_BACKFILL_DONE, "1")
+                .await
+            {
+                tracing::warn!(%error, "stamping the Dolby Vision backfill as complete");
+            } else if without_record > 0 {
+                tracing::warn!(
+                    without_record,
+                    "dv backfill complete, but these files carry no Dolby Vision configuration \
+                     record in their stored probe -- they need a re-scan to become claimable"
+                );
+            }
+        }
+    }
+
     async fn build_fragment_indexes(self: Arc<Self>, transcode: Arc<TranscodeManager>) {
         if self.indexing.swap(true, Ordering::Relaxed) {
             return;
@@ -3392,6 +3488,10 @@ impl JobManager {
         // the node that ran the delete -- and never a node that was down at
         // the time. Each node asking, on its own tick, converges everywhere.
         self.sweep_orphaned_vod_rows().await;
+        // Before indexing, not after: the Dolby Vision columns decide which
+        // identities a file is indexed FOR, so a pass that ran first would
+        // build the wrong set for every unbackfilled title.
+        self.backfill_dolby_vision_facts().await;
 
         let cluster_cache_enabled =
             match self.store.get_setting(keys::VOD_INDEX_CLUSTER_CACHE).await {

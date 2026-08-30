@@ -1236,9 +1236,10 @@ impl MediaStore for SqliteStore {
                 "INSERT INTO files
                    (item_id, path, size, mtime, duration_ms, container, video_codec,
                     video_profile, width, height, bit_depth, hdr, bitrate,
-                    audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at)
+                    audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at,
+                    dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
-                         ?14, ?15, ?16, ?17, unixepoch())
+                         ?14, ?15, ?16, ?17, unixepoch(), ?18, ?19, ?20, ?21, ?22)
                  ON CONFLICT(path) DO UPDATE SET
                      item_id = excluded.item_id,
                      size = excluded.size,
@@ -1256,6 +1257,11 @@ impl MediaStore for SqliteStore {
                      subtitle_streams = excluded.subtitle_streams,
                      probe_json = excluded.probe_json,
                      hdr_format = excluded.hdr_format,
+                     dv_profile = excluded.dv_profile,
+                     dv_level = excluded.dv_level,
+                     dv_bl_compat_id = excluded.dv_bl_compat_id,
+                     dv_el_present = excluded.dv_el_present,
+                     dv_rpu_present = excluded.dv_rpu_present,
                      scanned_at = unixepoch()
                  RETURNING id",
                 params![
@@ -1276,6 +1282,11 @@ impl MediaStore for SqliteStore {
                     subs,
                     probe.raw_json,
                     probe.hdr_format,
+                    probe.dolby_vision.profile,
+                    probe.dolby_vision.level,
+                    probe.dolby_vision.bl_compat_id,
+                    probe.dolby_vision.el_present.map(i64::from),
+                    probe.dolby_vision.rpu_present.map(i64::from),
                 ],
                 |row| row.get(0),
             )?;
@@ -1394,6 +1405,55 @@ impl MediaStore for SqliteStore {
                 "UPDATE files SET probe_json = json_set(probe_json, '$.chapters', json(?2))
                  WHERE id = ?1 AND probe_json IS NOT NULL",
                 params![file_id, chapters],
+            )?;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn files_missing_dolby_vision(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>, StoreError> {
+        self.with_conn(move |conn| {
+            let mut statement = conn.prepare(
+                "SELECT id, probe_json FROM files
+                  WHERE hdr = 'dolby_vision'
+                    AND dv_profile IS NULL
+                    AND probe_json IS NOT NULL
+                  ORDER BY id
+                  LIMIT ?1",
+            )?;
+            let rows = statement.query_map(params![limit.max(0)], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?;
+            Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        })
+        .await
+    }
+
+    async fn set_file_dolby_vision(
+        &self,
+        file_id: i64,
+        facts: crate::domain::DolbyVisionFacts,
+        hdr_format: Option<&str>,
+    ) -> Result<(), StoreError> {
+        let hdr_format = hdr_format.map(str::to_owned);
+        self.with_conn(move |conn| {
+            conn.execute(
+                "UPDATE files SET dv_profile = ?2, dv_level = ?3, dv_bl_compat_id = ?4,
+                                  dv_el_present = ?5, dv_rpu_present = ?6,
+                                  hdr_format = COALESCE(?7, hdr_format)
+                  WHERE id = ?1",
+                params![
+                    file_id,
+                    facts.profile,
+                    facts.level,
+                    facts.bl_compat_id,
+                    facts.el_present.map(i64::from),
+                    facts.rpu_present.map(i64::from),
+                    hdr_format,
+                ],
             )?;
             Ok(())
         })

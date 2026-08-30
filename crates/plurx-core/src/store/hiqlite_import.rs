@@ -509,6 +509,15 @@ const TABLES: &[TablePlan] = &[
             "scanned_at",
             "hdr_format",
             "audio_offset_ms",
+            // The Dolby Vision configuration record, added with the columns
+            // themselves: a legacy database that already ran the backfill
+            // carries real values here, and dropping them on import would
+            // silently re-open the backfill's whole window.
+            "dv_profile",
+            "dv_level",
+            "dv_bl_compat_id",
+            "dv_el_present",
+            "dv_rpu_present",
         ],
         order_by: "id",
         minimum_schema: 5,

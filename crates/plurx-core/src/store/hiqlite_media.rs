@@ -12,6 +12,7 @@ use super::{
     ArtworkInventoryItem, ArtworkRepairFence, MediaStore, ReconcileOutcome, RootFingerprintStatus,
     WatchStore, TOP_LEVEL_ITEM_PREDICATE,
 };
+use crate::domain::DolbyVisionFacts;
 use crate::domain::{
     sort_title_for, ArtworkAttempt, BookMetadataPatch, HomePreviewPage, InProgressItem, Item,
     ItemEdit, ItemKind, ItemPage, ItemSort, MediaFile, MediaShape, MetadataPatch, NewItem,
@@ -254,6 +255,7 @@ struct IdRow {
 const FILE_COLS: &str = "id, item_id, path, size, mtime, duration_ms, container, video_codec, \
      video_profile, width, height, bit_depth, hdr, bitrate, audio_streams, \
      subtitle_streams, scanned_at, hdr_format, audio_offset_ms, \
+     dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present, \
      (probe_json IS NOT NULL) AS probed";
 
 struct FileRow {
@@ -276,6 +278,11 @@ struct FileRow {
     scanned_at: i64,
     hdr_format: Option<String>,
     audio_offset_ms: i64,
+    dv_profile: Option<i64>,
+    dv_level: Option<i64>,
+    dv_bl_compat_id: Option<i64>,
+    dv_el_present: Option<i64>,
+    dv_rpu_present: Option<i64>,
     probed: i64,
 }
 
@@ -301,6 +308,11 @@ impl From<&mut Row<'_>> for FileRow {
             scanned_at: row.get("scanned_at"),
             hdr_format: row.get("hdr_format"),
             audio_offset_ms: row.get("audio_offset_ms"),
+            dv_profile: row.get("dv_profile"),
+            dv_level: row.get("dv_level"),
+            dv_bl_compat_id: row.get("dv_bl_compat_id"),
+            dv_el_present: row.get("dv_el_present"),
+            dv_rpu_present: row.get("dv_rpu_present"),
             probed: row.get("probed"),
         }
     }
@@ -333,6 +345,13 @@ impl TryFrom<FileRow> for MediaFile {
             scanned_at: row.scanned_at,
             audio_offset_ms: row.audio_offset_ms,
             probed: row.probed != 0,
+            dolby_vision: DolbyVisionFacts {
+                profile: row.dv_profile,
+                level: row.dv_level,
+                bl_compat_id: row.dv_bl_compat_id,
+                el_present: row.dv_el_present.map(|value| value != 0),
+                rpu_present: row.dv_rpu_present.map(|value| value != 0),
+            },
         })
     }
 }
@@ -2122,9 +2141,10 @@ impl MediaStore for HiqliteAuthStore {
         let sql = "INSERT INTO files \
                    (item_id, path, size, mtime, duration_ms, container, video_codec, \
                     video_profile, width, height, bit_depth, hdr, bitrate, \
-                    audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at) \
+                    audio_streams, subtitle_streams, probe_json, hdr_format, scanned_at, \
+                    dv_profile, dv_level, dv_bl_compat_id, dv_el_present, dv_rpu_present) \
                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, \
-                           $14, $15, $16, $17, $18) \
+                           $14, $15, $16, $17, $18, $19, $20, $21, $22, $23) \
                    ON CONFLICT(path) DO UPDATE SET \
                      item_id = excluded.item_id, size = excluded.size, mtime = excluded.mtime, \
                      duration_ms = excluded.duration_ms, container = excluded.container, \
@@ -2134,6 +2154,10 @@ impl MediaStore for HiqliteAuthStore {
                      audio_streams = excluded.audio_streams, \
                      subtitle_streams = excluded.subtitle_streams, \
                      probe_json = excluded.probe_json, hdr_format = excluded.hdr_format, \
+                     dv_profile = excluded.dv_profile, dv_level = excluded.dv_level, \
+                     dv_bl_compat_id = excluded.dv_bl_compat_id, \
+                     dv_el_present = excluded.dv_el_present, \
+                     dv_rpu_present = excluded.dv_rpu_present, \
                      scanned_at = excluded.scanned_at RETURNING id";
         validate_sql(sql)?;
         let row = self
@@ -2158,7 +2182,12 @@ impl MediaStore for HiqliteAuthStore {
                     subtitles,
                     probe.raw_json.as_deref(),
                     probe.hdr_format.as_deref(),
-                    now
+                    now,
+                    probe.dolby_vision.profile,
+                    probe.dolby_vision.level,
+                    probe.dolby_vision.bl_compat_id,
+                    probe.dolby_vision.el_present.map(i64::from),
+                    probe.dolby_vision.rpu_present.map(i64::from)
                 ),
             )
             .await
@@ -2334,6 +2363,69 @@ impl MediaStore for HiqliteAuthStore {
             params!(offset_ms, file_id),
         )
         .await?;
+        Ok(())
+    }
+
+    async fn files_missing_dolby_vision(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<(i64, String)>, StoreError> {
+        #[derive(Debug)]
+        struct MissingRow {
+            id: i64,
+            probe_json: String,
+        }
+        impl From<&mut Row<'_>> for MissingRow {
+            fn from(row: &mut Row<'_>) -> Self {
+                Self {
+                    id: row.get("id"),
+                    probe_json: row.get("probe_json"),
+                }
+            }
+        }
+        Ok(self
+            .client()
+            .query_consistent_map::<MissingRow, _>(
+                "SELECT id, probe_json FROM files \
+                  WHERE hdr = 'dolby_vision' AND dv_profile IS NULL \
+                    AND probe_json IS NOT NULL \
+                  ORDER BY id LIMIT $1",
+                params!(limit.max(0)),
+            )
+            .await
+            .map_err(database_error)?
+            .into_iter()
+            .map(|row| (row.id, row.probe_json))
+            .collect())
+    }
+
+    async fn set_file_dolby_vision(
+        &self,
+        file_id: i64,
+        facts: crate::domain::DolbyVisionFacts,
+        hdr_format: Option<&str>,
+    ) -> Result<(), StoreError> {
+        self.client()
+            .execute(
+                // Placeholders have to appear in order, so the id is last:
+                // the transport rejects a statement whose first `$n` is not
+                // `$1`.
+                "UPDATE files SET dv_profile = $1, dv_level = $2, dv_bl_compat_id = $3, \
+                                  dv_el_present = $4, dv_rpu_present = $5, \
+                                  hdr_format = COALESCE($6, hdr_format) \
+                  WHERE id = $7",
+                params!(
+                    facts.profile,
+                    facts.level,
+                    facts.bl_compat_id,
+                    facts.el_present.map(i64::from),
+                    facts.rpu_present.map(i64::from),
+                    hdr_format,
+                    file_id
+                ),
+            )
+            .await
+            .map_err(database_error)?;
         Ok(())
     }
 

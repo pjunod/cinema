@@ -9291,6 +9291,7 @@ mod tests {
             height: file.height,
             bit_depth: file.bit_depth,
             hdr: file.hdr.clone(),
+            dolby_vision: Default::default(),
             hdr_format: file.hdr_format.clone(),
             bitrate: file.bitrate,
             audio_streams: file.audio_streams.clone(),
@@ -11210,6 +11211,7 @@ mod tests {
             scanned_at: 0,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: Default::default(),
         }
     }
 

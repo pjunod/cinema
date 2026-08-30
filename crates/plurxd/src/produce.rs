@@ -569,6 +569,7 @@ mod tests {
             scanned_at: 0,
             audio_offset_ms: 0,
             probed,
+            dolby_vision: Default::default(),
         }
     }
 

@@ -1743,6 +1743,7 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: crate::domain::DolbyVisionFacts::default(),
         }
     }
 
@@ -3351,6 +3352,7 @@ mod index_pipe_tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: crate::domain::DolbyVisionFacts::default(),
         }
     }
 

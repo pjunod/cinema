@@ -402,6 +402,47 @@ pub struct SubtitleStream {
     pub hearing_impaired: bool,
 }
 
+/// The Dolby Vision configuration record's own facts, as columns.
+///
+/// The label in `hdr_format` was the only place these lived, and reading a
+/// profile number back out of a display string is exactly as fragile as it
+/// sounds: a record with no `dv_profile`, or a detection that only matched the
+/// codec tag, produced the bare string "Dolby Vision", which no client can
+/// claim and no server can reason about. Two facts the label never carried at
+/// all — whether an enhancement layer is present, and whether an RPU is —
+/// decide whether a Profile 7 disc can be converted to single-layer Profile
+/// 8.1 (PLAYBACK-CAPS-V2-PLAN §4.3).
+///
+/// Every field is optional and `None` means "the record did not say", never a
+/// default. A file scanned before these columns existed, or one whose ffprobe
+/// emitted no DOVI record, has to be distinguishable from one that genuinely
+/// reported zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DolbyVisionFacts {
+    /// 4, 5, 7, 8, 9 or 10. The number a client's `dv_profiles` list is
+    /// matched against.
+    pub profile: Option<i64>,
+    /// The DV level, which bounds resolution and frame rate.
+    pub level: Option<i64>,
+    /// What a non-DV client sees of the base layer: 1 and 6 are HDR10, 4 is
+    /// HLG, 2 is SDR, 0 is none.
+    pub bl_compat_id: Option<i64>,
+    /// Is there an enhancement layer? True for the dual-layer profiles (4 and
+    /// 7), which no consumer decoder takes.
+    pub el_present: Option<bool>,
+    /// Is there an RPU? Without one there is no Dolby Vision to preserve,
+    /// whatever the container says.
+    pub rpu_present: Option<bool>,
+}
+
+impl DolbyVisionFacts {
+    /// Nothing known. Distinct from a record that reported every field as
+    /// zero, which is why every field is an `Option`.
+    pub fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct MediaFile {
     pub id: i64,
@@ -422,7 +463,18 @@ pub struct MediaFile {
     pub hdr: Option<String>,
     /// Human HDR label with detail for display: "Dolby Vision · Profile 7
     /// (HDR10-compatible)", "HDR10+", "HLG". None when `hdr` is None.
+    ///
+    /// Since M2 this is DERIVED from [`MediaFile::dolby_vision`] at scan time
+    /// rather than being the only place those facts live. It stays the display
+    /// string, byte for byte what it was; nothing reads a profile number back
+    /// out of it any more except as a fallback for rows the backfill has not
+    /// reached.
     pub hdr_format: Option<String>,
+    /// The Dolby Vision configuration record's own facts, as columns. Empty
+    /// for a non-DV file, and empty for a DV file whose row predates the
+    /// backfill — `hdr_format` is the fallback for those.
+    #[serde(default)]
+    pub dolby_vision: DolbyVisionFacts,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,
@@ -451,6 +503,9 @@ pub struct ProbeResult {
     pub bit_depth: Option<i64>,
     pub hdr: Option<String>,
     pub hdr_format: Option<String>,
+    /// The Dolby Vision configuration record, parsed. `hdr_format` is built
+    /// from this rather than the other way round.
+    pub dolby_vision: DolbyVisionFacts,
     pub bitrate: Option<i64>,
     pub audio_streams: Vec<AudioStream>,
     pub subtitle_streams: Vec<SubtitleStream>,

@@ -433,10 +433,22 @@ pub fn delivered_dynamic_range(
     }
 }
 
-/// Profile number from the scan's rich label (for example Profile 5 or 8).
+/// Profile number from the Dolby Vision configuration record, or from the
+/// scan's rich label for a row the M2 backfill has not reached.
+///
 /// Unknown is deliberately `None`: claiming every DV profile from a generic
 /// HDR bit is the bug this profile-aware path replaces.
+///
+/// The column is asked first and the label is the fallback, not the reverse.
+/// Reading a number back out of a display string is exactly as fragile as it
+/// sounds — a record with no `dv_profile`, or a detection that only matched
+/// the codec tag, produces the bare string "Dolby Vision" and no profile at
+/// all. The fallback exists for rows written before the columns did, and can
+/// be deleted once no such row remains.
 pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
+    if let Some(profile) = file.dolby_vision.profile {
+        return u8::try_from(profile).ok();
+    }
     let label = file.hdr_format.as_deref()?;
     let after = label.to_ascii_lowercase();
     let after = after.split("profile").nth(1)?.trim_start();
@@ -444,7 +456,17 @@ pub fn dolby_vision_profile(file: &MediaFile) -> Option<u8> {
     digits.parse().ok()
 }
 
+/// Does this Dolby Vision source have a base layer a non-DV client can watch?
+///
+/// The compatibility id says what that client sees: 1 and 6 are HDR10, 4 is
+/// HLG, 2 is SDR and 0 is none. Only the first two are a base worth stripping
+/// to — which is exactly what the label's "(HDR10-compatible)" and
+/// "(HLG-compatible)" markers were derived from, so the column and the
+/// fallback answer the same question from the same fact.
 fn has_compatible_dv_base(file: &MediaFile) -> bool {
+    if let Some(compat) = file.dolby_vision.bl_compat_id {
+        return matches!(compat, 1 | 4 | 6);
+    }
     file.hdr_format
         .as_deref()
         .is_some_and(|label| label.contains("HDR10-compatible") || label.contains("HLG-compatible"))
@@ -741,7 +763,7 @@ pub fn prefer_segmented(bitrate_bps: Option<i64>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{AudioStream, MediaFile};
+    use crate::domain::{AudioStream, DolbyVisionFacts, MediaFile};
 
     fn file(container: &str, vcodec: &str, acodec: &str) -> MediaFile {
         MediaFile {
@@ -771,6 +793,7 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: crate::domain::DolbyVisionFacts::default(),
         }
     }
 
@@ -1154,6 +1177,84 @@ mod tests {
         assert_eq!(preserved.delivered_dynamic_range, "dolby_vision");
         assert_eq!(preserved.transcode_grade, OutputGrade::Sdr);
         assert_ne!(preserved.method, PlaybackMethod::Transcode);
+    }
+
+    /// The columns answer, and the label is only the fallback.
+    ///
+    /// Reading a profile number back out of a display string is exactly as
+    /// fragile as it sounds. The case that mattered: a scan that saw the codec
+    /// tag but no configuration record wrote the bare string "Dolby Vision",
+    /// which parses to no profile at all — so the file was unclaimable by
+    /// every client, forever, however good its actual record was.
+    #[test]
+    fn dolby_vision_facts_come_from_the_columns_before_the_label() {
+        let mut file = file("mkv", "hevc", "aac");
+        file.hdr = Some("dolby_vision".to_owned());
+
+        // A row the backfill has not reached: the label is all there is.
+        file.hdr_format = Some("Dolby Vision · Profile 8 (HDR10-compatible)".to_owned());
+        assert_eq!(dolby_vision_profile(&file), Some(8));
+        assert!(has_compatible_dv_base(&file));
+
+        // The same row with columns: they win, and they can say things the
+        // label cannot spell.
+        file.dolby_vision = DolbyVisionFacts {
+            profile: Some(7),
+            level: Some(6),
+            bl_compat_id: Some(6),
+            el_present: Some(true),
+            rpu_present: Some(true),
+        };
+        assert_eq!(dolby_vision_profile(&file), Some(7));
+        assert!(has_compatible_dv_base(&file));
+
+        // A file whose label says nothing at all is still claimable once its
+        // columns are filled in — this is the state the backfill exists for.
+        file.hdr_format = Some("Dolby Vision".to_owned());
+        assert_eq!(dolby_vision_profile(&file), Some(7));
+        assert!(
+            has_compatible_dv_base(&file),
+            "the compatibility id is a fact the bare label never carried"
+        );
+
+        // A compatibility id of 0 is a real answer, not a missing one: a
+        // Profile 5 has no base a non-DV client can watch, whatever a stale
+        // label claims.
+        file.dolby_vision = DolbyVisionFacts {
+            profile: Some(5),
+            bl_compat_id: Some(0),
+            rpu_present: Some(true),
+            el_present: Some(false),
+            ..DolbyVisionFacts::default()
+        };
+        file.hdr_format = Some("Dolby Vision · Profile 5 (HDR10-compatible)".to_owned());
+        assert!(
+            !has_compatible_dv_base(&file),
+            "the column overrules a label that disagrees with it"
+        );
+        assert!(dolby_vision_needs_rpu_render(&file));
+
+        // And the decision that hangs off it: a client listing profile 7 can
+        // claim a file whose label never named one.
+        let mut chrome = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+        chrome.dolby_vision_profiles = vec![7];
+        file.dolby_vision = DolbyVisionFacts {
+            profile: Some(7),
+            bl_compat_id: Some(6),
+            ..DolbyVisionFacts::default()
+        };
+        file.hdr_format = Some("Dolby Vision".to_owned());
+        assert!(
+            decide(&file, &chrome, true).preserve_dolby_vision,
+            "an unlabelled Profile 7 was unclaimable by every client before M2"
+        );
     }
 
     /// Every source the HDR10 rung must refuse, and why each one is a
