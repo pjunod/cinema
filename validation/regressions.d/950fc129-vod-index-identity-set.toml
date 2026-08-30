@@ -1,0 +1,7 @@
+version = 1
+
+[[coverage]]
+commits = ["950fc129"]
+points = ["playback.pipeline"]
+checks = ["rust-gate"]
+reason = "`the_cap_never_evicts_the_row_it_was_called_for` (crates/plurx-core/src/store/fragindex.rs) fills a file's identity set, then writes one more row with a `built_at_ms` older than every incumbent -- the shape a backwards clock step produces -- and requires `get` to return that row afterwards. The eviction this replaces kept the newest twelve including the row it had just inserted, so the insert deleted itself, `put` still returned Ok, and the pass logged a build of a row that was not there; the test fails against that SQL and passes only once the written fingerprint is excluded from the eviction. `one_file_holds_an_index_per_pipeline` and `a_replaced_file_takes_its_whole_identity_set_with_it` pin the surrounding key semantics the eviction operates on. `a_partly_analysed_file_says_so_rather_than_reading_as_ready` (tests/playback/web-policy.test.js) requires the partial state to render its own copy and to offer `Analyze now` rather than `Rebuild analysis`, which is the control the analysis-request identity choice makes reachable -- an analysis path that keeps taking the stripped identity leaves the badge partial forever and fails nothing else."
