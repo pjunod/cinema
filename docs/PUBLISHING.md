@@ -82,6 +82,47 @@ production inventory cannot own device settings. Set
 the default is a real TestFlight upload, and an authentication or upload failure
 fails the play.
 
+## When the controller cannot run the play
+
+Everything above assumes Ansible works on the macOS controller. When it does
+not, `scripts/ship-physical` puts a plurx build on the attached hardware
+without it. It is deliberately narrower than the playbook: plurx only — no
+Curator, no Runner — no controller inventory, and no App Store Connect upload.
+TestFlight remains an Ansible-only path.
+
+```bash
+scripts/ship-physical --dry-run      # print the plan, build nothing
+scripts/ship-physical                # build, then install everywhere reachable
+scripts/ship-physical --build-only   # build and verify, install nothing
+scripts/ship-physical --apple        # Apple devices only
+scripts/ship-physical --android      # Android devices only
+```
+
+It resolves `origin/main`, pins a detached worktree under
+`/private/tmp/plurx-physical-release`, and builds there, so the operator's own
+checkout is neither read for its working state nor left holding build output.
+Apple builds the `plurx-iOS` and `plurx-tvOS` Release targets against
+`generic/platform=iOS` and `generic/platform=tvOS` — a device build, not an
+archive — and Android assembles the same signed debug APK the playbook ships.
+`codesign --verify --deep --strict` and `apksigner verify` both run before any
+device is touched.
+
+The device contract matches the playbook's rather than relaxing it. An app is
+installed only where the installed version differs; a downgrade is declined,
+because it retains `/data` and hands older code a newer schema. Android
+hardware whose `ro.product.model` matches no known pattern is reported and
+skipped — pass `--allow-unknown` to install anyway — since unrecognized
+hardware is somebody's actual phone more often than it is a new test device. A
+device that is asleep, unplugged, or sitting on an unanswered "Allow USB
+debugging?" prompt is simply absent, which is recorded and survived rather than
+being allowed to decide the rest of the fleet's fate; a run that reached no
+device at all is never a success.
+
+`PLURX_RELEASE_ROOT`, `PLURX_DEVELOPMENT_TEAM`, `PLURX_ADB`, `PLURX_APKSIGNER`,
+and `ANDROID_HOME` override the defaults. The script must run on the Mac that
+owns the signing identity and the device pairings; it declines to run anywhere
+else.
+
 ## 1. The demo server — solve this before you write any store copy
 
 An app whose entire function is "connect to a server you host" is testable only

@@ -1,0 +1,468 @@
+#!/usr/bin/env bash
+#
+# Build plurx from origin/main and install it on every reachable physical
+# Apple and Android device — without Ansible.
+#
+# This is the standalone fallback for the media/mobile-physical.yml path in the
+# private Ansible repository. It does the same work for plurx alone: no monarr,
+# no nzbd, no controller inventory, no roster contract. When Ansible is healthy,
+# prefer `scripts/ship --android` / the mobile-physical play — they cover all
+# three apps and enforce the deploy-completeness assertions this script does not.
+#
+# It must run on the Mac that owns the Xcode signing identity and the device
+# pairings. It builds from a detached worktree pinned to origin/main, so your
+# working checkout is never touched and never dirtied by build output.
+#
+# Usage:
+#   scripts/ship-physical                    # build, then install everywhere
+#   scripts/ship-physical --dry-run          # print the plan, build nothing
+#   scripts/ship-physical --build-only       # build and verify, install nothing
+#   scripts/ship-physical --apple            # Apple devices only
+#   scripts/ship-physical --android          # Android devices only
+#   scripts/ship-physical --allow-unknown    # install to unrecognized Android hardware
+#   scripts/ship-physical --keep             # keep the release worktree afterwards
+#
+# What it will not do: downgrade an app, install to a device it cannot name,
+# or ship an artifact that fails codesign/apksigner verification.
+
+set -euo pipefail
+
+# --------------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------------
+
+SOURCE_REPO="${PLURX_REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+RELEASE_ROOT="${PLURX_RELEASE_ROOT:-/private/tmp/plurx-physical-release}"
+DEVELOPMENT_TEAM="${PLURX_DEVELOPMENT_TEAM:-YHK542LK23}"
+ANDROID_HOME_DIR="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
+ADB="${PLURX_ADB:-$ANDROID_HOME_DIR/platform-tools/adb}"
+XCRUN="${PLURX_XCRUN:-xcrun}"
+
+APPLE_BUNDLE_ID="tv.plurx.app"
+ANDROID_PACKAGE="tv.plurx.app"
+
+# Unanchored, case-insensitive match against ro.product.model with spaces
+# turned into underscores — not the name Device Manager shows, which prepends
+# the manufacturer. Keep these in step with the Ansible role's list.
+KNOWN_ANDROID_PATTERNS=(
+  "Pixel_11.*XL"
+  "razr.*ultra.*2025"
+  "25019PNF3C"
+  "9445X"
+  "^Pixel_10_Pro_Fold$"
+  "^TB322FC$"
+  "^(Xiaomi_15_Ultra|25010PN30G)$"
+)
+
+DRY_RUN=0
+BUILD_ONLY=0
+DO_APPLE=1
+DO_ANDROID=1
+ALLOW_UNKNOWN=0
+KEEP_WORKTREE=0
+
+# --------------------------------------------------------------------------
+# Plumbing
+# --------------------------------------------------------------------------
+
+log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
+warn() { printf '\033[1;33m warn\033[0m %s\n' "$*" >&2; }
+fail() { printf '\033[1;31m FAIL\033[0m %s\n' "$*" >&2; exit 1; }
+
+INSTALLED=()
+SKIPPED=()
+FAILED=()
+
+record_installed() { INSTALLED+=("$1"); }
+record_skipped()   { SKIPPED+=("$1"); }
+record_failed()    { FAILED+=("$1"); }
+
+run() {
+  if [[ $DRY_RUN -eq 1 ]]; then
+    printf '     would run: %s\n' "$*"
+    return 0
+  fi
+  "$@"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run)       DRY_RUN=1 ;;
+    --build-only)    BUILD_ONLY=1 ;;
+    --apple)         DO_ANDROID=0 ;;
+    --android)       DO_APPLE=0 ;;
+    --allow-unknown) ALLOW_UNKNOWN=1 ;;
+    --keep)          KEEP_WORKTREE=1 ;;
+    -h|--help)       sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    *)               fail "unknown argument: $1" ;;
+  esac
+  shift
+done
+
+# --------------------------------------------------------------------------
+# Preconditions
+# --------------------------------------------------------------------------
+
+[[ "$(uname -s)" == "Darwin" ]] || fail "this must run on the Mac that owns Xcode signing and the device pairings"
+
+need() { command -v "$1" >/dev/null 2>&1 || fail "missing required tool: $1"; }
+need git
+need python3
+if [[ $DO_APPLE -eq 1 || $BUILD_ONLY -eq 1 ]]; then
+  need xcodebuild
+  need xcodegen
+  need codesign
+fi
+if [[ $DO_ANDROID -eq 1 || $BUILD_ONLY -eq 1 ]]; then
+  [[ -x "$ADB" ]] || fail "adb not executable at $ADB (set PLURX_ADB or ANDROID_HOME)"
+fi
+
+# apksigner moves with build-tools. Take the newest rather than pinning a
+# version that a Studio update will retire underneath us.
+APKSIGNER="${PLURX_APKSIGNER:-}"
+if [[ -z "$APKSIGNER" ]]; then
+  APKSIGNER="$(ls -1d "$ANDROID_HOME_DIR"/build-tools/*/apksigner 2>/dev/null | sort -V | tail -1 || true)"
+fi
+
+# --------------------------------------------------------------------------
+# Pin the release to origin/main
+# --------------------------------------------------------------------------
+
+log "resolving origin/main in $SOURCE_REPO"
+git -C "$SOURCE_REPO" fetch origin '+refs/heads/main:refs/remotes/origin/main' --quiet
+COMMIT="$(git -C "$SOURCE_REPO" rev-parse origin/main)"
+SHORT="${COMMIT:0:12}"
+WORKTREE="$RELEASE_ROOT/plurx-$SHORT"
+
+log "release commit $SHORT — $(git -C "$SOURCE_REPO" log -1 --format=%s "$COMMIT")"
+
+mkdir -p "$RELEASE_ROOT"
+# /private/tmp is swept by macOS, which leaves the registration behind and
+# breaks every later `worktree add`. Prune before touching anything.
+git -C "$SOURCE_REPO" worktree prune
+
+if [[ ! -d "$WORKTREE" ]]; then
+  log "creating release worktree at $WORKTREE"
+  run git -C "$SOURCE_REPO" worktree add --detach "$WORKTREE" "$COMMIT"
+else
+  log "reusing release worktree at $WORKTREE"
+fi
+
+if [[ $DRY_RUN -eq 0 ]]; then
+  ACTUAL="$(git -C "$WORKTREE" rev-parse HEAD)"
+  [[ "$ACTUAL" == "$COMMIT" ]] || fail \
+    "worktree $WORKTREE is at $ACTUAL, not $COMMIT. Clear it with: git -C $SOURCE_REPO worktree remove --force $WORKTREE"
+  # A matching sha says nothing about the files. Restore tracked drift rather
+  # than shipping somebody's edit; untracked build output is left alone so
+  # artifact reuse still works.
+  if [[ -n "$(git -C "$WORKTREE" status --porcelain --untracked-files=no)" ]]; then
+    warn "release worktree had tracked drift; restoring to $SHORT"
+    git -C "$WORKTREE" reset --hard "$COMMIT" --quiet
+  fi
+fi
+
+APPLE_DIR="$WORKTREE/clients/apple"
+ANDROID_DIR="$WORKTREE/clients/android"
+
+IOS_APP="$APPLE_DIR/build/physical-ios/Build/Products/Release-iphoneos/plurx.app"
+TVOS_APP="$APPLE_DIR/build/physical-tvos/Build/Products/Release-appletvos/plurx.app"
+APK="$ANDROID_DIR/app/build/outputs/apk/debug/app-debug.apk"
+
+# --------------------------------------------------------------------------
+# Read the versions we intend to ship
+# --------------------------------------------------------------------------
+
+read_versions() {
+  python3 - "$WORKTREE" <<'PY'
+import re, sys, pathlib
+root = pathlib.Path(sys.argv[1])
+proj = (root / "clients/apple/project.yml").read_text()
+gradle = (root / "clients/android/app/build.gradle.kts").read_text()
+cargo = (root / "Cargo.toml").read_text()
+
+def one(pattern, text, label):
+    m = re.search(pattern, text)
+    if not m:
+        sys.exit(f"could not read {label}")
+    return m.group(1)
+
+marketing = one(r'MARKETING_VERSION:\s*"([^"]+)"', proj, "MARKETING_VERSION")
+build = one(r'CURRENT_PROJECT_VERSION:\s*"([^"]+)"', proj, "CURRENT_PROJECT_VERSION")
+name = one(r'versionName\s*=\s*"([^"]+)"', gradle, "versionName")
+code = one(r'versionCode\s*=\s*(\d+)', gradle, "versionCode")
+workspace = one(r'(?m)^version\s*=\s*"([^"]+)"', cargo, "workspace version")
+
+# The Ansible role refuses to ship apps whose version names disagree, and so
+# does this. A mismatch means somebody bumped one client and not the other.
+if not (marketing == name == workspace):
+    sys.exit(
+        f"version names disagree — workspace {workspace}, Apple {marketing}, "
+        f"Android {name}. Reconcile them before shipping."
+    )
+
+print(f"{marketing}\n{build}\n{code}")
+PY
+}
+
+if [[ $DRY_RUN -eq 0 ]]; then
+  # Not `mapfile` — macOS ships bash 3.2 and this script must run under it.
+  VERSION_BLOB="$(read_versions)" || fail "version check failed"
+  VERSION="$(printf '%s\n' "$VERSION_BLOB" | sed -n 1p)"
+  APPLE_BUILD="$(printf '%s\n' "$VERSION_BLOB" | sed -n 2p)"
+  ANDROID_CODE="$(printf '%s\n' "$VERSION_BLOB" | sed -n 3p)"
+  [[ -n "$VERSION" && -n "$APPLE_BUILD" && -n "$ANDROID_CODE" ]] || fail "version check returned nothing"
+else
+  VERSION="?"; APPLE_BUILD="?"; ANDROID_CODE="?"
+fi
+
+log "shipping plurx $VERSION — Apple build $APPLE_BUILD, Android versionCode $ANDROID_CODE"
+
+# --------------------------------------------------------------------------
+# Build
+# --------------------------------------------------------------------------
+
+if [[ $DO_APPLE -eq 1 ]]; then
+  if [[ ! -d "$IOS_APP" || ! -d "$TVOS_APP" ]]; then
+    log "generating the Apple project"
+    run bash -c "cd '$APPLE_DIR' && xcodegen generate"
+  fi
+
+  if [[ ! -d "$IOS_APP" ]]; then
+    log "building plurx-iOS Release for device"
+    run bash -c "cd '$APPLE_DIR' && xcodebuild \
+      -project plurx.xcodeproj \
+      -scheme plurx-iOS \
+      -configuration Release \
+      -destination 'generic/platform=iOS' \
+      -derivedDataPath build/physical-ios \
+      DEVELOPMENT_TEAM='$DEVELOPMENT_TEAM' \
+      CODE_SIGN_STYLE=Automatic \
+      -allowProvisioningUpdates \
+      build"
+  else
+    log "reusing cached iOS artifact"
+  fi
+
+  if [[ ! -d "$TVOS_APP" ]]; then
+    log "building plurx-tvOS Release for device"
+    run bash -c "cd '$APPLE_DIR' && xcodebuild \
+      -project plurx.xcodeproj \
+      -scheme plurx-tvOS \
+      -configuration Release \
+      -destination 'generic/platform=tvOS' \
+      -derivedDataPath build/physical-tvos \
+      DEVELOPMENT_TEAM='$DEVELOPMENT_TEAM' \
+      CODE_SIGN_STYLE=Automatic \
+      -allowProvisioningUpdates \
+      build"
+  else
+    log "reusing cached tvOS artifact"
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    log "verifying Apple signatures"
+    codesign --verify --deep --strict "$IOS_APP"  || fail "iOS artifact failed codesign verification"
+    codesign --verify --deep --strict "$TVOS_APP" || fail "tvOS artifact failed codesign verification"
+  fi
+fi
+
+if [[ $DO_ANDROID -eq 1 ]]; then
+  if [[ ! -f "$APK" ]]; then
+    log "building the Android debug APK"
+    run bash -c "cd '$ANDROID_DIR' && ANDROID_HOME='$ANDROID_HOME_DIR' ./gradlew --no-daemon :app:assembleDebug"
+  else
+    log "reusing cached APK"
+  fi
+
+  if [[ $DRY_RUN -eq 0 ]]; then
+    if [[ -n "$APKSIGNER" && -x "$APKSIGNER" ]]; then
+      log "verifying the APK signature"
+      "$APKSIGNER" verify "$APK" || fail "APK failed apksigner verification"
+    else
+      warn "apksigner not found; shipping the APK unverified"
+    fi
+  fi
+fi
+
+if [[ $BUILD_ONLY -eq 1 ]]; then
+  log "build only — artifacts left at:"
+  [[ $DO_APPLE   -eq 1 ]] && printf '     %s\n     %s\n' "$IOS_APP" "$TVOS_APP"
+  [[ $DO_ANDROID -eq 1 ]] && printf '     %s\n' "$APK"
+  exit 0
+fi
+
+if [[ $DRY_RUN -eq 1 ]]; then
+  log "dry run — nothing was built and nothing will be installed"
+  exit 0
+fi
+
+# --------------------------------------------------------------------------
+# Apple devices
+# --------------------------------------------------------------------------
+
+if [[ $DO_APPLE -eq 1 ]]; then
+  log "inventorying physical Apple devices"
+  DEVICE_JSON="$(mktemp -t plurx-devices)"
+  "$XCRUN" devicectl list devices --json-output "$DEVICE_JSON" >/dev/null 2>&1 \
+    || warn "devicectl device listing failed"
+
+  # `connected` means a live tunnel right now; a paired phone or Apple TV
+  # sitting idle reports `disconnected` and still installs fine. Only
+  # `unavailable` is CoreDevice saying the hardware is not there.
+  APPLE_DEVICES="$(python3 - "$DEVICE_JSON" <<'PY'
+import json, sys
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for d in data.get("result", {}).get("devices", []):
+    props = d.get("deviceProperties", {})
+    hw = d.get("hardwareProperties", {})
+    conn = d.get("connectionProperties", {})
+    state = (conn.get("tunnelState") or "").lower()
+    if state not in ("connected", "disconnected"):
+        continue
+    ident = d.get("identifier")
+    name = props.get("name") or hw.get("marketingName") or ident
+    platform = hw.get("platform") or ""
+    if not ident:
+        continue
+    print("\t".join([ident, name, platform]))
+PY
+)"
+
+  if [[ -z "$APPLE_DEVICES" ]]; then
+    warn "no reachable Apple devices — nothing installed on the Apple side"
+  fi
+
+  while IFS=$'\t' read -r ident name platform; do
+    [[ -n "$ident" ]] || continue
+    case "$platform" in
+      tvOS) app="$TVOS_APP" ;;
+      iOS|iPadOS|"") app="$IOS_APP" ;;
+      *) warn "$name: unsupported platform $platform — skipped"; record_skipped "$name (platform $platform)"; continue ;;
+    esac
+
+    current="$("$XCRUN" devicectl device info apps --device "$ident" \
+      --bundle-id "$APPLE_BUNDLE_ID" --json-output - 2>/dev/null \
+      | python3 -c '
+import json,sys
+try:
+    d=json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+for a in d.get("result",{}).get("apps",[]):
+    print(a.get("version") or "")
+    break
+' || true)"
+
+    if [[ "$current" == "$APPLE_BUILD" ]]; then
+      log "$name already on build $APPLE_BUILD — skipped"
+      record_skipped "$name (already $APPLE_BUILD)"
+      continue
+    fi
+
+    log "installing plurx $VERSION ($APPLE_BUILD) on $name [$platform]"
+    if "$XCRUN" devicectl device install app --device "$ident" "$app" >/dev/null; then
+      record_installed "$name [$platform] → $VERSION ($APPLE_BUILD)"
+    else
+      warn "$name: install failed"
+      record_failed "$name [$platform]"
+    fi
+  done <<< "$APPLE_DEVICES"
+
+  rm -f "$DEVICE_JSON"
+fi
+
+# --------------------------------------------------------------------------
+# Android devices
+# --------------------------------------------------------------------------
+
+if [[ $DO_ANDROID -eq 1 ]]; then
+  log "inventorying physical Android devices"
+  "$ADB" start-server >/dev/null 2>&1 || true
+
+  SERIALS="$("$ADB" devices | awk 'NR>1 && $2=="device" {print $1}')"
+  [[ -n "$SERIALS" ]] || warn "no reachable Android devices — nothing installed on the Android side"
+
+  for serial in $SERIALS; do
+    # Emulators are not the physical fleet.
+    if [[ "$serial" == emulator-* ]]; then
+      record_skipped "$serial (emulator)"
+      continue
+    fi
+
+    model="$("$ADB" -s "$serial" shell getprop ro.product.model 2>/dev/null | tr -d '\r' | tr ' ' '_')"
+    known=0
+    for pattern in "${KNOWN_ANDROID_PATTERNS[@]}"; do
+      if printf '%s' "$model" | grep -Eiq "$pattern"; then known=1; break; fi
+    done
+
+    if [[ $known -eq 0 && $ALLOW_UNKNOWN -eq 0 ]]; then
+      warn "$serial ($model) is not a known device — skipped. Pass --allow-unknown to install anyway."
+      record_skipped "$serial ($model, unrecognized)"
+      continue
+    fi
+
+    current="$("$ADB" -s "$serial" shell dumpsys package "$ANDROID_PACKAGE" 2>/dev/null \
+      | awk -F= '/versionCode=/{print $2}' | awk '{print $1}' | head -1)"
+
+    if [[ -n "$current" ]]; then
+      if [[ "$current" == "$ANDROID_CODE" ]]; then
+        log "$model already on versionCode $ANDROID_CODE — skipped"
+        record_skipped "$model (already $ANDROID_CODE)"
+        continue
+      fi
+      # A downgrade keeps /data, so older code inherits whatever schema the
+      # newer build wrote. Refuse it rather than corrupting the install.
+      if [[ "$current" -gt "$ANDROID_CODE" ]]; then
+        warn "$model has versionCode $current, newer than $ANDROID_CODE — refusing to downgrade"
+        record_skipped "$model (installed $current > $ANDROID_CODE)"
+        continue
+      fi
+    fi
+
+    log "installing plurx $VERSION (versionCode $ANDROID_CODE) on $model [$serial]"
+    if "$ADB" -s "$serial" install --no-streaming -r "$APK" >/dev/null; then
+      record_installed "$model [$serial] → $VERSION ($ANDROID_CODE)"
+    else
+      warn "$model: install failed — if this is INSTALL_FAILED_UPDATE_INCOMPATIBLE the debug keystore changed; uninstall the app on the device and rerun"
+      record_failed "$model [$serial]"
+    fi
+  done
+fi
+
+# --------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------
+
+echo
+log "plurx $VERSION — Apple build $APPLE_BUILD, Android versionCode $ANDROID_CODE — from $SHORT"
+
+if [[ ${#INSTALLED[@]} -gt 0 ]]; then
+  echo "  installed:"
+  printf '    %s\n' "${INSTALLED[@]}"
+fi
+if [[ ${#SKIPPED[@]} -gt 0 ]]; then
+  echo "  skipped:"
+  printf '    %s\n' "${SKIPPED[@]}"
+fi
+if [[ ${#FAILED[@]} -gt 0 ]]; then
+  echo "  failed:"
+  printf '    %s\n' "${FAILED[@]}"
+fi
+
+if [[ $KEEP_WORKTREE -eq 0 ]]; then
+  git -C "$SOURCE_REPO" worktree remove --force "$WORKTREE" 2>/dev/null || true
+  git -C "$SOURCE_REPO" worktree prune
+else
+  log "release worktree kept at $WORKTREE"
+fi
+
+# A run that reached zero devices is never a success.
+if [[ ${#INSTALLED[@]} -eq 0 && ${#SKIPPED[@]} -eq 0 ]]; then
+  fail "no device received or already had this build"
+fi
+[[ ${#FAILED[@]} -eq 0 ]] || fail "${#FAILED[@]} device install(s) failed"
+
+log "done"
