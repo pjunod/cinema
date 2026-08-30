@@ -299,7 +299,8 @@ final class PlaybackControlReporterTests: XCTestCase {
             observedDownloadBps: nil,
             selection: snapshot().selection,
             capabilities: capabilities(),
-            observation: nil
+            observation: nil,
+            supportedActions: PlaybackControl.supportedActions
         )))])
         let reporter = try XCTUnwrap(makeReporter(harness))
         await reporter.start()
@@ -308,6 +309,11 @@ final class PlaybackControlReporterTests: XCTestCase {
 
         let request = try XCTUnwrap(harness.requests.first)
         XCTAssertEqual(request.proto, PlaybackControl.protocolName)
+        XCTAssertEqual(
+            request.supportedActions,
+            ["hold"],
+            "the server sends only actions this client has declared"
+        )
         XCTAssertEqual(request.sequence, 1)
         XCTAssertEqual(request.generation, bootstrap().generation)
         XCTAssertEqual(request.controlEpoch, 7)
@@ -430,7 +436,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         ))
     }
 
-    func testAnActionOtherThanNoneIsTerminalRatherThanObeyed() async throws {
+    func testAnUndeclaredActionIsTerminalRatherThanObeyed() async throws {
         try await assertTerminal(response: ControlResponse(
             proto: PlaybackControl.protocolName,
             generation: bootstrap().generation,
@@ -438,6 +444,59 @@ final class PlaybackControlReporterTests: XCTestCase {
             acceptedSequence: 1,
             action: ControlAction(type: "prepare_replacement")
         ))
+    }
+
+    func testAHoldWithoutItsReasonIsTerminal() async throws {
+        try await assertTerminal(response: ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(type: "hold")
+        ))
+    }
+
+    func testAHoldIsAnExplanationAndKeepsTheReporterRunning() async throws {
+        // The point of declaring the action. The server is saying production
+        // is deliberately not advancing; a client that stopped reporting there
+        // would go silent for the rest of the film exactly when the server had
+        // just explained itself.
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(type: "hold", reason: "working_set")
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped, "a hold is not a reason to stop reporting")
+        await reporter.stop()
+    }
+
+    func testAnUnrecognisedHoldReasonIsStillAHold() async throws {
+        // A reason this client has never heard of is a newer server, not a
+        // broken one. Refusing the exchange over one unknown word would be the
+        // same silence by a different route.
+        let harness = Harness()
+        harness.enqueue([.success(ControlResponse(
+            proto: PlaybackControl.protocolName,
+            generation: bootstrap().generation,
+            controlEpoch: 7,
+            acceptedSequence: 1,
+            action: ControlAction(type: "hold", reason: "a_reason_from_next_year")
+        ))])
+        let reporter = try XCTUnwrap(makeReporter(harness))
+        await reporter.start()
+        XCTAssertTrue(harness.awaitExchanges(1))
+        try await Task.sleep(nanoseconds: 150_000_000)
+        let stopped = await reporter.stopped
+        XCTAssertFalse(stopped)
+        await reporter.stop()
     }
 
     private func assertTerminal(response: ControlResponse) async throws {
@@ -782,7 +841,7 @@ final class PlaybackControlReporterTests: XCTestCase {
             "\"render_state\":", "\"seek_target_ms\":", "\"observed_download_bps\":",
             "\"audio_track\":", "\"audio_offset_ms\":", "\"dynamic_range\":",
             "\"max_height\":", "\"dynamic_ranges\":", "\"dual_player_preparation\":",
-            "\"dropped_frames\":", "\"decoder_state\":",
+            "\"dropped_frames\":", "\"decoder_state\":", "\"supported_actions\":",
         ] {
             XCTAssertTrue(json.contains(key), "missing \(key)")
         }
@@ -791,6 +850,7 @@ final class PlaybackControlReporterTests: XCTestCase {
         XCTAssertTrue(json.contains("\"dynamic_range\":\"dolby_vision\""))
         XCTAssertTrue(json.contains("\"render_state\":\"waiting\""))
         XCTAssertTrue(json.contains("\"demand\":\"hold\""))
+        XCTAssertTrue(json.contains("\"supported_actions\":[\"hold\"]"))
         XCTAssertFalse(json.contains("\"proto\""), "the wire name is protocol, not proto")
     }
 
