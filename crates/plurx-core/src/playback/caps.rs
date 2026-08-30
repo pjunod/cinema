@@ -410,3 +410,133 @@ impl DeviceProfile {
         }
     }
 }
+
+/// The bucket width the browser groups source bitrates into, in bits per
+/// second (`DECODE_LIMIT_DEFAULTS.bitrateBucketBps`).
+const DECODE_LIMIT_BITRATE_BUCKET_BPS: i64 = 10_000_000;
+
+/// The identity schema the browser stamps into every key it writes
+/// (`DECODE_LIMIT_DEFAULTS.schema`). Bumping it in one place and not the
+/// other silently stops every learned limit from matching, which looks like
+/// the feature quietly not working rather than like a version skew — so the
+/// shared fixture pins both spellings together.
+const DECODE_LIMIT_SCHEMA: &str = "v2";
+
+/// The browser's `decodeLimitIdentity(source)`, in Rust.
+///
+/// This is a deliberate second implementation of a function that already
+/// exists in `web/playback-policy.js`, and the reason is that the browser
+/// computes the key from the source it is *looking at* while the server has
+/// to compute it from the source row it is *deciding about*. They have to
+/// agree byte for byte or nothing matches, and nothing matching is invisible:
+/// the limit is simply never applied and the viewer keeps stuttering.
+///
+/// `tests/playback/decode-limit-identity.json` is the contract between the
+/// two. Both this function and the browser's are run against every row in it,
+/// so a change to either spelling fails in both languages at once.
+///
+/// Returns `None` for a source shape the browser would also refuse to key.
+pub fn decode_limit_identity(file: &crate::domain::MediaFile) -> String {
+    fn text(value: Option<&str>, fallback: &str) -> String {
+        let normalized = value
+            .map(|value| {
+                value
+                    .trim()
+                    .to_lowercase()
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .unwrap_or_default();
+        if normalized.is_empty() {
+            fallback.to_owned()
+        } else {
+            normalized
+        }
+    }
+    // `positiveInteger`: anything not strictly positive is zero, including a
+    // negative, a NaN and an absent column.
+    fn positive(value: Option<i64>) -> i64 {
+        value.filter(|value| *value > 0).unwrap_or(0)
+    }
+
+    let hdr_format = file.hdr_format.as_deref();
+    // `sourceDynamicRange`: the declared range wins; otherwise the rich label
+    // is read for the words the browser reads, in the browser's order.
+    let dynamic_range = {
+        let declared = text(file.hdr.as_deref(), "");
+        if !declared.is_empty() {
+            declared
+        } else {
+            let rich = text(hdr_format, "");
+            if rich.contains("dolby vision")
+                || rich
+                    .split(|c: char| !c.is_alphanumeric())
+                    .any(|word| word == "dv")
+            {
+                "dolby_vision".to_owned()
+            } else if rich.contains("hdr10") {
+                "hdr10".to_owned()
+            } else if rich
+                .split(|c: char| !c.is_alphanumeric())
+                .any(|word| word == "hlg")
+            {
+                "hlg".to_owned()
+            } else {
+                "sdr_or_unknown".to_owned()
+            }
+        }
+    };
+    // `bitrateBucket`: `"unknown"` rather than a number when there is no
+    // positive bitrate to bucket — a string where the other rows are integers,
+    // which is exactly what the browser writes.
+    let bucket = match file.bitrate.filter(|bitrate| *bitrate > 0) {
+        Some(bitrate) => {
+            serde_json::Value::from(bitrate.div_euclid(DECODE_LIMIT_BITRATE_BUCKET_BPS))
+        }
+        None => serde_json::Value::from("unknown"),
+    };
+
+    let fields = serde_json::Value::Array(vec![
+        text(file.video_codec.as_deref(), "unknown").into(),
+        text(file.video_profile.as_deref(), "unknown").into(),
+        positive(file.width).into(),
+        positive(file.height).into(),
+        positive(file.bit_depth).into(),
+        dynamic_range.into(),
+        text(hdr_format, "none").into(),
+        bucket,
+    ]);
+    format!("decode-{DECODE_LIMIT_SCHEMA}:{fields}")
+}
+
+impl LearnedLimit {
+    /// The browser's own sentence for this demotion
+    /// (`learnedDecodeLimitView().reason`, `playback-policy.js:990`).
+    ///
+    /// Reproduced rather than paraphrased so the badge, the stats overlay and
+    /// the admin's session list all say what the browser would have said on
+    /// its own. Two wordings for one decision is how a viewer ends up
+    /// reconciling the server against their own client.
+    ///
+    /// The label is the client's, and a client that sent none gets its
+    /// identity instead — ugly, and better than a sentence with a hole in it.
+    /// The measurement degrades the same way the browser's does when the rate
+    /// is missing.
+    pub fn reason(&self) -> String {
+        let label = if self.label.trim().is_empty() {
+            self.identity.as_str()
+        } else {
+            self.label.trim()
+        };
+        let measurement = if self.rate > 0 {
+            format!(
+                "lost {} frames in {}s ({}/min)",
+                self.lost, self.secs, self.rate
+            )
+        } else {
+            "measured unstable original playback".to_owned()
+        };
+        format!("learned client-performance limit for {label}: {measurement}")
+    }
+}

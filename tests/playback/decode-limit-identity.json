@@ -1,0 +1,146 @@
+{
+  "schema_version": 1,
+  "note": "Generated from crates/plurxd/src/web/playback-policy.js decodeLimitIdentity, and asserted by BOTH tests/playback/web-policy.test.js and plurx_core::playback::caps::decode_limit_identity. The browser keys learned limits by this string and the server has to recompute it from the file row; a divergence is invisible, because nothing matches and the viewer just keeps stuttering.",
+  "cases": [
+    {
+      "name": "a plain 1080p H.264 SDR file",
+      "source": {
+        "video_codec": "h264",
+        "video_profile": "High",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 8,
+        "hdr": null,
+        "hdr_format": null,
+        "bitrate": 8000000
+      },
+      "identity": "decode-v2:[\"h264\",\"high\",1920,1080,8,\"sdr_or_unknown\",\"none\",0]"
+    },
+    {
+      "name": "the 4K Profile 7 remux the limits exist for",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": "dolby_vision",
+        "hdr_format": "Dolby Vision · Profile 7 (HDR10-compatible)",
+        "bitrate": 50000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",5]"
+    },
+    {
+      "name": "the same title at a different bitrate in the same bucket",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": "dolby_vision",
+        "hdr_format": "Dolby Vision · Profile 7 (HDR10-compatible)",
+        "bitrate": 59999999
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",5]"
+    },
+    {
+      "name": "and one bucket up, which must key differently",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": "dolby_vision",
+        "hdr_format": "Dolby Vision · Profile 7 (HDR10-compatible)",
+        "bitrate": 60000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dolby vision · profile 7 (hdr10-compatible)\",6]"
+    },
+    {
+      "name": "HDR10 inferred from the label, with no declared range",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "HDR10",
+        "bitrate": 40000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"hdr10\",\"hdr10\",4]"
+    },
+    {
+      "name": "HLG inferred from the label",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "HLG",
+        "bitrate": 40000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"hlg\",\"hlg\",4]"
+    },
+    {
+      "name": "Dolby Vision inferred from a bare DV word",
+      "source": {
+        "video_codec": "hevc",
+        "video_profile": "Main 10",
+        "width": 3840,
+        "height": 2160,
+        "bit_depth": 10,
+        "hdr": null,
+        "hdr_format": "DV profile 5",
+        "bitrate": 40000000
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",3840,2160,10,\"dolby_vision\",\"dv profile 5\",4]"
+    },
+    {
+      "name": "nothing known at all",
+      "source": {
+        "video_codec": null,
+        "video_profile": null,
+        "width": null,
+        "height": null,
+        "bit_depth": null,
+        "hdr": null,
+        "hdr_format": null,
+        "bitrate": null
+      },
+      "identity": "decode-v2:[\"unknown\",\"unknown\",0,0,0,\"sdr_or_unknown\",\"none\",\"unknown\"]"
+    },
+    {
+      "name": "a zero and a negative, which are both 'not positive'",
+      "source": {
+        "video_codec": "av1",
+        "video_profile": "Main",
+        "width": 0,
+        "height": -1080,
+        "bit_depth": 0,
+        "hdr": "sdr",
+        "hdr_format": null,
+        "bitrate": 0
+      },
+      "identity": "decode-v2:[\"av1\",\"main\",0,0,0,\"sdr\",\"none\",\"unknown\"]"
+    },
+    {
+      "name": "whitespace and case the two implementations must fold the same way",
+      "source": {
+        "video_codec": "  HEVC  ",
+        "video_profile": "Main   10",
+        "width": 1920,
+        "height": 1080,
+        "bit_depth": 10,
+        "hdr": "  HDR10 ",
+        "hdr_format": "  HDR10   Plus ",
+        "bitrate": 12345678
+      },
+      "identity": "decode-v2:[\"hevc\",\"main 10\",1920,1080,10,\"hdr10\",\"hdr10 plus\",1]"
+    }
+  ]
+}

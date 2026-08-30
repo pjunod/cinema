@@ -254,6 +254,24 @@ impl DeviceProfile {
         narrowest.or_else(|| self.video_max_heights.get(&codec).copied())
     }
 
+    /// The limit this client already applies to this exact media load, if it
+    /// reported one.
+    ///
+    /// Matching is on the identity string and nothing else — no fuzzy
+    /// codec-and-height fallback. The identity exists precisely because the
+    /// old `codec@height` key poisoned every 4K HEVC title on the strength of
+    /// one 90 Mb/s remux, and a lenient match here would reintroduce that
+    /// through the back door.
+    fn matching_learned_limit(&self, file: &MediaFile) -> Option<&caps::LearnedLimit> {
+        if self.learned_limits.is_empty() {
+            return None;
+        }
+        let identity = caps::decode_limit_identity(file);
+        self.learned_limits
+            .iter()
+            .find(|limit| limit.identity == identity)
+    }
+
     fn allows_dolby_vision(&self, file: &MediaFile) -> bool {
         self.supports_dolby_vision
             || dolby_vision_profile(file)
@@ -1004,6 +1022,28 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
             // answer is the one an operator needs.
             grade_explained = grade == OutputGrade::Hdr10;
         }
+    }
+
+    // A limit this client learned the hard way, on this exact media load.
+    //
+    // Without this the browser applied it alone: one stuttery session routed
+    // every matching title to a forced transcode for a month, and the server
+    // never knew — so `/decision` promised a direct play the client had
+    // already decided against, and every reason string the badge and the
+    // admin session list showed described a delivery that never happened.
+    //
+    // The demotion is a transcode rather than a remux because the limit is a
+    // statement about the DECODER: the client could not keep up with these
+    // frames, so handing it the same frames in a different envelope changes
+    // nothing.
+    let learned_limit = profile.matching_learned_limit(file);
+    if let Some(limit) = learned_limit {
+        c.video_ok = false;
+        // The browser's own wording, verbatim. A server paraphrase would put
+        // two different explanations of one decision in front of the same
+        // viewer, in the same UI, and the reconciliation would be theirs to
+        // do.
+        reasons.push(limit.reason());
     }
 
     // A manual A/V sync correction can only be applied by ffmpeg, so direct
@@ -1914,6 +1954,181 @@ mod tests {
                 dolby_vision_needs_rpu_render(&file),
                 "{hdr:?} / {label:?}"
             );
+        }
+    }
+
+    /// A limit the client already applies, applied by the server too.
+    ///
+    /// The gap this closes: the browser routed every matching title to a
+    /// forced transcode after one stuttery session and told nobody, so
+    /// `/decision` kept promising a direct play the client had already
+    /// decided against — and every reason string shown to that viewer
+    /// described a delivery that never happened.
+    #[test]
+    fn a_learned_client_limit_demotes_the_verdict_in_the_clients_own_words() {
+        let mut file = file("mp4", "hevc", "aac");
+        file.video_profile = Some("Main 10".into());
+        file.width = Some(3840);
+        file.height = Some(2160);
+        file.bit_depth = Some(10);
+        file.bitrate = Some(50_000_000);
+
+        let mut profile = caps_profile(
+            vec!["mp4".into()],
+            vec!["hevc".into(), "h264".into()],
+            vec!["aac".into()],
+            None,
+            true,
+            false,
+        );
+
+        // Without the limit this is an ordinary direct play.
+        let before = decide(&file, &profile, &RenderCaps::proven(true));
+        assert_eq!(before.method, PlaybackMethod::DirectPlay);
+
+        profile.learned_limits = vec![caps::LearnedLimit {
+            identity: caps::decode_limit_identity(&file),
+            label: "HEVC Main 10 · 3840×2160 · 10-bit · 50–60 Mb/s".to_owned(),
+            lost: 41,
+            secs: 60,
+            rate: 41,
+            at_ms: 1_756_400_000_000,
+        }];
+
+        let after = decide(&file, &profile, &RenderCaps::proven(true));
+        assert_eq!(
+            after.method,
+            PlaybackMethod::Transcode,
+            "a decoder that could not keep up with these frames is not helped \
+             by the same frames in a different envelope"
+        );
+        assert!(
+            after.reasons.iter().any(|reason| reason
+                == "learned client-performance limit for HEVC Main 10 · 3840×2160 · \
+                    10-bit · 50–60 Mb/s: lost 41 frames in 60s (41/min)"),
+            "the reason must be the browser's own sentence: {:?}",
+            after.reasons
+        );
+
+        // A limit for a different media load does not touch this one. The
+        // identity exists because the old codec-and-height key poisoned every
+        // 4K HEVC title on the strength of one 90 Mb/s remux.
+        let mut other = file.clone();
+        other.bitrate = Some(90_000_000);
+        assert_eq!(
+            decide(&other, &profile, &RenderCaps::proven(true)).method,
+            PlaybackMethod::DirectPlay,
+            "a limit learned at 50 Mb/s must not condemn the 90 Mb/s load"
+        );
+    }
+
+    /// A limit with no label, and one with no measurement.
+    ///
+    /// Both are shapes a real `localStorage` entry takes — the plan's own
+    /// §4.6 keys the map BY the identity, so the value need not repeat it —
+    /// and neither may produce a sentence with a hole in it.
+    #[test]
+    fn a_partial_learned_limit_still_produces_a_whole_sentence() {
+        let unlabelled = caps::LearnedLimit {
+            identity: "decode-v2:[\"hevc\"]".to_owned(),
+            label: "   ".to_owned(),
+            lost: 41,
+            secs: 60,
+            rate: 41,
+            at_ms: 0,
+        };
+        assert_eq!(
+            unlabelled.reason(),
+            "learned client-performance limit for decode-v2:[\"hevc\"]: \
+             lost 41 frames in 60s (41/min)"
+        );
+
+        let unmeasured = caps::LearnedLimit {
+            label: "HEVC Main 10".to_owned(),
+            rate: 0,
+            ..unlabelled
+        };
+        assert_eq!(
+            unmeasured.reason(),
+            "learned client-performance limit for HEVC Main 10: \
+             measured unstable original playback",
+            "the browser's own wording for a limit it recorded without a rate"
+        );
+    }
+
+    /// The browser and the server must key a learned limit identically.
+    ///
+    /// `tests/playback/decode-limit-identity.json` is the contract, and it is
+    /// generated from the browser's own function. `web-policy.test.js` runs
+    /// the same rows through `decodeLimitIdentity`, so a change to either
+    /// spelling fails in both languages at once.
+    ///
+    /// A divergence here has no symptom. Nothing errors: the server's key
+    /// simply never matches the browser's, no limit is ever applied, and the
+    /// viewer keeps stuttering through the exact title they already taught
+    /// their browser to avoid.
+    #[test]
+    fn the_server_keys_a_learned_limit_the_way_the_browser_does() {
+        #[derive(serde::Deserialize)]
+        struct Source {
+            video_codec: Option<String>,
+            video_profile: Option<String>,
+            width: Option<i64>,
+            height: Option<i64>,
+            bit_depth: Option<i64>,
+            hdr: Option<String>,
+            hdr_format: Option<String>,
+            bitrate: Option<i64>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            source: Source,
+            identity: String,
+        }
+        #[derive(serde::Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+
+        let raw = include_str!("../../../../tests/playback/decode-limit-identity.json");
+        let fixture: Fixture = serde_json::from_str(raw).expect("the shared fixture parses");
+        assert!(
+            fixture.cases.len() >= 10,
+            "a fixture this small stops being a contract"
+        );
+
+        for case in &fixture.cases {
+            let mut media = file("mkv", "hevc", "aac");
+            media.video_codec = case.source.video_codec.clone();
+            media.video_profile = case.source.video_profile.clone();
+            media.width = case.source.width;
+            media.height = case.source.height;
+            media.bit_depth = case.source.bit_depth;
+            media.hdr = case.source.hdr.clone();
+            media.hdr_format = case.source.hdr_format.clone();
+            media.bitrate = case.source.bitrate;
+            assert_eq!(
+                caps::decode_limit_identity(&media),
+                case.identity,
+                "{}",
+                case.name
+            );
+        }
+
+        // And the property the rows are chosen to prove: the bitrate bucket
+        // separates the 40 and 90 Mb/s 4K loads that the old codec-and-height
+        // key conflated, while tolerating jitter inside one bucket.
+        let same_bucket: Vec<&str> = fixture
+            .cases
+            .iter()
+            .filter(|case| case.name.contains("same bitrate") || case.name.contains("same title"))
+            .map(|case| case.identity.as_str())
+            .collect();
+        if let [first, rest @ ..] = same_bucket.as_slice() {
+            for other in rest {
+                assert_eq!(first, other, "one bucket, one key");
+            }
         }
     }
 

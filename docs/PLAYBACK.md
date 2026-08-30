@@ -1090,6 +1090,28 @@ Original** bypasses every learned entry, and an explicit-Original session that
 plays **60 s under the same 6-per-minute rate** clears only its exact identity
 and logs `decode_limit_cleared`.
 
+The server sees these too. A client that sends caps v2 includes its learned
+limits verbatim, and `decide()` matches them on the same identity string —
+computed in Rust from the file row rather than in JavaScript from the source
+object, which is why `tests/playback/decode-limit-identity.json` pins both
+implementations to the same output and both test suites read it. A divergence
+there has no symptom worth noticing: nothing errors, no limit ever matches,
+and the viewer simply keeps stuttering through the title they already taught
+their browser to avoid.
+
+When the server matches one, it demotes to a **transcode** — the limit is a
+statement about the decoder, so the same frames in a different envelope change
+nothing — and the reason string is the browser's own sentence, verbatim:
+
+```
+learned client-performance limit for HEVC Main 10 · 3840×2160 · 10-bit · 50–60 Mb/s: lost 41 frames in 60s (41/min)
+```
+
+Verbatim rather than paraphrased because the alternative puts two different
+explanations of one decision in front of the same viewer, in the same UI, and
+leaves the reconciliation to them. The server does not store these; it reports
+them. Per-device storage is a separate decision nobody has needed yet.
+
 When that learned route replaces an ordinary HDR/Dolby Vision delivery with an
 SDR transcode, the Quality menu and Reason row name the consequence, such as
 `HDR10 → SDR`. The text attributes the choice to measured client performance;
