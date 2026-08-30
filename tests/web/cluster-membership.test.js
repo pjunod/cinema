@@ -20,6 +20,12 @@ const path = require("node:path");
 const INDEX = path.join(__dirname, "../../crates/plurxd/src/web/index.html");
 const SHIPPED_UI = fs.readFileSync(INDEX, "utf8");
 
+// The model has a file boundary now, so it is required rather than sliced out
+// of the shell. Everything still declared inline — the templates, the fold DOM
+// glue — keeps the extraction harness below; that harness shrinks as the
+// boundary grows, which is the point of moving it.
+const PANEL = require("../../crates/plurxd/src/web/cluster-panel.js");
+
 // Same extraction contract as tests/playback/web-policy.test.js: every function
 // borrowed here is declared at column zero in one inline <script>, so the next
 // top-level declaration terminates it and no brace parsing is needed. A rename
@@ -43,56 +49,34 @@ function shippedSource(name) {
 // formatting under test too.
 const BORROWED = [
   "esc",
+  "clenv",
   "fmtAgo",
   "fmtBytes",
   "replicationText",
-  "clusterQuorum",
-  "clusterStateView",
-  "membershipRefusalText",
-  "clusterDirectOperationRow",
-  "clusterDirectMaintenanceStatus",
-  "clusterMaintenanceEntryVerdict",
-  "clusterMaintenanceReady",
-  "clusterMaintenanceResumeReady",
   "clusterNodeOperationsBadge",
   "clusterNodeOperationsHtml",
   "clusterNodeRow",
-  "clusterOperationAge",
-  "clusterOperationReason",
   "clusterOperationsUnavailable",
   "clusterRestartPreparationHtml",
   "clusterOperationsCard",
-  "clusterRecoveryState",
   "clusterRecoveryPanel",
   "clusterMaintenanceProgress",
   "clusterOperationsPanel",
   "forceElectionDialog",
   "clusterRefusalHtml",
-  "clusterRailBlocker",
-  "clusterRailRow",
-  "clusterOperationRows",
   "clusterOperationsRail",
-  "clusterSqliteReplication",
-  "clusterSampleAge",
-  "clusterDatabaseWal",
-  "clusterDatabaseStatus",
-  "clusterCapacityText",
-  "clusterDatabaseHealth",
-  "clusterHealthPill",
-  "clusterDatabaseSummary",
-  "clusterDatabaseRows",
   "clusterDatabasePanel",
   "clusterTabButton",
   "clusterDiagnosticsFacts",
   "clusterTroubleshootingPanel",
   "showClusterTab",
   "selectClusterTab",
-  "clusterFoldKey",
-  "clusterFoldRead",
-  "clusterFoldWrite",
   "clusterNodeFoldId",
   "clusterNodeFoldLater",
   "clusterNodeFoldSave",
+  "clusterStorage",
+  "clusterFoldState",
+  "clusterFoldSave",
   "applyClusterFolds",
   "setClusterDatabaseFold",
   "toggleClusterDatabase",
@@ -107,27 +91,42 @@ const BORROWED = [
 
 // One sandbox per test so a mutation of ME or CLUSTER_REFUSAL cannot leak into
 // the next assertion.
-function sandbox({ isAdmin = true, refusal = null, token = null } = {}) {
+function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] } = {}) {
   const source = `
     let ME = ${JSON.stringify({ is_admin: isAdmin })};
     let CLUSTER_REFUSAL = ${JSON.stringify(refusal)};
     let CLUSTER_TOKEN = ${JSON.stringify(token)};
+    let CLUSTER_RAIL_EXPANDED = ${JSON.stringify(expanded)};
     let CLUSTER_LEAVING = false;
     ${BORROWED.map(shippedSource).join("\n")}
-    return { ${BORROWED.join(", ")} };
+    // The shell's own esc/fmtAgo/fmtBytes, handed to the model exactly the way
+    // the browser hands them over. Borrowing the real ones rather than stubbing
+    // keeps the escaping and the "3m ago" formatting under test too.
+    return Object.assign({}, PlurxClusterPanel, { ${BORROWED.join(", ")} }, { env: clenv() });
   `;
-  return new Function(source)();
+  return new Function("PlurxClusterPanel", source)(PANEL);
 }
 
 let failures = 0;
-function test(name, run) {
+let started = 0;
+let finished = 0;
+// Awaited, counted, and the exit code deferred to beforeExit. Two ways an async
+// test can pass without proving anything, both of which this file has shipped:
+// a body that is never awaited runs zero assertions, and a body that never
+// settles — a harness promise nobody resolves — prints neither PASS nor FAIL and
+// simply disappears from the run. Counting starts against finishes catches the
+// second; the count is asserted below. Keep this identical to the harness in
+// tests/web/page-read-budget.test.js.
+async function test(name, run) {
+  started += 1;
   try {
-    run();
+    await run();
     process.stdout.write(`PASS ${name}\n`);
   } catch (error) {
     failures += 1;
     process.stdout.write(`FAIL ${name}\n${error && error.stack}\n`);
   }
+  finished += 1;
 }
 
 // Words that assert redundancy or fault tolerance. Any of these in the
@@ -927,7 +926,10 @@ test("the healthy cluster layout combines node membership and operations evidenc
   assert.match(html, /class="clrail"/);
   assert.match(html, /Enter maintenance on node-a/);
   assert.match(html, /Force a leader election/);
-  assert.match(html, /Danger zone · membership changes/);
+  // The membership controls are the rail's own rows now, not a second card.
+  assert.equal(html.includes("cldanger"), false);
+  assert.match(html, /id="clrail-add"/);
+  assert.match(html, /id="clrail-leave"/);
   assert.equal(html.includes("<table"), false);
 });
 
@@ -1063,8 +1065,14 @@ test("maintenance resume requires direct local process evidence", () => {
     node("node-c", 3, "voter"),
   ]);
   const panel = ui.clusterPanel({ cluster, sys: { replication: REPLICATION } });
-  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Create a join token/);
-  assert.match(panel, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
+  // A membership change is in flight, so the rows that would start another one
+  // are blocked — and a blocked row carries no expansion at all. An unreachable
+  // control is better than a disabled control the operator has to open to find.
+  assert.equal(panel.includes('id="clrail-add"'), false);
+  assert.equal(panel.includes("Create a join token"), false);
+  assert.match(panel, /A membership change is already in flight on node-b/);
+  const leaving = ui.leavePanel("node-a", true);
+  assert.match(leaving, /disabled title="Finish maintenance before changing membership[^>]*>Leave this cluster/);
   assert.match(panel, /disabled[^>]*>Remove permanently/);
 });
 
@@ -1154,7 +1162,7 @@ test("the local row cannot use generic removal", () => {
   const local = ui.clusterNodeRow(node("node-a", 1, "voter"), "node-a");
   const peer = ui.clusterNodeRow(node("node-b", 2, "voter"), "node-a");
   assert.match(local, /This node/);
-  assert.match(local, /Use graceful leave in Danger zone/);
+  assert.match(local, /Use Leave this cluster on the Maintenance card/);
   assert.equal(local.includes(">Remove<"), false);
   assert.match(peer, />Remove permanently</);
 });
@@ -1333,7 +1341,7 @@ test("late cluster work can repaint only a live Settings route", () => {
   for (const handler of ["loadCluster", "mintJoinToken", "removeNode"]) {
     assert.match(
       shippedSource(handler),
-      /renderSettings\(\)/,
+      /renderSettings\(\)|repaintClusterPreserving\(renderSettings\)/,
       `${handler} no longer renders through the guarded Settings choke point`,
     );
   }
@@ -1434,7 +1442,7 @@ test("the database section is foldable and keeps its verdict folded", () => {
   assert.match(html, /id="cluster-database-summary" hidden/);
   // Folding hides the detail, never the verdict: the pill stays in the header
   // and the summary keeps the readings somebody checks before expanding again.
-  const summary = ui.clusterDatabaseSummary(cluster, REPLICATION, ops);
+  const summary = ui.clusterDatabaseSummary(ui.env, cluster, REPLICATION, ops);
   assert.match(summary, /leader <b>node-a<\/b>/);
   assert.match(summary, /term <b>81<\/b>/);
   assert.match(summary, /commit <b>482191<\/b>/);
@@ -1460,7 +1468,7 @@ test("the quorum watermark is the quorum's, not this node's applied index", () =
   local.status.raft.applied_index = 482191;
   local.status.raft.apply_lag_entries = 4;
   const rows = new Map(
-    ui.clusterDatabaseRows(cluster, { ...REPLICATION, last_applied_index: 482191, behind_by: 4 }, behind)
+    ui.clusterDatabaseRows(ui.env, cluster, { ...REPLICATION, last_applied_index: 482191, behind_by: 4 }, behind)
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(rows.get("Quorum commit"), "482195");
@@ -1490,7 +1498,7 @@ test("the database reports this machine's store, not the leader's", () => {
     row.status.raft.apply_lag_entries = local ? 91 : 0;
     row.status.protocol_max = local ? 6 : 9;
   });
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.equal(rows.get("Applied here"), "482100");
   assert.equal(rows.get("Apply lag"), "91 entries");
   assert.equal(rows.get("Protocol"), "5–6");
@@ -1502,7 +1510,7 @@ test("the database reports this machine's store, not the leader's", () => {
 test("database readings say unknown instead of inventing a number", () => {
   const ui = sandbox();
   const cluster = status("high_availability", [node("node-a", 1, "voter", { is_leader: true })]);
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, null).map((row) => [row[0], row[1]]));
   assert.equal(rows.get("Term"), "unknown");
   assert.equal(rows.get("Quorum commit"), "unknown");
   assert.equal(rows.get("Apply lag"), "unknown");
@@ -1516,7 +1524,7 @@ test("database readings say unknown instead of inventing a number", () => {
   assert.equal(rows.get("Snapshots"), "unknown");
   assert.equal(rows.get("WAL"), "unknown");
   const degraded = new Map(
-    ui.clusterDatabaseRows(cluster, { backend: "hiqlite", health: "degraded", clustered: true }, null)
+    ui.clusterDatabaseRows(ui.env, cluster, { backend: "hiqlite", health: "degraded", clustered: true }, null)
       .map((row) => [row[0], row[1]]),
   );
   assert.equal(degraded.get("Behind by"), "unknown");
@@ -1532,7 +1540,7 @@ test("a proven-unavailable store reads as broken, not as unobserved", () => {
   const local = ops.nodes[0];
   local.status.snapshot = { available: false, build_ok_count: 0, build_error_count: 0, install_ok_count: 0, install_error_count: 0 };
   local.status.wal = { available: false, reason: "lock_contended" };
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.match(rows.get("Snapshots"), /unavailable/);
   assert.match(rows.get("WAL"), /unavailable/);
   assert.match(rows.get("WAL"), /lock contended/);
@@ -1543,7 +1551,7 @@ test("a proven-unavailable store reads as broken, not as unobserved", () => {
   // uses rather than printing a neutral "open".
   const faulted = operationStatus(cluster);
   faulted.nodes[0].status.wal.snapshot.last_log_index = 482195;
-  const walRow = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, faulted).map((row) => [row[0], row[1]])).get("WAL");
+  const walRow = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, faulted).map((row) => [row[0], row[1]])).get("WAL");
   assert.match(walRow, /var\(--bad\)/);
   assert.match(walRow, /482195 logged, 482191 durable/);
 });
@@ -1560,7 +1568,7 @@ test("the freshness row ages while the tab stays open", () => {
   ]);
   const ops = operationStatus(cluster);
   ops.observed_at_unix_ms = Date.now() - 600_000;
-  const rows = new Map(ui.clusterDatabaseRows(cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
+  const rows = new Map(ui.clusterDatabaseRows(ui.env, cluster, REPLICATION, ops).map((row) => [row[0], row[1]]));
   assert.match(rows.get("Reading age"), /local 10m ago/);
   assert.match(rows.get("Reading age"), /watermark 10m ago/);
   assert.equal(ui.clusterSampleAge(ops, null), null);
@@ -1707,7 +1715,7 @@ test("a browser that refuses storage still gets the shipped defaults", () => {
     // markup's own defaults on the way past.
     ui.applyClusterFolds();
     ui.clusterNodeFoldSave();
-    assert.equal(ui.clusterFoldRead(), null);
+    assert.equal(ui.clusterFoldState(), null);
   });
   assert.deepEqual(
     cards.map((card) => card.open),
@@ -1771,7 +1779,7 @@ test("the fold is restored where the panel is written, and saved by every contro
   // these tests green.
   assert.match(shippedSource("renderSettings"), /if\(tab==="cluster"\)\{ applyClusterFolds\(\); return refreshClusterLogs\(\); \}/);
   assert.match(shippedSource("toggleClusterNodes"), /clusterNodeFoldSave\(\);/);
-  assert.match(shippedSource("selectClusterTab"), /clusterFoldWrite\(\{tab:id\}\)/);
+  assert.match(shippedSource("selectClusterTab"), /clusterFoldSave\(\{tab:id\}\)/);
 });
 
 test("the troubleshooting tab is a fold like any other", () => {
@@ -1815,23 +1823,26 @@ test("the troubleshooting tab is a fold like any other", () => {
 test("the fold never carries anything but the fold", () => {
   // The panel holds a live join credential in memory. The fold is the one thing
   // on this screen that is allowed to reach browser storage, so pin its shape.
-  const write = shippedSource("clusterFoldWrite");
-  assert.match(write, /localStorage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
+  const write = PANEL.clusterFoldWrite.toString();
+  assert.match(write, /storage\.setItem\(clusterFoldKey\(\),JSON\.stringify\(/);
   assert.match(shippedSource("clusterNodeFoldSave"), /nodes_closed/);
-  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldWrite\(\{database:open\}\)/);
+  assert.match(shippedSource("toggleClusterDatabase"), /clusterFoldSave\(\{database:open\}\)/);
   assert.doesNotMatch(shippedSource("clusterDatabasePanel"), /localStorage/);
+  // Only the shell may hold the storage handle: the model takes it as an
+  // argument, so a test never stubs a global to exercise it.
+  assert.doesNotMatch(PANEL.clusterFoldRead.toString(), /localStorage/);
 });
 
 test("a stored fold that is not a fold is ignored, not carried forward", () => {
   const ui = sandbox();
   const junk = fakeStorage({ "plurx.cluster.fold": JSON.stringify([1, 2, 3]) });
-  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldRead(), null));
+  withDom(foldDom(), junk, () => assert.equal(ui.clusterFoldState(), null));
   const stray = fakeStorage({
     "plurx.cluster.fold": JSON.stringify({ database: false, nodes_closed: ["a", 7], tab: "log", stowaway: "x" }),
   });
   withDom(foldDom(), stray, () => {
-    assert.deepEqual(ui.clusterFoldRead(), { database: false, nodes_closed: ["a"], tab: "log" });
-    ui.clusterFoldWrite({ database: true });
+    assert.deepEqual(ui.clusterFoldState(), { database: false, nodes_closed: ["a"], tab: "log" });
+    ui.clusterFoldSave({ database: true });
   });
   assert.deepEqual(JSON.parse(stray.read("plurx.cluster.fold")), {
     database: true, nodes_closed: ["a"], tab: "log",
@@ -1888,7 +1899,7 @@ test("a refusal is kept in troubleshooting, not spent on a toast", () => {
 
 function railRows(ui, cluster, ops) {
   return new Map(
-    ui.clusterOperationRows(cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
+    ui.clusterOperationRows(ui.env, cluster, ops).map((row) => [row.title.replace(/<[^>]*>/g, ""), row]),
   );
 }
 
@@ -1990,10 +2001,19 @@ test("the rail routes to the credential rather than minting a second one", () =>
     node("node-c", 3, "voter"),
   ]);
   const rows = railRows(ui, cluster, operationStatus(cluster));
-  assert.match(rows.get("Add a node").action, /openClusterDanger\(\)/);
-  assert.match(rows.get("Leave this cluster").action, /openClusterDanger\(\)/);
-  assert.doesNotMatch(ui.clusterOperationsRail(cluster, operationStatus(cluster)), /mintJoinToken|leaveCluster\(/);
-  assert.doesNotMatch(shippedSource("clusterOperationRows"), /localStorage/);
+  assert.match(rows.get("Add a node").action, /toggleClusterRailPanel\('add'\)/);
+  assert.match(rows.get("Leave this cluster").action, /toggleClusterRailPanel\('leave'\)/);
+
+  // The row that decides the change carries the control for it, and it is the
+  // only place either one exists. Two surfaces that mint one credential is the
+  // failure this panel must never ship.
+  const html = ui.clusterPanel({ cluster, clusterOps: operationStatus(cluster), sys: { replication: REPLICATION } });
+  assert.equal((html.match(/mintJoinToken\(this\)/g) || []).length, 1);
+  assert.equal((html.match(/leaveCluster\(this,/g) || []).length, 1);
+  const rail = html.slice(html.indexOf('<div class="clrail">'));
+  assert.match(rail, /mintJoinToken\(this\)/);
+  assert.match(rail, /leaveCluster\(this,/);
+  assert.doesNotMatch(PANEL.clusterOperationRows.toString(), /localStorage/);
 });
 
 test("a stale roster cannot make the rail claim a verdict", () => {
@@ -2235,7 +2255,7 @@ test("the two components stay in their own columns, and the rail with the cluste
   assert.match(left, /<h3>Replicated database<\/h3>/);
   assert.match(left, /<h3>Maintenance<\/h3>/);
   assert.match(left, /class="clrail"/);
-  assert.match(left, /Danger zone · membership changes/);
+  assert.match(left, /id="clrail-add"/);
   assert.doesNotMatch(left, /id="cluster-node-list"/);
   assert.match(right, /<h3>Cluster nodes<\/h3>/);
   assert.match(right, /id="cluster-node-list"/);
@@ -2258,9 +2278,745 @@ test("the controls the rail routes to actually do something", () => {
   // Both of these are one line each and both were deletable with the suite
   // green: the credential panel would never open, and a card opened near the
   // bottom of the scroller would open below the fold.
-  assert.match(shippedSource("openClusterDanger"), /querySelector\("\.cldanger"\)/);
-  assert.match(shippedSource("openClusterDanger"), /zone\.open=true/);
+  assert.match(shippedSource("toggleClusterRailPanel"), /scrollIntoView\(\{block:"nearest"\}\)/);
   assert.match(shippedSource("clusterNodeFoldLater"), /scrollIntoView\(\{block:"nearest"\}\)/);
 });
 
-process.exit(failures ? 1 : 0);
+// ---- one credential surface ------------------------------------------------
+
+test("the credential is an expansion of the row that decides it", () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const collapsed = sandbox().clusterOperationsRail(cluster, ops);
+  // Shipped state: the panel exists in the markup and is not showing. A fresh
+  // page must never open a credential surface by itself.
+  assert.match(collapsed, /<div class="clrailpanel" id="clrail-add" hidden>/);
+  assert.match(collapsed, /aria-controls="clrail-add" aria-expanded="false"/);
+  assert.match(collapsed, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+
+  const open = sandbox({ expanded: ["add"] }).clusterOperationsRail(cluster, ops);
+  assert.match(open, /<div class="clrailpanel" id="clrail-add">/);
+  assert.match(open, /aria-controls="clrail-add" aria-expanded="true"/);
+  assert.match(open, />Hide</);
+  // Opening one does not open the other.
+  assert.match(open, /<div class="clrailpanel" id="clrail-leave" hidden>/);
+});
+
+test("the token survives a repaint and never reaches storage", () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ui = sandbox({
+    expanded: ["add"],
+    token: { token: "plxjoin:v1:aaaa:bbbb", expires_at: Date.now() + 600_000, raft_id: 4, role: "voter" },
+  });
+  const rail = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  // Rendered from state rather than captured from the DOM, so the 15s status
+  // repaint cannot pull a half-read credential shut underneath someone.
+  assert.match(rail, /plxjoin:v1:aaaa:bbbb/);
+  assert.equal((rail.match(/plxjoin:v1:aaaa:bbbb/g) || []).length, 1, "shown once means once");
+  assert.match(rail, /Shown once/);
+
+  // The expansion is module state, and the same three exits that drop the token
+  // drop it too — so returning to this tab starts collapsed, with nothing to
+  // reopen onto.
+  const forget = shippedSource("forgetJoinToken");
+  assert.match(forget, /CLUSTER_TOKEN=null/);
+  assert.match(forget, /CLUSTER_RAIL_EXPANDED=\[\]/);
+  const toggle = shippedSource("toggleClusterRailPanel");
+  assert.doesNotMatch(toggle, /forgetJoinToken|CLUSTER_TOKEN/);
+  for (const sink of ["localStorage", "sessionStorage", "clusterFoldSave"]) {
+    assert.equal(toggle.includes(sink), false, `the rail expansion reaches ${sink}`);
+  }
+  // The fold's whitelist is still exactly the fold: nothing credential-adjacent
+  // can ride into storage on it.
+  const read = PANEL.clusterFoldRead.toString();
+  for (const key of ["database", "nodes_closed", "tab"]) assert.ok(read.includes(key));
+  assert.doesNotMatch(read, /rail|expand|token/i);
+});
+
+test("the expansion is a toggle over module state, and writes nothing down", () => {
+  // The fold's read side is a whitelist, but its write side Object.assigns any
+  // key it is handed — so the guarantee that a credential surface never reaches
+  // storage has to be asserted against the storage, not against a grep.
+  const storage = fakeStorage({ "plurx.cluster.fold": JSON.stringify({ database: true }) });
+  const panel = { hidden: true, scrollIntoView() {} };
+  const document = { getElementById: (id) => (id === "clrail-add" ? panel : null) };
+  const harness = new Function(
+    "document", "renderSettings", "repaintClusterPreserving", "localStorage",
+    `let CLUSTER_RAIL_EXPANDED=[];
+     ${shippedSource("toggleClusterRailPanel")}
+     return {toggle:toggleClusterRailPanel,state:()=>CLUSTER_RAIL_EXPANDED};`,
+  )(document, () => {}, (paint) => paint(), storage);
+
+  harness.toggle("add");
+  assert.deepEqual(harness.state(), ["add"]);
+  harness.toggle("add");
+  assert.deepEqual(harness.state(), [], "toggling twice closes it again");
+  assert.deepEqual(
+    JSON.parse(storage.read("plurx.cluster.fold")),
+    { database: true },
+    "the rail expansion left nothing behind in browser storage",
+  );
+});
+
+test("both membership rows carry an evaluated precondition", () => {
+  // Leave is a membership change like any other: it commits through the same
+  // quorum and cannot start while another lifecycle change is in flight. It was
+  // the one row on a card headed "with its precondition already evaluated" that
+  // had none.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ui = sandbox({ expanded: ["leave"] });
+  const open = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  assert.match(open, /<div class="clrailpanel" id="clrail-leave">/, "leave expands too, not just add");
+  assert.match(open, /leaveCluster\(this,/);
+
+  const recovering = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { reachable: false }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  recovering.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 2, leader_elected: false };
+  const locked = railRows(ui, recovering, operationStatus(recovering)).get("Leave this cluster");
+  assert.equal(locked.blocked, true);
+  assert.match(locked.reason, /elected leader and a reachable voter majority/);
+  const lockedHtml = sandbox({ expanded: ["leave"] }).clusterOperationsRail(recovering, operationStatus(recovering));
+  assert.equal(lockedHtml.includes('id="clrail-leave"'), false, "a blocked row has no reachable control");
+  assert.equal(lockedHtml.includes("leaveCluster(this,"), false);
+
+  // A blocked row's own control is disabled in the model too, not only absent
+  // from the shell's mount — otherwise a live Leave button ships on a row the
+  // rail has already refused.
+  assert.match(locked.action, /disabled/);
+  assert.doesNotMatch(locked.action, /toggleClusterRailPanel/);
+
+  // Maintenance is a cluster-wide conflict for membership changes, so a fenced
+  // node blocks a leave and the row says which node to resume.
+  const fenced = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { maintenance: true, maintenance_acknowledged: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  const fencedRow = railRows(ui, fenced, operationStatus(fenced)).get("Leave this cluster");
+  assert.equal(fencedRow.blocked, true);
+  assert.match(fencedRow.reason, /Maintenance is active on node-b/);
+
+  // The server refuses a voter self-leave below three voters with the same
+  // arithmetic the Remove row already reports. A removal pending on some OTHER
+  // node is deliberately NOT a blocker — that fence is per-node, and refusing
+  // here would refuse something the server allows.
+  const pair = status("degraded_reconfiguration", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const small = railRows(ui, pair, operationStatus(pair)).get("Leave this cluster");
+  assert.equal(small.blocked, true);
+  assert.match(small.reason, /at least three voters remain, and this cluster has 2/);
+
+  const pendingElsewhere = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter", { removal_pending: true }),
+  ]);
+  const stillFree = railRows(ui, pendingElsewhere, operationStatus(pendingElsewhere)).get("Leave this cluster");
+  assert.equal(stillFree.blocked, false, "another node's pending removal does not fence this one");
+
+  // A learner leaving is not held to the voter arithmetic — the server sends it
+  // down the learner path.
+  const learnerLocal = status("high_availability", [
+    node("node-w", 9, "learner", { bounded_read_ready: true, voter_storage_ready: true }),
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+  ]);
+  const learnerRow = railRows(ui, learnerLocal, operationStatus(learnerLocal)).get("Leave this cluster");
+  assert.equal(learnerRow.blocked, false);
+
+  // And the leave control the rail mounts still receives the lifecycle state, so
+  // its own button stays disabled wherever the row is reachable.
+  assert.match(shippedSource("clusterOperationsRail"), /leavePanel\(cluster\.local_node_id,maintenanceActive\)/);
+  assert.match(shippedSource("clusterOperationsRail"), /joinPanel\(maintenanceActive\)/);
+});
+
+test("the danger zone is gone, not renamed", () => {
+  for (const trace of ["cldanger", "cldangerbody", "openClusterDanger", "Danger zone"]) {
+    assert.equal(SHIPPED_UI.includes(trace), false, `index.html still ships ${trace}`);
+  }
+  // Leave keeps its friction and its binding: the graceful-leave wording, the
+  // roster-bound node_id, and the destructive treatment all moved as they were.
+  const leave = sandbox().leavePanel("node-a");
+  assert.match(leave, /leaveCluster\(this,&quot;node-a&quot;\)/);
+  assert.match(leave, /permanent, not an update or restart action/);
+  assert.match(leave, /fresh data directory/);
+});
+
+// ---- the direct status keeps itself fresh ----------------------------------
+
+test("the projection ignores what moves on its own and nothing else", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const first = operationStatus(cluster);
+  const later = JSON.parse(JSON.stringify(first));
+  // Everything here is the passage of time, not news.
+  later.observed_at_unix_ms = (first.observed_at_unix_ms || 0) + 60_000;
+  later.nodes.forEach((row) => {
+    row.sample_age_ms = (row.sample_age_ms || 0) + 60_000;
+    if (row.membership) row.membership.last_seen_at = (row.membership.last_seen_at || 0) + 60_000;
+    if (row.status) {
+      row.status.observed_at_unix_ms = (row.status.observed_at_unix_ms || 0) + 60_000;
+      row.status.raft.sample_age_seconds = (row.status.raft.sample_age_seconds || 0) + 60;
+      row.status.raft.watermark_age_millis = (row.status.raft.watermark_age_millis || 0) + 60_000;
+      // Rendered, but excluded: a WAL fsync alone is not news worth rewriting
+      // the screen for, and the commit watermark beside it is in the projection.
+      if (row.status.wal && row.status.wal.snapshot)
+        row.status.wal.snapshot.last_sync_unix_ms =
+          (row.status.wal.snapshot.last_sync_unix_ms || 0) + 60_000;
+    }
+  });
+  assert.equal(
+    ui.clusterOpsProjection(later),
+    ui.clusterOpsProjection(first),
+    "an aggregate that only got older must not repaint the panel",
+  );
+
+  // The commit watermark advancing is exactly what an operator leaves this
+  // ledger open to watch, so it is news.
+  const advanced = JSON.parse(JSON.stringify(later));
+  advanced.nodes[0].status.raft.commit_index += 1;
+  assert.notEqual(ui.clusterOpsProjection(advanced), ui.clusterOpsProjection(first));
+  const fenced = JSON.parse(JSON.stringify(later));
+  fenced.verdict.safe_to_restart_one = !fenced.verdict.safe_to_restart_one;
+  assert.notEqual(ui.clusterOpsProjection(fenced), ui.clusterOpsProjection(first));
+  // The aggregate's top-level `membership` is the committed roster again: the
+  // panel reads one stable field from it and renders the rest from
+  // /cluster/nodes, so its lag and session counts must not repaint anything.
+  const roster = JSON.parse(JSON.stringify(later));
+  if (roster.membership && roster.membership.nodes && roster.membership.nodes.length) {
+    roster.membership.nodes[0].apply_lag_entries = 41;
+    roster.membership.nodes[0].active_media_sessions = 7;
+    assert.equal(ui.clusterOpsProjection(roster), ui.clusterOpsProjection(first));
+  }
+  const relocal = JSON.parse(JSON.stringify(later));
+  relocal.membership = Object.assign({}, relocal.membership, { local_node_id: "somewhere-else" });
+  assert.notEqual(ui.clusterOpsProjection(relocal), ui.clusterOpsProjection(first),
+    "which node this is remains part of the projection");
+  // …but the per-node membership record inside nodes[] identifies the rows, and
+  // a node joining, leaving or being renamed IS news.
+  const renamed = JSON.parse(JSON.stringify(later));
+  renamed.nodes[0].membership.hostname = "renamed-host";
+  assert.notEqual(ui.clusterOpsProjection(renamed), ui.clusterOpsProjection(first));
+
+  // Key order in the response is not a change either.
+  const shuffled = JSON.parse(JSON.stringify(first));
+  shuffled.nodes = shuffled.nodes.map((row) =>
+    Object.fromEntries(Object.entries(row).reverse()),
+  );
+  assert.equal(ui.clusterOpsProjection(shuffled), ui.clusterOpsProjection(first));
+});
+
+// A settingsTick harness that can actually run the cluster branch: the tick
+// itself is shipped source, everything it reaches for is supplied here.
+function tickHarness({ cluster, ops, now }) {
+  const requests = [];
+  const painted = [];
+  const readingAge = { innerHTML: "local now · watermark now" };
+  const dialogs = [];
+  const document = {
+    visibilityState: "visible",
+    getElementById: (id) => (id === "cldb-reading-age" ? readingAge : null),
+    querySelectorAll: () => [],
+    querySelector: (selector) =>
+      selector.includes("dialog[open]") ? dialogs.find((open) => open) || null : null,
+  };
+  const harness = new Function(
+    "document", "location", "api", "settingsTab", "settingsCurrent", "refreshLogs",
+    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock", "dialogs",
+    `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
+       TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
+       SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     const cacheTrakt=(value)=>value;
+     const Date={now:clock};
+     ${shippedSource("clusterOpsInterval")}
+     ${shippedSource("clusterOpsStamp")}
+     ${shippedSource("clusterOpsDue")}
+     ${shippedSource("clusterRepaintDeferred")}
+     ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("clusterOpenDetailNodes")}
+     ${shippedSource("patchClusterReadingAge")}
+     ${shippedSource("clenv")}
+     ${shippedSource("esc")}
+     ${shippedSource("fmtAgo")}
+     ${shippedSource("fmtBytes")}
+     ${shippedSource("settingsTick")}
+     return {settingsTick,stamped:()=>CLUSTER_OPS_FETCHED_AT,ops:()=>SETTINGS_DATA.clusterOps,
+       cluster:()=>SETTINGS_DATA.cluster,
+       openDialog:(open)=>{dialogs.length=0;if(open)dialogs.push({});}};`,
+  )(
+    document,
+    { hash: "#/settings" },
+    (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject })),
+    () => "cluster",
+    () => true,
+    async () => {},
+    async () => {},
+    () => {},
+    () => painted.push("render"),
+    PANEL,
+    () => now.value,
+    dialogs,
+  );
+  return { harness, requests, painted, readingAge, dialogs };
+}
+
+test("the direct status collects on its own gate, and never overlaps", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests } = tickHarness({ cluster, ops, now });
+
+  // Fifteen seconds since the tab painted, so this tick collects — and stamps
+  // the clock BEFORE the await, at request time rather than at completion.
+  now.value += 15_000;
+  const first = harness.settingsTick(1, "cluster");
+  assert.deepEqual(requests.map((r) => r.url), ["/cluster/status"]);
+  assert.equal(harness.stamped(), now.value, "the clock is stamped before the await");
+
+  // A probe slower than the gate must not put a second fan-out behind itself.
+  now.value += 20_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 1, "a slow probe is never overlapped");
+  requests[0].resolve(ops);
+  await first;
+
+  // …and because the clock was stamped at request time, a probe that took
+  // twenty seconds does not also push the next collection twenty seconds out.
+  const prompt = harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 2, "a slow probe does not delay the next one by its own duration");
+  requests[1].resolve(ops);
+  await prompt;
+
+  now.value += 9_000;
+  await harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 2, "the 2s tick does not become a 2s fan-out");
+  now.value += 7_000;
+  const dueAgain = harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 3, "fifteen seconds later it collects again");
+  requests[2].resolve(ops);
+  await dueAgain;
+});
+
+test("the gate is fifteen seconds, and a single machine is never polled", async () => {
+  // The interval is a measured trade-off, not an incidental number: the fan-out
+  // probes every voter, and the flow that needs 2s freshness has its own poll.
+  assert.match(shippedSource("clusterOpsInterval"), /return 15000;/);
+
+  // The overwhelmingly common install is one SQLite box. It renders no rail, no
+  // roster and no direct readings, so collecting a fan-out for it would be a
+  // request spent to learn nothing.
+  const solo = { unavailable: true, code: "membership_unavailable" };
+  const now = { value: 1_000_000 };
+  const { harness, requests } = tickHarness({ cluster: solo, ops: undefined, now });
+  now.value += 60_000;
+  await harness.settingsTick(1, "cluster");
+  assert.deepEqual(requests, [], "a non-clustered install polls nothing");
+});
+
+test("a refused collection still moves the freshness row", async () => {
+  // A failing collection is exactly when the age of the reading on screen
+  // matters most, so the row whose only job is freshness must not be the one
+  // that freezes.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted, readingAge } = tickHarness({
+    cluster, ops: operationStatus(cluster), now,
+  });
+  readingAge.innerHTML = "frozen";
+  now.value += 15_000;
+  const refused = harness.settingsTick(1, "cluster");
+  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await refused;
+  assert.notEqual(readingAge.innerHTML, "frozen");
+  assert.deepEqual(painted, [], "a refusal does not repaint the tab");
+  assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
+
+  // A 401 is not an ordinary refusal: it belongs to the logout transition, and
+  // swallowing it here would leave the tab rendering after auth is gone.
+  now.value += 15_000;
+  const unauthorized = harness.settingsTick(1, "cluster");
+  requests[1].reject(Object.assign(new Error("unauthorized"), { status: 401 }));
+  await unauthorized;
+  assert.deepEqual(painted, [], "a 401 paints nothing here either");
+  assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
+});
+
+test("the two-second roster poll holds its sample under a dialog too", async () => {
+  // This branch runs precisely while a node is fenced or a recovery is
+  // required — which is when the force-election dialog is most likely open. The
+  // dangerous shape is storing a roster that was never painted: the next poll
+  // then finds no difference and the repaint is lost for good.
+  const fenced = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { maintenance: true, maintenance_acknowledged: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(fenced);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now });
+  const moved = JSON.parse(JSON.stringify(fenced));
+  moved.nodes[2].reachable = false;
+
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  harness.openDialog(true);
+  const held = harness.settingsTick(1, "cluster");
+  requests[0].resolve(moved);
+  await settle();
+  requests[1].resolve(ops);
+  await held;
+  assert.deepEqual(painted, [], "the dialog was open");
+  assert.deepEqual(harness.cluster(), fenced, "a roster the panel did not paint was not stored");
+
+  harness.openDialog(false);
+  now.value += 15_000;
+  const paid = harness.settingsTick(1, "cluster");
+  requests[2].resolve(moved);
+  await settle();
+  requests[3].resolve(ops);
+  await paid;
+  assert.deepEqual(painted, ["render"], "the owed roster repaint landed");
+  assert.deepEqual(harness.cluster(), moved);
+});
+
+test("the restart poll holds its sample under a dialog, and still reads it", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const draining = operationStatus(cluster);
+  draining.nodes[0].status.media.new_admissions_blocked = true;
+  draining.nodes[0].status.media.drained = false;
+  const drained = JSON.parse(JSON.stringify(draining));
+  drained.nodes[0].status.media.drained = true;
+
+  // A modal is open for the first iteration and closed for the second, so the
+  // sequencing is deterministic rather than a race with the microtask queue.
+  const queue = [draining, drained];
+  const painted = [];
+  let served = 0;
+  const state = { clusterOps: null };
+  const poll = new Function(
+    "api", "settingsCurrent", "SETTINGS_DATA", "SETTINGS_LOADED", "renderSettings",
+    "repaintClusterPreserving", "clusterOpsStamp", "clusterRepaintDeferred", "setTimeout",
+    `${shippedSource("pollLocalRestart")} return pollLocalRestart;`,
+  )(
+    () => {
+      served += 1;
+      return Promise.resolve(queue.shift());
+    },
+    () => true,
+    state,
+    new Set(),
+    () => painted.push("render"),
+    (paint) => paint(),
+    () => {},
+    () => served === 1,
+    (resolve) => resolve(),
+  );
+
+  // First iteration: a modal is open. The sample is held — but the loop's own
+  // exit condition still reads the fresh one, so the poll keeps going.
+  await poll("node-a", 1);
+  assert.equal(served, 2, "holding a sample did not stop the poll");
+  assert.deepEqual(painted, ["render"], "exactly the iteration that was not deferred painted");
+  assert.deepEqual(state.clusterOps, drained, "and it stored exactly what it painted");
+});
+
+test("the manual refresh always paints what it stores", () => {
+  // The fourth repaint path deliberately has no deferral: the election dialog is
+  // modal, so the button that reaches this code cannot be clicked while one is
+  // open. What it must never do is store without painting.
+  const refresh = shippedSource("refreshClusterOperations");
+  const stored = refresh.indexOf("SETTINGS_DATA.clusterOps=ops;");
+  const paints = refresh.indexOf("repaintClusterPreserving(renderSettings)");
+  assert.notEqual(stored, -1);
+  assert.notEqual(paints, -1);
+  assert.ok(paints > stored, "the store is not followed by a repaint");
+  assert.doesNotMatch(refresh, /clusterRepaintDeferred/);
+});
+
+test("the panel's own controls and dialogs are the only ones it reaches for", () => {
+  // Both new helpers hang off one class emitted 1,700 lines away. If the shell
+  // stops marking the Cluster tab, the control capture silently finds nothing
+  // and a repaint stops deferring — with no other symptom.
+  assert.match(shippedSource("settingsShell"), /clusterwrap/);
+  assert.match(shippedSource("settingsShell"), /tab==="cluster"\?" clusterwrap":""/);
+  // Scoped, so an unrelated modal elsewhere in the app cannot freeze this tab's
+  // refresh, and an unrelated input cannot be captured and put back.
+  assert.match(shippedSource("clusterRepaintDeferred"), /\.clusterwrap dialog\[open\]/);
+  assert.match(shippedSource("clusterControlValues"), /\.clusterwrap select\[id\],\.clusterwrap input\[id\]/);
+});
+
+test("a decision in progress is never repainted out from under the operator", async () => {
+  // renderSettings() rewrites the whole tab, and the force-election dialog lives
+  // in that markup. A modal is a decision in progress; the repaint waits.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster, ops, now });
+  const changed = JSON.parse(JSON.stringify(ops));
+  changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
+
+  harness.openDialog(true);
+  now.value += 15_000;
+  const held = harness.settingsTick(1, "cluster");
+  requests[0].resolve(changed);
+  await held;
+  assert.deepEqual(painted, [], "the dialog was still open");
+  // Held, not stored. What the panel holds is exactly what it painted, so the
+  // next collection sees the same difference and there is no second copy for
+  // the screen to drift from.
+  assert.deepEqual(harness.ops(), ops, "a sample the panel did not paint was not stored");
+
+  // Deferred, not dropped: the next collection after it closes pays the repaint,
+  // even though the payload has not changed again since.
+  harness.openDialog(false);
+  now.value += 15_000;
+  const paid = harness.settingsTick(1, "cluster");
+  requests[1].resolve(changed);
+  await paid;
+  assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
+  assert.deepEqual(harness.ops(), changed);
+
+  // An unchanged sample is stored even under a dialog — there is nothing to
+  // repaint, and holding it would make the freshness row describe the older
+  // one — and the freshness row keeps moving either way.
+  harness.openDialog(true);
+  now.value += 15_000;
+  const quiet = harness.settingsTick(1, "cluster");
+  requests[2].resolve(changed);
+  await quiet;
+  assert.deepEqual(painted, ["render"], "nothing changed, so nothing repainted");
+  assert.deepEqual(harness.ops(), changed, "an unchanged sample is not held");
+});
+
+test("a fetch is not a repaint, and the freshness row still ages", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted, readingAge } = tickHarness({ cluster, ops, now });
+
+  const older = JSON.parse(JSON.stringify(ops));
+  older.observed_at_unix_ms = (older.observed_at_unix_ms || 0) + 15_000;
+  older.nodes.forEach((row) => {
+    row.sample_age_ms = (row.sample_age_ms || 0) + 15_000;
+  });
+  readingAge.innerHTML = "stale text";
+  const quiet = harness.settingsTick(1, "cluster");
+  requests[0].resolve(older);
+  await quiet;
+  assert.deepEqual(painted, [], "nothing changed, so nothing was rewritten");
+  assert.notEqual(readingAge.innerHTML, "stale text", "the freshness row was patched in place");
+  assert.equal(harness.ops(), older, "the newer sample is still what the panel reads");
+
+  now.value += 16_000;
+  const changed = JSON.parse(JSON.stringify(older));
+  changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
+  const loud = harness.settingsTick(1, "cluster");
+  requests[1].resolve(changed);
+  await loud;
+  assert.deepEqual(painted, ["render"], "a changed verdict repaints exactly once");
+});
+
+test("every repaint on this tab preserves what the operator was looking at", () => {
+  // Three paths repaint the Cluster tab and all three must behave the same,
+  // because a 15s cadence turns "the scroll jumps" from a papercut into an
+  // unusable panel. Pin the call sites: a helper nothing calls is the failure
+  // mode this suite has already caught once.
+  assert.match(shippedSource("settingsTick"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("refreshClusterOperations"), /repaintClusterPreserving\(renderSettings\)/);
+  assert.match(shippedSource("pollLocalRestart"), /repaintClusterPreserving\(renderSettings\)/);
+  // …and the restart poll stamps the same clock, so the two never probe at once.
+  assert.match(shippedSource("pollLocalRestart"), /clusterOpsStamp\(\)/);
+
+  const detail = (open) => ({ open });
+  const bodies = [
+    { node: "node-a", detail: detail(true) },
+    { node: "node-b", detail: detail(false) },
+  ].map((entry) => ({
+    getAttribute: () => entry.node,
+    querySelector: () => entry.detail,
+    detail: entry.detail,
+  }));
+  const list = { scrollTop: 420 };
+  const ttl = { id: "clttl", value: "3600" };
+  const role = { id: "clrole", value: "learner" };
+  const auto = { id: "cllogauto", type: "checkbox", checked: false, value: "on" };
+  const controls = { clttl: ttl, clrole: role, cllogauto: auto };
+  const document = {
+    getElementById: (id) => (id === "cluster-node-list" ? list : controls[id] || null),
+    querySelectorAll: (selector) => (selector.includes("clnodebody") ? bodies : [ttl, role, auto]),
+  };
+  const repaint = new Function(
+    "document",
+    `${shippedSource("clusterOpenDetailNodes")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
+     ${shippedSource("repaintClusterPreserving")}
+     return repaintClusterPreserving;`,
+  )(document);
+
+  repaint(() => {
+    // renderSettings() rewrites the markup: a fresh list at the top, every
+    // drill-down back to its shipped default, and every control back to the
+    // value in the template.
+    list.scrollTop = 0;
+    bodies.forEach((body) => {
+      body.detail.open = false;
+    });
+    ttl.value = "600";
+    role.value = "voter";
+    auto.checked = true;
+  });
+  assert.equal(list.scrollTop, 420, "the roster scroller kept its place");
+  // A repaint between choosing a token's lifetime and clicking Create must not
+  // silently mint a ten-minute voter token instead of the hour-long read worker
+  // that was selected.
+  assert.equal(ttl.value, "3600");
+  assert.equal(role.value, "learner");
+  assert.equal(auto.checked, false);
+  assert.deepEqual(
+    bodies.map((body) => body.detail.open),
+    [true, false],
+    "the open drill-down came back and the closed one stayed closed",
+  );
+});
+
+// ---- the module boundary ---------------------------------------------------
+
+test("the ledger's freshness cell is addressable, and the clock is stamped where the request is", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  // patchClusterReadingAge finds this cell by id; without the id in the rendered
+  // markup the patch is a silent no-op and the row freezes.
+  const rows = PANEL.clusterDatabaseRows(ui.env, cluster, REPLICATION, operationStatus(cluster));
+  const age = rows.find((row) => row[0] === "Reading age");
+  assert.equal(age[3], "cldb-reading-age");
+  const panel = ui.clusterDatabasePanel(cluster, REPLICATION, cluster.capacity, operationStatus(cluster));
+  assert.match(panel, /<dd id="cldb-reading-age">/);
+  assert.match(shippedSource("patchClusterReadingAge"), /getElementById\("cldb-reading-age"\)/);
+  assert.match(shippedSource("patchClusterReadingAge"), /clusterReadingAge\(clenv\(\)/);
+
+  // Stamped where the request happens. loadSettingsKey serves a cached
+  // aggregate without a request, so stamping where the value is PAINTED would
+  // let a tab switch every ten seconds starve the refresh indefinitely.
+  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{ clusterOpsStamp\(\); return ops; \}\)/);
+  assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
+});
+
+test("every path that rewrites this tab goes through the preserving repaint", () => {
+  // A bare renderSettings() on the Cluster tab throws away the roster scroll,
+  // the open drill-downs, and the half-filled token form. Both branches of the
+  // tick, the manual refresh, the restart poll, and the three controls that
+  // repaint from inside the rail all use the helper.
+  const tick = shippedSource("settingsTick");
+  assert.equal(
+    (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
+    2,
+    "both the roster branch and the direct-status branch preserve",
+  );
+  for (const handler of [
+    "refreshClusterOperations",
+    "pollLocalRestart",
+    "toggleClusterRailPanel",
+    "mintJoinToken",
+    "clearJoinToken",
+  ]) {
+    assert.match(
+      shippedSource(handler),
+      /repaintClusterPreserving\(renderSettings\)/,
+      `${handler} repaints without preserving what the operator was looking at`,
+    );
+  }
+});
+
+test("the model is a file, and the shell actually mounts it", () => {
+  // A module nobody calls is the dead-feature failure mode this suite already
+  // paid for once, so the boundary is pinned from both sides: the shell loads
+  // the served file before its own inline script, and the call sites that read
+  // the model name it.
+  const tag = SHIPPED_UI.indexOf('<script src="/assets/cluster-panel.js">');
+  assert.notEqual(tag, -1, "index.html does not load the served model");
+  assert.ok(tag < SHIPPED_UI.indexOf("\nfunction clusterPanel("));
+  assert.match(shippedSource("clusterOperationsRail"), /PlurxClusterPanel\.clusterOperationRows\(clenv\(\),/);
+  assert.match(shippedSource("clusterDatabasePanel"), /PlurxClusterPanel\.clusterDatabaseRows\(clenv\(\),/);
+  assert.match(shippedSource("clusterPanel"), /PlurxClusterPanel\.clusterStateView\(/);
+  assert.match(shippedSource("clusterRefusalHtml"), /PlurxClusterPanel\.membershipRefusalText\(/);
+});
+
+test("the model reaches for nothing the shell owns", () => {
+  // The whole value of the boundary is that these decisions load under Node
+  // with no setup: no document, no localStorage, no SETTINGS_DATA, no ME, no
+  // CLUSTER_* state. A helper it needs arrives as an argument.
+  // Comments discuss the DOM the module deliberately does not touch, so the
+  // check reads the code and not the prose around it.
+  const source = fs
+    .readFileSync(path.join(__dirname, "../../crates/plurxd/src/web/cluster-panel.js"), "utf8")
+    .split("\n")
+    .filter((line) => !/^\s*\/\//.test(line))
+    .join("\n");
+  for (const forbidden of [/\bdocument\b/, /\blocalStorage\b/, /\bSETTINGS_[A-Z]/, /\bCLUSTER_[A-Z]/, /\bME\b/]) {
+    assert.doesNotMatch(source, forbidden, `cluster-panel.js reaches for ${forbidden}`);
+  }
+  // One esc, one escaping contract to review.
+  assert.doesNotMatch(source, /function esc\(/);
+  assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
+});
+
+let reported = false;
+process.on("beforeExit", () => {
+  if (reported) return;
+  reported = true;
+  if (started !== finished) {
+    failures += started - finished;
+    process.stdout.write(
+      `FAIL ${started - finished} test(s) never finished — an async body is waiting on ` +
+        `something the test never resolves, so it printed no result at all\n`,
+    );
+  }
+  if (failures) process.exitCode = 1;
+});

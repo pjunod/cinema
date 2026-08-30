@@ -35,7 +35,13 @@ function shippedTopLevelSource(name) {
 }
 
 let failures = 0;
+let started = 0;
+let finished = 0;
+// An async body that never settles prints neither PASS nor FAIL and vanishes
+// from the run, which reads exactly like a clean pass. Count starts against
+// finishes and fail the run on the difference.
 async function test(name, run) {
+  started += 1;
   try {
     await run();
     process.stdout.write(`PASS ${name}\n`);
@@ -43,6 +49,7 @@ async function test(name, run) {
     failures += 1;
     process.stderr.write(`FAIL ${name}\n${error && error.stack}\n`);
   }
+  finished += 1;
 }
 
 function nextTurn() {
@@ -1159,6 +1166,13 @@ test("Page phases are generation-fenced, ordered, and wired to measured routes",
   assert.match(activity, /setPagePhase\("#\/activity",generation,"settled"\)/);
 });
 
+let reported = false;
 process.on("beforeExit", () => {
+  if (reported) return;
+  reported = true;
+  if (started !== finished) {
+    failures += started - finished;
+    process.stderr.write(`FAIL ${started - finished} test(s) never finished\n`);
+  }
   if (failures) process.exitCode = 1;
 });

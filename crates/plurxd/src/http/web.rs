@@ -18,6 +18,11 @@ const INDEX_HTML: &str = include_str!("../web/index.html");
 /// Pure playback-routing policy, separated from the player adapter so the
 /// decisions that change bytes or transport can run under Node unit tests.
 const PLAYBACK_POLICY_JS: &str = include_str!("../web/playback-policy.js");
+/// The Settings → Cluster panel's model: quorum arithmetic, the operations
+/// rail's preconditions, and the replicated-database ledger. Served separately
+/// so its decisions run under Node unit tests instead of a regex that slices
+/// functions out of the app shell.
+const CLUSTER_PANEL_JS: &str = include_str!("../web/cluster-panel.js");
 /// Passive playback-control reporter. It owns exchange sequencing and
 /// coalescing, but deliberately has no authority over playback recovery.
 const PLAYBACK_CONTROL_JS: &str = include_str!("../web/playback-control.js");
@@ -50,6 +55,19 @@ pub async fn hls_js() -> Response {
             (header::CACHE_CONTROL, "public, max-age=604800"),
         ],
         HLS_JS,
+    )
+        .into_response()
+}
+
+/// Serve the cluster panel's model.
+pub async fn cluster_panel_js() -> Response {
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/javascript"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        CLUSTER_PANEL_JS,
     )
         .into_response()
 }

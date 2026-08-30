@@ -21,9 +21,22 @@ bump may break compatibility and a **patch** bump never does.
   reports the blocker the preflight returned rather than a plausible one. The rail reports the conditions the endpoints already enforce and
   widens none of them; the two it cannot see from the roster, offline work
   owned by a node and a mid-upgrade fence, are still answered by the server and
-  land in Troubleshooting. Adding a node and leaving the cluster route to the
-  Danger zone rather than minting a second path to a credential that is shown
-  once.
+  land in Troubleshooting. Adding a node and leaving the cluster are expansions
+  of the rows that decide them, so a credential shown exactly once has exactly
+  one surface.
+
+- **The Cluster tab keeps its readings current while it is open.** The direct
+  all-voter status behind every rail verdict, every node card's Operations
+  group, and the replicated database ledger was collected once when the tab
+  opened and never again unless a button asked for it, so a rail whose promise
+  is "read the refusal before you click" could be reading a nine-minute-old
+  sample. It is now collected at most every fifteen seconds while the tab is
+  visible — it probes every voter, so it is deliberately not a two-second
+  reading, and a slow probe is never stacked behind itself. A collection is not
+  a redraw: the panel repaints only when something it shows has changed, ages
+  excluded, and a repaint restores the roster's scroll position and any open
+  WAL/snapshot drill-downs. Between repaints the Reading age row is patched in
+  place, because the row whose only job is freshness must not itself go stale.
 
 ### Changed
 
@@ -37,6 +50,18 @@ bump may break compatibility and a **patch** bump never does.
   keeps its natural height. The restart-readiness verdict moved
   under the roster, because it names one of those machines.
 
+- **The cluster panel's model is a served file with its own tests.** Roughly
+  2,700 lines of cluster logic lived inline in the app shell, and the suite
+  reached them by slicing that file at each function declaration. The quorum
+  arithmetic, the state banner's sentences, the refusal catalogue, the direct
+  status readers, the rail's rows and preconditions, and the database ledger
+  now live in `cluster-panel.js`, served like `playback-policy.js` and required
+  directly by the tests. The extraction itself changed no behaviour — most of
+  the moved functions are byte-identical to what shipped inline, and the rest
+  differed only by taking the shell's escaping, formatting and storage handles
+  as arguments instead of reaching for them; the behaviour changes above were
+  made on top of that boundary, in their own commits.
+
 - **The Cluster tab is laid out around its two components.** The replicated
   database had no section of its own: watch state was one run-on sentence
   wedged between the node cards, and the rest of the store's readings were
@@ -47,8 +72,8 @@ bump may break compatibility and a **patch** bump never does.
   snapshot and WAL health, the active protocol range, and how old those
   readings are — all from projections the panel already fetched, with no new
   endpoint and no new measurement. **Cluster nodes** sits beside it,
-  **Maintenance** collects the restart-readiness verdict, planned work, and
-  the Danger zone, and **Troubleshooting** collects the cluster log, the
+  **Maintenance** collects the restart-readiness verdict and the operations
+  rail, and **Troubleshooting** collects the cluster log, the
   quorum and sample readings, and the last refusal behind one tab strip.
   Missing readings say `unknown` rather than borrowing a neighbouring field, a
   proven-unavailable store says so instead, and a machine that is not in a
