@@ -282,6 +282,26 @@ id = "legacy-stall-watch-owner"
 pattern = "watch_for_stall"
 expected_occurrences = 0
 
+# Three owners the M4 cuts removed that had no reintroduction guard at all.
+# A symbol absent from both the source and the ledger is not protected — it is
+# merely gone, and nothing notices when it comes back. The contract names
+# begin_copy_child_replacement explicitly (M4 §8); the other two were the copy
+# watchdog's election claim and the request-side exit verdict, deleted by #642.
+[[module_symbols]]
+id = "legacy-copy-replacement-transaction"
+pattern = "begin_copy_child_replacement"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "legacy-watchdog-claim"
+pattern = "WatchdogClaim"
+expected_occurrences = 0
+
+[[module_symbols]]
+id = "legacy-request-side-exit-verdict"
+pattern = "playlist_producer_failed"
+expected_occurrences = 0
+
 [[module_symbols]]
 id = "future-rolling-progress-deadline"
 pattern = "ProducerProgressDeadline"
@@ -956,7 +976,15 @@ expected_occurrences = 3
 [[module_structures]]
 id = "namespaced-time-constructor"
 pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout|timeout_at)\\s*\\("
-expected_occurrences = 501
+# 503 since settle_producer_flow_signal_before joined
+# request_producer_flow_before: two tokio::time::timeout_at calls, each
+# bounding the caller's wait for one actor reply, the same shape and budget as
+# their sibling classify_producer_exit_before. Both bound a mailbox round trip,
+# not a producer; neither selects a recipe, publishes a response or starts a
+# process. The transaction bound that CAN end a producer is the actor-owned
+# PRODUCER_FLOW_ACTION_BUDGET, which is not a time constructor and is named in
+# the lifecycle allowlist instead.
+expected_occurrences = 503
 
 [[module_structures]]
 id = "bare-time-constructor"
