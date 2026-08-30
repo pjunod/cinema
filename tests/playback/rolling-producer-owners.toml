@@ -1004,7 +1004,13 @@ pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
 # capability checks against a synthetic 64x64 lavfi frame, awaited to
 # completion behind a process-lifetime `OnceCell` at boot. Neither owns a
 # rolling producer, neither outlives its `await`, and both are `kill_on_drop`.
-expected_occurrences = 60
+# +1: the `sh` fixture in `ffmpeg.rs`'s
+# `a_help_listing_larger_than_a_megabyte_survives_the_probe_bound` test. It is
+# `#[cfg(test)]`-only, emits a fixed number of lines and exits, and is handed
+# straight to `bounded_command_output` -- so it inherits that function's
+# `kill_on_drop`, its 5s timeout, and its awaited `child.wait()`. Nothing owns
+# it beyond the await, and it never runs in a shipped binary.
+expected_occurrences = 61
 
 [[module_structures]]
 id = "process-capable-launch-method"
