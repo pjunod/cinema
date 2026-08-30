@@ -583,11 +583,27 @@ mod tests {
             !CANDIDATES.contains(&Pipeline::DoviPassthrough),
             "the HDR10 rung has its own boot probe and its own admission"
         );
-        assert_ne!(
-            Pipeline::DoviPassthrough.name(),
-            Pipeline::DoviTonemapx.name(),
-            "the two Dolby renderers must have distinct cache identities"
+        assert_eq!(
+            Pipeline::parse("hdr10_passthrough"),
+            Some(Pipeline::Hdr10Passthrough)
         );
+        assert!(
+            !CANDIDATES.contains(&Pipeline::Hdr10Passthrough),
+            "the plain HDR10 rung is chosen by the grade negotiation, never by \
+             the tone-map probe -- an SDR session must not be able to land on a \
+             graph that tags its output PQ"
+        );
+        for pair in [
+            (Pipeline::DoviPassthrough, Pipeline::DoviTonemapx),
+            (Pipeline::DoviPassthrough, Pipeline::Hdr10Passthrough),
+            (Pipeline::DoviTonemapx, Pipeline::Hdr10Passthrough),
+        ] {
+            assert_ne!(
+                pair.0.name(),
+                pair.1.name(),
+                "every renderer needs a distinct cache identity"
+            );
+        }
     }
 
     /// The HDR10 rung, end to end as a graph: what it will take, what it will
@@ -666,7 +682,63 @@ mod tests {
         ] {
             assert_eq!(p.output_grade(), OutputGrade::Sdr, "{p:?}");
         }
-        assert_eq!(Pipeline::DoviPassthrough.output_grade(), OutputGrade::Hdr10);
+        for p in [Pipeline::DoviPassthrough, Pipeline::Hdr10Passthrough] {
+            assert_eq!(p.output_grade(), OutputGrade::Hdr10, "{p:?}");
+        }
+    }
+
+    /// The plain HDR10 rung: the same grade as the Dolby one, a different
+    /// graph, and a source set that must not overlap it.
+    #[test]
+    fn the_plain_hdr10_rung_touches_no_pixel_values_and_takes_no_dolby_source() {
+        let p = Pipeline::Hdr10Passthrough;
+        assert_eq!(p.output_grade(), OutputGrade::Hdr10);
+        assert!(!p.on_gpu());
+        assert_eq!(
+            p.fallback(),
+            None,
+            "the CPU chain ends in BT.709 8-bit, so falling back to it would \
+             swap the grade the client was promised"
+        );
+        assert!(p.decode_args().is_empty());
+        assert!(p.init_args().is_empty());
+        assert!(
+            !p.requires_software_decode(),
+            "there is no RPU side data for a hardware decode to drop, unlike \
+             both Dolby graphs"
+        );
+
+        assert!(p.pairs_with(Encoder::Software));
+        assert!(p.pairs_with(Encoder::Qsv));
+        for encoder in [Encoder::Nvenc, Encoder::Vaapi, Encoder::VideoToolbox] {
+            assert!(
+                !p.pairs_with(encoder),
+                "{encoder:?} has no measured HEVC Main10 route"
+            );
+        }
+
+        for source in [Some("hdr10"), Some("hdr10plus")] {
+            assert!(p.handles(source), "{source:?}");
+        }
+        for source in [None, Some("hlg"), Some("dolby_vision")] {
+            assert!(
+                !p.handles(source),
+                "{source:?} must not reach a graph that tags its output PQ"
+            );
+        }
+
+        let graph = p
+            .filters(Some(1920), 1080, Some("hdr10"))
+            .expect("a chain for a real source");
+        assert_eq!(graph, "scale=1920:1080,format=yuv420p10le");
+        assert!(
+            !graph.contains("tonemap"),
+            "no tone-map, no RPU: that is the whole rung — {graph}"
+        );
+        assert!(
+            graph.ends_with(OutputGrade::Hdr10.pixel_format()),
+            "the chain has to end in the depth the encoder's transfer needs: {graph}"
+        );
     }
 
     #[test]

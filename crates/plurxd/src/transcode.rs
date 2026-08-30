@@ -9142,6 +9142,7 @@ pub struct TranscodeManager {
     /// This is the measured route that makes the 2160p HDR10 rung realtime.
     dovi_passthrough_qsv: bool,
     hdr10_passthrough: bool,
+    hdr10_passthrough_qsv: bool,
     dovi_proofs: std::sync::Mutex<HashMap<String, bool>>,
     /// The ahead-window limits, snapshotted ([`AHEAD_LIMITS_TTL`]).
     ///
@@ -9384,6 +9385,7 @@ impl TranscodeManager {
             dovi_passthrough: false,
             dovi_passthrough_qsv: false,
             hdr10_passthrough: false,
+            hdr10_passthrough_qsv: false,
             dovi_proofs: std::sync::Mutex::new(HashMap::new()),
             cached_limits: std::sync::RwLock::new(None),
             #[cfg(any(test, feature = "live-hls-recovery"))]
@@ -9423,6 +9425,36 @@ impl TranscodeManager {
     pub fn with_hdr10_passthrough(mut self, proved: bool) -> Self {
         self.hdr10_passthrough = proved;
         self
+    }
+
+    pub fn with_hdr10_passthrough_qsv(mut self, proved: bool) -> Self {
+        self.hdr10_passthrough_qsv = proved;
+        self
+    }
+
+    /// The tallest frame this node can actually encode HDR10 at, or 0.
+    ///
+    /// `/decision` needs this and cannot derive it: the renderer proofs answer
+    /// "can this graph run", while the rungs are measured per
+    /// (height, encoder) pair — 1080p on software or QSV, 2160p on QSV only
+    /// (`hdr10_rung_fits`). Without it the negotiation promised HDR10 to every
+    /// HDR title on a software-only node, whose Auto ceiling is 720p, and the
+    /// session tone-mapped every one of them.
+    ///
+    /// The Dolby Vision route's own QSV proof is deliberately not consulted
+    /// here: this is the ceiling a plain PQ source can reach, and a node that
+    /// proved only the Dolby half still cannot encode one.
+    pub async fn hdr10_ceiling(&self) -> i64 {
+        if !self.hdr10_passthrough {
+            return 0;
+        }
+        match self.encoder().await {
+            Encoder::Qsv if self.hdr10_passthrough_qsv => HDR10_4K_HEIGHT,
+            Encoder::Qsv | Encoder::Software => HDR10_HEIGHT,
+            // No measured Main10 route on this family, and dropping to
+            // software x265 costs realtime — see `hdr10_grade_for`.
+            _ => 0,
+        }
     }
 
     pub fn with_dovi_reshape(mut self, dovi_reshape: bool) -> Self {
@@ -9700,6 +9732,14 @@ impl TranscodeManager {
         if self.dovi_passthrough {
             tone_map_pipelines.push(Pipeline::DoviPassthrough.name().to_owned());
         }
+        // Advertised for the same reason as the Dolby rung: the cluster picks
+        // a node for HDR work off this list, and a node that proved only the
+        // plain HDR10 encode -- no tone-map graph, no Dolby filter -- would
+        // otherwise publish an empty list and be filtered out of the work it
+        // is the best answer for.
+        if self.hdr10_passthrough {
+            tone_map_pipelines.push(Pipeline::Hdr10Passthrough.name().to_owned());
+        }
         MediaNodeRuntime {
             scratch_bytes_free: u64::try_from(capabilities.scratch_bytes.max(0)).unwrap_or(0),
             scratch_target_bytes: SCRATCH_TARGET_BYTES,
@@ -9765,7 +9805,7 @@ impl TranscodeManager {
             .select_tracks(file, audio_override, subtitle_override)
             .await;
         let (encoder, grade) = self
-            .encoder_and_grade_for(file, hdr10, target_height)
+            .encoder_and_grade_for(file, hdr10, target_height, subtitle_burn.is_some())
             .await
             .map_err(|_| "incapable")?;
         let target_supported = geometry_supported && (!hdr10 || grade == OutputGrade::Hdr10);
@@ -10156,6 +10196,7 @@ impl TranscodeManager {
         requested: bool,
         target_height: i64,
         encoder: Encoder,
+        subtitle_burn: bool,
     ) -> Result<OutputGrade, String> {
         let Some(route) = plurx_core::playback::hdr_route(file) else {
             return Ok(OutputGrade::Sdr);
@@ -10163,14 +10204,34 @@ impl TranscodeManager {
         if !requested || !hdr10_rung_fits(file, target_height, encoder) {
             return Ok(OutputGrade::Sdr);
         }
-        // The QSV half is one graph for both routes — P010 upload into
-        // `hevc_qsv` Main10 with the PQ/BT.2020 flags — so one proof covers
-        // them. The software halves are different graphs and are proved
-        // separately.
-        if encoder == Encoder::Qsv && !self.dovi_passthrough_qsv {
+        // A burn tone-maps. libass has no notion of a transfer function: it
+        // draws nominal white at the CODE value, which on a BT.709 output is
+        // diffuse white near 100 nits and on a PQ output is the top of the
+        // curve — nominally 10,000. Subtitles that bright over an HDR picture
+        // are not a styling complaint, they are painful to look at. Tone-map
+        // instead and burn into the SDR frame, which is exactly what a burn on
+        // an HDR title did before this rung existed.
+        if subtitle_burn {
             tracing::info!(
                 file = file.id,
-                "this node did not prove the QSV Main10 encode graph; using the measured software/SDR route"
+                "a burned subtitle track tone-maps: subtitle white is a code value, and on a PQ \
+                 output it lands at the top of the curve"
+            );
+            return Ok(OutputGrade::Sdr);
+        }
+        // A hardware encoder this rung was never measured on. Only libx265 and
+        // hevc_qsv have Main10 routes here, so an NVENC or VA-API node would
+        // fall back to software x265 — measured at 11 fps for 1080p on two
+        // cores, under realtime, against the 20.3 fps the SDR chain it
+        // replaced runs at. Losing the grade is a worse picture; losing
+        // realtime is a stall, and the viewer notices that one.
+        let preferred = self.encoder().await;
+        if !matches!(preferred, Encoder::Software | Encoder::Qsv) {
+            tracing::info!(
+                file = file.id,
+                encoder = preferred.label(),
+                "this node's encoder has no measured Main10 route; tone-mapping to SDR rather \
+                 than dropping to software x265"
             );
             return Ok(OutputGrade::Sdr);
         }
@@ -10182,11 +10243,32 @@ impl TranscodeManager {
                 );
                 return Ok(OutputGrade::Sdr);
             }
+            // The QSV half is proved on its own. `dovi_passthrough_qsv` looks
+            // like it would do — it is the same P010 upload into `hevc_qsv`
+            // Main10 — but it short-circuits on `tonemapx` declaring
+            // `apply_dovi`, a jellyfin filter this route neither uses nor
+            // needs. Reusing it would take the 4K rung away from every QSV
+            // node running stock ffmpeg, with no log line naming the reason.
+            if encoder == Encoder::Qsv && !self.hdr10_passthrough_qsv {
+                tracing::info!(
+                    file = file.id,
+                    "this node did not prove the QSV Main10 encode for a plain HDR source; using \
+                     the measured software/SDR route"
+                );
+                return Ok(OutputGrade::Sdr);
+            }
             // No RPU to prove: the graph reads no metadata, so the boot proof
             // is the whole proof. `require_dovi_renderer` below is a
             // per-source check that this file's RPU actually changes pixels,
             // which is a question this route never asks.
             return Ok(OutputGrade::Hdr10);
+        }
+        if encoder == Encoder::Qsv && !self.dovi_passthrough_qsv {
+            tracing::info!(
+                file = file.id,
+                "this node did not prove the Dolby Vision HDR10 QSV encode graph; using the measured software/SDR route"
+            );
+            return Ok(OutputGrade::Sdr);
         }
         if !self.dovi_passthrough {
             tracing::info!(
@@ -10215,13 +10297,19 @@ impl TranscodeManager {
         file: &plurx_core::domain::MediaFile,
         requested: bool,
         target_height: i64,
+        subtitle_burn: bool,
     ) -> Result<(Encoder, OutputGrade), String> {
         let hdr_candidate = if requested
+            && !subtitle_burn
             && plurx_core::playback::hdr_route(file).is_some()
             && matches!(target_height, HDR10_HEIGHT | HDR10_4K_HEIGHT)
         {
             let preferred = self.encoder().await;
-            if preferred == Encoder::Qsv && self.dovi_passthrough_qsv {
+            let qsv_proved = match plurx_core::playback::hdr_route(file) {
+                Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough_qsv,
+                _ => self.hdr10_passthrough_qsv,
+            };
+            if preferred == Encoder::Qsv && qsv_proved {
                 Encoder::Qsv
             } else {
                 Encoder::Software
@@ -10230,7 +10318,7 @@ impl TranscodeManager {
             self.encoder_for_file(file).await?
         };
         let grade = self
-            .hdr10_grade_for(file, requested, target_height, hdr_candidate)
+            .hdr10_grade_for(file, requested, target_height, hdr_candidate, subtitle_burn)
             .await?;
         if grade == OutputGrade::Hdr10 {
             Ok((hdr_candidate, grade))
@@ -10343,7 +10431,12 @@ impl TranscodeManager {
                     Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => {
                         Pipeline::DoviPassthrough
                     }
-                    _ => Pipeline::Hdr10Passthrough,
+                    Some(plurx_core::playback::HdrRoute::Passthrough) => Pipeline::Hdr10Passthrough,
+                    // Not reachable: `hdr10_grade_for` answers Sdr for a
+                    // source with no route, and `hdr10` is its answer. Spelled
+                    // out rather than left to a catch-all, because a catch-all
+                    // here would hand an SDR or HLG source the PQ graph.
+                    None => Pipeline::Cpu,
                 }
             } else if dovi_reshape {
                 Pipeline::DoviTonemapx
@@ -14279,7 +14372,9 @@ impl TranscodeManager {
         // boot proof of its Main10 upload/encode graph.
         let hdr10_renderer_proved = match file.and_then(plurx_core::playback::hdr_route) {
             Some(plurx_core::playback::HdrRoute::DolbyVisionRpu) => self.dovi_passthrough,
-            Some(plurx_core::playback::HdrRoute::Passthrough) => self.hdr10_passthrough,
+            Some(plurx_core::playback::HdrRoute::Passthrough) => {
+                self.hdr10_passthrough && self.hdr10_passthrough_qsv
+            }
             None => false,
         };
         if hdr10_requested
@@ -14641,7 +14736,7 @@ impl TranscodeManager {
         // Resolved together, once, before the cache lookup: the grade and
         // encoder both change the bytes and therefore the recipe identity.
         let (mut encoder, grade) = self
-            .encoder_and_grade_for(&file, hdr10, target_height)
+            .encoder_and_grade_for(&file, hdr10, target_height, subtitle_burn.is_some())
             .await?;
         let mut opts = self.live_lookup_options(
             rate_control,
@@ -22242,6 +22337,42 @@ mod tests {
     /// is promised a grade the encoder does not produce — an HDR10 badge over
     /// a tone-mapped SDR picture, which plays, so nobody reports it.
     #[test]
+    fn the_grade_predicate_and_the_renderer_predicate_agree() {
+        let base = profile5_file();
+        let variant = |label: Option<&str>, hdr: Option<&str>| {
+            let mut file = base.clone();
+            file.hdr = hdr.map(str::to_owned);
+            file.hdr_format = label.map(str::to_owned);
+            file
+        };
+        let cases = [
+            (Some("Dolby Vision · Profile 5"), Some("dolby_vision")),
+            (Some("Dolby Vision · Profile 4"), Some("dolby_vision")),
+            (Some("Dolby Vision · Profile 7"), Some("dolby_vision")),
+            (
+                Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
+                Some("dolby_vision"),
+            ),
+            (
+                Some("Dolby Vision · Profile 7 (HLG-compatible)"),
+                Some("dolby_vision"),
+            ),
+            (Some("Dolby Vision"), Some("dolby_vision")),
+            (None, Some("dolby_vision")),
+            (None, Some("hdr10")),
+            (None, Some("hlg")),
+            (None, None),
+        ];
+        for (label, hdr) in cases {
+            let file = variant(label, hdr);
+            assert_eq!(
+                plurx_core::playback::dolby_vision_needs_rpu_render(&file),
+                TranscodeManager::needs_dovi_reshape(&file) == Ok(true),
+                "the two predicates disagree about {label:?} / {hdr:?}"
+            );
+        }
+    }
+
     /// The renderer a source's grade names and the pipeline the session
     /// actually builds are the same choice, read from one function.
     ///
@@ -22284,60 +22415,43 @@ mod tests {
             (Some("Dolby Vision"), Some("dolby_vision"), None),
             (None, None, None),
         ];
+        let store: Arc<dyn Store> =
+            Arc::new(plurx_core::store::SqliteStore::open_in_memory().expect("store"));
+        let dir = crate::test_tempdir().expect("work");
+        let manager = TranscodeManager::new(
+            store,
+            dir.path().to_path_buf(),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        );
         for (label, hdr, expected) in cases {
             let file = variant(label, hdr);
-            let route = plurx_core::playback::hdr_route(&file);
-            let pipeline = route.map(|route| match route {
-                plurx_core::playback::HdrRoute::DolbyVisionRpu => Pipeline::DoviPassthrough,
-                plurx_core::playback::HdrRoute::Passthrough => Pipeline::Hdr10Passthrough,
-            });
-            assert_eq!(pipeline, expected, "{label:?} / {hdr:?}");
+            // Through the production selector, not a re-implementation of it:
+            // a test that maps the route itself and asserts its own mapping
+            // cannot notice `options_for_tone_map` drifting.
+            let opts = manager.options_for_tone_map(
+                Encoder::Software,
+                &file,
+                HDR10_HEIGHT,
+                0.0,
+                None,
+                None,
+                None,
+                ToneMap::Zscale,
+                OutputGrade::Hdr10,
+            );
+            let expected = expected.unwrap_or(Pipeline::Cpu);
+            assert_eq!(opts.pipeline, expected, "{label:?} / {hdr:?}");
             // And whichever pipeline is named must admit the source it was
             // named for -- `handles` is the guard that keeps the Dolby graph
             // away from plain PQ and the plain graph away from an RPU.
-            if let Some(pipeline) = pipeline {
+            if expected != Pipeline::Cpu {
                 assert!(
-                    pipeline.handles(transcode::routing_hdr(&file)),
-                    "{pipeline:?} refuses the source it was chosen for: {label:?} / {hdr:?}"
+                    expected.handles(transcode::routing_hdr(&file)),
+                    "{expected:?} refuses the source it was chosen for: {label:?} / {hdr:?}"
                 );
-                assert_eq!(pipeline.output_grade(), OutputGrade::Hdr10);
+                assert_eq!(expected.output_grade(), OutputGrade::Hdr10);
             }
-        }
-    }
-
-    fn the_grade_predicate_and_the_renderer_predicate_agree() {
-        let base = profile5_file();
-        let variant = |label: Option<&str>, hdr: Option<&str>| {
-            let mut file = base.clone();
-            file.hdr = hdr.map(str::to_owned);
-            file.hdr_format = label.map(str::to_owned);
-            file
-        };
-        let cases = [
-            (Some("Dolby Vision · Profile 5"), Some("dolby_vision")),
-            (Some("Dolby Vision · Profile 4"), Some("dolby_vision")),
-            (Some("Dolby Vision · Profile 7"), Some("dolby_vision")),
-            (
-                Some("Dolby Vision · Profile 8 (HDR10-compatible)"),
-                Some("dolby_vision"),
-            ),
-            (
-                Some("Dolby Vision · Profile 7 (HLG-compatible)"),
-                Some("dolby_vision"),
-            ),
-            (Some("Dolby Vision"), Some("dolby_vision")),
-            (None, Some("dolby_vision")),
-            (None, Some("hdr10")),
-            (None, Some("hlg")),
-            (None, None),
-        ];
-        for (label, hdr) in cases {
-            let file = variant(label, hdr);
-            assert_eq!(
-                plurx_core::playback::dolby_vision_needs_rpu_render(&file),
-                TranscodeManager::needs_dovi_reshape(&file) == Ok(true),
-                "the two predicates disagree about {label:?} / {hdr:?}"
-            );
         }
     }
 
@@ -22445,7 +22559,7 @@ mod tests {
         // Everything proved, and asked for.
         assert_eq!(
             manager
-                .hdr10_grade_for(&file, true, HDR10_HEIGHT, Encoder::Software)
+                .hdr10_grade_for(&file, true, HDR10_HEIGHT, Encoder::Software, false)
                 .await
                 .expect("proved"),
             OutputGrade::Hdr10
@@ -22453,7 +22567,7 @@ mod tests {
         // Not asked for: absent means not proven, and not proven tone-maps.
         assert_eq!(
             manager
-                .hdr10_grade_for(&file, false, HDR10_HEIGHT, Encoder::Software)
+                .hdr10_grade_for(&file, false, HDR10_HEIGHT, Encoder::Software, false)
                 .await
                 .expect("no request"),
             OutputGrade::Sdr
@@ -22461,21 +22575,72 @@ mod tests {
         // Not the measured rung.
         assert_eq!(
             manager
-                .hdr10_grade_for(&file, true, 2160, Encoder::Software)
+                .hdr10_grade_for(&file, true, 2160, Encoder::Software, false)
                 .await
                 .expect("wrong rung"),
             OutputGrade::Sdr
         );
-        // Not a source with an RPU. This is the guard that stands between a
-        // plain HDR10 file and a broken picture at exit 0.
+        // A plain HDR10 source on a node that proved only the Dolby renderer.
+        // It must not borrow that proof: the Dolby graph applies an RPU this
+        // file does not have, and emits a broken picture at exit 0 rather than
+        // failing.
         let mut hdr10_source = file.clone();
         hdr10_source.hdr = Some("hdr10".into());
         hdr10_source.hdr_format = None;
         assert_eq!(
             manager
-                .hdr10_grade_for(&hdr10_source, true, HDR10_HEIGHT, Encoder::Software,)
+                .hdr10_grade_for(&hdr10_source, true, HDR10_HEIGHT, Encoder::Software, false)
                 .await
                 .expect("non-dv source"),
+            OutputGrade::Sdr
+        );
+        // With the plain encode proved, the same file takes the plain rung —
+        // and the pipeline the session builds for it is the plain graph, not
+        // the Dolby one.
+        let plain = TranscodeManager::new(
+            Arc::clone(&store),
+            dir.path().join("plain"),
+            EncoderCaps::default(),
+            Pipeline::Cpu,
+        )
+        .with_hdr10_passthrough(true);
+        assert_eq!(
+            plain
+                .hdr10_grade_for(&hdr10_source, true, HDR10_HEIGHT, Encoder::Software, false)
+                .await
+                .expect("plain rung"),
+            OutputGrade::Hdr10
+        );
+        let plain_opts = plain.options_for_tone_map(
+            Encoder::Software,
+            &hdr10_source,
+            HDR10_HEIGHT,
+            0.0,
+            None,
+            None,
+            None,
+            ToneMap::Zscale,
+            OutputGrade::Hdr10,
+        );
+        assert_eq!(plain_opts.pipeline, Pipeline::Hdr10Passthrough);
+        assert_eq!(plain_opts.pipeline.output_grade(), OutputGrade::Hdr10);
+        // A burn tone-maps. Subtitle white is a code value, and on a PQ output
+        // it lands at the top of the curve — nominally 10,000 nits.
+        assert_eq!(
+            plain
+                .hdr10_grade_for(&hdr10_source, true, HDR10_HEIGHT, Encoder::Software, true)
+                .await
+                .expect("burned"),
+            OutputGrade::Sdr
+        );
+        // And the Dolby proof alone does not unlock the plain rung's QSV half:
+        // `dovi_passthrough_qsv` is gated behind a filter this route never
+        // uses, so reusing it would take the 4K rung off a stock-ffmpeg node.
+        assert_eq!(
+            plain
+                .hdr10_grade_for(&hdr10_source, true, HDR10_HEIGHT, Encoder::Qsv, false)
+                .await
+                .expect("qsv unproved"),
             OutputGrade::Sdr
         );
 
@@ -22489,7 +22654,7 @@ mod tests {
         .with_dovi_reshape(true);
         assert_eq!(
             unproved
-                .hdr10_grade_for(&file, true, HDR10_HEIGHT, Encoder::Software)
+                .hdr10_grade_for(&file, true, HDR10_HEIGHT, Encoder::Software, false)
                 .await
                 .expect("unproved build"),
             OutputGrade::Sdr

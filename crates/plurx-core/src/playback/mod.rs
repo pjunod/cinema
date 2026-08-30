@@ -206,6 +206,13 @@ impl DeviceProfile {
 /// greps for `h264_*` only — and the two probes below are stronger than an
 /// inventory would be: each runs the real graph into the real encoder and
 /// checks it exits clean, so "the encoder exists" is a claim they subsume.
+/// The shortest frame the HDR10 rungs were measured at. Below it there is no
+/// rung to land on: `hdr10_rung_fits` admits exactly 1080 and 2160, and
+/// `output_size` never upscales, so a 720p source has nowhere to go.
+pub const HDR10_MIN_MEASURED_HEIGHT: i64 = 1080;
+/// The tallest, for the same reason.
+pub const HDR10_MAX_MEASURED_HEIGHT: i64 = 2160;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RenderCaps {
     /// This ffmpeg has the `dovi_rpu` bitstream filter, so a Dolby Vision
@@ -223,7 +230,24 @@ pub struct RenderCaps {
     /// straight into Main10 PQ, no tone-map and no RPU. The route for every
     /// PQ source that is not a Profile 5: HDR10, HDR10+, and the HDR10 base
     /// of a Dolby Vision title whose enhancement layer has been stripped.
+    ///
+    /// Note it re-encodes, so HDR10+ dynamic metadata does not survive it —
+    /// an HDR10+ source reaches the client as plain HDR10. The static grade is
+    /// what is preserved.
     pub hdr10_passthrough: bool,
+    /// The tallest rung this node can actually encode HDR10 at, or 0 for none.
+    ///
+    /// The renderer proofs above answer "can this graph run"; this answers
+    /// "on a frame this size, on the encoder this node will choose". They are
+    /// different questions and the second one is the one that was missing:
+    /// the HDR10 rungs are measured at 1080p and 2160p only
+    /// (`hdr10_rung_fits`), and a node with no hardware encoder resolves Auto
+    /// to 720p — so without this term `/decision` promised HDR10 for the
+    /// entire HDR library on a software-only node and the session delivered
+    /// SDR every time. That is the badge-over-a-tone-mapped-picture failure
+    /// this whole type exists to end, and it would have been widened from
+    /// Profile 5 to every HDR title.
+    pub hdr10_max_height: i64,
 }
 
 impl RenderCaps {
@@ -235,6 +259,7 @@ impl RenderCaps {
             dv_strippable,
             dolby_vision_p5_render: false,
             hdr10_passthrough: false,
+            hdr10_max_height: 0,
         }
     }
 
@@ -244,6 +269,7 @@ impl RenderCaps {
             dv_strippable,
             dolby_vision_p5_render: true,
             hdr10_passthrough: true,
+            hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
         }
     }
 }
@@ -269,6 +295,17 @@ enum SourceGrade {
     /// renderer that can read its RPU. Nothing can put this on the wire as
     /// HDR, so it tone-maps whatever anyone claims.
     Unrenderable,
+}
+
+/// The client's own height ceiling for HEVC, narrowed by a codec-specific
+/// entry where the client reported one. `None` is uncapped.
+fn hevc_height_ceiling(profile: &DeviceProfile) -> Option<i64> {
+    match (profile.max_height, profile.video_max_heights.get("hevc")) {
+        (Some(global), Some(codec)) => Some(global.min(*codec)),
+        (Some(global), None) => Some(global),
+        (None, Some(codec)) => Some(*codec),
+        (None, None) => None,
+    }
 }
 
 fn source_grade(file: &MediaFile) -> SourceGrade {
@@ -382,10 +419,58 @@ pub fn target_grade(
         }
         SourceGrade::Pq | SourceGrade::PqViaRpu => {}
     }
-    if !profile.supports_hdr || !profile.supports_hdr10_transcode {
+    if !profile.supports_hdr {
+        // `evaluate` has already pushed "HDR (…) presentation was not proven
+        // by this client", naming the display bit that actually refused. A
+        // second line here would put two entries in the badge for one refusal
+        // and blame the Main10 decoder for a decision the display made.
+        return (OutputGrade::Sdr, "");
+    }
+    if !profile.supports_hdr10_transcode {
         return (
             OutputGrade::Sdr,
             "tone-mapped to SDR: this client did not prove it decodes and presents HEVC Main10 PQ",
+        );
+    }
+    // The rung emits HEVC Main10 and nothing else — `video_codec_for(Hdr10)`
+    // is libx265 or hevc_qsv — so a client that cannot decode HEVC must not be
+    // handed it. Nothing else in the negotiation checks this: `hdr10t=1` says
+    // "I present Main10 PQ", and a device with an HDR panel and an H.264-only
+    // decoder can honestly send it. The web player happens to derive the flag
+    // from an HEVC probe; a third party against the documented query string
+    // does not have to.
+    if !profile.allows_video(&Some("hevc".to_owned())) {
+        return (
+            OutputGrade::Sdr,
+            "tone-mapped to SDR: this client does not decode HEVC, which is the only codec the \
+             HDR10 rung emits",
+        );
+    }
+    // Geometry. The rungs are measured at 1080p and 2160p, and nothing
+    // upscales into HDR, so a source shorter than the smallest rung has
+    // nowhere to land — and neither does a client whose own ceiling is below
+    // it. Auto may still resolve lower than this for bandwidth reasons at
+    // session time; the session reports what it actually produced
+    // (MEDIA-BADGES-PLAN §3.2). What this refuses is the case where no rung
+    // was ever reachable.
+    if file.height.unwrap_or(0) < HDR10_MIN_MEASURED_HEIGHT {
+        return (
+            OutputGrade::Sdr,
+            "tone-mapped to SDR: the HDR10 rung is measured at 1080p and above, and this source \
+             is smaller",
+        );
+    }
+    if hevc_height_ceiling(profile).is_some_and(|ceiling| ceiling < HDR10_MIN_MEASURED_HEIGHT) {
+        return (
+            OutputGrade::Sdr,
+            "tone-mapped to SDR: this client's height ceiling is below the smallest measured \
+             HDR10 rung",
+        );
+    }
+    if node.hdr10_max_height < HDR10_MIN_MEASURED_HEIGHT {
+        return (
+            OutputGrade::Sdr,
+            "tone-mapped to SDR: this node cannot encode HDR10 at any height it would deliver",
         );
     }
     let node_proved = if source == SourceGrade::PqViaRpu {
@@ -788,14 +873,40 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
                 // is what selects a display's HDR mode; what it lacks is the
                 // mastering-display hint some panels use for headroom.
                 reasons.push(
-                    "re-encoding to HEVC Main10 PQ (HDR10) rather than tone-mapping, because \
-                     this client reported it decodes and presents Main10 PQ; HDR10 static \
-                     mastering metadata is not carried — a Profile 5 source has none to \
-                     inherit"
-                        .to_owned(),
+                    if hdr_route(file) == Some(HdrRoute::DolbyVisionRpu) {
+                        // A true Profile 5 source carries no MDCV/CLL SEI at
+                        // all — Dolby's L6 metadata lives inside the RPU — so
+                        // there is nothing to inherit and nothing honest to
+                        // synthesise. The output is correctly tagged PQ/BT.2020,
+                        // which is what selects a display's HDR mode; what it
+                        // lacks is the mastering-display hint some panels use
+                        // for headroom.
+                        "re-encoding to HEVC Main10 PQ (HDR10) rather than tone-mapping, \
+                         because this client reported it decodes and presents Main10 PQ; \
+                         HDR10 static mastering metadata is not carried — a Profile 5 \
+                         source has none to inherit"
+                    } else {
+                        // This source DOES carry mastering-display and
+                        // content-light metadata, and whether it survives the
+                        // re-encode depends on the graph: x265 forwards frame
+                        // side data, a hardware download can drop it, and
+                        // hevc_qsv does not carry it at all. Said plainly
+                        // rather than repeating Profile 5's excuse, which is
+                        // false here.
+                        "re-encoding to HEVC Main10 PQ (HDR10) rather than tone-mapping, \
+                         because this client reported it decodes and presents Main10 PQ; \
+                         the source's HDR10 mastering metadata may not survive the \
+                         re-encode"
+                    }
+                    .to_owned(),
                 );
             }
-            grade_explained = true;
+            // Only an HDR10 outcome was explained above. A Dolby Vision
+            // re-encode that tone-maps has said why the DEVICE cannot take the
+            // source, which is a different question from why the GRADE was
+            // lost — and on a node that never proved the renderer, the second
+            // answer is the one an operator needs.
+            grade_explained = grade == OutputGrade::Hdr10;
         }
     }
 
@@ -1398,8 +1509,15 @@ mod tests {
         assert!(
             !sdr.reasons
                 .iter()
-                .any(|reason| reason.contains("Main10 PQ")),
+                .any(|reason| reason.contains("re-encoding to HEVC Main10 PQ")),
             "{:?}",
+            sdr.reasons
+        );
+        assert!(
+            sdr.reasons
+                .iter()
+                .any(|reason| reason.contains("this client did not prove")),
+            "the refusal names the client that refused: {:?}",
             sdr.reasons
         );
         // …and nothing else about the verdict moved.
@@ -1431,7 +1549,7 @@ mod tests {
         let hdr_client = || {
             let mut client = caps_profile(
                 vec!["mp4".into()],
-                vec!["h264".into()],
+                vec!["h264".into(), "hevc".into()],
                 vec!["aac".into()],
                 None,
                 true,
@@ -1459,11 +1577,13 @@ mod tests {
             dv_strippable: true,
             dolby_vision_p5_render: true,
             hdr10_passthrough: false,
+            hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
         };
         let no_rpu = RenderCaps {
             dv_strippable: true,
             dolby_vision_p5_render: false,
             hdr10_passthrough: true,
+            hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
         };
         let nothing = RenderCaps::strip_only(true);
 
@@ -1488,18 +1608,18 @@ mod tests {
                 source(Some("hdr10"), None),
                 no_plain,
                 OutputGrade::Sdr,
-                "this node's ffmpeg",
+                "this node",
             ),
             // The Dolby route and the plain route are proved separately, and
             // each source takes only its own: a node that proved the RPU
             // renderer and not the plain encode still tone-maps plain HDR10.
             (p5(), everything, OutputGrade::Hdr10, "HDR kept"),
-            (p5(), no_rpu, OutputGrade::Sdr, "this node's ffmpeg"),
-            (p5(), nothing, OutputGrade::Sdr, "this node's ffmpeg"),
+            (p5(), no_rpu, OutputGrade::Sdr, "this node"),
+            (p5(), nothing, OutputGrade::Sdr, "this node"),
             // A Dolby Vision base layer that is HDR10-compatible decodes to
             // ordinary PQ frames, so it is the PLAIN route, not the RPU one.
             (p8(), no_rpu, OutputGrade::Hdr10, "HDR kept"),
-            (p8(), no_plain, OutputGrade::Sdr, "this node's ffmpeg"),
+            (p8(), no_plain, OutputGrade::Sdr, "this node"),
             // HLG has no grade that spells it. Refused on every node.
             (
                 source(Some("hlg"), None),
@@ -1533,11 +1653,34 @@ mod tests {
         assert_eq!(grade, OutputGrade::Sdr);
         assert!(why.contains("this client did not prove"), "{why}");
 
+        // An SDR display is refused too, but silently: `evaluate` has already
+        // pushed "HDR (…) presentation was not proven by this client", which
+        // names the bit that actually refused. A second line here would put
+        // two entries in the badge for one refusal and blame the Main10
+        // decoder for a decision the display made.
         let mut sdr_display = hdr_client();
         sdr_display.supports_hdr = false;
         let (grade, why) = target_grade(&source(Some("hdr10"), None), &sdr_display, &everything);
         assert_eq!(grade, OutputGrade::Sdr);
-        assert!(why.contains("this client did not prove"), "{why}");
+        assert_eq!(why, "");
+        let plan = decide(&source(Some("hdr10"), None), &sdr_display, &everything);
+        assert_eq!(
+            plan.reasons
+                .iter()
+                .filter(|reason| reason.contains("tone-map"))
+                .count(),
+            1,
+            "one refusal, one line: {:?}",
+            plan.reasons
+        );
+
+        // A client that cannot decode HEVC is refused whatever it proved about
+        // PQ: the rung emits HEVC Main10 and nothing else.
+        let mut no_hevc = hdr_client();
+        no_hevc.video_codecs = vec!["h264".into()];
+        let (grade, why) = target_grade(&source(Some("hdr10"), None), &no_hevc, &everything);
+        assert_eq!(grade, OutputGrade::Sdr);
+        assert!(why.contains("does not decode HEVC"), "{why}");
     }
 
     /// The grade classification and the renderer choice read the same
@@ -1621,12 +1764,32 @@ mod tests {
         let mut hdr10_source = file("mkv", "hevc", "aac");
         hdr10_source.hdr = Some("hdr10".to_owned());
         assert!(!dolby_vision_needs_rpu_render(&hdr10_source));
-        // A browser that cannot decode HEVC at all, so the file has to be
-        // re-encoded for a reason that has nothing to do with its grade —
-        // which is exactly the case that was silently tone-mapped before M4.
+        // A browser that cannot decode HEVC at all. It has to re-encode for a
+        // reason that has nothing to do with the grade — the case that was
+        // silently tone-mapped before M4 — but it must NOT be handed the HDR10
+        // rung, whose output is HEVC Main10 and nothing else. `hdr10t=1` is an
+        // honest claim from a device with an HDR panel and an H.264-only
+        // decoder, and reading it as an HEVC claim is a black screen.
         let mut no_hevc = chrome.clone();
         no_hevc.video_codecs = vec!["h264".into()];
         let d = decide(&hdr10_source, &no_hevc, &RenderCaps::proven(true));
+        assert_eq!(d.method, PlaybackMethod::Transcode);
+        assert_eq!(d.transcode_grade, OutputGrade::Sdr);
+        assert!(
+            d.reasons.iter().any(|r| r.contains("does not decode HEVC")),
+            "{:?}",
+            d.reasons
+        );
+
+        // The same source on a client that DOES decode HEVC, forced to
+        // re-encode by a height ceiling rather than a codec: this is the case
+        // M4 exists for.
+        let mut capped = chrome.clone();
+        capped.max_height = Some(1080);
+        let mut uhd = hdr10_source.clone();
+        uhd.width = Some(3840);
+        uhd.height = Some(2160);
+        let d = decide(&uhd, &capped, &RenderCaps::proven(true));
         assert_eq!(d.method, PlaybackMethod::Transcode);
         assert_eq!(d.transcode_grade, OutputGrade::Hdr10);
         assert_eq!(d.delivered_dynamic_range, "hdr10");
@@ -1635,19 +1798,41 @@ mod tests {
             dv_strippable: true,
             dolby_vision_p5_render: true,
             hdr10_passthrough: false,
+            hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
         };
-        let d = decide(&hdr10_source, &no_hevc, &unproved);
+        let d = decide(&uhd, &capped, &unproved);
         assert_eq!(d.transcode_grade, OutputGrade::Sdr);
         assert!(
-            d.reasons.iter().any(|r| r.contains("this node's ffmpeg")),
+            d.reasons.iter().any(|r| r.contains("this node")),
             "the demotion has to name which of the three refused: {:?}",
             d.reasons
         );
+        // A node that proved the graph but only at a height this delivery can
+        // never reach is the same refusal — and it is the one that was
+        // missing: a node with no hardware encoder resolves Auto to 720p,
+        // where no measured rung exists.
+        let short = RenderCaps {
+            hdr10_max_height: 720,
+            ..RenderCaps::proven(true)
+        };
+        assert_eq!(
+            decide(&uhd, &capped, &short).transcode_grade,
+            OutputGrade::Sdr
+        );
+        // And a source too small to fill the smallest measured rung, on a node
+        // that proved everything.
+        let mut small = hdr10_source.clone();
+        small.width = Some(1280);
+        small.height = Some(720);
+        assert_eq!(
+            decide(&small, &capped, &RenderCaps::proven(true)).transcode_grade,
+            OutputGrade::Sdr
+        );
         // A client that never proved it presents Main10 PQ is refused too,
         // and the reason names the client rather than the node.
-        let mut no_pq = no_hevc.clone();
+        let mut no_pq = capped.clone();
         no_pq.supports_hdr10_transcode = false;
-        let d = decide(&hdr10_source, &no_pq, &RenderCaps::proven(true));
+        let d = decide(&uhd, &no_pq, &RenderCaps::proven(true));
         assert_eq!(d.transcode_grade, OutputGrade::Sdr);
         assert!(
             d.reasons
@@ -1663,7 +1848,7 @@ mod tests {
         hlg.hdr = Some("hlg".to_owned());
         assert!(!dolby_vision_needs_rpu_render(&hlg));
         assert_eq!(
-            decide(&hlg, &no_hevc, &RenderCaps::proven(true)).transcode_grade,
+            decide(&hlg, &capped, &RenderCaps::proven(true)).transcode_grade,
             OutputGrade::Sdr
         );
         assert!(!dolby_vision_needs_rpu_render(&file("mkv", "hevc", "aac")));
@@ -1749,6 +1934,7 @@ mod tests {
             dv_strippable: true,
             dolby_vision_p5_render: false,
             hdr10_passthrough: true,
+            hdr10_max_height: HDR10_MAX_MEASURED_HEIGHT,
         };
         let manual = decide_forced(&p5, &client, Force::Transcode, &unproved);
         assert_eq!(manual.transcode_grade, OutputGrade::Sdr);
@@ -2049,8 +2235,13 @@ mod tests {
     }
 
     /// The non-DV half of the truth table. Copied video keeps whatever the
-    /// source was graded in; every transcode lands on SDR, because every
-    /// encoder in the pipeline emits H.264 8-bit.
+    /// source was graded in; a transcode answers whatever grade the
+    /// negotiation reached, and for a client that proved nothing about PQ
+    /// that is still SDR.
+    ///
+    /// The name is left as it was on purpose: it records what this was true of
+    /// before M4, and every client in it proves nothing about Main10 PQ, so
+    /// every answer below is unchanged.
     #[test]
     fn copied_video_keeps_the_sources_grade_and_a_transcode_never_does() {
         let mut hdr10 = file("mkv", "hevc", "aac"); // MKV → container mismatch
@@ -2099,7 +2290,11 @@ mod tests {
 
     /// A manual quality pick is still a delivery, so it still has to answer.
     /// Original honours the strip (base layer kept); Transcode overrides a
-    /// perfectly direct-playable DV file and tone-maps it.
+    /// perfectly direct-playable DV file, and tone-maps it for a client that
+    /// never proved it presents Main10 PQ — which is every client here. Since
+    /// M4 that control negotiates a grade like any other transcode rather than
+    /// being pinned to SDR; `a_delivery_that_encodes_nothing_reports_no_grade`
+    /// covers the client that does prove it.
     #[test]
     fn a_forced_quality_reports_the_grade_that_override_delivers() {
         let mut dv = file("mp4", "hevc", "aac"); // container+audio both fine
@@ -2135,7 +2330,8 @@ mod tests {
             decide_forced(&dv, &safari, Force::Transcode, &RenderCaps::proven(true))
                 .delivered_dynamic_range,
             "sdr",
-            "and a forced rung tone-maps the same file, direct-playable or not"
+            "and a forced rung tone-maps the same file for a client that never \
+             proved it presents Main10 PQ, direct-playable or not"
         );
     }
 

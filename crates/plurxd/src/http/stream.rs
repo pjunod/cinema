@@ -592,11 +592,15 @@ pub struct DecisionResponse {
 /// covers every other PQ source. Both are boot probes that run the real graph
 /// into the real encoder, so `false` means this node has not been shown to
 /// produce those bytes — never that it refuses to.
-fn render_caps(state: &AppState) -> playback::RenderCaps {
+async fn render_caps(state: &AppState) -> playback::RenderCaps {
     playback::RenderCaps {
         dv_strippable: state.system.dovi_rpu,
         dolby_vision_p5_render: state.system.dovi_passthrough,
         hdr10_passthrough: state.system.hdr10_passthrough,
+        // Asked of the transcoder rather than derived here: the ceiling
+        // depends on which encoder this node will actually choose, which is a
+        // runtime answer the system snapshot does not carry.
+        hdr10_max_height: state.transcode.hdr10_ceiling().await,
     }
 }
 
@@ -796,7 +800,20 @@ fn apply_selected_subtitle(
 }
 
 fn subtitle_burn_would_discard_hdr(decision: &Decision, requires_burn_in: bool) -> bool {
+    // A transcode is exempt, and has to be: it re-encodes, so the burn happens
+    // inside a graph that can tone-map on the way, which is exactly what a
+    // burn on an HDR title did before the HDR10 rung existed. Since M4 a
+    // transcode's `delivered_dynamic_range` is the negotiated grade rather
+    // than a hard-coded "sdr", so without this term every HDR title that
+    // transcoded for a height cap would start refusing burns it used to
+    // perform. `hdr10_grade_for` drops such a session to SDR for the same
+    // reason: subtitle white is a code value, and on a PQ output it lands at
+    // the top of the curve.
+    //
+    // A copy is not exempt. There is no encode to burn into, so keeping the
+    // HDR grade and honouring the request are genuinely exclusive.
     requires_burn_in
+        && decision.method != playback::PlaybackMethod::Transcode
         && matches!(
             decision.delivered_dynamic_range,
             "dolby_vision" | "hdr10" | "hlg"
@@ -1113,7 +1130,7 @@ pub async fn decision(
         subtitle_requires_burn_in(&file, selected_subtitle, state.pgs_overlay_enabled);
     let container_default_audio = container_default_audio_index(&file.audio_streams);
     set_selected_audio_default(&mut file.audio_streams, selected_audio);
-    let mut decision = q.decide(&file, &render_caps(&state));
+    let mut decision = q.decide(&file, &render_caps(&state).await);
     let subtitle_burn_in_blocked_by_hdr =
         subtitle_burn_would_discard_hdr(&decision, selected_subtitle_requires_burn);
     // Only an explicit subtitle choice may change the delivery verdict. An
@@ -1539,7 +1556,7 @@ pub async fn stream_mp4(
     let prefs = state.transcode.lang_prefs().await;
     let audio = remux_audio_index(&file.audio_streams, q.audio, &prefs);
     set_selected_audio_default(&mut file.audio_streams, Some(audio));
-    let decision = q.caps().decide(&file, &render_caps(&state));
+    let decision = q.caps().decide(&file, &render_caps(&state).await);
     let probe_json = state.store.get_file_probe_json(id).await?;
     let promote_hevc_parameter_sets =
         plurx_core::transcode::hevc_parameter_set_promotion_required(&file, probe_json.as_deref());

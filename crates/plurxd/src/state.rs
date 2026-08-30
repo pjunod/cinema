@@ -98,6 +98,10 @@ pub struct SystemInfo {
     /// is nearly every HDR title; separate from `dovi_passthrough` because it
     /// touches no RPU and needs no Dolby-aware filter.
     pub hdr10_passthrough: bool,
+    /// Whether this node proved the QSV half of that route — P010 upload into
+    /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
+    /// gated behind a Dolby Vision filter this route does not use.
+    pub hdr10_passthrough_qsv: bool,
 }
 
 /// The daemon's managed directories across the configured storage roots.
@@ -509,6 +513,7 @@ impl AppState {
             .with_dovi_passthrough(system.dovi_passthrough)
             .with_dovi_passthrough_qsv(system.dovi_passthrough_qsv)
             .with_hdr10_passthrough(system.hdr10_passthrough)
+            .with_hdr10_passthrough_qsv(system.hdr10_passthrough_qsv)
             .with_cache_layout(
                 cache_dir.clone(),
                 runtime_cache.clone(),
