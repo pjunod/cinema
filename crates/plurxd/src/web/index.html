@@ -11773,6 +11773,10 @@ function clusterOperationsCard(ops){
       <div class="clopsfact"><span class="muted">Owned media</span><b>${sessions} active session${sessions===1?"":"s"}</b></div>
       <div class="clopsfact"><span class="muted">Oldest direct sample</span><b>${esc(PlurxClusterPanel.clusterOperationAge(oldest))}</b></div></div></div>`;
 }
+// The manual refresh has no deferral, deliberately: the election dialog is
+// modal, so the button that reaches this code cannot be clicked while one is
+// open. It still obeys the invariant the other three paths obey — it paints
+// exactly what it stores.
 async function refreshClusterOperations(btn){
   const generation=PAGE_RENDER_GENERATION;
   if(btn) btn.disabled=true;

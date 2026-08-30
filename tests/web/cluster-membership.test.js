@@ -2500,6 +2500,25 @@ test("the projection ignores what moves on its own and nothing else", () => {
   const fenced = JSON.parse(JSON.stringify(later));
   fenced.verdict.safe_to_restart_one = !fenced.verdict.safe_to_restart_one;
   assert.notEqual(ui.clusterOpsProjection(fenced), ui.clusterOpsProjection(first));
+  // The aggregate's top-level `membership` is the committed roster again: the
+  // panel reads one stable field from it and renders the rest from
+  // /cluster/nodes, so its lag and session counts must not repaint anything.
+  const roster = JSON.parse(JSON.stringify(later));
+  if (roster.membership && roster.membership.nodes && roster.membership.nodes.length) {
+    roster.membership.nodes[0].apply_lag_entries = 41;
+    roster.membership.nodes[0].active_media_sessions = 7;
+    assert.equal(ui.clusterOpsProjection(roster), ui.clusterOpsProjection(first));
+  }
+  const relocal = JSON.parse(JSON.stringify(later));
+  relocal.membership = Object.assign({}, relocal.membership, { local_node_id: "somewhere-else" });
+  assert.notEqual(ui.clusterOpsProjection(relocal), ui.clusterOpsProjection(first),
+    "which node this is remains part of the projection");
+  // …but the per-node membership record inside nodes[] identifies the rows, and
+  // a node joining, leaving or being renamed IS news.
+  const renamed = JSON.parse(JSON.stringify(later));
+  renamed.nodes[0].membership.hostname = "renamed-host";
+  assert.notEqual(ui.clusterOpsProjection(renamed), ui.clusterOpsProjection(first));
+
   // Key order in the response is not a change either.
   const shuffled = JSON.parse(JSON.stringify(first));
   shuffled.nodes = shuffled.nodes.map((row) =>
@@ -2545,6 +2564,7 @@ function tickHarness({ cluster, ops, now }) {
      ${shippedSource("fmtBytes")}
      ${shippedSource("settingsTick")}
      return {settingsTick,stamped:()=>CLUSTER_OPS_FETCHED_AT,ops:()=>SETTINGS_DATA.clusterOps,
+       cluster:()=>SETTINGS_DATA.cluster,
        openDialog:(open)=>{dialogs.length=0;if(open)dialogs.push({});}};`,
   )(
     document,
@@ -2652,6 +2672,101 @@ test("a refused collection still moves the freshness row", async () => {
   assert.match(shippedSource("settingsTick"), /if\(error&&error\.status===401\) throw error;/);
 });
 
+test("the two-second roster poll holds its sample under a dialog too", async () => {
+  // This branch runs precisely while a node is fenced or a recovery is
+  // required — which is when the force-election dialog is most likely open. The
+  // dangerous shape is storing a roster that was never painted: the next poll
+  // then finds no difference and the repaint is lost for good.
+  const fenced = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { maintenance: true, maintenance_acknowledged: true }),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(fenced);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster: fenced, ops, now });
+  const moved = JSON.parse(JSON.stringify(fenced));
+  moved.nodes[2].reachable = false;
+
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+  harness.openDialog(true);
+  const held = harness.settingsTick(1, "cluster");
+  requests[0].resolve(moved);
+  await settle();
+  requests[1].resolve(ops);
+  await held;
+  assert.deepEqual(painted, [], "the dialog was open");
+  assert.deepEqual(harness.cluster(), fenced, "a roster the panel did not paint was not stored");
+
+  harness.openDialog(false);
+  now.value += 15_000;
+  const paid = harness.settingsTick(1, "cluster");
+  requests[2].resolve(moved);
+  await settle();
+  requests[3].resolve(ops);
+  await paid;
+  assert.deepEqual(painted, ["render"], "the owed roster repaint landed");
+  assert.deepEqual(harness.cluster(), moved);
+});
+
+test("the restart poll holds its sample under a dialog, and still reads it", async () => {
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const draining = operationStatus(cluster);
+  draining.nodes[0].status.media.new_admissions_blocked = true;
+  draining.nodes[0].status.media.drained = false;
+  const drained = JSON.parse(JSON.stringify(draining));
+  drained.nodes[0].status.media.drained = true;
+
+  // A modal is open for the first iteration and closed for the second, so the
+  // sequencing is deterministic rather than a race with the microtask queue.
+  const queue = [draining, drained];
+  const painted = [];
+  let served = 0;
+  const state = { clusterOps: null };
+  const poll = new Function(
+    "api", "settingsCurrent", "SETTINGS_DATA", "SETTINGS_LOADED", "renderSettings",
+    "repaintClusterPreserving", "clusterOpsStamp", "clusterRepaintDeferred", "setTimeout",
+    `${shippedSource("pollLocalRestart")} return pollLocalRestart;`,
+  )(
+    () => {
+      served += 1;
+      return Promise.resolve(queue.shift());
+    },
+    () => true,
+    state,
+    new Set(),
+    () => painted.push("render"),
+    (paint) => paint(),
+    () => {},
+    () => served === 1,
+    (resolve) => resolve(),
+  );
+
+  // First iteration: a modal is open. The sample is held — but the loop's own
+  // exit condition still reads the fresh one, so the poll keeps going.
+  await poll("node-a", 1);
+  assert.equal(served, 2, "holding a sample did not stop the poll");
+  assert.deepEqual(painted, ["render"], "exactly the iteration that was not deferred painted");
+  assert.deepEqual(state.clusterOps, drained, "and it stored exactly what it painted");
+});
+
+test("the manual refresh always paints what it stores", () => {
+  // The fourth repaint path deliberately has no deferral: the election dialog is
+  // modal, so the button that reaches this code cannot be clicked while one is
+  // open. What it must never do is store without painting.
+  const refresh = shippedSource("refreshClusterOperations");
+  const stored = refresh.indexOf("SETTINGS_DATA.clusterOps=ops;");
+  const paints = refresh.indexOf("repaintClusterPreserving(renderSettings)");
+  assert.notEqual(stored, -1);
+  assert.notEqual(paints, -1);
+  assert.ok(paints > stored, "the store is not followed by a repaint");
+  assert.doesNotMatch(refresh, /clusterRepaintDeferred/);
+});
+
 test("the panel's own controls and dialogs are the only ones it reaches for", () => {
   // Both new helpers hang off one class emitted 1,700 lines away. If the shell
   // stops marking the Cluster tab, the control capture silently finds nothing
@@ -2699,13 +2814,16 @@ test("a decision in progress is never repainted out from under the operator", as
   assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
   assert.deepEqual(harness.ops(), changed);
 
-  // Same discipline on the two-second roster branch, which runs precisely while
-  // a node is fenced or a recovery is required — when that dialog is most
-  // likely to be open.
-  const tick = shippedSource("settingsTick");
-  assert.match(tick, /if\(!\(changed&&clusterRepaintDeferred\(\)\)\)\{/);
-  // …and on the restart poll, which repaints every two seconds by design.
-  assert.match(shippedSource("pollLocalRestart"), /if\(!clusterRepaintDeferred\(\)\)\{/);
+  // An unchanged sample is stored even under a dialog — there is nothing to
+  // repaint, and holding it would make the freshness row describe the older
+  // one — and the freshness row keeps moving either way.
+  harness.openDialog(true);
+  now.value += 15_000;
+  const quiet = harness.settingsTick(1, "cluster");
+  requests[2].resolve(changed);
+  await quiet;
+  assert.deepEqual(painted, ["render"], "nothing changed, so nothing repainted");
+  assert.deepEqual(harness.ops(), changed, "an unchanged sample is not held");
 });
 
 test("a fetch is not a repaint, and the freshness row still ages", async () => {
