@@ -372,7 +372,7 @@ pub async fn item_detail(
                     present += 1;
                 }
             }
-            Some(if !videos.is_empty() && present == videos.len() {
+            Some(if present == videos.len() {
                 "indexed"
             } else if present > 0 {
                 "partial"

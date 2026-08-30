@@ -476,12 +476,19 @@ impl NodeLocalTelemetry {
             }
             // v7: re-key `fragment_indexes` on (file_id, argv_fingerprint), so
             // one file can hold an index per copy pipeline a client can ask
-            // for (PLAYBACK-CAPS-V2-PLAN §4.7). Unconditional inside this
-            // branch rather than guarded on the current key: everything that
-            // reaches here is at v6 or below, where the table is either absent
-            // or file-keyed, and a fresh sidecar rebuilds an empty table.
-            migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY);
-            migration.push('\n');
+            // for (PLAYBACK-CAPS-V2-PLAN §4.7).
+            //
+            // Guarded on `current < 7` and not on the branch it sits in. The
+            // branch is `current < SIDECAR_SCHEMA_VERSION`, which is the same
+            // thing today and stops being it the moment a v8 exists: every
+            // already-migrated sidecar would then rebuild this table on every
+            // upgrade — a full copy of every packed index the voter holds —
+            // and a v8 that added a column above this line would watch the
+            // rebuild's explicit column list silently drop it again.
+            if current < 7 {
+                migration.push_str(crate::store::fragindex::FRAGMENT_INDEXES_IDENTITY_KEY);
+                migration.push('\n');
+            }
             migration.push_str(&format!(
                 "PRAGMA user_version = {SIDECAR_SCHEMA_VERSION};\nCOMMIT;"
             ));
@@ -986,12 +993,11 @@ mod tests {
         let error = NodeLocalTelemetry::open(&path)
             .err()
             .expect("future sidecar schema must be refused");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("only knows v{SIDECAR_SCHEMA_VERSION}")),
-            "{error}"
-        );
+        // The literal is the point: the error text is itself formatted from
+        // `SIDECAR_SCHEMA_VERSION`, so an assertion built from the same
+        // constant can never fail on a bump. Update it by hand, deliberately,
+        // exactly as the single-node backend's `assert_eq!(version, 37)` is.
+        assert!(error.to_string().contains("only knows v7"), "{error}");
     }
 
     #[tokio::test]

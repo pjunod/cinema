@@ -100,19 +100,29 @@ ALTER TABLE fragment_indexes_identity_keyed RENAME TO fragment_indexes;";
 
 /// How many pipeline identities one file may hold an index for at once.
 ///
-/// The set a file can legitimately be asked for is small and bounded by code —
-/// at most three, once the Profile 7 conversion adds its own
+/// The set a file can legitimately be asked for at any one moment is small and
+/// bounded by code — at most three, once the Profile 7 conversion adds its own
 /// (PLAYBACK-CAPS-V2-PLAN §4.7). This ceiling is not that bound restated; it is
 /// the backstop for identities that used to *replace* each other and now
-/// accumulate. An ffmpeg upgrade that flips the `dovi_rpu` probe, or a
-/// parameter-set promotion that turns on, changes the fingerprint without
-/// changing anything about the file, and nothing else would ever collect the
-/// row it orphaned.
+/// accumulate. `copy_video_args` reads three inputs beyond the session's own
+/// choice — the `dovi_rpu` probe, parameter-set promotion, and the file's
+/// `hdr_format` label — and each is a node or scan fact that can flip without
+/// the file's bytes changing. Every flip strands the fingerprints from before
+/// it, and nothing else would ever collect them. Enumerating those inputs
+/// gives six argv strings for one Dolby Vision file, so twelve is the double
+/// headroom, not six.
 ///
-/// Eviction is oldest-built first, so the row a live client is serving from —
-/// necessarily built after the ones it displaced — is the last to go. Six
-/// leaves double the headroom the code can actually request.
-const MAX_IDENTITIES_PER_FILE: i64 = 6;
+/// The row being written is exempt: a cap that could delete its own insert
+/// would report a successful build of a row that is not there, and the next
+/// pass would rebuild and delete it again — an unbounded loop over a 60 GB
+/// remux with no error anywhere to show for it. Everything else is evicted
+/// oldest-built first, which is a deliberate second-best: `built_at_ms` is
+/// stamped by [`put`] and never refreshed by a read, so a long-lived index
+/// nothing has had to rebuild is the *oldest* row, not the newest. At twelve
+/// the eviction should never fire at all; if it ever does, it means the
+/// fingerprint churn above is real and worth a look rather than a smarter
+/// policy here.
+const MAX_IDENTITIES_PER_FILE: i64 = 12;
 
 /// Bytes per packed row: dts u64, duration u32, wire bytes u32, video bytes
 /// u32, class u8, 3 pad.
@@ -249,13 +259,18 @@ pub(crate) fn put(
     conn.execute(
         "DELETE FROM fragment_indexes
           WHERE file_id = ?1
+            AND argv_fingerprint <> ?2
             AND argv_fingerprint NOT IN (
                 SELECT argv_fingerprint FROM fragment_indexes
-                 WHERE file_id = ?1
+                 WHERE file_id = ?1 AND argv_fingerprint <> ?2
                  ORDER BY built_at_ms DESC, argv_fingerprint ASC
-                 LIMIT ?2
+                 LIMIT ?3
             )",
-        params![file_id, MAX_IDENTITIES_PER_FILE],
+        params![
+            file_id,
+            index.source.argv_fingerprint,
+            MAX_IDENTITIES_PER_FILE - 1
+        ],
     )?;
     Ok(())
 }
@@ -578,9 +593,38 @@ mod tests {
         assert_eq!(
             held.first().map(String::as_str),
             Some("pipeline-03"),
-            "eviction is oldest-built first, so the rows a live session could \
-             still be serving from are the last to go"
+            "eviction is oldest-built first"
         );
+    }
+
+    #[test]
+    fn the_cap_never_evicts_the_row_it_was_called_for() {
+        // The failure this pins: a `put` that reports success for a row the
+        // cap deleted on its way out. The next pass finds nothing, rebuilds
+        // the same identity -- a whole ffmpeg pass over a 60 GB remux -- and
+        // deletes it again, forever, with no error anywhere. Reachable with a
+        // clock that steps backwards, which `built_at_ms` is taken from.
+        let conn = conn();
+        let full = MAX_IDENTITIES_PER_FILE as usize;
+        for step in 0..full {
+            put(
+                &conn,
+                7,
+                &index_with(&format!("incumbent-{step:02}"), 4_096, 1_700_000_000_000),
+                5_000,
+            )
+            .expect("put");
+        }
+        let newcomer = index_with("newcomer", 4_096, 1_700_000_000_000);
+        put(&conn, 7, &newcomer, 1).expect("put with a clock that went backwards");
+
+        assert!(
+            get(&conn, 7, &newcomer.source)
+                .expect("get")
+                .is_some(),
+            "the row a caller was told was stored must be there to read"
+        );
+        assert_eq!(fingerprints(&conn, 7).len(), full);
     }
 
     #[test]

@@ -275,9 +275,8 @@ pub fn identity_for(file: &MediaFile, video: transcode::CopyVideoOptions) -> Sou
 /// (PLAYBACK-CAPS-V2-PLAN §4.7, edge E1).
 ///
 /// The stripped identity stays **first**. It is what every non-DV client and
-/// every non-DV file uses, and what the single-identity analysis request still
-/// resolves to, so a library that is fully indexed today does not re-order its
-/// work to adopt this.
+/// every non-DV file uses, and what a forced rebuild resolves to, so a library
+/// that is fully indexed today does not re-order its work to adopt this.
 ///
 /// Deduplicated by fingerprint rather than by [`transcode::CopyVideoOptions`]
 /// equality, so that an option which happens to render to an argv another
@@ -574,9 +573,9 @@ mod tests {
         // Worth pinning because it is the opposite of what it looks like:
         // without the `dovi_rpu` filter nothing removes the RPU, so it would
         // be easy to assume the two pipelines collapse into one. They do not.
-        // The sample entry tag alone differs -- `dvh1` for the preserved
-        // envelope, `hvc1` for the strip -- and a player reads the delivery's
-        // grade off exactly that, so the two are still different bytes.
+        // The sample entry tag is the same `hvc1` either way for a source with
+        // an HDR10-compatible base, but `-strict unofficial` and the bitstream
+        // filter chain both still differ, and those decide the emitted bytes.
         let file = hevc_file(
             Some("dolby_vision"),
             Some("Dolby Vision · Profile 8 (HDR10-compatible)"),

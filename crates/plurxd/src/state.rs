@@ -1210,24 +1210,38 @@ async fn fragment_index_video_identities(
     ))
 }
 
-/// The one pipeline a caller that can only carry one should use.
+/// The one pipeline a caller that can only carry one should work on.
 ///
 /// The durable analysis request (`POST /files/{id}/analysis`) is admin-issued,
 /// carries no client capabilities, and its store row binds one request to one
-/// queued job, so it cannot fan out. It keeps the stripped identity — the
-/// behaviour it has today — and the background pass fills in the rest.
-async fn fragment_index_primary_video_options(
+/// queued job, so it cannot fan out. It answers the identity the file is
+/// **missing**, falling back to the first — the stripped pipeline — when every
+/// identity is already present, which is what a forced rebuild wants.
+///
+/// Answering the first identity unconditionally, which is what this did when
+/// there was only ever one, is the version that reads correctly and is
+/// useless: the admin control is the only way to build an index on a node
+/// where the background pass is turned off (`vod_index_mins = 0`), and on a
+/// Dolby Vision title it would re-derive the pipeline that already exists.
+/// The file would sit at `partial` through every click of a button that ran a
+/// whole-file hash to change nothing.
+async fn fragment_index_requested_video_options(
     store: &dyn Store,
     file: &MediaFile,
     have_dovi: bool,
 ) -> Result<plurx_core::transcode::CopyVideoOptions, StoreError> {
     let probe_json = store.get_file_probe_json(file.id).await?;
-    Ok(plurx_core::transcode::CopyVideoOptions::from_probe(
-        file,
-        probe_json.as_deref(),
-        have_dovi,
-        false,
-    ))
+    let videos = crate::fragindex::video_identities(file, probe_json.as_deref(), have_dovi);
+    for video in &videos {
+        let identity = crate::fragindex::identity_for(file, *video);
+        if store.fragment_index(file.id, &identity).await?.is_none() {
+            return Ok(*video);
+        }
+    }
+    Ok(videos
+        .first()
+        .copied()
+        .unwrap_or_else(|| plurx_core::transcode::CopyVideoOptions::new(have_dovi, false)))
 }
 
 /// Heartbeat and self-fence for one distributed queue row.
@@ -3423,8 +3437,11 @@ impl JobManager {
         let mut attempted = 0usize;
         let mut last_examined = None;
         for (examined, (file_id, _path)) in paths.into_iter().enumerate() {
-            // Both bounds stop different runaways: attempts bound whole-file
-            // reads, while examined bounds a fully indexed library's queries.
+            // Both bounds stop different runaways: attempts bound the
+            // whole-file reads a pass will start, while examined bounds a
+            // fully indexed library's queries. Attempts count identities
+            // rather than files now, and the check stays here, at the top of
+            // the FILE loop, on purpose — see the identity loop below.
             if attempted >= INDEX_MAX_PER_PASS
                 || examined >= INDEX_MAX_EXAMINED_PER_PASS
                 || std::time::Instant::now() >= deadline
@@ -3449,14 +3466,22 @@ impl JobManager {
                         continue;
                     }
                 };
-            // One file, one index per pipeline a client can request. The pass
-            // bounds count identities rather than files, so a Dolby Vision
-            // library cannot silently double a pass's wall clock.
+            // One file, one index per pipeline a client can request.
+            //
+            // No pass bound is re-checked in here, and that is the whole
+            // design: a file this loop starts, it finishes. The cursor is
+            // stamped per file, and `ordered_index_paths` resumes strictly
+            // *after* it, so a break in the middle of an identity set would
+            // hand the rest of that set to the next full wrap of the library —
+            // hours on a mid-size one, and never at all for a file whose first
+            // identity reliably eats the whole window. Both bounds are checked
+            // at the top of the file loop instead, which costs at most one
+            // file's worth of overshoot per pass and buys the invariant that
+            // makes the cursor safe.
             for video in videos {
-                if attempted >= INDEX_MAX_PER_PASS || std::time::Instant::now() >= deadline {
-                    break;
-                }
                 if !transcode.pretranscode_worker_idle() {
+                    // Deliberately a return: it skips the cursor stamp, so a
+                    // preempted pass leaves the file due rather than half done.
                     return;
                 }
                 let identity = crate::fragindex::identity_for(&file, video);
@@ -3465,8 +3490,13 @@ impl JobManager {
                     Ok(Some(_)) => continue,
                     Ok(None) => {}
                     Err(error) => {
+                        // The sidecar is failing reads. Give up on the whole
+                        // file rather than the identity: the alternative is to
+                        // stop asking "is this already built?" and go straight
+                        // to a multi-minute whole-file pass whose store write
+                        // is about to fail too.
                         tracing::warn!(file_id, error = %error, "reading a fragment index");
-                        continue;
+                        break;
                     }
                 }
                 attempted += 1;
@@ -3708,6 +3738,14 @@ impl JobManager {
             // address already admits several pipelines per source, so this
             // needs nothing from the cluster schema — only that the enqueue
             // loop stops emitting a single one.
+            //
+            // Like the single-node pass, this runs the whole set for a file it
+            // has started rather than re-checking the pass bounds inside: the
+            // cursor is stamped per file and resumed strictly after, so a
+            // break here would defer the rest of the set by a full library
+            // wrap. What it spends is bounded — a cache-key lookup and either
+            // an enqueue or a hydrate, against an attestation that has already
+            // happened — and every enqueue is idempotent on the cache key.
             for video in &videos {
                 let video = *video;
                 let pipeline_sha256 =
@@ -4054,7 +4092,7 @@ impl JobManager {
                 })
             }
         };
-        let video = fragment_index_primary_video_options(self.store.as_ref(), &file, have_dovi)
+        let video = fragment_index_requested_video_options(self.store.as_ref(), &file, have_dovi)
             .await
             .map_err(|_| AnalysisResolutionError::Retry {
                 code: "source_catalog_read_failed",
