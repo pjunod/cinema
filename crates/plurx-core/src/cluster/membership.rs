@@ -4745,18 +4745,28 @@ impl MembershipManager {
             .collect())
     }
 
-    /// Machine names for the live roster, keyed by node id.
+    /// Machine names for the roster, keyed by node id.
     ///
-    /// Deliberately narrower than [`Self::status`]: a caller that only wants
-    /// to put a name on a node id should not pay for Raft metrics, protocol
-    /// status and five joins. The activity page polls this every few seconds.
+    /// *Cheaper* than [`Self::status`], not a subset of it: a caller that only
+    /// wants to put a name on a node id should not pay for Raft metrics,
+    /// protocol status and five joins, and the activity page polls this every
+    /// few seconds. The price of skipping the Raft read is that this cannot
+    /// filter on committed membership the way `status` does, so it can still
+    /// name a node that has been written to `cluster_nodes` by a join whose
+    /// Raft change has not landed. Naming a node the caller never asks about
+    /// costs nothing; a delivery is only ever attributed to a node the peer
+    /// directory returned. The durable removal fence *is* applied, because a
+    /// node whose `removed_at` write did not land is fenced by its pending
+    /// removal row alone and would otherwise be named forever.
     ///
     /// A node whose name could not be derived is *absent* from the map rather
     /// than present as [`UNKNOWN_HOSTNAME`], so a caller that already holds a
     /// stable node id shows that instead of a sentinel that names nothing.
     /// The local node answers from memory: its replicated row is written by
     /// the heartbeat, so a table read alone would leave this node nameless for
-    /// the first heartbeat interval after start.
+    /// the first heartbeat interval after start. `status` has no such override,
+    /// so during that window the two reads disagree about this one node — in
+    /// the direction of the page knowing more, not less.
     pub async fn node_hostnames(&self) -> Result<BTreeMap<String, String>, MembershipError> {
         let Some(inner) = self.inner.as_deref() else {
             return Ok(BTreeMap::new());
@@ -4768,7 +4778,9 @@ impl MembershipManager {
                         COALESCE(host.hostname, '') AS hostname \
                  FROM cluster_nodes node \
                  LEFT JOIN cluster_node_hostnames host ON host.node_id = node.node_id \
-                 WHERE node.removed_at IS NULL",
+                 WHERE node.removed_at IS NULL \
+                   AND NOT EXISTS (SELECT 1 FROM cluster_node_removals removal \
+                     WHERE removal.node_id = node.node_id)",
                 params!(),
             )
             .await?;
@@ -12038,6 +12050,9 @@ mod tests {
         // The roster's own name table, and only the live rows in it.
         assert!(accessor.contains("LEFT JOIN cluster_node_hostnames"));
         assert!(accessor.contains("WHERE node.removed_at IS NULL"));
+        // A node whose `removed_at` write did not land is fenced by its
+        // pending removal row alone; without this it would be named forever.
+        assert!(accessor.contains("FROM cluster_node_removals removal"));
         // The naming rules live in one tested place. An accessor that filtered
         // or defaulted inline would leave `roster_hostnames` asserting nothing
         // about what the cluster actually publishes.

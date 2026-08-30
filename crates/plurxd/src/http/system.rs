@@ -1,6 +1,6 @@
 //! Server identity, first-run setup, settings, and scan status.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -2299,6 +2299,27 @@ impl ClusterDelivery {
     }
 }
 
+/// The roster's machine names, for a reader allowed to see them.
+///
+/// Admin-only, matching `GET /api/v1/cluster/nodes`: machine names are an
+/// operator fact, and the activity page must not become the one place an
+/// ordinary household member can read the fleet's hostnames. A household
+/// member keeps the node id they are already shown.
+///
+/// A roster read that fails costs the page its labels, never the page.
+async fn node_hostnames(state: &AppState, is_admin: bool) -> BTreeMap<String, String> {
+    if !is_admin {
+        return BTreeMap::new();
+    }
+    match state.membership.node_hostnames().await {
+        Ok(hostnames) => hostnames,
+        Err(error) => {
+            tracing::warn!(?error, "node hostnames unavailable for activity");
+            BTreeMap::new()
+        }
+    }
+}
+
 async fn peer_activity(state: &AppState) -> PeerActivityRead {
     // `advertise_host` is the explicit first step toward peer membership.
     // Keeping this guard outside `snapshots()` means the overwhelmingly common
@@ -2835,12 +2856,25 @@ pub async fn activity_detail(
     // `sessions` is untouched — native clients parse it — and `deliveries` is
     // the superset beside it: the same HLS sessions plus the two routes that
     // were never listed at all.
-    let ((sessions, deliveries), peers) =
-        if state.cluster_advertisement && state.membership.is_replicated() {
-            tokio::join!(deliveries(&state), peer_activity(&state))
-        } else {
-            (deliveries(&state).await, PeerActivityRead::LocalOnly)
-        };
+    //
+    // The roster's machine names ride in the same wave rather than following
+    // it. This page polls every few seconds; a name read that waits for the
+    // peer fan-out to finish would add its latency to every poll for nothing.
+    let replicated = state.cluster_advertisement && state.membership.is_replicated();
+    let ((sessions, deliveries), peers, hostnames) = if replicated {
+        let (local, peers, hostnames) = tokio::join!(
+            deliveries(&state),
+            peer_activity(&state),
+            node_hostnames(&state, user.0.is_admin)
+        );
+        (local, peers, hostnames)
+    } else {
+        (
+            deliveries(&state).await,
+            PeerActivityRead::LocalOnly,
+            BTreeMap::new(),
+        )
+    };
     let clustered = !matches!(peers, PeerActivityRead::LocalOnly);
     let deliveries = if clustered {
         serde_json::to_value(clustered_deliveries(&state.node_id, deliveries, &peers))
@@ -2906,22 +2940,13 @@ pub async fn activity_detail(
     // node's short hostname, so send the id -> hostname map once per response
     // and let the page label its rows from it.
     //
-    // Admin-only, matching `GET /api/v1/cluster/nodes`: machine names are an
-    // operator fact, and this page must not become the one place an ordinary
-    // household member can read the fleet's hostnames. Non-admins keep the node
-    // id they are already shown. A roster read that fails costs the page its
-    // labels, never the page.
+    // Present for every clustered admin read even when it is empty, so the
+    // field's presence answers "may this reader see machine names" and nothing
+    // else. Making an empty roster look identical to a refused one would leave
+    // the gate untestable from the wire.
     if clustered && user.0.is_admin {
-        match state.membership.node_hostnames().await {
-            Ok(hostnames) if !hostnames.is_empty() => {
-                response["node_hostnames"] = serde_json::to_value(hostnames)
-                    .map_err(|error| ApiError::Internal(error.to_string()))?;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                tracing::warn!(?error, "node hostnames unavailable for activity");
-            }
-        }
+        response["node_hostnames"] = serde_json::to_value(&hostnames)
+            .map_err(|error| ApiError::Internal(error.to_string()))?;
     }
     // Analysis is an operator concern: keep it out of ordinary household
     // responses, but make it a first-class part of the admin Activity page.
@@ -3477,6 +3502,31 @@ mod tests {
     }
 
     #[test]
+    fn a_roster_read_costs_the_page_its_labels_and_never_the_page() {
+        let source = include_str!("system.rs");
+        let reader = source
+            .split_once("async fn node_hostnames(state: &AppState")
+            .expect("the roster reader")
+            .1
+            .split_once("\nasync fn peer_activity(")
+            .expect("function after node_hostnames")
+            .0;
+        // A household member is refused before the roster is touched at all.
+        let refused = reader.find("if !is_admin {").expect("the admin gate");
+        let read = reader
+            .find("state.membership.node_hostnames().await")
+            .expect("the roster read");
+        assert!(refused < read);
+        // No `?`: a roster that will not answer must not turn the page into an
+        // error, and must not be reported as an empty roster either.
+        assert!(!reader.contains("node_hostnames().await?"));
+        assert!(reader.contains("Err(error) =>"));
+        assert!(reader.contains("tracing::warn!"));
+        // The cheap accessor, not the full membership status.
+        assert!(!reader.contains("membership.status()"));
+    }
+
+    #[test]
     fn machine_names_reach_the_activity_page_only_for_an_admin() {
         let source = include_str!("system.rs");
         let handler = source
@@ -3486,25 +3536,28 @@ mod tests {
             .split_once("\n/// DELETE /api/v1/activity/producer")
             .expect("handler after activity_detail")
             .0;
-        let published = handler
-            .find("response[\"node_hostnames\"]")
-            .expect("the activity page is sent the roster's machine names");
-        let gate = handler
-            .find("if clustered && user.0.is_admin {")
-            .expect("machine names are gated on the admin the roster is gated on");
         // `GET /api/v1/cluster/nodes` is `AdminUser`. This page is `AuthUser`,
         // so an ungated map here would make the activity page the one place an
         // ordinary household member can read the fleet's hostnames.
-        assert!(gate < published);
-        // A roster read that fails must cost the page its labels, not the page.
-        let read = handler
-            .find("state.membership.node_hostnames().await")
-            .expect("the roster read");
-        assert!(gate < read && read < published);
-        assert!(handler[read..].contains("Err(error) =>"));
-        assert!(!handler.contains("node_hostnames().await?"));
-        // The cheap accessor, not the full membership status.
-        assert!(!handler.contains("membership.status()"));
+        //
+        // Asserted as "the branch this line is inside", not "a gate appears
+        // somewhere above": an ungated `if clustered {` added immediately
+        // before the publish would satisfy the weaker form while leaking.
+        assert_eq!(
+            handler.matches("response[\"node_hostnames\"]").count(),
+            1,
+            "one publication site, or this test reasons about the wrong one"
+        );
+        let published = handler
+            .find("response[\"node_hostnames\"]")
+            .expect("the activity page is sent the roster's machine names");
+        let enclosing = handler[..published]
+            .rfind("if clustered")
+            .expect("the publication is inside a clustered branch");
+        assert!(
+            handler[enclosing..].starts_with("if clustered && user.0.is_admin {"),
+            "the branch the map is published from is not the admin branch"
+        );
     }
 
     #[test]
