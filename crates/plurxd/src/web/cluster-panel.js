@@ -347,9 +347,19 @@
         action:""});
     }
 
-    rows.push({title:"Leave this cluster",destructive:true,expand:"leave",expanded:showing("leave"),
-      reason:"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
-      action:disclose("leave","Leave","btn-danger")});
+    // A graceful leave is a membership change like any other: it has to commit
+    // through the same quorum, and it cannot start while another lifecycle
+    // change is in flight. It is stated with the same two conditions the Add row
+    // uses, rather than being the one row on a card headed "with its
+    // precondition already evaluated" that has none.
+    const leaveBlocked=locked||lifecycle;
+    rows.push({title:"Leave this cluster",destructive:true,expand:"leave",
+      expanded:showing("leave"),blocked:Boolean(leaveBlocked),
+      reason:locked?locked.reason
+        :lifecycle?`A membership change is already in flight on ${name(lifecycle)}. Finish it before this node removes itself.`
+        :"This node resolves its owned work, commits its own removal, drains and shuts down. Rejoining needs a fresh data directory and a new token.",
+      action:leaveBlocked?`<button class="btn-danger sm" disabled>Leave</button>`
+        :disclose("leave","Leave","btn-danger")});
     return rows;
   }
 

@@ -356,9 +356,11 @@ that same place and nowhere else, because a join token is shown exactly once
 and two surfaces that mint one are two surfaces to leak it from. Whether a row
 is expanded is held for as long as the panel is on screen and is never written
 to browser storage, so a fresh page always starts collapsed and a status
-refresh cannot pull the panel shut while you are reading a token. A blocked
-row has no expansion at all — the blocked reason is the whole row, rather than
-a disabled control you have to open to discover.
+refresh cannot pull the panel shut while you are reading a token. Both rows
+carry a precondition — a recovery that has locked membership, or a lifecycle
+change already in flight, blocks either one — and a blocked row has no
+expansion at all, so the blocked reason is the whole row rather than a disabled
+control you have to open to discover.
 
 A machine that is not in a cluster gets a shorter version of the same tab:
 the banner, a **Replicated database** section that names the backend and says
@@ -400,17 +402,29 @@ verdict, every node card's Operations group, and the ledger's Raft, WAL,
 snapshot and protocol readings is collected at most every fifteen seconds for
 as long as the tab is visible: it probes every voter, so it is not a
 two-second reading, and the restart-preparation flow that does need one keeps
-its own poll. Nothing is collected while the tab is hidden, and a probe slower
-than the interval is never stacked behind itself.
+its own poll. Nothing is collected while the tab is hidden, nothing is
+collected at all on a machine that is not in a cluster, and a probe slower than
+the interval is never overlapped. A refused collection retries at the next
+interval rather than the next tick.
 
 A collection is not a redraw. The panel repaints only when something it
-actually shows has changed — the ages in the payload are excluded from that
-comparison, so time passing on its own never rewrites the screen. When it does
-repaint, the roster's scroll position and any open **WAL, snapshot, and
-protocol details** come back with it. Between repaints the **Reading age** row
-is updated in place, because the one row whose job is freshness must not be
-the row that goes stale. Text selection cannot survive a repaint at all, which
-is the reason repaints are driven by change rather than by the clock.
+actually shows has changed. The comparison excludes the ages in the payload, so
+time passing on its own never rewrites the screen — but a cluster that is
+committing writes is genuinely changing what the ledger reports, and there the
+tab will repaint about as often as it collects. That is intended, so a repaint
+has to be survivable: the roster's scroll position, any open **WAL, snapshot,
+and protocol details**, and every control you have touched — the token's
+lifetime and role, the log level, the auto-refresh box — are all put back
+afterwards, and a repaint is deferred entirely while a dialog is open, then
+paid on the next collection after you close it. Between repaints the **Reading
+age** row is updated in place, because the one row whose job is freshness must
+not be the row that goes stale. Text selection is the one thing that cannot
+survive the rewrite, which is why repaints are driven by change and not by the
+clock.
+
+The restart-preparation poll is the exception: while a preparation is active it
+repaints every two seconds regardless, because the drain countdown is the whole
+point of that view.
 
 ### Planned node maintenance — fence, drain, update, resume
 

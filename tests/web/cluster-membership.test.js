@@ -108,9 +108,13 @@ function sandbox({ isAdmin = true, refusal = null, token = null, expanded = [] }
 }
 
 let failures = 0;
-function test(name, run) {
+// Awaited, and the exit code deferred to beforeExit — an async test whose body
+// is dropped on the floor prints PASS with zero assertions run, which is how
+// four behaviours once shipped with their coverage written and not executing.
+// Same harness as tests/web/page-read-budget.test.js; keep them identical.
+async function test(name, run) {
   try {
-    run();
+    await run();
     process.stdout.write(`PASS ${name}\n`);
   } catch (error) {
     failures += 1;
@@ -2330,6 +2334,66 @@ test("the token survives a repaint and never reaches storage", () => {
   assert.doesNotMatch(read, /rail|expand|token/i);
 });
 
+test("the expansion is a toggle over module state, and writes nothing down", () => {
+  // The fold's read side is a whitelist, but its write side Object.assigns any
+  // key it is handed — so the guarantee that a credential surface never reaches
+  // storage has to be asserted against the storage, not against a grep.
+  const storage = fakeStorage({ "plurx.cluster.fold": JSON.stringify({ database: true }) });
+  const panel = { hidden: true, scrollIntoView() {} };
+  const document = { getElementById: (id) => (id === "clrail-add" ? panel : null) };
+  const harness = new Function(
+    "document", "renderSettings", "repaintClusterPreserving", "localStorage",
+    `let CLUSTER_RAIL_EXPANDED=[];
+     ${shippedSource("toggleClusterRailPanel")}
+     return {toggle:toggleClusterRailPanel,state:()=>CLUSTER_RAIL_EXPANDED};`,
+  )(document, () => {}, (paint) => paint(), storage);
+
+  harness.toggle("add");
+  assert.deepEqual(harness.state(), ["add"]);
+  harness.toggle("add");
+  assert.deepEqual(harness.state(), [], "toggling twice closes it again");
+  assert.deepEqual(
+    JSON.parse(storage.read("plurx.cluster.fold")),
+    { database: true },
+    "the rail expansion left nothing behind in browser storage",
+  );
+});
+
+test("both membership rows carry an evaluated precondition", () => {
+  // Leave is a membership change like any other: it commits through the same
+  // quorum and cannot start while another lifecycle change is in flight. It was
+  // the one row on a card headed "with its precondition already evaluated" that
+  // had none.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ui = sandbox({ expanded: ["leave"] });
+  const open = ui.clusterOperationsRail(cluster, operationStatus(cluster));
+  assert.match(open, /<div class="clrailpanel" id="clrail-leave">/, "leave expands too, not just add");
+  assert.match(open, /leaveCluster\(this,/);
+
+  const recovering = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter", { reachable: false }),
+    node("node-c", 3, "voter", { reachable: false }),
+  ]);
+  recovering.recovery = { required: true, quorum_available: false, reachable_voters: 1, required_voters: 2, leader_elected: false };
+  const locked = railRows(ui, recovering, operationStatus(recovering)).get("Leave this cluster");
+  assert.equal(locked.blocked, true);
+  assert.match(locked.reason, /elected leader and a reachable voter majority/);
+  const lockedHtml = sandbox({ expanded: ["leave"] }).clusterOperationsRail(recovering, operationStatus(recovering));
+  assert.equal(lockedHtml.includes('id="clrail-leave"'), false, "a blocked row has no reachable control");
+  assert.equal(lockedHtml.includes("leaveCluster(this,"), false);
+
+  // A fenced node is a lifecycle change in flight, and the leave control the
+  // rail mounts still receives that state, so its own button stays disabled if
+  // the row is ever reached.
+  assert.match(shippedSource("clusterOperationsRail"), /leavePanel\(cluster\.local_node_id,maintenanceActive\)/);
+  assert.match(shippedSource("clusterOperationsRail"), /joinPanel\(maintenanceActive\)/);
+});
+
 test("the danger zone is gone, not renamed", () => {
   for (const trace of ["cldanger", "cldangerbody", "openClusterDanger", "Danger zone"]) {
     assert.equal(SHIPPED_UI.includes(trace), false, `index.html still ships ${trace}`);
@@ -2357,7 +2421,7 @@ test("the projection ignores what moves on its own and nothing else", () => {
   later.observed_at_unix_ms = (first.observed_at_unix_ms || 0) + 60_000;
   later.nodes.forEach((row) => {
     row.sample_age_ms = (row.sample_age_ms || 0) + 60_000;
-    if (row.membership) row.membership.last_seen_at = Date.now();
+    if (row.membership) row.membership.last_seen_at = (row.membership.last_seen_at || 0) + 60_000;
     if (row.status) {
       row.status.observed_at_unix_ms = (row.status.observed_at_unix_ms || 0) + 60_000;
       row.status.raft.sample_age_seconds = (row.status.raft.sample_age_seconds || 0) + 60;
@@ -2392,23 +2456,34 @@ function tickHarness({ cluster, ops, now }) {
   const requests = [];
   const painted = [];
   const readingAge = { innerHTML: "local now · watermark now" };
+  const dialogs = [];
   const document = {
     visibilityState: "visible",
     getElementById: (id) => (id === "cldb-reading-age" ? readingAge : null),
     querySelectorAll: () => [],
+    querySelector: (selector) =>
+      selector.includes("dialog[open]") ? dialogs.find((open) => open) || null : null,
   };
   const harness = new Function(
     "document", "location", "api", "settingsTab", "settingsCurrent", "refreshLogs",
-    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock",
+    "refreshClusterLogs", "paintTrakt", "renderSettings", "PlurxClusterPanel", "clock", "dialogs",
     `let PAGE_RENDER_GENERATION=1,AUTH_GENERATION=1,SETTINGS_TICKING=null,TRAKT_EDIT=false,
        TRAKT=null,CLUSTER_LOADED=true,CLUSTER_OPS_FETCHED_AT=0,
        SETTINGS_DATA=${JSON.stringify({ cluster, clusterOps: ops })},SETTINGS_LOADED=new Set(["cluster","clusterOps"]);
+     // What the tab painted when it opened, exactly as patchSettingsSecondary
+     // records it.
+     let CLUSTER_OPS_PAINTED=PlurxClusterPanel.clusterOpsProjection(SETTINGS_DATA.clusterOps);
      const cacheTrakt=(value)=>value;
      const Date={now:clock};
      ${shippedSource("clusterOpsInterval")}
      ${shippedSource("clusterOpsStamp")}
      ${shippedSource("clusterOpsDue")}
+     ${shippedSource("clusterOpsPainted")}
+     ${shippedSource("clusterOpsChanged")}
+     ${shippedSource("clusterRepaintDeferred")}
      ${shippedSource("repaintClusterPreserving")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
      ${shippedSource("clusterOpenDetailNodes")}
      ${shippedSource("patchClusterReadingAge")}
      ${shippedSource("clenv")}
@@ -2416,11 +2491,12 @@ function tickHarness({ cluster, ops, now }) {
      ${shippedSource("fmtAgo")}
      ${shippedSource("fmtBytes")}
      ${shippedSource("settingsTick")}
-     return {settingsTick,stamped:()=>CLUSTER_OPS_FETCHED_AT,ops:()=>SETTINGS_DATA.clusterOps};`,
+     return {settingsTick,stamped:()=>CLUSTER_OPS_FETCHED_AT,ops:()=>SETTINGS_DATA.clusterOps,
+       openDialog:(open)=>{dialogs.length=0;if(open)dialogs.push({});}};`,
   )(
     document,
     { hash: "#/settings" },
-    (url) => new Promise((resolve) => requests.push({ url, resolve })),
+    (url) => new Promise((resolve, reject) => requests.push({ url, resolve, reject })),
     () => "cluster",
     () => true,
     async () => {},
@@ -2429,11 +2505,12 @@ function tickHarness({ cluster, ops, now }) {
     () => painted.push("render"),
     PANEL,
     () => now.value,
+    dialogs,
   );
-  return { harness, requests, painted, readingAge };
+  return { harness, requests, painted, readingAge, dialogs };
 }
 
-test("the direct status refreshes on its own gate, and never stacks", async () => {
+test("the direct status collects on its own gate, and never overlaps", async () => {
   const cluster = status("high_availability", [
     node("node-a", 1, "voter", { is_leader: true }),
     node("node-b", 2, "voter"),
@@ -2443,26 +2520,105 @@ test("the direct status refreshes on its own gate, and never stacks", async () =
   const now = { value: 1_000_000 };
   const { harness, requests } = tickHarness({ cluster, ops, now });
 
-  // Nothing is in flight and the clock has never been stamped, so the first
-  // tick collects the status.
+  // Fifteen seconds since the tab painted, so this tick collects — and stamps
+  // the clock BEFORE the await, at request time rather than at completion.
+  now.value += 15_000;
   const first = harness.settingsTick(1, "cluster");
   assert.deepEqual(requests.map((r) => r.url), ["/cluster/status"]);
   assert.equal(harness.stamped(), now.value, "the clock is stamped before the await");
+
   // A probe slower than the gate must not put a second fan-out behind itself.
   now.value += 20_000;
   await harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 1, "a slow probe is never stacked");
+  assert.equal(requests.length, 1, "a slow probe is never overlapped");
   requests[0].resolve(ops);
   await first;
 
+  // …and because the clock was stamped at request time, a probe that took
+  // twenty seconds does not also push the next collection twenty seconds out.
+  const prompt = harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 2, "a slow probe does not delay the next one by its own duration");
+  requests[1].resolve(ops);
+  await prompt;
+
   now.value += 9_000;
   await harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 1, "the 2s tick does not become a 2s fan-out");
+  assert.equal(requests.length, 2, "the 2s tick does not become a 2s fan-out");
   now.value += 7_000;
-  const due = harness.settingsTick(1, "cluster");
-  assert.equal(requests.length, 2, "fifteen seconds later it collects again");
-  requests[1].resolve(ops);
-  await due;
+  const dueAgain = harness.settingsTick(1, "cluster");
+  assert.equal(requests.length, 3, "fifteen seconds later it collects again");
+  requests[2].resolve(ops);
+  await dueAgain;
+});
+
+test("the gate is fifteen seconds, and a single machine is never polled", async () => {
+  // The interval is a measured trade-off, not an incidental number: the fan-out
+  // probes every voter, and the flow that needs 2s freshness has its own poll.
+  assert.match(shippedSource("clusterOpsInterval"), /return 15000;/);
+
+  // The overwhelmingly common install is one SQLite box. It renders no rail, no
+  // roster and no direct readings, so collecting a fan-out for it would be a
+  // request spent to learn nothing.
+  const solo = { unavailable: true, code: "membership_unavailable" };
+  const now = { value: 1_000_000 };
+  const { harness, requests } = tickHarness({ cluster: solo, ops: undefined, now });
+  now.value += 60_000;
+  await harness.settingsTick(1, "cluster");
+  assert.deepEqual(requests, [], "a non-clustered install polls nothing");
+});
+
+test("a refused collection still moves the freshness row", async () => {
+  // A failing collection is exactly when the age of the reading on screen
+  // matters most, so the row whose only job is freshness must not be the one
+  // that freezes.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted, readingAge } = tickHarness({
+    cluster, ops: operationStatus(cluster), now,
+  });
+  readingAge.innerHTML = "frozen";
+  now.value += 15_000;
+  const refused = harness.settingsTick(1, "cluster");
+  requests[0].reject(Object.assign(new Error("gateway"), { status: 502 }));
+  await refused;
+  assert.notEqual(readingAge.innerHTML, "frozen");
+  assert.deepEqual(painted, [], "a refusal does not repaint the tab");
+  assert.equal(harness.stamped(), now.value, "the retry is the next gate, not the next tick");
+});
+
+test("a decision in progress is never repainted out from under the operator", async () => {
+  // renderSettings() rewrites the whole tab, and the force-election dialog lives
+  // in that markup. A modal is a decision in progress; the repaint waits.
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  const ops = operationStatus(cluster);
+  const now = { value: 1_000_000 };
+  const { harness, requests, painted } = tickHarness({ cluster, ops, now });
+  const changed = JSON.parse(JSON.stringify(ops));
+  changed.verdict.safe_to_restart_one = !changed.verdict.safe_to_restart_one;
+
+  harness.openDialog(true);
+  now.value += 15_000;
+  const held = harness.settingsTick(1, "cluster");
+  requests[0].resolve(changed);
+  await held;
+  assert.deepEqual(painted, [], "the dialog was still open");
+
+  // Deferred, not dropped: the next collection after it closes pays the repaint,
+  // even though the payload has not changed again since.
+  harness.openDialog(false);
+  now.value += 15_000;
+  const paid = harness.settingsTick(1, "cluster");
+  requests[1].resolve(changed);
+  await paid;
+  assert.deepEqual(painted, ["render"], "the owed repaint landed once the modal closed");
 });
 
 test("a fetch is not a repaint, and the freshness row still ages", async () => {
@@ -2518,26 +2674,42 @@ test("every repaint on this tab preserves what the operator was looking at", () 
     detail: entry.detail,
   }));
   const list = { scrollTop: 420 };
+  const ttl = { id: "clttl", value: "3600" };
+  const role = { id: "clrole", value: "learner" };
+  const auto = { id: "cllogauto", type: "checkbox", checked: false, value: "on" };
+  const controls = { clttl: ttl, clrole: role, cllogauto: auto };
   const document = {
-    getElementById: (id) => (id === "cluster-node-list" ? list : null),
-    querySelectorAll: () => bodies,
+    getElementById: (id) => (id === "cluster-node-list" ? list : controls[id] || null),
+    querySelectorAll: (selector) => (selector.includes("clnodebody") ? bodies : [ttl, role, auto]),
   };
   const repaint = new Function(
     "document",
     `${shippedSource("clusterOpenDetailNodes")}
+     ${shippedSource("clusterControlValues")}
+     ${shippedSource("clusterRestoreControlValues")}
      ${shippedSource("repaintClusterPreserving")}
      return repaintClusterPreserving;`,
   )(document);
 
   repaint(() => {
-    // renderSettings() rewrites the markup: a fresh list at the top, and every
-    // drill-down back to its shipped default.
+    // renderSettings() rewrites the markup: a fresh list at the top, every
+    // drill-down back to its shipped default, and every control back to the
+    // value in the template.
     list.scrollTop = 0;
     bodies.forEach((body) => {
       body.detail.open = false;
     });
+    ttl.value = "600";
+    role.value = "voter";
+    auto.checked = true;
   });
   assert.equal(list.scrollTop, 420, "the roster scroller kept its place");
+  // A repaint between choosing a token's lifetime and clicking Create must not
+  // silently mint a ten-minute voter token instead of the hour-long read worker
+  // that was selected.
+  assert.equal(ttl.value, "3600");
+  assert.equal(role.value, "learner");
+  assert.equal(auto.checked, false);
   assert.deepEqual(
     bodies.map((body) => body.detail.open),
     [true, false],
@@ -2546,6 +2718,57 @@ test("every repaint on this tab preserves what the operator was looking at", () 
 });
 
 // ---- the module boundary ---------------------------------------------------
+
+test("the ledger's freshness cell is addressable, and the clock is stamped where the request is", () => {
+  const ui = sandbox();
+  const cluster = status("high_availability", [
+    node("node-a", 1, "voter", { is_leader: true }),
+    node("node-b", 2, "voter"),
+    node("node-c", 3, "voter"),
+  ]);
+  // patchClusterReadingAge finds this cell by id; without the id in the rendered
+  // markup the patch is a silent no-op and the row freezes.
+  const rows = PANEL.clusterDatabaseRows(ui.env, cluster, REPLICATION, operationStatus(cluster));
+  const age = rows.find((row) => row[0] === "Reading age");
+  assert.equal(age[3], "cldb-reading-age");
+  const panel = ui.clusterDatabasePanel(cluster, REPLICATION, cluster.capacity, operationStatus(cluster));
+  assert.match(panel, /<dd id="cldb-reading-age">/);
+  assert.match(shippedSource("patchClusterReadingAge"), /getElementById\("cldb-reading-age"\)/);
+  assert.match(shippedSource("patchClusterReadingAge"), /clusterReadingAge\(clenv\(\)/);
+
+  // Stamped where the request happens. loadSettingsKey serves a cached
+  // aggregate without a request, so stamping where the value is PAINTED would
+  // let a tab switch every ten seconds starve the refresh indefinitely.
+  assert.match(SHIPPED_UI, /clusterOps:\(\)=>api\("\/cluster\/status"\)\.then\(ops=>\{ clusterOpsStamp\(\); return ops; \}\)/);
+  assert.doesNotMatch(shippedSource("patchSettingsSecondary"), /clusterOpsStamp\(\)/);
+  assert.match(shippedSource("patchSettingsSecondary"), /clusterOpsPainted\(SETTINGS_DATA\.clusterOps\)/);
+});
+
+test("every path that rewrites this tab goes through the preserving repaint", () => {
+  // A bare renderSettings() on the Cluster tab throws away the roster scroll,
+  // the open drill-downs, and the half-filled token form. Both branches of the
+  // tick, the manual refresh, the restart poll, and the three controls that
+  // repaint from inside the rail all use the helper.
+  const tick = shippedSource("settingsTick");
+  assert.equal(
+    (tick.match(/repaintClusterPreserving\(renderSettings\)/g) || []).length,
+    2,
+    "both the roster branch and the direct-status branch preserve",
+  );
+  for (const handler of [
+    "refreshClusterOperations",
+    "pollLocalRestart",
+    "toggleClusterRailPanel",
+    "mintJoinToken",
+    "clearJoinToken",
+  ]) {
+    assert.match(
+      shippedSource(handler),
+      /repaintClusterPreserving\(renderSettings\)/,
+      `${handler} repaints without preserving what the operator was looking at`,
+    );
+  }
+});
 
 test("the model is a file, and the shell actually mounts it", () => {
   // A module nobody calls is the dead-feature failure mode this suite already
@@ -2580,4 +2803,6 @@ test("the model reaches for nothing the shell owns", () => {
   assert.match(shippedSource("clenv"), /return \{esc,fmtAgo,fmtBytes\};/);
 });
 
-process.exit(failures ? 1 : 0);
+process.on("beforeExit", () => {
+  if (failures) process.exitCode = 1;
+});

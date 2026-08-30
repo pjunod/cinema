@@ -10717,7 +10717,10 @@ const SETTINGS_ENDPOINTS={
     if(error&&error.status===401) throw error;
     return {unavailable:true,code:error.code,message:error.message};
   }),
-  clusterOps:()=>api("/cluster/status"),
+  // Stamped here rather than where the value is painted: loadSettingsKey serves
+  // a cached aggregate without a request, and stamping that would let a tab
+  // switch every ten seconds starve the refresh indefinitely.
+  clusterOps:()=>api("/cluster/status").then(ops=>{ clusterOpsStamp(); return ops; }),
 };
 const SETTINGS_MANIFEST={
   libraries:{required:["settings","libs","status"],secondary:[]},
@@ -10777,7 +10780,7 @@ function patchSettingsSecondary(tab,key){
     if(mount) mount.innerHTML=playbackSummaryCard(SETTINGS_DATA.playbackEvents||[]);
   }
   if(tab==="cluster"&&key==="clusterOps"){
-    clusterOpsStamp();
+    clusterOpsPainted(SETTINGS_DATA.clusterOps);
     renderSettings();
   }
 }
@@ -11383,6 +11386,10 @@ let CLUSTER_LOADED=false;
 // fresh without a timer of its own. Every path that stores a new aggregate
 // stamps this; the tick reads it. See clusterOpsInterval().
 let CLUSTER_OPS_FETCHED_AT=0;
+// The projection of the aggregate the markup on screen was built from — not the
+// last one fetched. A repaint that had to be deferred is therefore still owed,
+// and the next tick pays it.
+let CLUSTER_OPS_PAINTED=null;
 // The last removal refusal, held so its sentence stays readable. A toast is
 // 2.2 seconds and these answers are paragraphs.
 let CLUSTER_REFUSAL=null;
@@ -11418,6 +11425,15 @@ function clenv(){ return {esc,fmtAgo,fmtBytes}; }
 function clusterOpsInterval(){ return 15000; }
 function clusterOpsStamp(){ CLUSTER_OPS_FETCHED_AT=Date.now(); }
 function clusterOpsDue(){ return Date.now()-CLUSTER_OPS_FETCHED_AT>=clusterOpsInterval(); }
+function clusterOpsPainted(ops){ CLUSTER_OPS_PAINTED=PlurxClusterPanel.clusterOpsProjection(ops); }
+function clusterOpsChanged(ops){ return PlurxClusterPanel.clusterOpsProjection(ops)!==CLUSTER_OPS_PAINTED; }
+// A modal is a decision in progress. renderSettings() rewrites the tab, and the
+// force-election dialog lives in that markup, so repainting under it would close
+// it mid-sentence. The repaint is deferred, not dropped: CLUSTER_OPS_PAINTED is
+// left where it was, so the next collection after the dialog closes pays it.
+function clusterRepaintDeferred(){
+  return Boolean(document.querySelector(".clusterwrap dialog[open]"));
+}
 // Which node cards have their "WAL, snapshot, and protocol details" open. A
 // drill-down is not layout, so it is never persisted to storage — it just has
 // to survive the repaint happening underneath it.
@@ -11441,13 +11457,35 @@ function repaintClusterPreserving(paint){
   const list=document.getElementById("cluster-node-list");
   const scroll=list?list.scrollTop:0;
   const open=clusterOpenDetailNodes();
+  const controls=clusterControlValues();
   paint();
   const painted=document.getElementById("cluster-node-list");
   if(painted) painted.scrollTop=scroll;
+  clusterRestoreControlValues(controls);
   if(!open.length) return;
   document.querySelectorAll("#cluster-node-list .clnodebody").forEach(body=>{
     const detail=body.querySelector(".clnodedetail");
     if(detail&&open.indexOf(body.getAttribute("data-node"))!==-1) detail.open=true;
+  });
+}
+// Every choice the operator has made in this panel that lives only in the
+// markup: the token's lifetime and role, the log level, the auto-refresh box.
+// A repaint rebuilds them from their defaults, so a status refresh arriving
+// between choosing "1 hour · read worker" and clicking Create would silently
+// mint a ten-minute VOTER token. Captured by id and put back.
+function clusterControlValues(){
+  const values=[];
+  document.querySelectorAll(".clusterwrap select[id],.clusterwrap input[id]").forEach(control=>{
+    values.push({id:control.id,value:control.value,checked:control.checked});
+  });
+  return values;
+}
+function clusterRestoreControlValues(values){
+  (values||[]).forEach(saved=>{
+    const control=document.getElementById(saved.id);
+    if(!control) return;
+    if(control.type==="checkbox"||control.type==="radio") control.checked=saved.checked;
+    else if(saved.value!==undefined&&saved.value!==null) control.value=saved.value;
   });
 }
 // The one reading that moves without a new fetch. When the projection has not
@@ -11747,7 +11785,7 @@ async function refreshClusterOperations(btn){
     const ops=await loadSettingsKey("clusterOps",generation);
     if(settingsCurrent(generation,"cluster")){
       SETTINGS_DATA.clusterOps=ops;
-      clusterOpsStamp();
+      clusterOpsPainted(ops);
       repaintClusterPreserving(renderSettings);
     }
   }catch(error){
@@ -11786,9 +11824,12 @@ async function pollLocalRestart(nodeId,generation){
       if(!settingsCurrent(generation,"cluster")) return;
       SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
       // The restart poll owns freshness while it runs, so it stamps the same
-      // clock the tick reads: the two never probe the fan-out at once.
+      // clock the tick reads: the two never probe the fan-out at once. It
+      // repaints every two seconds by design — the drain countdown is the point
+      // of the view — but never under an open modal.
       clusterOpsStamp();
-      repaintClusterPreserving(renderSettings);
+      clusterOpsPainted(ops);
+      if(!clusterRepaintDeferred()) repaintClusterPreserving(renderSettings);
       const local=(ops.nodes||[]).find(row=>row.membership&&row.membership.node_id===nodeId);
       const media=local&&local.status&&local.status.media;
       if(!media||!media.new_admissions_blocked||media.drained) return;
@@ -12176,7 +12217,7 @@ async function mintJoinToken(btn){
     toast(e.message||"Couldn't create a join token");
   }
 }
-function clearJoinToken(){ forgetJoinToken(); renderSettings(); }
+function clearJoinToken(){ forgetJoinToken(); repaintClusterPreserving(renderSettings); }
 async function copyJoinToken(){
   if(!CLUSTER_TOKEN) return;
   try{
@@ -12353,17 +12394,30 @@ async function settingsTick(generation=PAGE_RENDER_GENERATION,tab=settingsTab())
       // here rather than on a timer of its own because this loop already owns
       // the cadence, the generation guard, the visibility check, and the
       // re-entrancy latch, and a second loop would have to reimplement all four.
-      if(clusterOpsDue()){
+      //
+      // Only on a machine that is actually in a cluster: a single SQLite box
+      // renders no rail, no roster and no direct readings, so collecting a
+      // fan-out it will not paint is a request spent to learn nothing.
+      if(current&&!current.unavailable&&clusterOpsDue()){
         // Stamped BEFORE the await: a probe slower than the gate must not stack
-        // a second fan-out behind itself.
+        // a second fan-out behind itself. A refusal leaves it stamped too — the
+        // retry is the next gate, not the next tick — but the freshness row
+        // still has to move, because a failing collection is exactly when the
+        // age of the reading on screen matters most.
         clusterOpsStamp();
-        const previous=SETTINGS_DATA.clusterOps;
-        const ops=await api("/cluster/status");
-        if(!settingsCurrent(generation,tab)) return;
-        SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
-        if(PlurxClusterPanel.clusterOpsProjection(previous)!==PlurxClusterPanel.clusterOpsProjection(ops))
-          repaintClusterPreserving(renderSettings);
-        else patchClusterReadingAge();
+        try{
+          const ops=await api("/cluster/status");
+          if(!settingsCurrent(generation,tab)) return;
+          SETTINGS_DATA.clusterOps=ops; SETTINGS_LOADED.add("clusterOps");
+          if(clusterOpsChanged(ops)&&!clusterRepaintDeferred()){
+            clusterOpsPainted(ops);
+            repaintClusterPreserving(renderSettings);
+          }else patchClusterReadingAge();
+        }catch(error){
+          if(error&&error.status===401) throw error;
+          if(!settingsCurrent(generation,tab)) return;
+          patchClusterReadingAge();
+        }
       }
     }
     await Promise.all(secondary);

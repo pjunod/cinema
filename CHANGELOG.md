@@ -56,9 +56,11 @@ bump may break compatibility and a **patch** bump never does.
   arithmetic, the state banner's sentences, the refusal catalogue, the direct
   status readers, the rail's rows and preconditions, and the database ledger
   now live in `cluster-panel.js`, served like `playback-policy.js` and required
-  directly by the tests. No behaviour changed: eighteen of the twenty-six moved
-  functions are byte-identical, and the rest differ only by taking the shell's
-  escaping and formatting helpers as an argument instead of reaching for them.
+  directly by the tests. The extraction itself changed no behaviour — most of
+  the moved functions are byte-identical to what shipped inline, and the rest
+  differed only by taking the shell's escaping, formatting and storage handles
+  as arguments instead of reaching for them; the behaviour changes above were
+  made on top of that boundary, in their own commits.
 
 - **The Cluster tab is laid out around its two components.** The replicated
   database had no section of its own: watch state was one run-on sentence
@@ -70,8 +72,8 @@ bump may break compatibility and a **patch** bump never does.
   snapshot and WAL health, the active protocol range, and how old those
   readings are — all from projections the panel already fetched, with no new
   endpoint and no new measurement. **Cluster nodes** sits beside it,
-  **Maintenance** collects the restart-readiness verdict, planned work, and
-  the Danger zone, and **Troubleshooting** collects the cluster log, the
+  **Maintenance** collects the restart-readiness verdict and the operations
+  rail, and **Troubleshooting** collects the cluster log, the
   quorum and sample readings, and the last refusal behind one tab strip.
   Missing readings say `unknown` rather than borrowing a neighbouring field, a
   proven-unavailable store says so instead, and a machine that is not in a
