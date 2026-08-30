@@ -30620,19 +30620,36 @@ mod tests {
         );
         opts.pipeline = Pipeline::Cpu;
         let sw_pool = mgr.admissions.software_pool();
-        let _ = TranscodeManager::downgrade_one_step(
-            &session,
+        // Retirement has already won. The production retry executor is the
+        // thing that must refuse to resurrect an encoder afterwards, so it is
+        // what this regression drives — the retired ladder helper would prove
+        // nothing about the path production takes.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             EffectiveRateControl::Vbr,
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "retirement-first",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
+        )
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        let refused = execute_prepublication_transcode_retry(
+            Arc::clone(&session),
+            &retry,
+            1,
+            1,
+            &retry.actor_recipe,
+            crate::playback_control::ProducerDecisionReason::ProgressDeadline,
+            "retirement-first",
         )
         .await;
+        assert!(
+            refused.is_err(),
+            "a retired session must refuse the retry rather than install a successor"
+        );
 
         assert!(session.control.is_retired());
         assert!(
