@@ -3505,6 +3505,10 @@ enum RollingControlCommand {
         desired_hold: bool,
         reply: tokio::sync::oneshot::Sender<ProducerFlowIntentionOutcome>,
     },
+    SettleProducerFlowSignal {
+        producer_attempt: u64,
+        reply: tokio::sync::oneshot::Sender<bool>,
+    },
     Snapshot {
         reply: tokio::sync::oneshot::Sender<RollingLeaseSnapshot>,
     },
@@ -3545,6 +3549,7 @@ impl RollingControlCommand {
             Self::ExecutorSettled { .. } => Some(17),
             Self::ClassifyCopyProducerExit { .. } => Some(18),
             Self::ApplyProducerFlow { .. } => Some(19),
+            Self::SettleProducerFlowSignal { .. } => Some(20),
             Self::ObservePublication { .. } => Some(4),
             Self::CommitMedia { .. } => Some(5),
             Self::CommitGenerationMetadata { .. } => Some(14),
@@ -6922,6 +6927,13 @@ impl RollingControlActor {
                     }
                     let _ = reply.send(committed);
                 }
+                RollingControlCommand::SettleProducerFlowSignal {
+                    producer_attempt,
+                    reply,
+                } => {
+                    let diverged = self.settle_producer_flow_signal(producer_attempt);
+                    let _ = reply.send(diverged);
+                }
                 RollingControlCommand::ApplyProducerFlow {
                     producer_attempt,
                     desired_hold,
@@ -7638,6 +7650,40 @@ impl RollingControlHandle {
     /// Publish the executor's one bounded, exact-attempt natural-exit proof.
     /// Command sealing orders the proof after its exit barrier; the actor's
     /// existing `ClassifyingExit` deadline remains the only verdict clock.
+    /// Release the outstanding-signal claim after a signal attempt that
+    /// published no acknowledgement barrier — a failed or refused syscall.
+    ///
+    /// A successful signal settles itself when its `FlowApplied` barrier is
+    /// folded. Without this path a failure would leave the actor believing a
+    /// signal were forever in flight, and every later desire would coalesce
+    /// behind a signal that no longer exists. Returns whether the desire still
+    /// diverges from the applied state.
+    pub(crate) async fn settle_producer_flow_signal_before(
+        &self,
+        producer_attempt: u64,
+        deadline: Instant,
+    ) -> bool {
+        let (reply, response) = tokio::sync::oneshot::channel();
+        if self
+            .enqueue_command_before(
+                RollingControlCommand::SettleProducerFlowSignal {
+                    producer_attempt,
+                    reply,
+                },
+                deadline,
+            )
+            .await
+            .is_err()
+        {
+            return false;
+        }
+        tokio::time::timeout_at(tokio::time::Instant::from_std(deadline), response)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or(false)
+    }
+
     /// Put one desired physical-flow state on the shared actor sequence and
     /// learn whether this caller owns the next signal.
     ///
@@ -8366,7 +8412,7 @@ static ROLLING_PRODUCER_EVENT_OUTCOMES: [AtomicU64; 4] = [const { AtomicU64::new
 static ROLLING_PRODUCER_FLOW_DEFERRALS: AtomicU64 = AtomicU64::new(0);
 static ROLLING_PRODUCER_DEADLINE_OBSERVATIONS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 static ROLLING_PRODUCER_EXIT_CLASSIFICATIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-static ROLLING_CONTROL_COMMANDS: [AtomicU64; 20] = [const { AtomicU64::new(0) }; 20];
+static ROLLING_CONTROL_COMMANDS: [AtomicU64; 21] = [const { AtomicU64::new(0) }; 21];
 /// End won/already-terminal, authority-fence won/already-terminal, then lease
 /// expiry won/already-terminal.
 static ROLLING_TERMINAL_EVENT_OUTCOMES: [AtomicU64; 6] = [const { AtomicU64::new(0) }; 6];
@@ -8656,6 +8702,7 @@ pub(crate) fn prometheus() -> String {
         "executor_settled",
         "classify_copy_producer_exit",
         "apply_producer_flow",
+        "settle_producer_flow_signal",
     ]
     .iter()
     .enumerate()

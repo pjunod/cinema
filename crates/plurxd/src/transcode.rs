@@ -246,6 +246,14 @@ const ACTOR_SOFTWARE_STARTUP_BUDGET: Duration = Duration::from_secs(30);
 /// How long ffmpeg's output timestamp may sit still. It is the actor's
 /// progress budget for every actor-managed rolling producer.
 #[cfg(any(test, feature = "live-hls-recovery"))]
+/// How long a flow evaluation waits for the actor to order its desire.
+///
+/// This bounds a mailbox round trip, not a producer: it selects no recipe,
+/// publishes no response and starts no process. A caller that cannot be
+/// ordered within it simply does not signal, and the next evaluation tries
+/// again.
+const FLOW_INTENTION_BUDGET: Duration = Duration::from_secs(5);
+
 const PROGRESS_STALL: Duration = Duration::from_secs(10);
 /// One typed copy-reader fact is a bounded actor ingress operation. This is
 /// separate from the actor's own five-second two-fact rendezvous, which starts
@@ -19269,6 +19277,26 @@ impl TranscodeManager {
             }
             return;
         }
+        // The desire goes on the actor sequence before any syscall, and the
+        // reply is the only authorization to make one. Two flow evaluations
+        // used to reach this point believing each owned the next signal,
+        // because the only shared state was the `suspended` atomic read at the
+        // top of this function; the actor now settles that ordering. A desire
+        // that arrives while a signal is outstanding coalesces into the newest
+        // revision and returns here without signalling, and the next
+        // evaluation applies it once the acknowledgement lands.
+        let producer_attempt = session.control.current_producer_attempt();
+        let intention_deadline = Instant::now() + FLOW_INTENTION_BUDGET;
+        match session
+            .control
+            .request_producer_flow_before(producer_attempt, want_suspend, intention_deadline)
+            .await
+        {
+            crate::playback_control::ProducerFlowIntentionOutcome::Issue { .. } => {}
+            crate::playback_control::ProducerFlowIntentionOutcome::Coalesced
+            | crate::playback_control::ProducerFlowIntentionOutcome::Settled
+            | crate::playback_control::ProducerFlowIntentionOutcome::Rejected => return,
+        }
         let signal = if want_suspend {
             libc::SIGSTOP
         } else {
@@ -19285,6 +19313,17 @@ impl TranscodeManager {
             }
         };
         if !sent {
+            // A failed or refused syscall publishes no acknowledgement
+            // barrier, so the actor's outstanding claim has to be released
+            // here or every later desire coalesces behind a signal that no
+            // longer exists.
+            let _ = session
+                .control
+                .settle_producer_flow_signal_before(
+                    producer_attempt,
+                    Instant::now() + FLOW_INTENTION_BUDGET,
+                )
+                .await;
             return;
         }
         if !want_suspend {
