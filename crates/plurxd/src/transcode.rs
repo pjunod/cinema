@@ -1985,10 +1985,12 @@ async fn own_published_attempt_cleanup(
     };
     loop {
         let outcome = {
-            // Copy replacement and ordinary retirement still use this
-            // compatibility gate. Actor-managed transcodes never replace a
-            // published attempt, but sharing the gate keeps this slice ordered
-            // with a simultaneous explicit End until the copy cut removes it.
+            // Retirement still uses this gate, so cleanup stays ordered with
+            // a simultaneous explicit End. The comment here used to promise
+            // that the copy cut would remove the need for it; that cut landed
+            // in #642 and the need remains, because the gate's remaining job
+            // is retirement ordering rather than copy replacement. Actor-
+            // managed transcodes never replace a published attempt.
             let _transition = session.child_transition.lock().await;
             if session.retirement_cleanup_finished.load(Acquire) {
                 Ok(PublishedFailureCleanupOutcome::RetirementTookOwnership)
