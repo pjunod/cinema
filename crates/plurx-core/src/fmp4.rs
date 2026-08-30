@@ -924,6 +924,178 @@ pub fn promote_hevc_parameter_sets_from(
     Ok(true)
 }
 
+/// A Dolby Vision decoder configuration record, as it sits in a sample entry.
+///
+/// 24 bytes, and the only four fields anything downstream reads. The rest of
+/// the record is a reserved tail that is zero in every stream plurx produces
+/// or ingests.
+///
+/// The box has two names for one payload: `dvcC` for profiles up to 7 and
+/// `dvvC` for 8 and above. Which one a muxer writes is a fact about the muxer,
+/// not about the stream, so [`DolbyVisionRecord`] carries the profile and the
+/// caller's writer picks the name from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DolbyVisionRecord {
+    /// 5, 7, 8, 9, 10 — what the stream actually is.
+    pub profile: u8,
+    /// The level, carried through unchanged; nothing in plurx reads it.
+    pub level: u8,
+    /// Whether an enhancement layer is present **in these bytes**.
+    ///
+    /// This is the field the spike found lying: dropping the EL NAL units
+    /// with `filter_units=remove_types=63` does not touch the record ffmpeg
+    /// copied out of the source container, so a stripped Profile 7 stream
+    /// goes out still declaring an enhancement layer that is no longer in it.
+    pub el_present: bool,
+    /// Whether an RPU is present.
+    pub rpu_present: bool,
+    /// Whether a base layer is present — true in every real stream, and
+    /// carried because it is a bit in the record and dropping it on a rewrite
+    /// would change bytes a decoder reads.
+    pub bl_present: bool,
+    /// `dv_bl_signal_compatibility_id`: 1/6 = HDR10 base, 4 = HLG, 2 = SDR,
+    /// 0 = none. It is what the HLS master playlist's `dvh1.08.NN` suffix is
+    /// built from, so it must survive any rewrite unchanged.
+    pub bl_signal_compatibility_id: u8,
+}
+
+impl DolbyVisionRecord {
+    /// The box name for this profile: `dvvC` at 8 and above, `dvcC` below.
+    pub fn box_name(&self) -> [u8; 4] {
+        if self.profile >= 8 {
+            *b"dvvC"
+        } else {
+            *b"dvcC"
+        }
+    }
+
+    /// Parse the 24-byte payload.
+    ///
+    /// Bit layout, big-endian across bytes 2-3 (bytes 0-1 are the version
+    /// pair): `profile:7 | level:6 | rpu_present:1 | el_present:1 |
+    /// bl_present:1`. The compatibility id is the high nibble of byte 4, and
+    /// everything after it is reserved and zero.
+    fn parse(payload: &[u8]) -> Result<DolbyVisionRecord, Fmp4Error> {
+        if payload.len() < 24 {
+            return malformed("Dolby Vision configuration record is shorter than 24 bytes");
+        }
+        let packed = u16::from_be_bytes([payload[2], payload[3]]);
+        Ok(DolbyVisionRecord {
+            profile: ((packed >> 9) & 0x7f) as u8,
+            level: ((packed >> 3) & 0x3f) as u8,
+            rpu_present: (packed >> 2) & 1 == 1,
+            el_present: (packed >> 1) & 1 == 1,
+            bl_present: packed & 1 == 1,
+            bl_signal_compatibility_id: (payload[4] >> 4) & 0x0f,
+        })
+    }
+
+    /// The 24-byte payload for this record.
+    ///
+    /// `dv_version_major` is 1 and `dv_version_minor` 0, which is what every
+    /// consumer stream carries and what ffmpeg writes. The reserved tail is
+    /// zero, which the spec requires.
+    fn to_payload(self) -> [u8; 24] {
+        let mut out = [0u8; 24];
+        out[0] = 1;
+        out[1] = 0;
+        let packed = (u16::from(self.profile & 0x7f) << 9)
+            | (u16::from(self.level & 0x3f) << 3)
+            | (u16::from(self.rpu_present) << 2)
+            | (u16::from(self.el_present) << 1)
+            | u16::from(self.bl_present);
+        out[2..4].copy_from_slice(&packed.to_be_bytes());
+        out[4] = (self.bl_signal_compatibility_id & 0x0f) << 4;
+        out
+    }
+}
+
+/// The Dolby Vision configuration this init declares, if it declares one.
+pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp4Error> {
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Ok(None);
+    };
+    let Some((_, payload)) = location.dolby_vision else {
+        return Ok(None);
+    };
+    DolbyVisionRecord::parse(&init.bytes[payload]).map(Some)
+}
+
+/// Write `record` into this init's video sample entry, replacing whatever
+/// configuration was there.
+///
+/// Two callers, one mechanism (M5a-0, `docs/PLAYBACK-CAPS-V2-M0.md` §8):
+///
+/// - **The conversion.** ffmpeg does not derive this record from the RPU — it
+///   copies the one the input container had, and the P7→P8.1 pipe feeds it a
+///   raw Annex B stream with no container at all. So its output carries
+///   correct Profile 8.1 RPUs inside `mdat` and nothing in the sample entry to
+///   say so, and this writer supplies the record.
+/// - **The strip.** Dropping the enhancement-layer NAL units does not touch a
+///   record ffmpeg copied verbatim, so today a stripped Profile 7 stream still
+///   declares `el_present_flag=1` over bytes with no enhancement layer. The
+///   same writer corrects it.
+///
+/// Answers whether the init changed. Replacing a record with an identical one
+/// is a no-op, which matters: an init that is byte-identical across generations
+/// has to stay that way.
+pub fn set_dolby_vision_record(
+    init: &mut Init,
+    record: DolbyVisionRecord,
+) -> Result<bool, Fmp4Error> {
+    let Some(location) = locate_hvcc(&init.bytes)? else {
+        return Err(Fmp4Error::Unsupported(
+            "no HEVC video sample entry to carry a Dolby Vision record".into(),
+        ));
+    };
+    let payload = record.to_payload();
+    let name = record.box_name();
+
+    if let Some((existing_name, existing)) = location.dolby_vision {
+        if existing_name == name
+            && existing.len() == payload.len()
+            && init.bytes[existing.clone()] == payload
+        {
+            return Ok(false);
+        }
+        // The payload is a fixed 24 bytes in both spellings, so an in-place
+        // rewrite changes no size anywhere — including when only the box's
+        // NAME changes, which is what a profile 7 record becoming a profile 8
+        // one does. Nothing above needs to grow.
+        if existing.len() == payload.len() {
+            init.bytes[existing.start - 4..existing.start].copy_from_slice(&name);
+            init.bytes[existing].copy_from_slice(&payload);
+            return Ok(true);
+        }
+        return Err(Fmp4Error::Unsupported(format!(
+            "existing Dolby Vision record is {} bytes, not 24",
+            existing.len()
+        )));
+    }
+
+    // No record at all: append one at the end of the sample entry, and grow
+    // every box that contains it. `sample_entry_end` is the end of the entry's
+    // child boxes, so this lands after hvcC and any mdcv/clli.
+    let mut boxed = Vec::with_capacity(8 + payload.len());
+    boxed.extend_from_slice(
+        &u32::try_from(8 + payload.len())
+            .expect("24-byte record")
+            .to_be_bytes(),
+    );
+    boxed.extend_from_slice(&name);
+    boxed.extend_from_slice(&payload);
+    let delta = boxed.len();
+    let at = location.sample_entry_end;
+    init.bytes.splice(at..at, boxed);
+    // `ancestors` is hvcC first, then the sample entry and its parents. The
+    // record goes beside hvcC rather than inside it, so hvcC itself does not
+    // grow — everything from the sample entry up does.
+    for &box_at in &location.ancestors[1..] {
+        grow_box(&mut init.bytes, box_at, delta)?;
+    }
+    Ok(true)
+}
+
 /// Whether the HEVC decoder configuration carries VPS, SPS, and PPS arrays.
 ///
 /// The minimal legal hvcC record carries none. It is parseable, but it cannot
@@ -1261,6 +1433,14 @@ struct HvcCLocation {
     parameter_sets_in_band: bool,
     has_mdcv: bool,
     has_clli: bool,
+    /// The Dolby Vision configuration record already in this sample entry, if
+    /// there is one: its four-character name and its payload range.
+    ///
+    /// Two names for one 24-byte record — `dvcC` is the profile ≤ 7 spelling
+    /// and `dvvC` the profile ≥ 8 one. Which one is present is a fact about
+    /// the muxer that wrote it, so both are found and the name is carried
+    /// rather than assumed.
+    dolby_vision: Option<([u8; 4], Range<usize>)>,
     /// hvcC first, then every enclosing box through moov.
     ancestors: Vec<BoxAt>,
 }
@@ -1316,6 +1496,16 @@ fn locate_hvcc(bytes: &[u8]) -> Result<Option<HvcCLocation>, Fmp4Error> {
                 parameter_sets_in_band: matches!(entry.kind(), b"hev1" | b"dvhe"),
                 has_mdcv: find_child(bytes, extra_start..extra_end, b"mdcv")?.is_some(),
                 has_clli: find_child(bytes, extra_start..extra_end, b"clli")?.is_some(),
+                dolby_vision: {
+                    let mut found = None;
+                    for name in [b"dvvC", b"dvcC"] {
+                        if let Some((at, hdr)) = find_child(bytes, extra_start..extra_end, name)? {
+                            found = Some((*name, at.start + hdr.header_len..at.start + hdr.size));
+                            break;
+                        }
+                    }
+                    found
+                },
                 ancestors: vec![
                     hvcc_at, entry_at, stsd_at, stbl_at, minf_at, mdia_at, trak_at, moov_at,
                 ],
@@ -3428,6 +3618,164 @@ mod tests {
             .expect("video track")
             .dolby_vision_config = true;
         init
+    }
+
+    /// The two Dolby Vision configuration records ffmpeg itself wrote, captured
+    /// from nuc4 on 2026-08-30 (`docs/PLAYBACK-CAPS-V2-M0.md` §8).
+    ///
+    /// These are the golden. The 24-byte payload is the whole contract between
+    /// plurx and every Dolby Vision decoder downstream, and the only way to
+    /// know a hand-written parser agrees with the muxers in the wild is to
+    /// take it from them.
+    const NATIVE_P8_DVVC: &str = "010010351000000000000000000000000000000000000000";
+    const STRIPPED_P7_DVCC: &str = "01000e376000000000000000000000000000000000000000";
+
+    /// Read an init back through the ordinary reader, from bytes.
+    fn reparse_init(bytes: &[u8]) -> Init {
+        let mut reader = FragmentReader::new();
+        reader.push(bytes);
+        match reader.next_unit().expect("the rewritten init parses") {
+            Some(Unit::Init(init)) => init,
+            other => panic!("expected an init, got {other:?}"),
+        }
+    }
+
+    fn hex(text: &str) -> Vec<u8> {
+        (0..text.len())
+            .step_by(2)
+            .map(|at| u8::from_str_radix(&text[at..at + 2], 16).expect("hex"))
+            .collect()
+    }
+
+    /// The parser agrees with ffmpeg, on records ffmpeg wrote.
+    ///
+    /// The second row is the bug M5a-0 found stated as a fact: a Profile 7
+    /// title whose enhancement-layer NAL units were dropped by
+    /// `filter_units=remove_types=63` still carries a record saying an
+    /// enhancement layer is there. ffmpeg copies the source container's record
+    /// verbatim and the bitstream filter never touches it, so the bytes and
+    /// the record disagree and a decoder is told to expect a layer that is not
+    /// in the stream.
+    #[test]
+    fn the_dolby_vision_record_reads_the_way_ffmpeg_writes_it() {
+        let native = DolbyVisionRecord::parse(&hex(NATIVE_P8_DVVC)).expect("native P8 record");
+        assert_eq!(
+            native,
+            DolbyVisionRecord {
+                profile: 8,
+                level: 6,
+                el_present: false,
+                rpu_present: true,
+                bl_present: true,
+                bl_signal_compatibility_id: 1,
+            }
+        );
+        assert_eq!(native.box_name(), *b"dvvC", "profile 8 and above is dvvC");
+
+        let stripped = DolbyVisionRecord::parse(&hex(STRIPPED_P7_DVCC)).expect("stripped P7");
+        assert_eq!(
+            stripped,
+            DolbyVisionRecord {
+                profile: 7,
+                level: 6,
+                // Wrong, and wrong in the shipped output — see the doc comment.
+                el_present: true,
+                rpu_present: true,
+                bl_present: true,
+                bl_signal_compatibility_id: 6,
+            }
+        );
+        assert_eq!(stripped.box_name(), *b"dvcC", "profile 7 and below is dvcC");
+
+        // And the writer is the parser's exact inverse, or a rewrite would
+        // silently drop a field nothing here reads but a decoder does.
+        for golden in [NATIVE_P8_DVVC, STRIPPED_P7_DVCC] {
+            let bytes = hex(golden);
+            let parsed = DolbyVisionRecord::parse(&bytes).expect("parse");
+            assert_eq!(
+                parsed.to_payload().as_slice(),
+                bytes.as_slice(),
+                "round trip of {golden}"
+            );
+        }
+    }
+
+    /// Correcting the stripped record is an in-place edit, and the conversion
+    /// is an insertion. Both have to leave a parseable init.
+    #[test]
+    fn writing_the_dolby_vision_record_keeps_the_box_tree_consistent() {
+        // An init with no record at all — the shape the P7→P8.1 pipe produces,
+        // because ffmpeg has no container record to copy and will not derive
+        // one from the RPU.
+        let feed = pipe("open-gop");
+        let (mut init, _, _) = read_all(&feed);
+        assert_eq!(
+            dolby_vision_record(&init).expect("read"),
+            None,
+            "the fixture starts with no Dolby Vision record"
+        );
+        let before = init.bytes.len();
+
+        let converted = DolbyVisionRecord {
+            profile: 8,
+            level: 6,
+            el_present: false,
+            rpu_present: true,
+            bl_present: true,
+            bl_signal_compatibility_id: 6,
+        };
+        assert!(set_dolby_vision_record(&mut init, converted).expect("insert"));
+        assert_eq!(
+            init.bytes.len(),
+            before + 32,
+            "24-byte payload plus an 8-byte box header"
+        );
+        assert_eq!(
+            dolby_vision_record(&init).expect("read back"),
+            Some(converted)
+        );
+
+        // The box tree still parses from scratch, which is the only check that
+        // proves every enclosing size was grown: the reader walks the sizes and
+        // would run off the end of a box whose parent was not resized.
+        let reparsed = reparse_init(&init.bytes);
+        assert!(
+            reparsed.video().expect("video track").dolby_vision_config,
+            "the record has to be visible to the ordinary parser, not just to the writer"
+        );
+
+        // Writing the same record again changes nothing. An init that is
+        // byte-identical across generations has to stay that way.
+        let stable = init.bytes.clone();
+        assert!(!set_dolby_vision_record(&mut init, converted).expect("idempotent"));
+        assert_eq!(init.bytes, stable);
+
+        // Correcting a record in place changes no size anywhere — including
+        // when the box NAME changes, which is exactly what a profile 7 record
+        // becoming a profile 8 one does.
+        let length = init.bytes.len();
+        let as_p7 = DolbyVisionRecord {
+            profile: 7,
+            el_present: true,
+            ..converted
+        };
+        assert!(set_dolby_vision_record(&mut init, as_p7).expect("rewrite"));
+        assert_eq!(init.bytes.len(), length, "a rename is not a resize");
+        assert_eq!(dolby_vision_record(&init).expect("read back"), Some(as_p7));
+        reparse_init(&init.bytes);
+
+        // …and back, which is the strip-path correction: same profile, EL flag
+        // told the truth.
+        let corrected = DolbyVisionRecord {
+            el_present: false,
+            ..as_p7
+        };
+        assert!(set_dolby_vision_record(&mut init, corrected).expect("correct"));
+        assert_eq!(init.bytes.len(), length);
+        assert_eq!(
+            dolby_vision_record(&init).expect("read back"),
+            Some(corrected)
+        );
     }
 
     fn strip_hvcc_arrays(init: &mut Init) {
