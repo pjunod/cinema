@@ -1906,8 +1906,18 @@ fn system_info(
         // is the off switch, and the default is on — a Profile 7 title that
         // reaches a Dolby Vision client as HDR10 is the thing this exists to
         // stop, so it should not need enabling.
-        dolby_vision_convert: !std::env::var("PLURX_DV_CONVERT")
-            .is_ok_and(|value| matches!(value.trim(), "0" | "false" | "off" | "no")),
+        //
+        // Case-folded, like every other boolean switch plurx reads
+        // (`PLURX_PGS_OVERLAY`, `state.rs:579`). An operator who writes
+        // `PLURX_DV_CONVERT=OFF` in a compose file means off; a switch that
+        // quietly ignored them would leave the feature on with nothing to
+        // explain why.
+        dolby_vision_convert: !std::env::var("PLURX_DV_CONVERT").is_ok_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "0" | "false" | "off" | "no"
+            )
+        }),
     }
 }
 

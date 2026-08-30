@@ -2700,6 +2700,76 @@ mod tests {
         ));
     }
 
+    /// The same exclusions, decided from the stored columns rather than the
+    /// label — which is the branch that actually runs.
+    ///
+    /// M2 populates `dv_profile` and `bl_compat_id` from the container, and
+    /// both `dolby_vision_profile` and `has_hdr10_dv_base` prefer them; the
+    /// label parse is the fallback for rows scanned before those columns
+    /// existed. A suite that only sets label strings therefore leaves the
+    /// production path uncovered — widening the compatibility set from `1 | 6`
+    /// to `1 | 4 | 6`, which would convert an HLG-based Profile 7 into an
+    /// HDR10-labelled 8.1 and get every frame's transfer function wrong,
+    /// passes every label-only test there is.
+    #[test]
+    fn the_conversion_reads_the_stored_columns_not_only_the_label() {
+        let client = {
+            let mut profile = caps_profile(
+                vec!["mkv".into()],
+                vec!["hevc".into()],
+                vec!["aac".into()],
+                None,
+                true,
+                false,
+            );
+            profile.dolby_vision_profiles = vec![5, 8];
+            profile
+        };
+        let node = RenderCaps::proven(true);
+
+        // No label at all, so nothing but the columns can answer.
+        let source = |dv_profile: i64, compat: i64| {
+            let mut file = file("mkv", "hevc", "aac");
+            file.hdr = Some("dolby_vision".into());
+            file.hdr_format = None;
+            file.dolby_vision.profile = Some(dv_profile);
+            file.dolby_vision.bl_compat_id = Some(compat);
+            file
+        };
+
+        // 1 and 6 are the two ids that mean an HDR10 base layer, and an HDR10
+        // base layer is what 8.1 is defined as. Both convert.
+        for compat in [1, 6] {
+            assert!(
+                dolby_vision_converts_to_p81(&source(7, compat), &client, &node),
+                "compatibility id {compat} is an HDR10 base"
+            );
+        }
+
+        // Everything else is a different base, and plurx has a rung for none
+        // of them: 4 is HLG (whose target would be 8.4), 2 is SDR, 0 is a base
+        // no client can watch on its own.
+        for (compat, what) in [(4, "HLG"), (2, "SDR"), (0, "none")] {
+            assert!(
+                !dolby_vision_converts_to_p81(&source(7, compat), &client, &node),
+                "a {what} base is not the HDR10 one profile 8.1 promises"
+            );
+        }
+
+        // And the profile column gates it exactly as the label did.
+        assert!(!dolby_vision_converts_to_p81(&source(5, 1), &client, &node));
+        assert!(!dolby_vision_converts_to_p81(&source(8, 1), &client, &node));
+
+        // A column and a label that disagree: the column wins, because it came
+        // out of the container and the label came out of a scanner's prose.
+        let mut contradicted = source(7, 4);
+        contradicted.hdr_format = Some("Dolby Vision · Profile 7 (HDR10-compatible)".into());
+        assert!(
+            !dolby_vision_converts_to_p81(&contradicted, &client, &node),
+            "the stored compatibility id is the fact; the label is the fallback"
+        );
+    }
+
     /// The two-entry HEVC ladder that replaces the web's min-of-rungs hack —
     /// and the fallback that decides what an unknown profile gets.
     ///

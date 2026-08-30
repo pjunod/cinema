@@ -363,8 +363,22 @@ impl CopyVideoOptions {
     /// fragment index is keyed by. A converted stream is a different stream
     /// and must get its own index identity, or a client would be served
     /// segments cut for the unconverted one.
+    ///
+    /// **Converting implies preserving**, and this method enforces it rather
+    /// than trusting the caller. The decider reaches the conversion by way of
+    /// a client that refuses Profile 7 — which is exactly the client `decide`
+    /// answers `preserve_dolby_vision = false` for. That answer renders
+    /// `dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63`, which deletes
+    /// the type-62 units this conversion exists to rewrite. The stage would
+    /// then report `rpus: 0` and pass plain HDR10 through while the badge, the
+    /// playlist and the configuration record all claimed Profile 8.1. There is
+    /// no argv shape where a converting copy wants a stripping bitstream
+    /// filter, so the invariant lives here and not in each caller (plan §4.8).
     pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
         self.dv_convert = convert;
+        if convert {
+            self.preserve_dolby_vision = true;
+        }
         self
     }
 
@@ -1499,7 +1513,7 @@ fn copy_input_args(
     }
     args.push("-sn".into());
 
-    args.extend(copy_video_args(source, video));
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
 
     if transcode_audio {
         // The correction rides the encode as a filter — same input, no
@@ -1573,7 +1587,7 @@ pub fn copy_index_pipe_args_with_input(
     args.push("0:v:0?".into());
     args.push("-an".into());
     args.push("-sn".into());
-    args.extend(copy_video_args(source, video));
+    args.extend(strip_plurx_markers(&copy_video_args(source, video)));
     args.extend(
         [
             "-avoid_negative_ts",
@@ -3567,6 +3581,141 @@ mod index_pipe_tests {
         h264.video_codec = Some("h264".into());
         let minimal = r#"{"streams":[{"codec_type":"video","extradata_size":23}]}"#;
         assert!(!hevc_parameter_set_promotion_required(&h264, Some(minimal)));
+    }
+
+    /// No argv that reaches an exec carries a plurx marker.
+    ///
+    /// `DV_CONVERT_MARKER` exists to be fingerprinted, and it is deliberately
+    /// not a valid ffmpeg option — which means the day it reaches a child
+    /// process, every copy session and every index build for a converted title
+    /// dies at startup with "Unrecognized option". The marker is added in
+    /// `copy_video_args` and removed in exactly two places; this is the test
+    /// that says so, over every argv builder that ends in an exec.
+    #[test]
+    fn no_executed_argv_carries_a_plurx_marker() {
+        let file = hevc_dv();
+        let convert = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true);
+
+        // The recipe carries it — that is the point of it existing.
+        let recipe = copy_video_args(&file, convert);
+        assert!(
+            recipe.iter().any(|arg| arg == DV_CONVERT_MARKER),
+            "the fingerprinted recipe must carry the marker: {recipe:?}"
+        );
+
+        let executed: Vec<(&str, Vec<String>)> = vec![
+            (
+                "copy pipe",
+                copy_pipe_args_with_dolby_vision(
+                    &file,
+                    0.0,
+                    None,
+                    true,
+                    Pacing::unpaced(),
+                    convert,
+                ),
+            ),
+            ("index pipe", copy_index_pipe_args(&file, convert)),
+            (
+                "index pipe with input",
+                copy_index_pipe_args_with_input(&file, "pipe:3", convert),
+            ),
+        ];
+        for (name, args) in executed {
+            assert!(
+                !args.iter().any(|arg| arg.starts_with("--plurx-")),
+                "{name} would hand ffmpeg a plurx marker: {args:?}"
+            );
+        }
+
+        // And a stripped argv is otherwise the recipe, so the marker is the
+        // only thing the two ever disagree about.
+        assert_eq!(
+            strip_plurx_markers(&recipe),
+            copy_video_args(&file, CopyVideoOptions::new(true, true)),
+            "stripping the marker must leave the preserving copy's arguments"
+        );
+    }
+
+    /// A converting copy preserves the RPUs it converts.
+    ///
+    /// The trap this closes: the decider reaches the conversion through a
+    /// client that refuses Profile 7, which is the same client it answers
+    /// `preserve = false` for. That renders `dovi_rpu=strip=1,…|62-63`, which
+    /// deletes the type-62 units — the conversion would find none, report
+    /// success, and serve plain HDR10 under a Profile 8.1 label.
+    #[test]
+    fn converting_dolby_vision_never_renders_a_stripping_bitstream_filter() {
+        // The only source shape the conversion is ever reached for: Profile 7
+        // over an HDR10-compatible base. The Profile 5 fixture would take the
+        // parameter-set promotion branch instead and render no `-bsf:v` at
+        // all, which would let this test pass for the wrong reason.
+        let mut file = hevc_dv();
+        file.hdr_format = Some(
+            "Dolby Vision, Version 1.0, dvhe.07.06, BL+EL+RPU, \
+                                HDR10-compatible / SMPTE ST 2086, HDR10"
+                .into(),
+        );
+
+        for asked_preserve in [false, true] {
+            let options =
+                CopyVideoOptions::new(true, asked_preserve).with_dolby_vision_conversion(true);
+            assert!(
+                options.preserves_dolby_vision(),
+                "converting implies preserving, whatever the caller asked for"
+            );
+
+            let rendered = copy_video_args(&file, options).join(" ");
+            assert!(
+                !rendered.contains("dovi_rpu=strip=1"),
+                "the RPUs the conversion reads must survive the bsf: {rendered}"
+            );
+            assert!(
+                !rendered.contains("62-63"),
+                "…and so must their NAL type: {rendered}"
+            );
+            assert!(
+                rendered.contains("filter_units=remove_types=32-34"),
+                "the ordinary parameter-set filtering still applies: {rendered}"
+            );
+            // A compatible base keeps the `hvc1` sample entry — the Profile
+            // 8.1 the conversion produces is an enhancement of HDR10, and the
+            // profile is advertised by SUPPLEMENTAL-CODECS, not by the tag.
+            assert!(
+                rendered.contains("-tag:v hvc1"),
+                "a converted stream is HDR10-compatible: {rendered}"
+            );
+        }
+
+        // Turning the conversion off again leaves the caller's answer alone —
+        // the coercion is one-way, so it cannot silently promote an ordinary
+        // stripping copy into a preserving one.
+        let off = CopyVideoOptions::new(true, false).with_dolby_vision_conversion(false);
+        assert!(!off.preserves_dolby_vision());
+        assert!(!off.converts_dolby_vision());
+    }
+
+    /// A converted stream gets its own fragment index.
+    ///
+    /// Its bytes differ from both the stripped and the preserved copy, so its
+    /// segment boundaries do too. Sharing an identity with either would hand a
+    /// client a playlist whose cut points describe different media.
+    #[test]
+    fn a_converted_copy_has_its_own_fragment_index_identity() {
+        let file = hevc_dv();
+        let fingerprint =
+            |options| crate::segplan::argv_fingerprint(&copy_video_args(&file, options));
+
+        let stripped = fingerprint(CopyVideoOptions::new(true, false));
+        let preserved = fingerprint(CopyVideoOptions::new(true, true));
+        let converted =
+            fingerprint(CopyVideoOptions::new(true, false).with_dolby_vision_conversion(true));
+
+        assert_ne!(converted, stripped);
+        assert_ne!(
+            converted, preserved,
+            "the conversion rewrites every RPU, so it is not the preserved copy"
+        );
     }
 
     fn contains_run(haystack: &[String], needle: &[String]) -> bool {
