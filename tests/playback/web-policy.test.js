@@ -2991,6 +2991,36 @@ test("an upgrade needs encode headroom, not just a bandwidth estimate", () => {
   assert.equal(pressured.emergency, true);
 });
 
+test("the browser and the server key a learned limit identically", () => {
+  // `tests/playback/decode-limit-identity.json` is the contract between this
+  // function and `plurx_core::playback::caps::decode_limit_identity`. The
+  // browser keys a learned limit by the source it is looking at; the server
+  // has to recompute the same string from the file row it is deciding about.
+  //
+  // A divergence has no symptom. Nothing errors — the server's key simply
+  // never matches, no limit is ever applied, and the viewer keeps stuttering
+  // through the exact title they already taught their browser to avoid. So
+  // both implementations run against these rows, and a change to either
+  // spelling fails in both languages at once.
+  const fixture = JSON.parse(
+    fs.readFileSync(
+      path.join(__dirname, "decode-limit-identity.json"),
+      "utf8",
+    ),
+  );
+  assert.ok(
+    fixture.cases.length >= 10,
+    "a fixture this small stops being a contract",
+  );
+  for (const row of fixture.cases) {
+    assert.equal(
+      policy.decodeLimitIdentity(row.source),
+      row.identity,
+      row.name,
+    );
+  }
+});
+
 // Drained last, in registration order, after every synchronous case has run.
 (async () => {
   for (const [name, run] of ASYNC_TESTS) {

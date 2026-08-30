@@ -1,0 +1,8 @@
+version = 1
+
+[[coverage]]
+commits = ["490a884c"]
+points = []
+checks = []
+ignore = true
+reason = "Documentation only: it records what a measurement on nuc4 found and corrects two claims the plan made without one — that ffmpeg would derive the Dolby Vision configuration record from the RPU (it does not; it copies the input container's), and that the box to write is `dvcC` (it is `dvvC` for profile 8). No runtime code changes, so there is no behaviour to pin. The bug the spike turned up in today's strip path — an `el_present_flag=1` record over a stream whose enhancement layer was just removed — is recorded here and fixed in M5a, where it gets its own regression test against the init-segment writer."

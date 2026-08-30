@@ -10,7 +10,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
-use crate::domain::{AudioStream, ProbeResult, SubtitleStream};
+use crate::domain::{AudioStream, DolbyVisionFacts, ProbeResult, SubtitleStream};
 use crate::error::ProbeError;
 
 /// The ffprobe binary name; overridable via `PLURX_FFPROBE` for jellyfin-ffmpeg
@@ -138,6 +138,7 @@ pub fn parse_probe_json(json: &Value) -> ProbeResult {
                 result.bit_depth = video_bit_depth(stream);
                 result.hdr = detect_hdr(stream);
                 result.hdr_format = detect_hdr_format(stream);
+                result.dolby_vision = detect_dolby_vision(stream);
             }
             Some("audio") => {
                 result.audio_streams.push(AudioStream {
@@ -283,36 +284,85 @@ fn detect_hdr(stream: &Value) -> Option<String> {
     }
 }
 
+/// The Dolby Vision configuration record on this stream, if ffprobe emitted
+/// one.
+///
+/// Every field comes straight off the record and stays `None` when the record
+/// did not carry it — a missing `dv_profile` and a `dv_profile` of 0 are
+/// different facts, and the whole point of moving these out of the display
+/// label is that the difference survives.
+pub(crate) fn detect_dolby_vision(stream: &Value) -> DolbyVisionFacts {
+    let Some(list) = stream.get("side_data_list").and_then(|v| v.as_array()) else {
+        return DolbyVisionFacts::default();
+    };
+    for sd in list {
+        let t = sd
+            .get("side_data_type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !(t.contains("DOVI") || t.contains("Dolby Vision")) {
+            continue;
+        }
+        let flag = |key: &str| sd.get(key).and_then(|v| v.as_i64()).map(|value| value != 0);
+        return DolbyVisionFacts {
+            profile: sd.get("dv_profile").and_then(|v| v.as_i64()),
+            level: sd.get("dv_level").and_then(|v| v.as_i64()),
+            bl_compat_id: sd
+                .get("dv_bl_signal_compatibility_id")
+                .and_then(|v| v.as_i64()),
+            el_present: flag("el_present_flag"),
+            rpu_present: flag("rpu_present_flag"),
+        };
+    }
+    DolbyVisionFacts::default()
+}
+
+/// The display label for a Dolby Vision source, derived from its facts.
+///
+/// One function, so the string a viewer reads and the numbers the decider uses
+/// can never describe different files. Byte for byte what `detect_hdr_format`
+/// built inline before M2 — the wording is load-bearing: `has_compatible_dv_base`
+/// still falls back to searching it for rows the backfill has not reached.
+pub(crate) fn dolby_vision_label(facts: &DolbyVisionFacts) -> String {
+    let mut label = match facts.profile {
+        Some(profile) => format!("Dolby Vision · Profile {profile}"),
+        None => "Dolby Vision".to_owned(),
+    };
+    match facts.bl_compat_id {
+        Some(1) | Some(6) => label.push_str(" (HDR10-compatible)"),
+        Some(4) => label.push_str(" (HLG-compatible)"),
+        _ => {}
+    }
+    label
+}
+
 /// A richer, human HDR label for display — the Dolby Vision profile number and
 /// compatibility, HDR10+ vs HDR10, HLG. Parallels [`detect_hdr`] (which stays
 /// coarse for the decision engine); returns None for SDR.
+///
+/// Since M2 the Dolby Vision half is derived from
+/// [`detect_dolby_vision`]'s facts rather than assembled inline, so the string
+/// a viewer reads and the numbers the decider uses cannot describe different
+/// files.
 fn detect_hdr_format(stream: &Value) -> Option<String> {
     let side = stream.get("side_data_list").and_then(|v| v.as_array());
 
-    // Dolby Vision: pull the profile + base-layer compatibility from the DOVI
-    // configuration record. Compatibility id tells you what a non-DV client
-    // sees: 1 = HDR10, 6 = Blu-ray HDR10, 4 = HLG, 2 = SDR.
+    // Dolby Vision: the profile and base-layer compatibility come from the
+    // DOVI configuration record. Compatibility id tells you what a non-DV
+    // client sees: 1 = HDR10, 6 = Blu-ray HDR10, 4 = HLG, 2 = SDR.
+    let facts = detect_dolby_vision(stream);
+    if !facts.is_empty() {
+        return Some(dolby_vision_label(&facts));
+    }
+    // A record that carried the type but no readable field at all still means
+    // Dolby Vision, and still has to be named.
     if let Some(list) = side {
-        for sd in list {
-            let t = sd
-                .get("side_data_type")
+        if list.iter().any(|sd| {
+            sd.get("side_data_type")
                 .and_then(|v| v.as_str())
-                .unwrap_or("");
-            if t.contains("DOVI") || t.contains("Dolby Vision") {
-                let mut label = match sd.get("dv_profile").and_then(|v| v.as_i64()) {
-                    Some(p) => format!("Dolby Vision · Profile {p}"),
-                    None => "Dolby Vision".to_owned(),
-                };
-                match sd
-                    .get("dv_bl_signal_compatibility_id")
-                    .and_then(|v| v.as_i64())
-                {
-                    Some(1) | Some(6) => label.push_str(" (HDR10-compatible)"),
-                    Some(4) => label.push_str(" (HLG-compatible)"),
-                    _ => {}
-                }
-                return Some(label);
-            }
+                .is_some_and(|t| t.contains("DOVI") || t.contains("Dolby Vision"))
+        }) {
+            return Some("Dolby Vision".to_owned());
         }
     }
     // A DV codec tag with no config record: name it without a profile.
@@ -441,6 +491,122 @@ mod tests {
             p.hdr_format.as_deref(),
             Some("Dolby Vision · Profile 7 (HDR10-compatible)")
         );
+    }
+
+    /// The record's own fields, as columns — and the label built from them.
+    ///
+    /// The two used to be one inline block, so a fact the label had no way to
+    /// spell (an enhancement layer, an RPU) simply did not survive the scan.
+    /// Those two decide whether a Profile 7 disc can be converted to
+    /// single-layer Profile 8.1, which no display string can carry.
+    #[test]
+    fn the_dolby_vision_record_survives_as_facts_not_only_as_a_label() {
+        let j = json!({
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc",
+                "side_data_list": [{
+                    "side_data_type": "DOVI configuration record",
+                    "dv_version_major": 1,
+                    "dv_profile": 7, "dv_level": 6,
+                    "dv_bl_signal_compatibility_id": 6,
+                    "rpu_present_flag": 1, "el_present_flag": 1, "bl_present_flag": 1
+                }]
+            }]
+        });
+        let p = parse_probe_json(&j);
+        assert_eq!(p.dolby_vision.profile, Some(7));
+        assert_eq!(p.dolby_vision.level, Some(6));
+        assert_eq!(p.dolby_vision.bl_compat_id, Some(6));
+        assert_eq!(p.dolby_vision.el_present, Some(true));
+        assert_eq!(p.dolby_vision.rpu_present, Some(true));
+        // The label is derived from exactly those facts, byte for byte what
+        // it was before the columns existed — `has_compatible_dv_base` still
+        // falls back to reading it for rows the backfill has not reached.
+        assert_eq!(
+            p.hdr_format.as_deref(),
+            Some("Dolby Vision · Profile 7 (HDR10-compatible)")
+        );
+
+        // A single-layer Profile 5: no enhancement layer, no compatible base.
+        let j = json!({
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc",
+                "side_data_list": [{
+                    "side_data_type": "DOVI configuration record",
+                    "dv_profile": 5, "dv_bl_signal_compatibility_id": 0,
+                    "rpu_present_flag": 1, "el_present_flag": 0
+                }]
+            }]
+        });
+        let p = parse_probe_json(&j);
+        assert_eq!(p.dolby_vision.el_present, Some(false));
+        assert_eq!(p.dolby_vision.bl_compat_id, Some(0));
+        assert_eq!(p.hdr_format.as_deref(), Some("Dolby Vision · Profile 5"));
+
+        // A record with nothing readable in it is still Dolby Vision, and
+        // still gets named — but its facts stay empty, which is what tells
+        // the backfill this row needs a real re-probe rather than a re-read.
+        let j = json!({
+            "streams": [{
+                "codec_type": "video", "codec_name": "hevc",
+                "side_data_list": [{ "side_data_type": "DOVI configuration record" }]
+            }]
+        });
+        let p = parse_probe_json(&j);
+        assert!(p.dolby_vision.is_empty());
+        assert_eq!(p.hdr_format.as_deref(), Some("Dolby Vision"));
+
+        // And a non-DV source carries no facts at all — `None` everywhere,
+        // never a zero that would read as "the record said so".
+        let j = json!({
+            "streams": [{ "codec_type": "video", "codec_name": "hevc",
+                          "color_transfer": "smpte2084" }]
+        });
+        assert!(parse_probe_json(&j).dolby_vision.is_empty());
+    }
+
+    /// The derived label is the label, byte for byte.
+    ///
+    /// It has to be. `hdr_format` is an input to `copy_video_args`, which
+    /// feeds the fragment index's argv fingerprint, so a re-worded label
+    /// re-keys every affected file's index and orphans what was built. The
+    /// backfill compares before it writes for the same reason; this is what
+    /// makes that comparison usually come out equal.
+    #[test]
+    fn the_derived_label_is_the_label_the_scan_used_to_write() {
+        for (profile, compat, expected) in [
+            (
+                Some(7),
+                Some(6),
+                "Dolby Vision · Profile 7 (HDR10-compatible)",
+            ),
+            (
+                Some(8),
+                Some(1),
+                "Dolby Vision · Profile 8 (HDR10-compatible)",
+            ),
+            (
+                Some(7),
+                Some(4),
+                "Dolby Vision · Profile 7 (HLG-compatible)",
+            ),
+            (Some(5), Some(0), "Dolby Vision · Profile 5"),
+            (Some(5), None, "Dolby Vision · Profile 5"),
+            (Some(4), Some(2), "Dolby Vision · Profile 4"),
+            (None, Some(6), "Dolby Vision (HDR10-compatible)"),
+            (None, None, "Dolby Vision"),
+        ] {
+            let facts = DolbyVisionFacts {
+                profile,
+                bl_compat_id: compat,
+                ..DolbyVisionFacts::default()
+            };
+            assert_eq!(
+                dolby_vision_label(&facts),
+                expected,
+                "{profile:?}/{compat:?}"
+            );
+        }
     }
 
     #[test]

@@ -35,31 +35,54 @@ concurrency:
 jobs:
   prune:
     name: prune stale cross-built binaries
-    runs-on: ubuntu-24.04
+    # The same selector every other job uses. Pinned to `ubuntu-24.04`, this
+    # job could not be scheduled at all on a self-hosted fleet: it reported
+    # failed with zero steps and an empty log every night since it merged,
+    # which is the shape a job that never started leaves behind.
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_MODE == 'github' && '["ubuntu-24.04"]' || '["self-hosted","Linux","X64","lab","general"]') }}
     timeout-minutes: 30
     steps:
       - name: Delete stale plurxd binaries
         env:
-          GH_TOKEN: ${{ github.token }}
+          GITHUB_TOKEN: ${{ github.token }}
           OLDER_THAN_DAYS: ${{ inputs.older_than_days || '2' }}
           DRY_RUN: ${{ inputs.dry_run || 'false' }}
         run: |
           python3 - <<'PY'
-          import json, os, subprocess, datetime, sys
+          import json, os, datetime, sys, urllib.error, urllib.request
+
+
+          class ArtifactApiError(RuntimeError):
+              """A call this job can report on rather than dying inside."""
+
 
           repo = os.environ["GITHUB_REPOSITORY"]
           older = float(os.environ.get("OLDER_THAN_DAYS") or 2)
           dry = os.environ.get("DRY_RUN", "false").lower() == "true"
           now = datetime.datetime.now(datetime.timezone.utc)
 
+          # urllib rather than the gh CLI: a self-hosted runner image is not
+          # obliged to ship gh, and this job has no other reason to need it.
           def api(method, path):
-              out = subprocess.run(
-                  ["gh", "api", "--method", method, path],
-                  capture_output=True, text=True,
+              request = urllib.request.Request(
+                  f"https://api.github.com{path}",
+                  method=method,
+                  headers={
+                      "Authorization": f"Bearer {os.environ['GITHUB_TOKEN']}",
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "plurx-artifact-prune",
+                  },
               )
-              if out.returncode != 0:
-                  raise SystemExit(f"gh api {method} {path} failed: {out.stderr.strip()}")
-              return json.loads(out.stdout) if out.stdout.strip() else {}
+              try:
+                  with urllib.request.urlopen(request, timeout=30) as response:
+                      body = response.read()
+              except urllib.error.HTTPError as failure:
+                  detail = failure.read().decode("utf-8", "replace")[:200]
+                  raise ArtifactApiError(f"{method} {path}: {failure.code} {detail}")
+              except urllib.error.URLError as failure:
+                  raise ArtifactApiError(f"{method} {path}: {failure.reason}")
+              return json.loads(body) if body.strip() else {}
 
           # Only names ci.yml publishes as cross-built binaries. Anything else
           # — evidence, receipts, topology, nightlies — is left alone. A prefix
@@ -69,7 +92,10 @@ jobs:
           stale, kept, total_bytes, freed = [], 0, 0, 0
           page = 1
           while True:
-              body = api("GET", f"/repos/{repo}/actions/artifacts?per_page=100&page={page}")
+              try:
+                  body = api("GET", f"/repos/{repo}/actions/artifacts?per_page=100&page={page}")
+              except ArtifactApiError as failure:
+                  raise SystemExit(f"listing artifacts failed: {failure}")
               batch = body.get("artifacts", [])
               if not batch:
                   break
@@ -102,7 +128,10 @@ jobs:
           for a in stale:
               try:
                   api("DELETE", f"/repos/{repo}/actions/artifacts/{a['id']}")
-              except SystemExit:
+              except ArtifactApiError as failure:
+                  # One artifact deleted by a concurrent expiry is not a reason
+                  # to leave the other few thousand in place.
+                  print(f"::warning::{failure}")
                   failed += 1
           print(f"deleted {len(stale) - failed}, failed {failed}")
 
