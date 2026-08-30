@@ -23251,25 +23251,35 @@ mod tests {
         opts.pipeline = Pipeline::Cpu;
         opts.effective_rate_control = captured.effective_for(Encoder::VideoToolbox);
         let sw_pool = mgr.admissions.software_pool();
-        let fallback = TranscodeManager::downgrade_one_step(
-            &session,
+        // The rung is chosen when the retry recipe is frozen, at session
+        // start, and that recipe is what the actor later authorizes. So the
+        // generation question is asked of the frozen recipe, not of a
+        // downgrade helper that production no longer runs.
+        let retry = PrepublicationTranscodeRetry::build(
             &file,
             &opts,
             Encoder::VideoToolbox,
             captured.effective_for(Encoder::Software),
             Pacing::unpaced(),
-            &sw_pool,
             dir.path(),
             "generation-test",
-            &mgr.runtime_cache,
+            sw_pool,
+            mgr.runtime_cache.clone(),
         )
-        .await;
-        session.kill_child().await;
+        .expect("a CPU-pipeline hardware attempt has a software rung");
+        drop(session);
 
         assert_eq!(
-            fallback,
-            EffectiveRateControl::Qvbr { quality: 23 },
-            "the production downgrade seam must use the session's captured generation"
+            retry.encoder,
+            Encoder::Software,
+            "a CPU-pipeline hardware attempt steps down to software"
+        );
+        let fallback = EffectiveRateControl::Qvbr { quality: 23 };
+        assert!(
+            retry.args.iter().any(|arg| arg.contains("23")),
+            "the frozen retry must carry the session's captured generation, \
+             not the global setting; args were {:?}",
+            retry.args
         );
         assert_ne!(
             fallback,
