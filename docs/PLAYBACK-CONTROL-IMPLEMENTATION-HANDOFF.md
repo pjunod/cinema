@@ -1369,23 +1369,32 @@ delete legacy owners without two concurrent recovery decision makers.
 
 ## 6. Remaining roadmap
 
-After merged PR #641, the remaining work is:
+Items 1-4 below are merged. #642 merged; the compatible server is deployed on
+all four nodes; #656 added the physical hold/resume command and intention
+barriers to the shared actor sequence. Item 5 is written and green in #663,
+where it had to travel with the four re-anchored replacement tests: those tests
+removed `downgrade_one_step`'s last caller, so `-D dead-code` rejects any tree
+that carries the tests without the deletion.
 
-1. Complete #642's final cumulative exact-head review and replacement hosted
-   run. Its static, exact-failure, and unrestricted cluster gates are complete;
-   the active cut's one broad unit run is consumed and must not be repeated.
-2. Merge #642 only from a pushed, unanimously reviewed, wholly green exact
-   head. The candidate already removes the legacy copy watchdog,
-   request-side exit inference, and in-place copy policy owner while keeping
-   public action `none`.
-3. Deploy the compatible server first, then ship passive Apple and Android
-   reporter PRs. Active mobile action consumption follows separately.
-4. Add desired physical hold/resume command/intention barriers to the shared
-   actor sequence; retain the successful physical acknowledgements already in
-   producer ingress.
-5. Delete remaining detached recovery loops and legacy catalog sentinels.
-   Retain any `child_transition` use that still serializes non-copy lifecycle,
-   retirement, retention, or cleanup until its own replacement is proved.
+The remaining work is:
+
+1. ~~Complete #642's final cumulative exact-head review and replacement hosted
+   run.~~ **Merged.**
+2. ~~Merge #642 only from a pushed, unanimously reviewed, wholly green exact
+   head.~~ **Merged.** It removed the legacy copy watchdog, request-side exit
+   inference, and in-place copy policy owner while keeping public action
+   `none`.
+3. ~~Deploy the compatible server first~~ — **deployed**; then ship passive
+   Apple and Android reporter PRs. Active mobile action consumption follows
+   separately.
+4. ~~Add desired physical hold/resume command/intention barriers to the shared
+   actor sequence~~ — **merged as #656**; the successful physical
+   acknowledgements already in producer ingress are retained.
+5. Delete remaining detached recovery loops and legacy catalog sentinels —
+   **written, green, awaiting the merge of #663**. `downgrade_one_step` is
+   deleted and pinned at zero; every remaining `child_transition` use still
+   serializes non-copy lifecycle, retirement, retention, or cleanup and is
+   retained until its own replacement is proved.
 6. Complete M5 client action ownership for web, Apple, and Android.
 7. Implement prepared/commit/abort handoff for transparent quality,
    resolution, codec, HDR/Dolby Vision, audio, subtitle, and node changes.
