@@ -26711,6 +26711,15 @@ mod tests {
             .begin_producer_attempt()
             .await
             .expect("admit the predecessor attempt");
+        // The executor terminates the exact failed attempt before it clears
+        // scratch, so the fixture needs a predecessor child bound to that
+        // attempt. Without one the transaction fails at termination and never
+        // reaches the clear this test is about.
+        *session.child.lock().await = Some(AttemptChild::new(
+            failed_attempt,
+            long_running_child(),
+            session.control.clone(),
+        ));
         let result = execute_prepublication_transcode_retry(
             Arc::clone(&session),
             &retry,
