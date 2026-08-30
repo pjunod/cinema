@@ -58,6 +58,35 @@ use std::sync::Arc;
 /// write. Hiqlite transactions do not expose an application-level rollback
 /// after affected-row counts are returned, so this trigger is the common
 /// SQLite/Hiqlite atomic boundary for BLOCKED -> finite/ready confirmation.
+/// The Dolby Vision configuration record's own fields, as columns on `files`.
+///
+/// One constant, applied by both backends, so the single-node migration list
+/// and the replicated migration chain cannot drift into different shapes.
+///
+/// Nullable with no default on purpose: a row that predates the backfill and a
+/// record that genuinely reported zero have to stay distinguishable, or the
+/// fallback to parsing the display label can never know when to stop.
+const FILES_DOLBY_VISION_COLUMNS: &[&str] = &[
+    "ALTER TABLE files ADD COLUMN dv_profile INTEGER",
+    "ALTER TABLE files ADD COLUMN dv_level INTEGER",
+    "ALTER TABLE files ADD COLUMN dv_bl_compat_id INTEGER",
+    "ALTER TABLE files ADD COLUMN dv_el_present INTEGER",
+    "ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER",
+];
+
+/// The same five columns as one batch, for the single-node migration list.
+///
+/// A list rather than a single string because the replicated backend runs one
+/// statement per transaction entry and rusqlite refuses a multi-statement
+/// `execute`; the batch spelling exists so the append-only SQLite list can
+/// keep one element per schema version.
+const FILES_DOLBY_VISION_COLUMNS_BATCH: &str = "
+ALTER TABLE files ADD COLUMN dv_profile INTEGER;
+ALTER TABLE files ADD COLUMN dv_level INTEGER;
+ALTER TABLE files ADD COLUMN dv_bl_compat_id INTEGER;
+ALTER TABLE files ADD COLUMN dv_el_present INTEGER;
+ALTER TABLE files ADD COLUMN dv_rpu_present INTEGER;";
+
 const MEDIA_SESSION_PUBLICATION_CLAIM_TRIGGER_SCHEMA: &str =
     "CREATE TRIGGER IF NOT EXISTS media_session_publication_claim_au
     AFTER UPDATE OF publication_ready_at_ms ON media_sessions
@@ -118,8 +147,8 @@ use async_trait::async_trait;
 use crate::cluster::coordination::{Lease, LeaseClaim};
 use crate::domain::{
     BookMetadataPatch, CacheConsumerKind, CacheConsumerPin, CacheManifestCheck, CacheStorageMember,
-    CachedTranscode, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind, ItemPage, ItemSort,
-    Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
+    CachedTranscode, DolbyVisionFacts, HomePreviewPage, InProgressItem, Item, ItemEdit, ItemKind,
+    ItemPage, ItemSort, Library, MediaFile, MediaSessionActivation, MediaSessionActivationOutcome,
     MediaSessionActivationSettlement, MediaSessionProjectionCompletion, MediaSessionRenewal,
     MediaSessionRequestClaim, MediaSessionRoute, MediaSessionTakeover, MediaShape, MetadataPatch,
     NetworkPrior, NetworkPriorObservation, NewItem, NewLibrary, NewOfflinePackage,
@@ -443,6 +472,16 @@ pub mod keys {
     /// cursor, one slow or malformed title at the front of a library consumes
     /// every pass and later files can never become playable.
     pub const JOB_VOD_INDEX_CURSOR: &str = "jobs.vod_index_cursor";
+    /// Set once the Dolby Vision columns have been filled in from stored probe
+    /// JSON for every file that had any. The incremental scanner skips
+    /// unchanged files, so without a backfill an existing library would never
+    /// gain the columns short of a destructive re-add.
+    pub const JOB_DV_BACKFILL_DONE: &str = "jobs.dv_facts_backfilled";
+    /// How far this node's Dolby Vision backfill has walked. Node-local, and
+    /// strictly-after: a row this pass cannot fix — a Dolby Vision codec tag
+    /// whose stored probe has no configuration record — would otherwise sit at
+    /// the front of every window forever, hiding every fixable row behind it.
+    pub const JOB_DV_BACKFILL_CURSOR: &str = "jobs.dv_facts_backfill_cursor";
 }
 
 #[async_trait]
@@ -860,6 +899,33 @@ pub trait MediaStore: Send + Sync + 'static {
     ) -> Result<std::collections::HashMap<i64, MediaFacts>, StoreError>;
     /// Persist a manual A/V sync correction for one file (0 clears it).
     async fn set_file_audio_offset(&self, file_id: i64, offset_ms: i64) -> Result<(), StoreError>;
+    /// Dolby Vision files whose configuration columns are still empty, with
+    /// the probe JSON to fill them from and the display label they currently
+    /// carry — strictly after `after_id`, lowest first, bounded.
+    ///
+    /// The M2 backfill's input, and the cursor is what makes it terminate.
+    /// Some of these rows can never be fixed — a Dolby Vision codec tag whose
+    /// stored probe has no configuration record in it needs a real re-probe,
+    /// not a re-read — and without a cursor they stay in the answer forever,
+    /// re-read every tick, hiding every fixable row behind them.
+    async fn files_missing_dolby_vision(
+        &self,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<(i64, String, Option<String>)>, StoreError>;
+    /// Write one file's Dolby Vision columns, and the display label derived
+    /// from them.
+    ///
+    /// The label moves with the columns because they are the same fact: a row
+    /// whose scan produced the bare string "Dolby Vision" while its probe JSON
+    /// carried a profile has a label that is wrong, not merely sparse, and
+    /// leaving it would keep that file unclaimable by every client.
+    async fn set_file_dolby_vision(
+        &self,
+        file_id: i64,
+        facts: DolbyVisionFacts,
+        hdr_format: Option<&str>,
+    ) -> Result<(), StoreError>;
     /// The raw ffprobe JSON captured at scan time (for the declared per-stream
     /// start-time readout in the player's sync menu, and the chapter markers
     /// the player shows as Skip Intro / Skip Credits).

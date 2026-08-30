@@ -1314,6 +1314,7 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: Default::default(),
         };
         // Unpaced: the pacing flags are the daemon's business and a 12 s
         // fixture read at 2× would just make the test slow.

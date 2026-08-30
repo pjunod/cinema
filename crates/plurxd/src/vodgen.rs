@@ -917,6 +917,7 @@ mod tests {
             scanned_at: 1,
             audio_offset_ms: 0,
             probed: true,
+            dolby_vision: Default::default(),
         };
         let args = copy_pipe_args(&file, start_seconds, None, true, Pacing::unpaced(), false);
         let mut child = tokio::process::Command::new(testfixtures::ffmpeg())
