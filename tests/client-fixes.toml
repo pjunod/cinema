@@ -548,3 +548,11 @@ source = "clients/apple/Sources/PlaybackControlSession.swift"
 source_anchor = "private let latest = PlaybackControlLatestSnapshot()"
 test = "clients/apple/Tests/PlaybackControlSessionTests.swift"
 test_anchor = "testAStartedSessionExchangesWhatThePlayerReported"
+
+[[fixes]]
+id = "android.control-action-vocabulary-encoding"
+commits = ["4f2319ff"]
+source = "clients/android/app/src/main/java/tv/plurx/app/player/PlaybackControlReporter.kt"
+source_anchor = '@SerialName("supported_actions") val supportedActions: List<String>,'
+test = "clients/android/app/src/test/java/tv/plurx/app/player/PlaybackControlReporterTest.kt"
+test_anchor = "the request encodes the server's field names"

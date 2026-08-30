@@ -828,6 +828,10 @@ struct CreateSessionRequest: Codable {
     /// Retain a source profile the server already decided this AVPlayer can
     /// decode. Omitted/false remains the safe legacy behavior.
     var preserveDolbyVision: Bool?
+    /// The exact capability snapshot used for `/decision`. Repeating it here
+    /// lets the server derive the plan again instead of trusting the DV/HDR
+    /// echo above.
+    var caps: DeviceCaps?
     /// Immutable film-addressed HLS is the only supported presentation.
     /// Every request states it so an older server cannot silently choose the
     /// removed growing live playlist.

@@ -17,6 +17,9 @@ import kotlinx.coroutines.launch
 import retrofit2.HttpException
 import java.net.URI
 import tv.plurx.app.data.Caps
+import tv.plurx.app.data.CapabilitySnapshot
+import tv.plurx.app.data.DecisionCapsReq
+import tv.plurx.app.data.DeviceCaps
 import tv.plurx.app.data.Appearance
 import tv.plurx.app.data.HomeGrouping
 import tv.plurx.app.data.PlaybackQuality
@@ -43,6 +46,7 @@ import tv.plurx.app.data.ServerDiscovery
 import tv.plurx.app.data.Server
 import tv.plurx.app.data.SettingsStore
 import tv.plurx.app.data.MediaFileDto
+import tv.plurx.app.data.shouldFallBackToLegacyDecision
 import tv.plurx.app.data.offline.OfflineBook
 import tv.plurx.app.data.offline.OfflineBookQueueRequest
 import tv.plurx.app.data.offline.OfflineBooks
@@ -148,9 +152,14 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     var playbackCaps: Map<String, String> = emptyMap()
         private set
 
-    /** Runtime playback caps for this device — sent to /decision and /stream.mp4. */
-    private suspend fun caps(): Map<String, String> =
-        Caps.query(getApplication<Application>()).also { playbackCaps = it }
+    /** The snapshot bound to the most recent decision, retained only so its
+     * session create can repeat the same facts. Every decision still probes
+     * again; route-dependent audio support is never reused as evidence. */
+    private var currentDecisionCaps: DeviceCaps? = null
+
+    /** Runtime playback caps for this device — both wire spellings from one probe. */
+    private suspend fun caps(): CapabilitySnapshot =
+        Caps.snapshot(getApplication<Application>()).also { playbackCaps = it.legacyQuery }
 
     init {
         viewModelScope.launch {
@@ -633,14 +642,22 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
     suspend fun decision(
         fileId: Long,
         tracks: PreplayTracks = PreplayTracks.NONE,
-    ): Decision = api().decision(
-        fileId,
-        caps() + ("force" to decisionForce(_preferences.value.playbackQuality)) +
-            // Request-local only. Omitting a parameter keeps the shared
-            // playback-default policy and the response older clients get; the
-            // server never writes a Playback setting from these.
-            preplayQueryParams(tracks),
-    )
+    ): Decision {
+        val snapshot = caps()
+        // Request-local only. Omitting a parameter keeps the shared playback-
+        // default policy and the response older clients get; the server never
+        // writes a Playback setting from these.
+        val request = mapOf("force" to decisionForce(_preferences.value.playbackQuality)) +
+            preplayQueryParams(tracks)
+        val decision = try {
+            api().decisionV2(fileId, request, DecisionCapsReq(snapshot.document))
+        } catch (error: HttpException) {
+            if (!shouldFallBackToLegacyDecision(error.code())) throw error
+            api().decision(fileId, snapshot.legacyQuery + request)
+        }
+        currentDecisionCaps = snapshot.document
+        return decision
+    }
 
     suspend fun setWatched(itemId: Long, watched: Boolean): Int = if (watched) {
         api().markWatched(itemId).updated
@@ -714,8 +731,13 @@ class AppViewModel(app: Application) : AndroidViewModel(app) {
         return null
     }
 
-    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart =
-        acceptHlsSessionPresentation(api().createHlsSession(fileId, body))
+    suspend fun createHlsSession(fileId: Long, body: CreateSessionReq): HlsStart {
+        val document = currentDecisionCaps
+            ?: Caps.snapshot(getApplication<Application>()).document
+        return acceptHlsSessionPresentation(
+            api().createHlsSession(fileId, body.copy(caps = body.caps ?: document)),
+        )
+    }
 
     suspend fun hlsSessionStatus(sessionId: String) = api().hlsSessionStatus(sessionId)
 

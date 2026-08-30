@@ -23,13 +23,24 @@ import kotlinx.serialization.json.JsonClassDiscriminator
  * port; this is the third, and the three are meant to stay observably
  * identical.
  *
- * Passive means passive: the server's only permitted action today is `none`,
- * and anything else is treated as a protocol error that stops the reporter
- * rather than as an instruction. M5 gives clients an action owner; this type
- * keeps reporting when it arrives.
+ * Passive means passive: this reporter declares the actions it will accept and
+ * treats anything else as a protocol error that stops it, rather than as an
+ * instruction to improvise. Today that vocabulary is `hold`, which is an
+ * explanation and not an instruction — the server saying production is
+ * deliberately not advancing. Accepting it is what keeps this client reporting
+ * through a deliberate hold; acting on it is the action owner's job, and
+ * recovery authority still belongs to this platform's own timers until M5
+ * moves it.
  */
 object PlaybackControl {
     const val PROTOCOL = "plurx-playback-control-v1"
+
+    /**
+     * The actions this client will accept, and therefore the only ones the
+     * server will send it. An action that is never declared is never sent, so
+     * a client cannot be silenced by one it does not understand.
+     */
+    val SUPPORTED_ACTIONS = listOf("hold")
     const val MIN_EXCHANGE_MS = 250L
     const val MAX_EXCHANGE_MS = 60_000L
     const val EXCHANGE_DEADLINE_MS = 6_000L
@@ -314,10 +325,22 @@ data class ControlRequest(
     val selection: ClientSelection,
     val capabilities: DynamicCapabilities? = null,
     val observation: ClientObservation? = null,
+    // No default. `Json` encodes defaults only when asked to, so a defaulted
+    // value here would be silently dropped from the request — and a server that
+    // never sees the vocabulary never sends the action, which is the exact
+    // failure this field exists to prevent.
+    @SerialName("supported_actions") val supportedActions: List<String>,
 )
 
 @Serializable
-data class ControlAction(val type: String)
+data class ControlAction(
+    val type: String,
+    /**
+     * Present on `hold`, and diagnostic rather than dispositive: a reason this
+     * client has never heard of is a newer server, not a broken one.
+     */
+    val reason: String? = null,
+)
 
 @Serializable
 data class ControlResponse(
@@ -532,6 +555,7 @@ class PlaybackControlReporter private constructor(
             selection = newest.selection,
             capabilities = if (repeats) null else newest.capabilities,
             observation = newest.observation?.bounded(),
+            supportedActions = PlaybackControl.SUPPORTED_ACTIONS,
         )
     }
 
@@ -584,10 +608,19 @@ class PlaybackControlReporter private constructor(
         if (response.acceptedSequence != request.sequence) {
             throw ControlProtocolException("accepted_sequence")
         }
-        // M2 clients consume nothing. An action of any other type is a server
-        // this client does not understand, not an instruction to improvise.
-        if (response.action.type != "none") {
-            throw ControlProtocolException("action")
+        // An action outside the declared vocabulary means the server and this
+        // client disagree about the contract, and continuing would be
+        // guessing. A `hold` is inside it: the server is explaining that
+        // production is deliberately not advancing, which is the opposite of a
+        // reason to stop reporting. Its reason must be present but need not be
+        // one this client recognises.
+        when (response.action.type) {
+            "none" -> Unit
+            "hold" ->
+                if (response.action.reason == null) {
+                    throw ControlProtocolException("action")
+                }
+            else -> throw ControlProtocolException("action")
         }
     }
 

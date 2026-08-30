@@ -51,6 +51,10 @@ final class AppModel: ObservableObject {
     private let settings = SettingsStore()
     private var api: PlurxAPI?
     private var homeLoadTask: Task<Void, Never>?
+    /// The probe snapshot that produced the current decision. Session create
+    /// repeats this exact document so server re-derivation checks the same
+    /// facts instead of a second display reading taken milliseconds later.
+    private var currentDecisionCaps: DeviceCaps?
 
     init() {
         discovery = ServerDiscovery()
@@ -83,7 +87,9 @@ final class AppModel: ObservableObject {
         return a
     }
 
-    func caps() -> [URLQueryItem] { Caps.query() }
+    /// Read live for every decision. In particular, Apple TV output format can
+    /// change in Settings without the app relaunching.
+    func caps() -> DeviceCaps { Caps.capsDocument() }
 
     // MARK: - Session lifecycle
 
@@ -775,11 +781,16 @@ final class AppModel: ObservableObject {
     /// `selection` is the viewer's pre-play track choice and is empty for every
     /// ordinary play, which keeps that request byte-for-byte what it was.
     func decision(fileId: Int, selection: PrePlaySelection = .none) async throws -> Decision {
+        let document = caps()
         do {
-            return try await requireAPI().decision(
+            let decision = try await requireAPI().decision(
                 fileId: fileId,
-                caps: caps() + selection.queryItems
+                caps: document,
+                query: selection.queryItems,
+                legacyQuery: { Caps.query() + selection.queryItems }
             )
+            currentDecisionCaps = document
+            return decision
         } catch {
             noteAuthFailure(error)
             throw error
@@ -821,6 +832,8 @@ final class AppModel: ObservableObject {
     }
 
     func createHlsSession(fileId: Int, body: CreateSessionRequest) async throws -> HlsStart {
+        var body = body
+        body.caps = currentDecisionCaps ?? caps()
         do {
             return try await requireAPI().createHlsSession(fileId: fileId, body: body)
         } catch {

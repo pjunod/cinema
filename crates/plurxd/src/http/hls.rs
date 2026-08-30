@@ -3522,6 +3522,7 @@ fn local_control_response(
     // rule two call sites have to remember.
     let action =
         crate::playback_control::resolve_action(&result.action, &response.delivery, request);
+    crate::playback_control::record_action(&action, &response.delivery, request, result.platform);
     crate::playback_control::ControlResponseV1 { action, ..response }
 }
 

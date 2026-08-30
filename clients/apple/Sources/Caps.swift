@@ -5,6 +5,48 @@ import os
 import UIKit
 import VideoToolbox
 
+struct DeviceCaps: Codable, Equatable {
+    var v: Int = 2
+    let client: ClientInfo
+    let video: [VideoCaps]
+    let audio: [String]
+    let containers: [String]
+    let transports: [String]
+    let dvTransport: String
+    let display: DisplayCaps
+    var learnedLimits: [LearnedLimit] = []
+}
+
+struct ClientInfo: Codable, Equatable {
+    let kind: String
+    let build: String
+    let ua: String
+}
+
+struct VideoCaps: Codable, Equatable {
+    let codec: String
+    var profiles: [String]?
+    var maxHeight: Int?
+    let present: [String]
+    var dvProfiles: [Int]?
+}
+
+struct DisplayCaps: Codable, Equatable {
+    let hdr: Bool
+    let dolbyVision: Bool
+}
+
+/// Native learned limits are M6 work. The type mirrors the accepted document
+/// so adding them later cannot tempt a second, almost-compatible wire shape.
+struct LearnedLimit: Codable, Equatable {
+    let identity: String
+    let label: String
+    let lost: Int
+    let secs: Int
+    let rate: Int
+    let atMs: Int
+}
+
 /// Runtime playback capabilities for this Apple device, sent to `/decision` so
 /// the server only transcodes what AVPlayer/VideoToolbox genuinely can't take.
 /// Apple's shape differs from Android's: AVPlayer direct-plays MP4/MOV/M4V (not
@@ -12,6 +54,70 @@ import VideoToolbox
 /// decode where present — so MKV or DTS files come back as HLS instead.
 enum Caps {
     private static let logger = Logger(subsystem: "tv.plurx.app", category: "capabilities")
+
+    static func capsDocument() -> DeviceCaps {
+        capsDocument(
+            hevc: VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC),
+            av1: VTIsHardwareDecodeSupported(kCMVideoCodecType_AV1),
+            displayHDR: displayIsHDR,
+            dolbyVision: dolbyVisionIsAvailable
+        )
+    }
+
+    /// Pure spelling of caps v2. AVFoundation stays outside this half so an
+    /// HDR10-only output and a Dolby Vision output are independently testable.
+    static func capsDocument(
+        hevc: Bool,
+        av1: Bool,
+        displayHDR: Bool,
+        dolbyVision: Bool
+    ) -> DeviceCaps {
+        let supportsDolbyVision = hevc && displayHDR && dolbyVision
+        let present = displayHDR ? ["sdr", "pq", "hlg"] : ["sdr"]
+        var video = [VideoCaps(codec: "h264", present: present)]
+        if hevc {
+            video.append(VideoCaps(
+                codec: "hevc",
+                profiles: ["main", "main10"],
+                present: present,
+                dvProfiles: supportsDolbyVision ? [5, 8] : nil
+            ))
+        }
+        if av1 {
+            video.append(VideoCaps(codec: "av1", profiles: ["main"], present: present))
+        }
+
+        #if os(tvOS)
+        let kind = "tvos"
+        #else
+        let kind = "ios"
+        #endif
+
+        return DeviceCaps(
+            client: ClientInfo(
+                kind: kind,
+                build: String(
+                    (Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
+                        .prefix(48)
+                ),
+                ua: String(UIDevice.current.model.prefix(160))
+            ),
+            video: video,
+            // AVPlayer handles these audio codecs; DTS / TrueHD are
+            // deliberately out.
+            audio: ["aac", "ac3", "eac3", "alac", "mp3"],
+            // Audio containers belong here too: omitting M4B made a playable
+            // audiobook enter the video HLS copy path and fail before its
+            // first frame-equivalent audio sample on physical devices.
+            containers: ["mp4", "mov", "m4v", "m4a", "m4b", "mp3", "aac", "flac", "wav"],
+            transports: ["progressive", "hls"],
+            // AVPlayer accepts P5/P8, but a raw progressive MP4 can advance
+            // with audio and report DV while rendering black. Preserved DV
+            // therefore always rides the normalized copy-video HLS envelope.
+            dvTransport: "hls",
+            display: DisplayCaps(hdr: displayHDR, dolbyVision: supportsDolbyVision)
+        )
+    }
 
     static func query() -> [URLQueryItem] {
         let hevc = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)

@@ -193,12 +193,6 @@ class ControlRequestWireCase(unittest.TestCase):
         # The server accepts an acknowledgement M2 clients never send: they
         # consume no action, so they have nothing to acknowledge.
         rust.discard("acknowledgement")
-        # `supported_actions` is the client's action vocabulary, and the server
-        # deploys before the clients do. An absent list means passive, which is
-        # exactly what an M2 client is, so a server that has the field and
-        # clients that do not is the correct intermediate state rather than a
-        # drift. This discard comes out in the client PR that adds it.
-        rust.discard("supported_actions")
         self.assertSameWire(
             "ControlRequestV1",
             rust,
@@ -258,6 +252,55 @@ class ControlRequestWireCase(unittest.TestCase):
             found = re.search(pattern, source)
             self.assertIsNotNone(found, f"{label} no longer names its protocol version")
             self.assertEqual(found.group(1), expected, f"{label} speaks a different version")
+
+    def test_every_port_declares_the_action_it_accepts(self) -> None:
+        """The server sends only actions the client named, so the names must match.
+
+        A misspelling here has no loud failure mode. The server simply never
+        sends that client the action, and the client goes quietly unmanaged for
+        the life of every session — which is the drift this file exists for.
+        """
+        server = re.search(r'HOLD_ACTION[^=]*=\s*"([^"]+)"', self.rust)
+        self.assertIsNotNone(server, "the server no longer names the hold action")
+        hold = server.group(1)
+        for label, source, pattern in (
+            ("web", self.web, r"SUPPORTED_ACTIONS\s*=\s*Object\.freeze\(\[([^\]]*)\]"),
+            ("apple", self.apple, r"supportedActions\s*=\s*\[([^\]]*)\]"),
+            ("android", self.android, r"SUPPORTED_ACTIONS\s*=\s*listOf\(([^)]*)\)"),
+        ):
+            found = re.search(pattern, source)
+            self.assertIsNotNone(found, f"{label} no longer declares an action vocabulary")
+            declared = re.findall(r'"([^"]+)"', found.group(1))
+            self.assertIn(
+                hold,
+                declared,
+                f"{label} does not declare {hold!r}, so the server would never send it",
+            )
+
+    def test_the_hold_reason_is_one_vocabulary(self) -> None:
+        """The action's reason and `DeliveryView.hold_reason` are the same fact."""
+        mapping = re.search(
+            r"fn from_delivery\(reason: &str\) -> Option<Self> \{(.*?)\n    \}",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(mapping, "the server no longer maps delivery hold reasons")
+        reasons = set(re.findall(r'"([a-z_]+)" =>', mapping.group(1)))
+        self.assertEqual(
+            reasons,
+            {"demand", "time", "bytes", "global", "ahead", "working_set", "no_room"},
+        )
+        bound = re.search(
+            r"hold_reason\s*\.as_deref\(\)\s*\.is_none_or\(\|value\| \{(.*?)\}\)",
+            self.rust,
+            re.DOTALL,
+        )
+        self.assertIsNotNone(bound, "the delivery view no longer bounds its hold reason")
+        self.assertEqual(
+            set(re.findall(r'"([a-z_]+)"', bound.group(1))),
+            reasons,
+            "the action and the delivery view disagree about the hold vocabulary",
+        )
 
     def test_every_port_agrees_on_the_enum_vocabularies(self) -> None:
         """A value the server does not know is refused exactly like a bad name."""

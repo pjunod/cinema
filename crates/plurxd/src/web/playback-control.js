@@ -11,6 +11,13 @@
   const EXCHANGE_DEADLINE_MS = 6_000;
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+  // The actions this client will accept from the server, and the only ones the
+  // server will send it. Naming an action here is a promise that receiving it
+  // is not a protocol error; it is not yet a promise to act on it. Recovery
+  // authority still belongs to this client's own timers until the milestone
+  // that moves it.
+  const SUPPORTED_ACTIONS = Object.freeze(["hold"]);
+
   function defaultNow() {
     if (typeof performance === "object" && typeof performance.now === "function") {
       return performance.now();
@@ -85,6 +92,7 @@
       control_epoch: bootstrap.control_epoch,
       client_instance_id: clientInstanceId,
       sequence,
+      supported_actions: SUPPORTED_ACTIONS.slice(),
     });
     return request;
   }
@@ -96,8 +104,20 @@
       && response.control_epoch === bootstrap.control_epoch
       && Number.isSafeInteger(response.accepted_sequence)
       && response.accepted_sequence === request.sequence
-      && response.action
-      && response.action.type === "none";
+      && validAction(response.action);
+  }
+
+  // An action outside the declared vocabulary is a protocol error, and the
+  // reporter stops: the server was told what this client accepts, so anything
+  // else means the two disagree about the contract and continuing would be
+  // guessing. A `hold` whose reason is unrecognised is still a hold — the
+  // reason is diagnostic, and refusing the exchange over one unknown word
+  // would silence this client against a merely newer server.
+  function validAction(action) {
+    if (!action) return false;
+    if (action.type === "none") return true;
+    if (action.type === "hold") return typeof action.reason === "string";
+    return false;
   }
 
   class Reporter {

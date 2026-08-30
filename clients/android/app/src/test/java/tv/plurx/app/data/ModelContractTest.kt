@@ -447,6 +447,23 @@ class ModelContractTest {
     }
 
     @Test
+    fun sessionCreateRepeatsTheDecisionCapabilitiesDocument() {
+        val caps = capsDocument(
+            video = videoCodecCaps(listOf(VideoDecoderLimit("h264", 1080))),
+            audio = listOf("aac"),
+            hdrTypes = emptySet(),
+            decoderDolbyVisionProfiles = emptyList(),
+            client = ClientInfo("android", "52", "test device"),
+        )
+
+        val wire = json.encodeToString(CreateSessionReq(playback_id = "player", caps = caps))
+
+        assertTrue(wire.contains("\"caps\":{\"v\":2"))
+        assertTrue(wire.contains("\"transports\":[\"progressive\",\"hls\"]"))
+        assertTrue(wire.contains("\"present\":[\"sdr\"]"))
+    }
+
+    @Test
     fun subtitleTracksCarryBothTextAndTheServersNativeVerdict() {
         // The two flags are different questions and the server sends both:
         // `text` is "has extractable text" (!is_bitmap_subtitle), `native` is

@@ -10,13 +10,20 @@ import Foundation
 /// are meant to stay observably identical. Where the JS relies on a truthy
 /// check this uses a typed optional, but no rule differs.
 ///
-/// Passive means passive: the server's only permitted action today is
-/// `none`, and `PlaybackControlReporter` treats anything else as a protocol
-/// error that stops the reporter rather than as an instruction. When M5 gives
-/// clients an action owner, that owner consumes actions; this type keeps
-/// reporting.
+/// Passive means passive: this reporter declares the actions it will accept
+/// and treats anything else as a protocol error that stops it, rather than as
+/// an instruction to improvise. Today that vocabulary is `hold`, which is an
+/// explanation and not an instruction — the server saying production is
+/// deliberately not advancing. Accepting it is what keeps this client
+/// reporting through a deliberate hold; acting on it is the action owner's
+/// job, and recovery authority still belongs to this platform's own timers
+/// until M5 moves it.
 enum PlaybackControl {
     static let protocolName = "plurx-playback-control-v1"
+    /// The actions this client will accept, and therefore the only ones the
+    /// server will send it. An action that is never declared is never sent, so
+    /// a client cannot be silenced by one it does not understand.
+    static let supportedActions = ["hold"]
     static let minimumExchangeMs = 250
     static let maximumExchangeMs = 60_000
     static let exchangeDeadlineMs = 6_000
@@ -295,18 +302,22 @@ struct ControlRequest: Codable, Equatable {
     var selection: ClientSelection
     var capabilities: DynamicCapabilities?
     var observation: ClientObservation?
+    var supportedActions: [String] = PlaybackControl.supportedActions
 
     enum CodingKeys: String, CodingKey {
         case proto = "protocol"
         case generation, controlEpoch, clientInstanceId, sequence, demand
         case positionMs, bufferedFromMs, bufferedThroughMs, playbackRate
         case renderState, seekTargetMs, observedDownloadBps
-        case selection, capabilities, observation
+        case selection, capabilities, observation, supportedActions
     }
 }
 
 struct ControlAction: Codable, Equatable {
     var type: String
+    /// Present on `hold`, and diagnostic rather than dispositive: a reason
+    /// this client has never heard of is a newer server, not a broken one.
+    var reason: String? = nil
 }
 
 struct ControlResponse: Codable, Equatable {
@@ -508,7 +519,8 @@ actor PlaybackControlReporter {
             observedDownloadBps: snapshot.observedDownloadBps,
             selection: snapshot.selection,
             capabilities: snapshot.capabilities,
-            observation: snapshot.observation?.bounded
+            observation: snapshot.observation?.bounded,
+            supportedActions: PlaybackControl.supportedActions
         )
         // Capabilities are static for the life of a player. Repeating them on
         // every exchange is bytes the server already has; the first request of
@@ -555,9 +567,20 @@ actor PlaybackControlReporter {
         guard response.acceptedSequence == request.sequence else {
             throw ControlProtocolError(reason: "accepted_sequence")
         }
-        // M2 clients consume nothing. An action of any other type is a server
-        // this client does not understand, not an instruction to improvise.
-        guard response.action.type == "none" else {
+        // An action outside the declared vocabulary means the server and this
+        // client disagree about the contract, and continuing would be
+        // guessing. A `hold` is inside it: the server is explaining that
+        // production is deliberately not advancing, which is the opposite of a
+        // reason to stop reporting. Its reason must be present but need not be
+        // one this client recognises.
+        switch response.action.type {
+        case "none":
+            break
+        case "hold":
+            guard response.action.reason != nil else {
+                throw ControlProtocolError(reason: "action")
+            }
+        default:
             throw ControlProtocolError(reason: "action")
         }
     }
