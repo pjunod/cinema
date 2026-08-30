@@ -42,7 +42,12 @@ the measured failure order, docs-only lane, suite split, and safe rebase-result
 reuse roadmap. Then
 [docs/PLAYBACK.md](docs/PLAYBACK.md) traces the end-to-end path a file takes to
 become a stream — every direct/remux/transcode fork and the per-browser
-transport choice behind it. [docs/PLAYBACK-TESTING.md](docs/PLAYBACK-TESTING.md)
+transport choice behind it;
+[docs/PLAYBACK-CAPS-V2-PLAN.md](docs/PLAYBACK-CAPS-V2-PLAN.md) is the open
+implementation plan for making that decision negotiate the highest grade a
+device can show — structured capabilities, an HDR10 transcode rung, and
+Dolby Vision Profile 7 → 8.1 conversion on the fly and on disk.
+[docs/PLAYBACK-TESTING.md](docs/PLAYBACK-TESTING.md)
 turns that map into an automated source × quality × operation matrix, with
 [docs/BENCHMARKING.md](docs/BENCHMARKING.md) defining the controlled
 Cinema/plurx-vs-Plex A/B suite — identical corpus, separate engine and decoded-
