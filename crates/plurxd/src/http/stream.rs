@@ -272,7 +272,7 @@ impl Caps {
     /// limits still apply — a decision that reads the clock invisibly is one
     /// nobody can reproduce from the log line it produced.
     fn profile(&self, now_ms: i64) -> playback::DeviceProfile {
-        let mut applicable = |profile: playback::DeviceProfile| {
+        let applicable = |profile: playback::DeviceProfile| {
             let mut profile = profile;
             profile.retain_applicable_learned_limits(now_ms);
             profile

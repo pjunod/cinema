@@ -1057,12 +1057,14 @@ pub fn decide(file: &MediaFile, profile: &DeviceProfile, node: &RenderCaps) -> D
         // what the ordinary decision would have delivered — a transcode's
         // own grade is a different answer and would report "HDR10 → SDR" for
         // a rung that is still HDR10.
-        let lost_range = (!c.needs_transcode() && target == OutputGrade::Sdr)
-            .then(|| match file.hdr.as_deref() {
-                Some(range @ ("dolby_vision" | "hdr10" | "hlg")) => Some(range),
-                _ => None,
-            })
-            .flatten();
+        let lost_range = match file.hdr.as_deref() {
+            Some(range @ ("dolby_vision" | "hdr10" | "hlg"))
+                if !c.needs_transcode() && target == OutputGrade::Sdr =>
+            {
+                Some(range)
+            }
+            _ => None,
+        };
         c.video_ok = false;
         // The browser's own wording, verbatim. A server paraphrase would put
         // two different explanations of one decision in front of the same
