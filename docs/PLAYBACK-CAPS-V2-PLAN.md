@@ -478,12 +478,13 @@ Two corrections the measurement forced:
   ffmpeg itself writes `dvvC` for a native Profile 8 source. M5a's output is
   P8.1, so the writer emits `dvvC` and the golden test is taken against a
   native P8 init.
-- **Today's strip path already lies**, independently of M5a. One ffmpeg with
-  `filter_units=remove_types=63` drops the EL NALs but copies the mkv's
-  record verbatim, so the output still declares `dv_profile=7,
-  el_present_flag=1` over a stream with no enhancement layer. The same writer
-  corrects `el_present_flag` to 0 there, which is a strictly smaller change
-  than the conversion and worth doing whether or not M5a lands.
+- **A second finding here was retracted.** An earlier revision claimed the
+  existing strip path emits a record still declaring an enhancement layer.
+  It does not: the strip's real argv is
+  `dovi_rpu=strip=1,filter_units=remove_types=32-34|62-63`, which removes the
+  DOVI side data outright, so the output carries no Dolby Vision record and is
+  correctly signalled as plain HDR10. The control that produced the claim ran
+  an argv plurx never runs. See `docs/PLAYBACK-CAPS-V2-M0.md` §8.
 
 Media segments are untouched either way — the RPU lives in `mdat` sample
 data, already rewritten upstream.

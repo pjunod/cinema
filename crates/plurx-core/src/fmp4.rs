@@ -945,13 +945,13 @@ pub struct DolbyVisionRecord {
     /// The level. This, with the profile, is what the HLS master playlist's
     /// `dvh1.PP.LL` suffix is built from (`dolby_vision_codec_from_init`).
     pub level: u8,
-    /// Whether an enhancement layer is present **in these bytes**.
+    /// Whether an enhancement layer is present.
     ///
-    /// This is the field M5a-0 found lying (`docs/PLAYBACK-CAPS-V2-M0.md` §8):
-    /// dropping the EL NAL units with `filter_units=remove_types=63` does not
-    /// touch the record ffmpeg copied out of the source container, so a
-    /// stripped Profile 7 stream goes out still declaring an enhancement layer
-    /// that is no longer in it.
+    /// Read and written faithfully, and never inferred. plurx's own Dolby
+    /// Vision strip does not produce a record at all — `dovi_rpu=strip=1`
+    /// removes the side data, so the output is signalled as plain HDR10 — so
+    /// every record this type sees is one a muxer wrote from a source that
+    /// had one, and its answer here is that source's answer.
     pub el_present: bool,
     /// Whether an RPU is present.
     pub rpu_present: bool,
@@ -1131,17 +1131,17 @@ pub fn dolby_vision_record(init: &Init) -> Result<Option<DolbyVisionRecord>, Fmp
 /// Write `record` into this init's video sample entry, replacing whatever
 /// configuration was there.
 ///
-/// Two callers, one mechanism (M5a-0, `docs/PLAYBACK-CAPS-V2-M0.md` §8):
+/// One caller today, one contingency (M5a-0, `docs/PLAYBACK-CAPS-V2-M0.md` §8):
 ///
 /// - **The conversion.** ffmpeg does not derive this record from the RPU — it
 ///   copies the one the input container had, and the P7→P8.1 pipe feeds it a
 ///   raw Annex B stream with no container. So its output carries correct
 ///   Profile 8.1 RPUs inside `mdat` and nothing in the sample entry to say so,
 ///   and this writer supplies the record.
-/// - **The strip.** Dropping the enhancement-layer NAL units does not touch a
-///   record ffmpeg copied verbatim, so today a stripped Profile 7 stream still
-///   declares `el_present_flag=1` over bytes with no enhancement layer. The
-///   same writer corrects it.
+/// - **A correction**, should a stream ever be found whose record disagrees
+///   with its samples. Nothing does today: plurx's strip removes the side data
+///   outright rather than leaving a stale record, and its preserve keeps both
+///   the layers and the record that describes them.
 ///
 /// Answers whether the init changed. Writing a record byte-identical to the
 /// one already there — under the same box name — is a no-op, and that is not a
@@ -3790,7 +3790,10 @@ mod tests {
     /// know a hand-written parser agrees with the muxers in the wild is to
     /// take it from them.
     const NATIVE_P8_DVVC: &str = "010010351000000000000000000000000000000000000000";
-    const STRIPPED_P7_DVCC: &str = "01000e376000000000000000000000000000000000000000";
+    /// A Profile 7 dual-layer title copied out of its Matroska container with
+    /// its enhancement layer and RPU intact — plurx's own preserve route. The
+    /// record is correct: there really is an enhancement layer.
+    const PRESERVED_P7_DVCC: &str = "01000e376000000000000000000000000000000000000000";
 
     /// Read an init back through the ordinary reader, from bytes.
     fn reparse_init(bytes: &[u8]) -> Init {
@@ -3811,13 +3814,9 @@ mod tests {
 
     /// The parser agrees with ffmpeg, on records ffmpeg wrote.
     ///
-    /// The second row is the bug M5a-0 found stated as a fact: a Profile 7
-    /// title whose enhancement-layer NAL units were dropped by
-    /// `filter_units=remove_types=63` still carries a record saying an
-    /// enhancement layer is there. ffmpeg copies the source container's record
-    /// verbatim and the bitstream filter never touches it, so the bytes and
-    /// the record disagree and a decoder is told to expect a layer that is not
-    /// in the stream.
+    /// Two real records, one of each spelling and one of each profile class,
+    /// so the two fields that decide the box name and the codec string are
+    /// pinned against a muxer rather than against a reading of the spec.
     #[test]
     fn the_dolby_vision_record_reads_the_way_ffmpeg_writes_it() {
         let native = DolbyVisionRecord::parse(&hex(NATIVE_P8_DVVC)).expect("native P8 record");
@@ -3834,24 +3833,27 @@ mod tests {
         );
         assert_eq!(native.box_name(), *b"dvvC", "profile 8 and above is dvvC");
 
-        let stripped = DolbyVisionRecord::parse(&hex(STRIPPED_P7_DVCC)).expect("stripped P7");
+        let preserved = DolbyVisionRecord::parse(&hex(PRESERVED_P7_DVCC)).expect("preserved P7");
         assert_eq!(
             (
-                stripped.profile,
-                stripped.level,
-                stripped.el_present,
-                stripped.rpu_present,
-                stripped.bl_present,
-                stripped.bl_signal_compatibility_id
+                preserved.profile,
+                preserved.level,
+                preserved.el_present,
+                preserved.rpu_present,
+                preserved.bl_present,
+                preserved.bl_signal_compatibility_id
             ),
-            // el_present is wrong, and wrong in the shipped output.
             (7, 6, true, true, true, 6)
         );
-        assert_eq!(stripped.box_name(), *b"dvcC", "profile 7 and below is dvcC");
+        assert_eq!(
+            preserved.box_name(),
+            *b"dvcC",
+            "profile 7 and below is dvcC"
+        );
 
         // The writer is the parser's exact inverse, or a rewrite silently
         // drops a field nothing here reads but a decoder does.
-        for golden in [NATIVE_P8_DVVC, STRIPPED_P7_DVCC] {
+        for golden in [NATIVE_P8_DVVC, PRESERVED_P7_DVCC] {
             let bytes = hex(golden);
             let parsed = DolbyVisionRecord::parse(&bytes).expect("parse");
             assert_eq!(parsed.to_payload(), bytes, "round trip of {golden}");
@@ -3879,7 +3881,7 @@ mod tests {
     /// bytes had been dropped.
     #[test]
     fn correcting_a_record_does_not_discard_the_bytes_it_does_not_understand() {
-        let mut carrying = hex(STRIPPED_P7_DVCC);
+        let mut carrying = hex(PRESERVED_P7_DVCC);
         carrying[4] |= 0x0c; // dv_md_compression
         carrying[8] = 0xab; // and something further into the reserved tail
         carrying[23] = 0x5a;
@@ -3922,8 +3924,9 @@ mod tests {
         assert!(DolbyVisionRecord::new(8, 6, false, true, true, 6).is_ok());
     }
 
-    /// Correcting the stripped record is an in-place edit, and the conversion
-    /// is an insertion. Both have to leave a parseable init.
+    /// Rewriting a record in place and inserting one where there is none —
+    /// the two shapes the writer has to get right — both leaving a parseable
+    /// init.
     #[test]
     fn writing_the_dolby_vision_record_keeps_the_box_tree_consistent() {
         // An init with no record at all — the shape the P7→P8.1 pipe produces,
@@ -4017,9 +4020,10 @@ mod tests {
             "the renamed box must still be found, and still be a dvvC"
         );
 
-        // …and the strip-path correction: same profile, EL flag told the truth.
-        let stripped = dolby_vision_record(&init).expect("read").expect("present");
-        let corrected = stripped.without_enhancement_layer();
+        // …and a flag correction on its own: same profile, same box name, one
+        // bit. The contingency `without_enhancement_layer` exists for.
+        let claiming = dolby_vision_record(&init).expect("read").expect("present");
+        let corrected = claiming.without_enhancement_layer();
         assert!(set_dolby_vision_record(&mut init, &corrected).expect("correct"));
         assert_eq!(init.bytes.len(), length);
         assert_eq!(
