@@ -255,6 +255,54 @@ class OperationsContractCase(unittest.TestCase):
         deploy_readme = read("deploy/README.md")
         self.assertIn("There is no direct-install step for the fleet", deploy_readme)
 
+    def test_ship_physical_is_a_self_contained_device_path(self):
+        script = read("scripts/ship-physical")
+        subprocess.run(
+            ["bash", "-n", str(ROOT / "scripts/ship-physical")], check=True
+        )
+        self.assertTrue(os.access(ROOT / "scripts/ship-physical", os.X_OK))
+
+        # It builds for real hardware, in the same shape the Ansible role does.
+        self.assertIn("-scheme plurx-iOS", script)
+        self.assertIn("-scheme plurx-tvOS", script)
+        self.assertIn("generic/platform=iOS", script)
+        self.assertIn("generic/platform=tvOS", script)
+        self.assertIn("-configuration Release", script)
+        self.assertIn(":app:assembleDebug", script)
+
+        # Neither artifact reaches a device unverified.
+        self.assertIn("codesign --verify --deep --strict", script)
+        self.assertIn('"$APKSIGNER" verify', script)
+
+        # TestFlight stays an Ansible-only path; this one never uploads.
+        self.assertNotIn("exportArchive", script)
+        self.assertNotIn("ASC_KEY_ID", script)
+
+        # A downgrade retains /data and hands older code a newer schema.
+        self.assertIn("install --no-streaming -r", script)
+        self.assertNotIn("adb -s \"$serial\" install -d", script)
+        self.assertNotIn("--allow-downgrade", script)
+
+        # macOS ships bash 3.2 — no mapfile, no associative arrays.
+        self.assertNotIn("mapfile", script.split("# Not `mapfile`")[0])
+        self.assertNotIn("declare -A", script)
+
+        result = subprocess.run(
+            [str(ROOT / "scripts/ship-physical"), "--help"],
+            cwd=ROOT,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        self.assertIn("--dry-run", result.stdout)
+        self.assertIn("--allow-unknown", result.stdout)
+
+    def test_publishing_documents_the_standalone_device_path(self):
+        publishing = read("docs/PUBLISHING.md")
+        self.assertIn("scripts/ship-physical", publishing)
+        self.assertIn("When the controller cannot run the play", publishing)
+
     def test_ship_has_no_obsolete_nuc4_port_exception(self):
         ship = read("scripts/ship")
         self.assertNotIn(
