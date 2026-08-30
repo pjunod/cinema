@@ -913,11 +913,15 @@ fn decode_setup(encoder: Encoder, source: &MediaFile) -> (Vec<String>, Option<St
     }
     let heavy = heavy_source(source);
     // 10-bit (HDR/DV) surfaces download as p010le; 8-bit as nv12.
-    let dl = if source.bit_depth.unwrap_or(8) >= 10 {
-        "p010le"
-    } else {
-        "nv12"
-    };
+    //
+    // An HDR source counts as 10-bit whatever the column says. `bit_depth` is
+    // nullable and is `None` for any row whose probe carried no `pix_fmt`, and
+    // guessing 8 there means downloading a PQ signal through `nv12` — an
+    // 8-bit quantisation, re-padded to 10 bits by the chain that follows and
+    // encoded Main10 with a PQ tag. Every gradient bands, at exit 0. There is
+    // no HDR flavour that is genuinely 8-bit, so the flag is the safer input.
+    let ten_bit = source.bit_depth.unwrap_or(0) >= 10 || source.hdr.is_some();
+    let dl = if ten_bit { "p010le" } else { "nv12" };
     match encoder {
         // These families decode into system memory implicitly — no hwdownload.
         Encoder::Nvenc => (vec![arg("-hwaccel"), arg("cuda")], None),
@@ -1084,9 +1088,20 @@ pub fn hls_args(
             // broken order exactly, hidden by the tests only ever burning
             // with the suffix-less software encoder.
             let up = suffix.map(|s| format!(",{s}")).unwrap_or_default();
+            // `overlay`'s output format defaults to 8-bit `yuv420`, and ffmpeg
+            // satisfies that by auto-inserting a downconvert on the main
+            // input — silently, at exit 0. On a 10-bit chain that produces
+            // HEVC **Main**, 8-bit, under a playlist advertising Main10 PQ:
+            // banding across every shadow gradient, and a hard decode refusal
+            // on players that check the advertised profile. Naming the format
+            // is the only thing that stops it.
+            let overlay_format = match opts.pipeline.output_grade() {
+                OutputGrade::Hdr10 => ":format=yuv420p10",
+                OutputGrade::Sdr => "",
+            };
             let complex = format!(
                 "[0:v]{vf}[vburn];{sub};\
-                 [vburn][sburn]overlay=eof_action=pass{up}{BURNED_VIDEO_LABEL}"
+                 [vburn][sburn]overlay=eof_action=pass{overlay_format}{up}{BURNED_VIDEO_LABEL}"
             );
             assert_no_pq_at_8_bit(&complex);
             args.push("-filter_complex".into());
@@ -2251,11 +2266,11 @@ mod tests {
         );
         // Every chain this crate can actually build is clean, at every rung
         // and for every source grade.
-        for pipeline in PIPELINE_CANDIDATES
-            .iter()
-            .copied()
-            .chain([Pipeline::DoviTonemapx, Pipeline::DoviPassthrough])
-        {
+        for pipeline in PIPELINE_CANDIDATES.iter().copied().chain([
+            Pipeline::DoviTonemapx,
+            Pipeline::DoviPassthrough,
+            Pipeline::Hdr10Passthrough,
+        ]) {
             for hdr in [None, Some("hdr10"), Some("hlg"), Some("dolby_vision")] {
                 if let Some(graph) = pipeline.filters(Some(1920), 1080, hdr) {
                     assert_no_pq_at_8_bit(&graph);

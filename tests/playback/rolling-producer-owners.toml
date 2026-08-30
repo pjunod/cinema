@@ -977,7 +977,10 @@ pattern = "(?:[A-Za-z_]\\w*::)+(?:sleep|sleep_until|interval|interval_at|timeout
 # process. The transaction bound that CAN end a producer is the actor-owned
 # PRODUCER_FLOW_ACTION_BUDGET, which is not a time constructor and is named in
 # the lifecycle allowlist instead.
-expected_occurrences = 503
+# 505 since the two HDR10 boot probes joined: each wraps its one-shot ffmpeg
+# in the same 20-second `tokio::time::timeout` every probe beside it uses. A
+# capability check that can hang is a daemon that never finishes starting.
+expected_occurrences = 505
 
 [[module_structures]]
 id = "bare-time-constructor"
@@ -992,7 +995,12 @@ expected_occurrences = 1
 [[module_structures]]
 id = "process-command-construction"
 pattern = "(?:[A-Za-z_]\\w*::)*Command::new\\s*\\("
-expected_occurrences = 58
+# +2: the two HDR10 boot probes in `ffmpeg.rs`
+# (`has_hdr10_passthrough`, `has_hdr10_passthrough_qsv`). Both are one-shot
+# capability checks against a synthetic 64x64 lavfi frame, awaited to
+# completion behind a process-lifetime `OnceCell` at boot. Neither owns a
+# rolling producer, neither outlives its `await`, and both are `kill_on_drop`.
+expected_occurrences = 60
 
 [[module_structures]]
 id = "process-capable-launch-method"
@@ -1000,7 +1008,8 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # Four new MembershipManager::status calls are direct replicated-state reads,
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
-expected_occurrences = 176
+# +2: `.output()` and `.status()` on the two HDR10 boot probes above.
+expected_occurrences = 178
 
 [[module_structures]]
 id = "process-command-ufcs-launch"
@@ -1025,7 +1034,10 @@ expected_occurrences = 32
 [[module_structures]]
 id = "kill-on-drop-construction"
 pattern = "kill_on_drop\\s*\\("
-expected_occurrences = 30
+# +2: the two HDR10 boot probes, which take it for the same reason every
+# other probe does -- a capability check that outlives its await is a stray
+# ffmpeg holding a device the first real session then cannot open.
+expected_occurrences = 32
 
 [[module_structures]]
 id = "rolling-supervisor-construction"
