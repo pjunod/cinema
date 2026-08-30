@@ -1901,6 +1901,13 @@ fn system_info(
         dovi_passthrough_qsv: measured.dovi_passthrough_qsv,
         hdr10_passthrough: measured.hdr10_passthrough,
         hdr10_passthrough_qsv: measured.hdr10_passthrough_qsv,
+        // Not measured: the conversion is plurx's own code, so the only
+        // question is whether an operator has turned it off. `PLURX_DV_CONVERT=0`
+        // is the off switch, and the default is on — a Profile 7 title that
+        // reaches a Dolby Vision client as HDR10 is the thing this exists to
+        // stop, so it should not need enabling.
+        dolby_vision_convert: !std::env::var("PLURX_DV_CONVERT")
+            .is_ok_and(|value| matches!(value.trim(), "0" | "false" | "off" | "no")),
     }
 }
 

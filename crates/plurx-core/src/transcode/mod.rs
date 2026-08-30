@@ -12,6 +12,7 @@
 //! graphs that keeps frames on the GPU. Which a node uses is decided by probe,
 //! not by version (PERF-PLAN §5).
 
+pub mod dvconvert;
 mod encoder;
 pub mod manifest;
 mod pipeline;
@@ -332,6 +333,7 @@ pub struct CopyVideoOptions {
     have_dovi_bsf: bool,
     preserve_dolby_vision: bool,
     promote_hevc_parameter_sets: bool,
+    dv_convert: bool,
 }
 
 impl CopyVideoOptions {
@@ -340,12 +342,35 @@ impl CopyVideoOptions {
             have_dovi_bsf,
             preserve_dolby_vision,
             promote_hevc_parameter_sets: false,
+            dv_convert: false,
         }
     }
 
     pub const fn with_parameter_set_promotion(mut self, required: bool) -> Self {
         self.promote_hevc_parameter_sets = required;
         self
+    }
+
+    /// Convert this source's Dolby Vision Profile 7 RPUs to Profile 8.1 on the
+    /// way through (PLAYBACK-CAPS-V2-PLAN §4.8).
+    ///
+    /// Set by the decider when the source is Profile 7 with a compatible base
+    /// and the client takes 8 but not 7 — which is every consumer Dolby Vision
+    /// decoder, since dual-layer has never shipped outside Blu-ray hardware.
+    ///
+    /// It is a field of `CopyVideoOptions` for one reason beyond tidiness: the
+    /// options render into `copy_video_args`, and the argv is what the
+    /// fragment index is keyed by. A converted stream is a different stream
+    /// and must get its own index identity, or a client would be served
+    /// segments cut for the unconverted one.
+    pub const fn with_dolby_vision_conversion(mut self, convert: bool) -> Self {
+        self.dv_convert = convert;
+        self
+    }
+
+    /// Whether this copy converts Profile 7 to Profile 8.1.
+    pub const fn converts_dolby_vision(self) -> bool {
+        self.dv_convert
     }
 
     pub fn from_probe(
@@ -1310,8 +1335,42 @@ pub fn copy_video_args(source: &MediaFile, options: CopyVideoOptions) -> Vec<Str
                 options.preserve_dolby_vision,
             ));
         }
+        // The conversion is not an ffmpeg argument — it happens between two
+        // ffmpegs, in `transcode::dvconvert` — but it has to appear here, and
+        // this is the honest place for it.
+        //
+        // `copy_video_args` is what the fragment index fingerprints. A
+        // converted stream has different bytes and therefore different
+        // segment boundaries, so it needs its own index identity; without a
+        // token in the argv it would silently share the unconverted stream's,
+        // and a client would be handed a playlist whose cut points describe
+        // different media. The token is stripped before exec by
+        // [`strip_plurx_markers`].
+        if options.dv_convert {
+            args.push(DV_CONVERT_MARKER.into());
+        }
     }
     args
+}
+
+/// The marker `copy_video_args` carries for a Profile 7 → 8.1 conversion.
+///
+/// Deliberately not a valid ffmpeg option: it exists to be fingerprinted and
+/// then removed, and anything that reached an exec would fail loudly rather
+/// than being interpreted.
+pub const DV_CONVERT_MARKER: &str = "--plurx-dv-convert=p7-to-p81";
+
+/// Remove plurx's own markers from an argv before it is executed.
+///
+/// The argv is two things at once: the recipe the fragment index is keyed by,
+/// and the command line ffmpeg receives. Where those disagree — a stage plurx
+/// runs itself, between ffmpegs — the recipe carries a token and the command
+/// line does not.
+pub fn strip_plurx_markers(args: &[String]) -> Vec<String> {
+    args.iter()
+        .filter(|arg| !arg.starts_with("--plurx-"))
+        .cloned()
+        .collect()
 }
 
 /// The source-timeline origin implied by [`keyframe_probe_args`] output.

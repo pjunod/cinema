@@ -102,6 +102,15 @@ pub struct SystemInfo {
     /// `hevc_qsv` Main10. Separate from `dovi_passthrough_qsv`, which is
     /// gated behind a Dolby Vision filter this route does not use.
     pub hdr10_passthrough_qsv: bool,
+    /// Whether this build converts Dolby Vision Profile 7 to Profile 8.1 on
+    /// the way through a copy (PLAYBACK-CAPS-V2-PLAN §4.8).
+    ///
+    /// Not a probe: the conversion is plurx's own code, so the answer is
+    /// "this binary has it" — which is always true — narrowed by the
+    /// `playback.dv_convert` setting an operator can turn off. It sits with
+    /// the probes because a client asking why a title played as HDR10 rather
+    /// than Dolby Vision needs all four answers in one place.
+    pub dolby_vision_convert: bool,
 }
 
 /// The daemon's managed directories across the configured storage roots.

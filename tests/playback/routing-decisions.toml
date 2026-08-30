@@ -33,6 +33,15 @@ source_anchor = "pub fn decide("
 test = "crates/plurx-core/src/playback/mod.rs"
 test_anchor = "automatic_routing_matrix_covers_every_compatibility_dimension"
 
+# Profile 7 to 8.1 on the fly. A delivery-changing rule: the same source
+# reaches the same client as Dolby Vision instead of HDR10.
+[[decisions]]
+id = "server.dolby-vision-convert"
+source = "crates/plurx-core/src/playback/mod.rs"
+source_anchor = "pub fn dolby_vision_converts_to_p81("
+test = "crates/plurx-core/src/playback/mod.rs"
+test_anchor = "only_a_client_that_takes_eight_but_not_seven_gets_a_converted_stream"
+
 [[decisions]]
 id = "server.dolby-vision"
 source = "crates/plurx-core/src/playback/mod.rs"
