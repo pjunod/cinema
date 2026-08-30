@@ -41,6 +41,15 @@ pub enum Transfer {
     Sdr,
     Pq,
     Hlg,
+    /// A curve this server has not heard of.
+    ///
+    /// The alternative is that one unrecognised token — a future `hlg10`, a
+    /// typo, a v2.1 client — fails the whole document, which fails the whole
+    /// create, which is no playback at all. That is exactly backwards for a
+    /// design whose rule is that an unknown claim is simply not a claim: this
+    /// variant matches nothing, grades nothing, and costs a set entry.
+    #[serde(other)]
+    Unknown,
 }
 
 /// One decodable video codec, and the ceilings that apply to it.
@@ -111,6 +120,12 @@ pub struct ClientInfo {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LearnedLimit {
     /// The client's own identity string for the source shape it gave up on.
+    ///
+    /// Defaulted like every other field here. The web stores these entries in
+    /// a map keyed BY the identity (PLAYBACK-CAPS-V2-PLAN §4.6), so the
+    /// obvious client serialization — the map's values — omits it. A
+    /// diagnostic field must never be the reason a create is refused.
+    #[serde(default)]
     pub identity: String,
     /// A human label for the same, as the client would word it.
     #[serde(default)]
@@ -121,7 +136,9 @@ pub struct LearnedLimit {
     pub secs: i64,
     #[serde(default)]
     pub rate: i64,
-    #[serde(default)]
+    /// Spelled `at` by the web (§4.6); accepted under both names so the
+    /// timestamp does not silently read zero.
+    #[serde(default, alias = "at")]
     pub at_ms: i64,
 }
 
@@ -215,7 +232,10 @@ impl DeviceCaps {
     ///   it is ignored, exactly as `stream.rs` has always read it.
     /// - `maxheight` stays a global ceiling and `vmaxheight` a per-codec one,
     ///   because `evaluate` takes the `min` of the two and a client that sent
-    ///   both meant both.
+    ///   both meant both. A `vmaxheight` entry for a codec absent from
+    ///   `vcodec` is dropped rather than carried: the v2 shape has nowhere to
+    ///   put a ceiling for a codec the client does not decode, and it cannot
+    ///   change a verdict that `video_ok` has already refused on the codec.
     pub fn from_legacy_query(legacy: &LegacyCaps) -> Self {
         let video = legacy
             .video_codecs
@@ -285,6 +305,12 @@ impl DeviceProfile {
             caps.audio.clone()
         };
         let mut video_codecs: Vec<String> = Vec::new();
+        // Membership is a set lookup rather than a scan of `video_codecs`.
+        // The document arrives from the network with no per-field bound, and
+        // a linear scan per entry is quadratic in a body an authenticated
+        // caller chooses the size of — seconds of a pinned worker thread for
+        // one request.
+        let mut seen_codecs: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut video_max_heights: HashMap<String, i64> = HashMap::new();
         let mut profile_max_heights: BTreeMap<(String, String), i64> = BTreeMap::new();
         let mut presents: BTreeMap<String, BTreeSet<Transfer>> = BTreeMap::new();
@@ -296,7 +322,7 @@ impl DeviceProfile {
             if codec.is_empty() {
                 continue;
             }
-            if !video_codecs.contains(&codec) {
+            if seen_codecs.insert(codec.clone()) {
                 video_codecs.push(codec.clone());
             }
             if let Some(height) = entry.max_height.filter(|height| *height > 0) {
@@ -336,14 +362,30 @@ impl DeviceProfile {
         }
         dolby_vision_profiles.sort_unstable();
 
-        let display = caps.display.clone().unwrap_or_default();
-        // The display bit OR a codec that presents an HDR curve. Either is a
-        // client saying it can show HDR at all; `supports_hdr10_transcode`
-        // below is the narrower claim about Main10 PQ specifically.
-        let presents_hdr = presents
-            .values()
-            .any(|set| set.contains(&Transfer::Pq) || set.contains(&Transfer::Hlg));
-        let supports_hdr = display.hdr || presents_hdr;
+        // The display, when the client described one, is the authority — and
+        // it has to be, in both directions. A decoder that emits PQ into an
+        // SDR panel shows grey, and a panel that shows HDR through a decoder
+        // that cannot is not an HDR path either. Only a document with no
+        // `display` block falls back to what its codecs present.
+        //
+        // This is also what keeps the legacy translation byte-identical:
+        // `from_legacy_query` always emits a display block, so `hdr=1` alone
+        // decides `supports_hdr` exactly as it did before caps v2 existed —
+        // and `hdr10t=1&hdr=0`, which the out-of-tree clients can produce
+        // because they compute the two bits from different sources, keeps
+        // tone-mapping to SDR rather than newly direct-playing PQ.
+        let supports_hdr = match caps.display.as_ref() {
+            Some(display) => display.hdr,
+            None => presents
+                .values()
+                .any(|set| set.contains(&Transfer::Pq) || set.contains(&Transfer::Hlg)),
+        };
+        // Deliberately narrower than the flat `hdr10t` bit it replaces: the
+        // claim is "decodes HEVC Main10 and presents it as PQ", and a client
+        // that did not list `hevc` at all has not made it. The old code stored
+        // `hdr10t=1` from such a client and `target_grade` then refused the
+        // rung anyway on the codec check, so the verdict is unchanged; only
+        // the reason string moves, and it moves to the accurate one.
         let supports_hdr10_transcode = presents
             .get("hevc")
             .is_some_and(|set| set.contains(&Transfer::Pq));

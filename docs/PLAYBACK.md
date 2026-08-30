@@ -21,8 +21,10 @@ and the player says so out loud in `/decision`.
  probe THIS client's decoders/display/route ─▶ vcodec, vmaxheight, acodec, container, hdr
       │            browser APIs / platform codec APIs / active audio sink
       ▼
- GET /api/v1/files/{id}/decision?<caps>&force=<auto|original|transcode>
-                                      &audio=<index>&subtitle=<index|-1>
+ GET  /api/v1/files/{id}/decision?<caps>&force=<auto|original|transcode>
+                                       &audio=<index>&subtitle=<index|-1>
+ POST /api/v1/files/{id}/decision  — the same question, caps as a JSON
+                                     document rather than query keys
       │
       ▼
  server pure fn:  (file streams, device profile, caps, prefs, selection) ─▶ Decision
@@ -176,6 +178,108 @@ containers to MP4/MOV/M4V and asks the server to remux everything else into HLS.
 browsers. A 4K HEVC/HDR MKV with DTS audio reports the *same* verdict on Chrome
 and Safari — `remux`, because the container (mkv) and audio (dts) fail but the
 HEVC/HDR video passes on both. What differs is the *transport*, below.
+
+### Caps v2 — the same claims as a document
+
+The flat query above cannot say several true things at once. A decoder that
+takes 8-bit HEVC at 4K and Main10 only at 1080p has one `vmaxheight` slot, so
+the web sent the minimum of its two rungs and transcoded every 4K 8-bit title
+it would have direct-played. `hdr` and `hdr10t` are two bits describing one
+question — can this device *present* this curve — asked once globally and once
+for HEVC. And `dv=1` without `dvprofile` meant "every Dolby Vision profile,
+including the dual-layer ones no consumer decoder takes".
+
+So the same claims also have a document form, posted rather than queried:
+
+```bash
+# The v2 spelling. `force`, `audio` and `subtitle` are request-local choices,
+# not capabilities, so they stay on the query string.
+curl -X POST "$PLURX/api/v1/files/1234/decision?force=auto" \
+  -H "authorization: Bearer $TOKEN" \
+  -H 'content-type: application/json' \
+  -d '{"caps":{
+        "v": 2,
+        "client": {"kind":"web","build":"86"},
+        "video": [
+          {"codec":"hevc","profiles":["main"],  "max_height":2160,"present":["sdr"]},
+          {"codec":"hevc","profiles":["main10"],"max_height":1080,"present":["sdr","pq"]},
+          {"codec":"h264","max_height":2160,"present":["sdr"]}
+        ],
+        "audio": ["aac","ac3","eac3"],
+        "containers": ["mp4","mov"],
+        "dv_transport": "hls",
+        "display": {"hdr":true,"dolby_vision":true,"max_nits":1600}
+      }}'
+```
+
+| v2 field | Replaces | What changed |
+|---|---|---|
+| `video[].codec` | `vcodec` | one entry per decodable codec |
+| `video[].profiles` + `max_height` | `vmaxheight`, `maxheight` | two entries for one codec express a per-profile ceiling, which is what the min-of-rungs hack was working around |
+| `video[].present` | `hdr`, `hdr10t` | transfer functions this codec can present: `sdr` · `pq` · `hlg` |
+| `video[].dv_profiles` | `dv`, `dvprofile` | exhaustive; `[]` means none, and there is no way to claim "all" |
+| `dv_transport` | `dvhls` | `hls` when preserved DV must ride the copy-video envelope |
+| `display` | folded into `hdr` | facts about the attached output, separate from decode |
+
+Both wire shapes reach `DeviceProfile` through one function
+(`DeviceCaps::from_caps_v2`), and a test asserts a legacy `CAPS_Q` and the
+equivalent document produce identical profiles — two verdicts for one device
+is the failure a translation like this ships if nobody pins it. The legacy
+query keeps working unchanged, including the blanket `dv=1` claim; the
+deprecation happens when the clients stop sending it, not when the server
+starts refusing it.
+
+Two rules the document is strict about, both in the refusing direction:
+
+- **Absent is never a claim.** A missing `present`, profile or ceiling means
+  "not proven", never "assume yes". The optimistic reading delivers a stream
+  the device cannot decode, and a black picture is worse than a transcode.
+- **A `display` block overrules its codecs.** A decoder that emits PQ into an
+  SDR panel shows grey and *plays*, so nobody reports it. When the client
+  described a display, that display decides `hdr`.
+
+### Session create re-derives the plan
+
+`/decision` computes the plan; the client echoes `preserve_dolby_vision` and
+`hdr10` back in the create body. That echo used to be trusted. A create that
+also carries `caps` re-runs the decision from those capabilities, and the echo
+becomes an assertion:
+
+```jsonc
+{
+  "playback_id": "…", "copy": true, "aac": true,
+  "preserve_dolby_vision": true,        // asserted, not instructed
+  "hdr10": false,
+  "caps": { "v": 2, "...": "the same document" },
+  "overrides": { "compatible_hdr_base": true }   // optional, named
+}
+```
+
+**The server's plan is a ceiling, not a floor.** A client may always ask for
+*less* than the derivation allows — that is Apple's `forceCompatibleHDRBase`
+retry, and forcing the derived answer back onto it would hand the client the
+exact stream it just failed on, forever. What a client may not do is claim
+*more* than its own document supports; that direction is clamped, logged, and
+returned as a `plan_notes` entry on the create response:
+
+```json
+"plan_notes": ["plan_mismatch: client asked preserve_dolby_vision=true, server derived false"]
+```
+
+**Never a refusal.** The stream still starts, with the server's plan. Named
+overrides (`compatible_hdr_base`, `force`) leave their own note instead of a
+mismatch. `plan_notes` is omitted entirely when the client and the server
+agreed, which is what it should be on every create once the fleet has moved.
+
+`GET /api/v1/system` (admin) carries the fleet view under `plan_derivation`:
+
+| Counter | Reads as |
+|---|---|
+| `legacy_trusted` | creates from builds that send no document. **Zero is the migration finished.** |
+| `unusable_caps` | a document this server could not read — an unknown `v`, or an empty one. A client that adopted the shape and got it wrong. |
+| `rederived` | creates whose plan was recomputed from the body's own caps |
+| `mismatched` | of those, how many claimed more than their caps support. **Off zero means a shipped build's caps and its player have drifted apart.** |
+| `overridden` | of those, how many carried a named override |
 
 ## Track preflight — one policy answer before Play
 

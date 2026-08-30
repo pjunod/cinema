@@ -598,10 +598,6 @@ pub struct CreateSession {
     /// working unchanged; that path is counted too, so the fleet can be
     /// watched for stragglers.
     pub caps: Option<plurx_core::playback::DeviceCaps>,
-    /// Advisory hash of the decision this create is acting on. Recorded in
-    /// the create log so a mismatch can be traced back to the exact
-    /// `/decision` response the client was holding; never used to refuse.
-    pub plan_ref: Option<String>,
     /// The named reasons this body may legitimately differ from the plan the
     /// server derives from `caps`.
     pub overrides: Option<CreateOverrides>,
@@ -665,12 +661,17 @@ pub mod plan_derivation {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static LEGACY_TRUSTED: AtomicU64 = AtomicU64::new(0);
+    static UNUSABLE_CAPS: AtomicU64 = AtomicU64::new(0);
     static REDERIVED: AtomicU64 = AtomicU64::new(0);
     static MISMATCHED: AtomicU64 = AtomicU64::new(0);
     static OVERRIDDEN: AtomicU64 = AtomicU64::new(0);
 
     pub(super) fn count_legacy_trusted() {
         LEGACY_TRUSTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn count_unusable_caps() {
+        UNUSABLE_CAPS.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn count_rederived() {
@@ -685,11 +686,19 @@ pub mod plan_derivation {
         OVERRIDDEN.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// `(legacy_trusted, rederived, mismatched, overridden)`, this process.
-    pub fn snapshot() -> (u64, u64, u64, u64) {
+    /// `(legacy_trusted, unusable_caps, rederived, mismatched, overridden)`,
+    /// this process.
+    ///
+    /// `rederived` is loaded FIRST and incremented BEFORE its own outcome
+    /// counters, so a concurrent create can only ever make the total look
+    /// larger than its parts — never `mismatched > rederived`, which reads as
+    /// a bug in the server rather than in a client.
+    pub fn snapshot() -> (u64, u64, u64, u64, u64) {
+        let rederived = REDERIVED.load(Ordering::Relaxed);
         (
             LEGACY_TRUSTED.load(Ordering::Relaxed),
-            REDERIVED.load(Ordering::Relaxed),
+            UNUSABLE_CAPS.load(Ordering::Relaxed),
+            rederived,
             MISMATCHED.load(Ordering::Relaxed),
             OVERRIDDEN.load(Ordering::Relaxed),
         )
@@ -746,14 +755,35 @@ pub(crate) struct PlanReview {
 /// Re-derive the plan from the capabilities the client sent, and reconcile it
 /// with what the client asked for.
 ///
-/// The server's derivation wins in **both** directions, and the only way to
-/// decline it is a named override. That is stricter than "the client may
-/// always ask for less", and deliberately so: `preserve_dolby_vision=false`
-/// against a server `true` is exactly the shape of Apple's compatible-base
-/// retry, so letting an unnamed `false` through would leave the retry
-/// indistinguishable from a client that quietly stopped honouring the plan.
-/// No shipped build is affected — a client that sends no `caps` never reaches
-/// this function at all.
+/// **The server's plan is a ceiling, not a floor.** A client may always ask
+/// for *less* than the derivation allows — that is a client declining
+/// something it is entitled to decline, and the reason it must stay allowed
+/// is Apple's `forceCompatibleHDRBase` retry (`PlayerController.swift:2373`):
+/// the device really does take Profile 8, so the derivation really does say
+/// "preserve", and forcing that answer back onto a retry hands the client the
+/// exact stream it just failed on, forever. What the client may *not* do is
+/// claim more than its own document supports — and that direction is the
+/// whole of E4, because it is the one that ends in a black screen.
+///
+/// So a downward echo is honoured silently (a named override still says why,
+/// when there is one), and an upward echo is clamped, logged, counted and
+/// reported. No shipped build is affected either way: a client that sends no
+/// `caps` never reaches this function.
+///
+/// The two fields are different *kinds* of claim and are reconciled
+/// differently:
+///
+/// - `preserve_dolby_vision` is a **per-title** verdict. The derivation
+///   answers it directly.
+/// - `hdr10` is a **per-title request** for the HDR10 re-encode rung, and the
+///   caps document only says whether the client could present one at all. So
+///   the document is a *permission*, not an answer: the request stands when
+///   the document backs it, and is refused when it does not. Deriving it from
+///   the document alone would set `hdr10: true` on every create from a
+///   PQ-capable client, including every SDR title — which would both change
+///   the ladder ceiling (`capability_height_ceiling_for_request`) for requests
+///   that never asked, and pin the §4.5 mismatch counter permanently off zero,
+///   making it useless for the one thing it exists to detect.
 pub(crate) fn review_client_plan(
     caps: &plurx_core::playback::DeviceCaps,
     overrides: Option<&CreateOverrides>,
@@ -764,28 +794,24 @@ pub(crate) fn review_client_plan(
 ) -> PlanReview {
     use plurx_core::playback::{decide_forced, DeviceProfile, Force};
 
+    plan_derivation::count_rederived();
     let profile = DeviceProfile::from_caps_v2(caps);
-    let force = overrides
-        .and_then(|o| o.force.as_deref())
-        .map(Force::parse)
-        .unwrap_or(Force::Auto);
+    let named_force = overrides.and_then(|o| o.force.as_deref());
+    let force = named_force.map(Force::parse).unwrap_or(Force::Auto);
     let derived = decide_forced(file, &profile, force, node);
     let mut review = PlanReview {
         preserve_dolby_vision: derived.preserve_dolby_vision,
-        // The body's `hdr10` is the create-side spelling of `hdr10t=1`: a
-        // claim about the *client*, not about the source or the node. The
-        // caps document already carries that claim as a PQ transfer on the
-        // codec, so the derivation is simply whether the document says so.
-        hdr10: profile.supports_hdr10_transcode,
+        hdr10: asked_hdr10 && profile.supports_hdr10_transcode,
         notes: Vec::new(),
         mismatched: false,
     };
+    let mut overridden = false;
 
     if matches!(force, Force::Original | Force::Transcode) {
-        review.notes.push(format!(
-            "override force={}",
-            overrides.and_then(|o| o.force.as_deref()).unwrap_or("auto")
-        ));
+        review
+            .notes
+            .push(format!("override force={}", named_force.unwrap_or("auto")));
+        overridden = true;
     }
 
     // The compatible-base retry only ever *lowers* the plan, and only for
@@ -793,44 +819,52 @@ pub(crate) fn review_client_plan(
     let compatible_hdr_base = overrides
         .and_then(|o| o.compatible_hdr_base)
         .unwrap_or(false);
-    if compatible_hdr_base && review.preserve_dolby_vision {
-        review.preserve_dolby_vision = false;
-        review
-            .notes
-            .push("override compatible_hdr_base: Dolby Vision declined by the client".to_owned());
-        plan_derivation::count_overridden();
-    } else if compatible_hdr_base {
-        // Harmless, and worth saying: a client retrying a title the server
-        // was never going to send as Dolby Vision is a client chasing the
-        // wrong failure.
-        review.notes.push(
-            "override compatible_hdr_base had nothing to decline: the plan was not Dolby Vision"
-                .to_owned(),
-        );
-        plan_derivation::count_overridden();
-    } else if matches!(force, Force::Original | Force::Transcode) {
+    if compatible_hdr_base {
+        overridden = true;
+        if review.preserve_dolby_vision {
+            review.preserve_dolby_vision = false;
+            review.notes.push(
+                "override compatible_hdr_base: Dolby Vision declined by the client".to_owned(),
+            );
+        } else {
+            // Harmless, and worth saying: a client retrying a title the server
+            // was never going to send as Dolby Vision is a client chasing the
+            // wrong failure.
+            review.notes.push(
+                "override compatible_hdr_base had nothing to decline: the plan was not \
+                 Dolby Vision"
+                    .to_owned(),
+            );
+        }
+    }
+    if overridden {
         plan_derivation::count_overridden();
     }
 
+    // Clamp, then report. Only the upward direction is a mismatch: `asked`
+    // above `derived` is a claim the client's own document does not support.
     for (field, asked, derived) in [
         (
             "preserve_dolby_vision",
             asked_preserve_dolby_vision,
-            review.preserve_dolby_vision,
+            &mut review.preserve_dolby_vision,
         ),
-        ("hdr10", asked_hdr10, review.hdr10),
+        ("hdr10", asked_hdr10, &mut review.hdr10),
     ] {
-        if asked != derived {
+        if asked && !*derived {
             review.mismatched = true;
             review.notes.push(format!(
-                "plan_mismatch: client asked {field}={asked}, server derived {derived}"
+                "plan_mismatch: client asked {field}=true, server derived false"
             ));
+        } else if !asked && *derived {
+            // The client declined something it could have had. Its answer
+            // stands; a named override, if one fired, has already said why.
+            *derived = false;
         }
     }
     if review.mismatched {
         plan_derivation::count_mismatched();
     }
-    plan_derivation::count_rederived();
     review
 }
 
@@ -846,11 +880,11 @@ fn client_build_label(
     headers: &HeaderMap,
 ) -> String {
     if let Some(client) = caps.and_then(|caps| caps.client.as_ref()) {
-        let named = match (client.kind.as_str(), client.build.as_str()) {
-            ("", "") => None,
-            ("", build) => Some(build.to_owned()),
-            (kind, "") => Some(kind.to_owned()),
-            (kind, build) => Some(format!("{kind}/{build}")),
+        let named = match (bound(&client.kind), bound(&client.build)) {
+            (None, None) => None,
+            (None, Some(build)) => Some(build),
+            (Some(kind), None) => Some(kind),
+            (Some(kind), Some(build)) => Some(format!("{kind}/{build}")),
         };
         if let Some(named) = named {
             return named;
@@ -859,8 +893,21 @@ fn client_build_label(
     headers
         .get(header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
-        .map(|ua| ua.chars().take(96).collect::<String>())
+        .and_then(bound)
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+/// A log-safe rendering of one caller-supplied identity string.
+///
+/// Control characters go first, then the length. The order matters: a body
+/// field is as attacker-controlled as a header, and a newline inside it is
+/// how one log line becomes two forged ones. `None` for anything that had no
+/// printable content to begin with, so the caller can fall through to its
+/// next source rather than logging an empty name.
+fn bound(value: &str) -> Option<String> {
+    let cleaned: String = value.chars().filter(|c| !c.is_control()).take(48).collect();
+    let cleaned = cleaned.trim();
+    (!cleaned.is_empty()).then(|| cleaned.to_owned())
 }
 
 const HDR_SUBTITLE_BURN_REFUSAL: &str =
@@ -962,8 +1009,17 @@ pub async fn create(
     // E4: the client's echo stops being an instruction the moment it sends
     // the capabilities the plan was derived from. Everything below reads the
     // reconciled values, so there is exactly one decider again.
-    let plan_notes = match (req.caps.as_ref(), source.as_ref()) {
-        (Some(caps), Some(file)) if caps.v == plurx_core::playback::DeviceCaps::VERSION => {
+    // The reconciled plan, and the notes that explain it. `req` is left
+    // untouched on purpose: the durable intent fingerprint below has to be a
+    // pure function of the body as the client sent it, or a transport retry
+    // that lands on a node running a different binary (or after a rescan
+    // changed the file's HDR facts) fingerprints differently and gets a 409
+    // where it should have got its own session back. The reconciled values
+    // are applied to the built request afterwards.
+    let review = match (req.caps.as_ref(), source.as_ref()) {
+        (Some(caps), Some(file))
+            if caps.v == plurx_core::playback::DeviceCaps::VERSION && !caps.is_empty() =>
+        {
             let review = review_client_plan(
                 caps,
                 req.overrides.as_ref(),
@@ -977,45 +1033,53 @@ pub async fn create(
                     file_id = id,
                     user_id = user.id,
                     client_build = %client_build,
-                    plan_ref = req.plan_ref.as_deref().unwrap_or(""),
                     asked_preserve_dolby_vision = req.preserve_dolby_vision == Some(true),
                     derived_preserve_dolby_vision = review.preserve_dolby_vision,
                     asked_hdr10 = req.hdr10 == Some(true),
                     derived_hdr10 = review.hdr10,
-                    "plan_mismatch: the create body disagrees with the plan its own caps derive; \
+                    "plan_mismatch: the create body claims more than its own caps support; \
                      proceeding with the server's plan"
                 );
             }
-            req.preserve_dolby_vision = Some(review.preserve_dolby_vision);
-            req.hdr10 = Some(review.hdr10);
-            review.notes
+            Some(review)
         }
-        // A document from a version this server does not understand is worth
-        // exactly as much as no document: its fields may not mean what v2's
-        // mean. It falls back to the trust path rather than being refused,
-        // because a create is not the place to fail a client over metadata.
-        (Some(caps), _) => {
-            plan_derivation::count_legacy_trusted();
+        // A document this server cannot read is worth exactly as much as no
+        // document: its fields may not mean what v2's mean. It falls back to
+        // the trust path rather than being refused, because a create is not
+        // the place to fail a client over metadata — but it is counted
+        // separately, because it is not the same population as a build that
+        // predates caps v2 and it must not pollute the number that says the
+        // migration is finished.
+        (Some(caps), Some(_)) => {
+            plan_derivation::count_unusable_caps();
             tracing::warn!(
                 file_id = id,
                 client_build = %client_build,
                 caps_version = caps.v,
-                "create could not re-derive the plan; trusting the client's echo"
+                caps_empty = caps.is_empty(),
+                "create could not read the caps document; trusting the client's echo"
             );
-            Vec::new()
+            None
         }
-        (None, _) => {
+        // No source row yet. This request is on its way to a 404; re-deriving
+        // a plan for a file that is not there would say nothing, and counting
+        // it would let any client hold the straggler metric off zero forever.
+        (_, None) => None,
+        (None, Some(_)) => {
             plan_derivation::count_legacy_trusted();
             tracing::warn!(
                 file_id = id,
                 client_build = %client_build,
                 "create trusted the client's plan echo: this build sends no caps document"
             );
-            Vec::new()
+            None
         }
     };
+    let hdr10_requested = review
+        .as_ref()
+        .map(|review| review.hdr10)
+        .unwrap_or(req.hdr10 == Some(true));
     let source_height = source.as_ref().and_then(|f| f.height);
-    let hdr10_requested = req.hdr10 == Some(true);
     let ladder_ceiling = state
         .transcode
         .capability_height_ceiling_for_request(source.as_ref(), hdr10_requested)
@@ -1067,7 +1131,7 @@ pub async fn create(
             }
         }
     }
-    let request = req.into_request(id, height);
+    let mut request = req.into_request(id, height);
     if request
         .request_id
         .as_ref()
@@ -1082,7 +1146,25 @@ pub async fn create(
             "media session request exceeds the supported cluster contract".to_owned(),
         ));
     }
+    // The fingerprint is the client's intent as sent, which is what makes a
+    // retry of the same body recover the same session no matter which binary
+    // answers it. Only after it is taken does the server's reconciliation
+    // apply to the request that will actually be built.
     let fingerprint = request.durable_intent_fingerprint(user.id);
+    let plan_notes = match review {
+        Some(review) => {
+            if let crate::transcode::SessionKind::Copy {
+                preserve_dolby_vision,
+                ..
+            } = &mut request.kind
+            {
+                *preserve_dolby_vision = review.preserve_dolby_vision;
+            }
+            request.hdr10 = review.hdr10;
+            review.notes
+        }
+        None => Vec::new(),
+    };
     let now_ms = unix_ms();
     let mut incarnation_id = uuid::Uuid::new_v4().to_string();
     // Every create occupies a durable admission row. A caller-supplied key
@@ -3304,7 +3386,6 @@ pub async fn start(
         // …and no capabilities document to re-derive from, so it lands on the
         // trust path with every other client that predates caps v2.
         caps: None,
-        plan_ref: None,
         overrides: None,
         audio_offset_ms: None,
         presentation: None,
@@ -11770,9 +11851,10 @@ mod tests {
     }
 
     /// The build label is what every create log line is keyed by, so it has
-    /// to be right for the population it is counting.
+    /// to be right for the population it is counting — and it is assembled
+    /// from strings a caller chose.
     #[test]
-    fn the_build_label_prefers_the_document_and_bounds_the_user_agent() {
+    fn the_build_label_prefers_the_document_and_bounds_every_source() {
         let mut headers = HeaderMap::new();
         headers.insert(
             header::USER_AGENT,
@@ -11792,12 +11874,172 @@ mod tests {
             let label = client_build_label(caps, &headers);
             assert_eq!(
                 label.chars().count(),
-                96,
+                48,
                 "an unbounded header does not belong in a log line: {label}"
             );
         }
 
         assert_eq!(client_build_label(None, &HeaderMap::new()), "unknown");
+
+        // The body is exactly as caller-controlled as the header, and a
+        // newline inside it is how one log line becomes two forged ones. The
+        // early return for a named client must not skip the bounding.
+        let hostile = caps_v2(
+            "{\"v\":2,\"client\":{\"kind\":\"ios\\n2026-08-30 WARN plan_mismatch: forged\",\
+             \"build\":\"86\"},\"video\":[],\"audio\":[],\"containers\":[]}",
+        );
+        let label = client_build_label(Some(&hostile), &headers);
+        assert!(
+            !label.contains('\n') && !label.chars().any(char::is_control),
+            "{label:?}"
+        );
+        assert!(label.chars().count() <= 48 * 2 + 1, "{label:?}");
+
+        // A client block that is nothing but control characters has no
+        // printable content, so it falls through rather than logging a blank.
+        let blank = caps_v2(
+            "{\"v\":2,\"client\":{\"kind\":\"\\n\\t\",\"build\":\"\"},\
+             \"video\":[],\"audio\":[],\"containers\":[]}",
+        );
+        assert_eq!(
+            client_build_label(Some(&blank), &HeaderMap::new()),
+            "unknown"
+        );
+    }
+
+    /// The client may always ask for LESS than the plan allows.
+    ///
+    /// This is the direction that keeps Apple's compatible-base retry from
+    /// becoming an infinite loop even before that client learns to send
+    /// `overrides.compatible_hdr_base` — and it is not a hole in E4, because
+    /// the direction E4 exists to close is the client claiming MORE than its
+    /// own document supports. A viewer declining Dolby Vision gets a stream
+    /// that plays; a client handed Dolby Vision it cannot decode gets black.
+    #[test]
+    fn a_client_may_decline_the_plan_but_not_exceed_it() {
+        let file = dolby_vision_p8_file();
+        let declined = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            false, // "don't preserve Dolby Vision, I just failed on it"
+            false,
+        );
+        assert!(
+            !declined.preserve_dolby_vision,
+            "the retry must not be handed back the stream it failed on"
+        );
+        assert!(!declined.mismatched, "declining is not disagreeing");
+        assert!(declined.notes.is_empty(), "{:?}", declined.notes);
+
+        // The other direction is still clamped, logged and reported.
+        let exceeded = review_client_plan(
+            &no_dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            false,
+        );
+        assert!(!exceeded.preserve_dolby_vision);
+        assert!(exceeded.mismatched);
+    }
+
+    /// The shape every real create has, and the one the counters have to stay
+    /// quiet for.
+    ///
+    /// `hdr10` is a per-TITLE request — the web sets it only when the
+    /// decision it is acting on said `transcode` + `hdr10`. Deriving it from
+    /// the caps document alone would set it true on every create from any
+    /// PQ-capable client, including every SDR title: the ladder ceiling would
+    /// move for requests that never asked, and the mismatch counter would sit
+    /// permanently off zero, which is the one thing that would make it
+    /// useless.
+    #[test]
+    fn an_sdr_title_from_a_pq_capable_client_is_not_a_mismatch() {
+        let mut file = dolby_vision_p8_file();
+        file.hdr = None;
+        file.hdr_format = None;
+
+        let review = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            false, // the body carries no preserve_dolby_vision…
+            false, // …and no hdr10, because there is nothing to ask for
+        );
+        assert!(!review.hdr10, "the client asked for no HDR10 rung");
+        assert!(!review.preserve_dolby_vision);
+        assert!(
+            !review.mismatched,
+            "an ordinary SDR create must not report a plan mismatch"
+        );
+        assert!(review.notes.is_empty(), "{:?}", review.notes);
+
+        // The same client asking for the rung on a title that has one is
+        // granted it, because its document backs the claim.
+        let mut hdr10 = dolby_vision_p8_file();
+        hdr10.hdr = Some("hdr10".into());
+        hdr10.hdr_format = Some("HDR10".into());
+        let asked = review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &hdr10,
+            &capable_node(),
+            false,
+            true,
+        );
+        assert!(asked.hdr10);
+        assert!(!asked.mismatched);
+    }
+
+    /// The counters are the fleet's only view of this, so something has to
+    /// prove they move — and that they cannot report more outcomes than
+    /// reviews.
+    #[test]
+    fn every_review_is_counted_and_the_parts_never_exceed_the_total() {
+        let before = plan_derivation::snapshot();
+        let file = dolby_vision_p8_file();
+
+        review_client_plan(
+            &dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            false,
+        );
+        review_client_plan(
+            &no_dolby_vision_client(),
+            None,
+            &file,
+            &capable_node(),
+            true,
+            false,
+        );
+        review_client_plan(
+            &dolby_vision_client(),
+            Some(&CreateOverrides {
+                compatible_hdr_base: Some(true),
+                force: Some("transcode".to_owned()),
+            }),
+            &file,
+            &capable_node(),
+            false,
+            false,
+        );
+
+        let after = plan_derivation::snapshot();
+        assert_eq!(after.2 - before.2, 3, "one `rederived` per review");
+        assert_eq!(after.3 - before.3, 1, "only the exceeding one mismatched");
+        assert_eq!(
+            after.4 - before.4,
+            1,
+            "a create carrying two overrides is one overridden create, not two"
+        );
+        assert!(after.3 <= after.2 && after.4 <= after.2);
     }
 
     fn hls_context(
@@ -11872,7 +12114,6 @@ mod tests {
             presentation: None,
             block_budget_secs: None,
             caps: None,
-            plan_ref: None,
             overrides: None,
         }
         .into_request(7, 1080);
@@ -11904,7 +12145,6 @@ mod tests {
             presentation: None,
             block_budget_secs: None,
             caps: None,
-            plan_ref: None,
             overrides: None,
         }
         .into_request(5615, 2160);

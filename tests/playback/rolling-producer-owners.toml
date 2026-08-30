@@ -1009,7 +1009,10 @@ pattern = "\\.(?:spawn|output|status)\\s*\\("
 # not process launches or rolling-producer owners. Keep them visible in the
 # module-wide sentinel so any later process-capable shape still needs review.
 # +2: `.output()` and `.status()` on the two HDR10 boot probes above.
-expected_occurrences = 178
+# +3 (M3): `Response::status()` reads in the caps-document body-limit test.
+# They are HTTP status codes on an in-process `oneshot` response — no child
+# process, no producer, nothing to own.
+expected_occurrences = 181
 
 [[module_structures]]
 id = "process-command-ufcs-launch"

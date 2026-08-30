@@ -2307,6 +2307,114 @@ mod tests {
              profiles; a difference here is a client that gets two different \
              verdicts for one device"
         );
+
+        // Equality alone is `f(g(A)) == f(B)`: both sides end in
+        // `from_caps_v2`, so a bug inside that function is invisible to it.
+        // Pin the values themselves, from the side that has to be right.
+        assert_eq!(from_query.video_codecs, vec!["hevc", "h264"]);
+        assert!(from_query.supports_hdr, "hdr=1 is the display bit");
+        assert!(
+            from_query.supports_hdr10_transcode,
+            "hdr10t=1 on a client that lists hevc"
+        );
+        assert_eq!(from_query.dolby_vision_profiles, vec![5, 8]);
+        assert!(
+            !from_query.supports_dolby_vision,
+            "enumerating profiles retires the blanket claim"
+        );
+        assert!(from_query.remux_dolby_vision, "dvhls=1");
+        assert_eq!(from_query.max_height, Some(2160));
+        assert_eq!(
+            from_query
+                .presents
+                .get("hevc")
+                .map(|set| set.iter().copied().collect::<Vec<_>>()),
+            Some(vec![playback::Transfer::Sdr, playback::Transfer::Pq]),
+            "hdr10t is a per-codec presentation claim, and only hevc made it"
+        );
+        assert_eq!(
+            from_query
+                .presents
+                .get("h264")
+                .map(|set| set.iter().copied().collect::<Vec<_>>()),
+            Some(vec![playback::Transfer::Sdr])
+        );
+    }
+
+    /// `hdr10t=1` must not become an HDR *display* claim.
+    ///
+    /// The two bits come from different sources on the out-of-tree clients —
+    /// Android reads `hdr` off the raw MediaCodec registry and `hdr10t` off
+    /// `MediaCapabilities` — so `hdr10t=1&hdr=0` is a shape a real device
+    /// sends. Reading it as "shows HDR" direct-plays a PQ stream into an SDR
+    /// panel, which renders grey and *plays*, so nobody reports it.
+    #[test]
+    fn a_presentation_claim_is_not_a_display_claim() {
+        let caps: Caps = serde_urlencoded::from_str("vcodec=hevc&hdr10t=1&maxheight=2160")
+            .expect("the query decodes");
+        let profile = caps.profile();
+        assert!(
+            !profile.supports_hdr,
+            "no hdr=1, so this client has not said it can show HDR"
+        );
+        assert!(
+            profile.supports_hdr10_transcode,
+            "…but it did prove the Main10 PQ decode, which is a different claim"
+        );
+
+        // A v2 document says the same thing the same way: a display block that
+        // denies HDR is the authority over what its codecs can emit.
+        let document: playback::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,"video":[{"codec":"hevc","present":["sdr","pq"]}],
+                "audio":[],"containers":[],"display":{"hdr":false}}"#,
+        )
+        .expect("the v2 document parses");
+        let from_document = playback::DeviceProfile::from_caps_v2(&document);
+        assert!(!from_document.supports_hdr);
+        assert!(from_document.supports_hdr10_transcode);
+
+        // With no display block at all there is nothing to overrule the
+        // codecs, and a client that presents PQ can show HDR.
+        let no_display: playback::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,"video":[{"codec":"hevc","present":["sdr","pq"]}],
+                "audio":[],"containers":[]}"#,
+        )
+        .expect("the v2 document parses");
+        assert!(playback::DeviceProfile::from_caps_v2(&no_display).supports_hdr);
+    }
+
+    /// A document is diagnostic data before it is a contract.
+    ///
+    /// Every field a client might get wrong has to degrade to "not claimed",
+    /// never to a refused create. The three shapes here are the ones the plan
+    /// itself makes likely: `learned_limits` serialized from a map whose KEY
+    /// was the identity, a transfer curve this build has not heard of, and a
+    /// timestamp spelled the way section 4.6 spells it.
+    #[test]
+    fn an_imperfect_capabilities_document_degrades_instead_of_refusing() {
+        let caps: playback::DeviceCaps = serde_json::from_str(
+            r#"{"v":2,
+                "video":[{"codec":"hevc","present":["sdr","pq","hlg10"]}],
+                "audio":["aac"],"containers":["mp4"],
+                "learned_limits":[{"lost":41,"secs":60,"rate":41,"at":1756400000000}]}"#,
+        )
+        .expect("an unknown curve and a keyless learned limit must not fail the document");
+
+        let profile = playback::DeviceProfile::from_caps_v2(&caps);
+        assert!(
+            profile.supports_hdr10_transcode,
+            "the recognised curves still count"
+        );
+        assert_eq!(profile.learned_limits.len(), 1);
+        assert_eq!(profile.learned_limits[0].identity, "");
+        assert_eq!(
+            profile.learned_limits[0].at_ms, 1_756_400_000_000,
+            "section 4.6 spells the timestamp `at`"
+        );
+        assert!(
+            profile.presents["hevc"].contains(&playback::Transfer::Unknown),
+            "the unknown curve is carried and grades nothing"
+        );
     }
 
     /// The one legacy claim that is deliberately unspellable in v2.

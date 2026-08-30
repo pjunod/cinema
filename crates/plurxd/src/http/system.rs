@@ -182,9 +182,16 @@ pub struct SystemDto {
 /// apart.
 #[derive(Serialize)]
 pub struct PlanDerivationDto {
-    /// Creates whose body carried no usable caps document, so the client's
-    /// `preserve_dolby_vision`/`hdr10` echo was trusted as before.
+    /// Creates whose body carried no caps document at all, so the client's
+    /// `preserve_dolby_vision`/`hdr10` echo was trusted as before. This is
+    /// the straggler count: zero means every build on the fleet has moved.
     pub legacy_trusted: u64,
+    /// Creates that carried a caps document this server could not read — an
+    /// unknown `v`, or one with nothing in it. Counted apart from
+    /// `legacy_trusted` because it is a different problem with a different
+    /// fix: a client that has adopted the document and is getting it wrong,
+    /// rather than one that has not adopted it yet.
+    pub unusable_caps: u64,
     /// Creates whose plan was re-derived from the caps in the body.
     pub rederived: u64,
     /// Of those, how many disagreed with the client, with no named override
@@ -253,10 +260,11 @@ pub async fn system_info(
         },
         storage: state.storage.read().await.clone(),
         plan_derivation: {
-            let (legacy_trusted, rederived, mismatched, overridden) =
+            let (legacy_trusted, unusable_caps, rederived, mismatched, overridden) =
                 super::hls::plan_derivation::snapshot();
             PlanDerivationDto {
                 legacy_trusted,
+                unusable_caps,
                 rederived,
                 mismatched,
                 overridden,

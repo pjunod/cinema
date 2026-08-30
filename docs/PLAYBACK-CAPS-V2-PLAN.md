@@ -1,8 +1,9 @@
 # Playback capabilities v2 — highest deliverable grade, negotiated not guessed
 
-**Status:** ready to build · **Executes:** fable's rulings of 2026-08-29 on
+**Status:** building — M0, M1, M4 merged; M2 and M3a in review; M3b-d, M5,
+M6 not started · **Executes:** fable's rulings of 2026-08-29 on
 opus's DV-delivery findings · **Analysed:** `main` @ `4ba8bb48` ·
-**Written:** 2026-08-29 · **Builder:** opus
+**Written:** 2026-08-29 · **Updated:** 2026-08-30 · **Builder:** opus
 
 Companion to [MEDIA-BADGES-PLAN.md](MEDIA-BADGES-PLAN.md) (what the badge
 promises) and [VOD-PRESENTATION-PLAN.md](VOD-PRESENTATION-PLAN.md) (how a
@@ -669,9 +670,11 @@ the progressive `play_url` only.
 returns the same `decision` as the GET with the equivalent `CAPS_Q`;
 a create whose body says `preserve_dolby_vision:true` for a client whose
 caps have `dv_profiles:[]` **succeeds** with the server's plan, carries the
-`plan_mismatch` reason, and increments the `/system` counter; Apple's
-`compatible_hdr_base` override is accepted and its reason appears in the
-session's `reasons`. Clients: each build's `/decision` request in the
+`plan_mismatch` entry in `plan_notes`, and increments the `/system` counter;
+a create that says `preserve_dolby_vision:false` where the plan says true is
+honoured silently; Apple's `compatible_hdr_base` override is accepted and its
+note appears in `plan_notes`; an ordinary SDR create from a PQ-capable client
+leaves `plan_notes` empty and the mismatch counter unmoved. Clients: each build's `/decision` request in the
 server log carries `caps.v=2`; `tests/playback/web-policy.test.js` has a
 case for the two-entry HEVC ladder replacing the min-of-rungs.
 
@@ -787,7 +790,7 @@ it landed in; build-number claims only through `make apple-build-bump`.
 | 1 | Dependencies (§5) | **Both**: `dolby_vision` crate (M5a) and `dovi_tool` + `mkvmerge` in the image (M5b). Paul: "why not both, with the option to do the disk conversion." |
 | 2 | On-the-fly vs on-disk | **Both, on-the-fly first** so P7 titles are usable while M5b is being built. On-disk is operator-triggered per file/library, `keep_original` on by default. |
 | 3 | FEL sources | **Defaulted** to convert-and-label (the base + RPU is real P8.1 DV; every consumer P7 player does the same). Overrule in the M5a PR if you want FEL served as HDR10 instead. |
-| 4 | `plan_mismatch` (§4.5) | **Warn, never refuse.** Paul: "I don't see a reason for it to prevent functionality." Server plan wins; reason on the session; counter on `/system`. |
+| 4 | `plan_mismatch` (§4.5) | **Warn, never refuse.** Paul: "I don't see a reason for it to prevent functionality." Server plan is a **ceiling**: an upward claim is clamped, noted in `plan_notes` and counted on `/system`; a downward echo is the client's to make. See §4.5 for why the original both-directions wording was wrong. |
 | 5 | Profile 7 claims (§6) | **Allowed from a real decoder enumeration** (Android `DolbyVisionProfileDvheDtb`); never from a display bit. Paul: "claim profile 7 all you want if you can do it." |
 
 ---
